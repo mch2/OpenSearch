@@ -108,7 +108,8 @@ subprojects {
         }
         maven {
           name = 'Snapshots'
-          url = 'https://aws.oss.sonatype.org/content/repositories/snapshots'
+          url = 'http://localhost:8080/content/repositories/snapshots'
+          allowInsecureProtocol = true
           credentials {
             username "$System.env.SONATYPE_USERNAME"
             password "$System.env.SONATYPE_PASSWORD"
