@@ -44,7 +44,7 @@ public abstract class RecoveryTransportRequest extends TransportRequest {
 
     private final long requestSeqNo;
 
-    RecoveryTransportRequest(StreamInput in) throws IOException {
+    protected RecoveryTransportRequest(StreamInput in) throws IOException {
         super(in);
         if (in.getVersion().onOrAfter(LegacyESVersion.V_7_9_0)) {
             requestSeqNo = in.readLong();
@@ -53,7 +53,7 @@ public abstract class RecoveryTransportRequest extends TransportRequest {
         }
     }
 
-    RecoveryTransportRequest(long requestSeqNo) {
+    protected RecoveryTransportRequest(long requestSeqNo) {
         this.requestSeqNo = requestSeqNo;
     }
 

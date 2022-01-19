@@ -488,6 +488,7 @@ public class ReplicationTracker extends AbstractIndexShardComponent implements L
      * @throws IOException if an I/O exception occurs reading the retention leases
      */
     public RetentionLeases loadRetentionLeases(final Path path) throws IOException {
+        logger.info("Path of retention lease {}", path);
         final RetentionLeases retentionLeases;
         synchronized (retentionLeasePersistenceLock) {
             retentionLeases = RetentionLeases.FORMAT.loadLatestState(logger, NamedXContentRegistry.EMPTY, path);
@@ -1086,7 +1087,7 @@ public class ReplicationTracker extends AbstractIndexShardComponent implements L
         final long previousGlobalCheckpoint = globalCheckpoint;
         if (newGlobalCheckpoint > previousGlobalCheckpoint) {
             globalCheckpoint = newGlobalCheckpoint;
-            logger.trace("updated global checkpoint from [{}] to [{}] due to [{}]", previousGlobalCheckpoint, globalCheckpoint, reason);
+            logger.info("updated global checkpoint from [{}] to [{}] due to [{}]", previousGlobalCheckpoint, globalCheckpoint, reason);
             onGlobalCheckpointUpdated.accept(globalCheckpoint);
         }
         assert invariant();

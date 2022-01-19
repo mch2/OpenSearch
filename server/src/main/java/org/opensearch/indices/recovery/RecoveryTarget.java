@@ -75,22 +75,22 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 public class RecoveryTarget extends AbstractRefCounted implements RecoveryTargetHandler {
 
-    private final Logger logger;
+    protected final Logger logger;
 
-    private static final AtomicLong idGenerator = new AtomicLong();
+    protected static final AtomicLong idGenerator = new AtomicLong();
 
-    private static final String RECOVERY_PREFIX = "recovery.";
+    protected static final String RECOVERY_PREFIX = "recovery.";
 
-    private final ShardId shardId;
+    protected final ShardId shardId;
     private final long recoveryId;
-    private final IndexShard indexShard;
-    private final DiscoveryNode sourceNode;
-    private final MultiFileWriter multiFileWriter;
-    private final RecoveryRequestTracker requestTracker = new RecoveryRequestTracker();
-    private final Store store;
-    private final PeerRecoveryTargetService.RecoveryListener listener;
+    protected final IndexShard indexShard;
+    protected final DiscoveryNode sourceNode;
+    protected final MultiFileWriter multiFileWriter;
+    protected final RecoveryRequestTracker requestTracker = new RecoveryRequestTracker();
+    protected final Store store;
+    protected final PeerRecoveryTargetService.RecoveryListener listener;
 
-    private final AtomicBoolean finished = new AtomicBoolean();
+    protected final AtomicBoolean finished = new AtomicBoolean();
 
     private final CancellableThreads cancellableThreads;
 
@@ -343,7 +343,7 @@ public class RecoveryTarget extends AbstractRefCounted implements RecoveryTarget
         });
     }
 
-    private boolean hasUncommittedOperations() throws IOException {
+    protected boolean hasUncommittedOperations() throws IOException {
         long localCheckpointOfCommit = Long.parseLong(indexShard.commitStats().getUserData().get(SequenceNumbers.LOCAL_CHECKPOINT_KEY));
         return indexShard.estimateNumberOfHistoryOperations(
             "peer-recovery",
@@ -392,22 +392,24 @@ public class RecoveryTarget extends AbstractRefCounted implements RecoveryTarget
              */
             indexShard().updateRetentionLeasesOnReplica(retentionLeases);
             for (Translog.Operation operation : operations) {
-                Engine.Result result = indexShard().applyTranslogOperation(operation, Engine.Operation.Origin.PEER_RECOVERY);
-                if (result.getResultType() == Engine.Result.Type.MAPPING_UPDATE_REQUIRED) {
-                    throw new MapperException("mapping updates are not allowed [" + operation + "]");
-                }
-                if (result.getFailure() != null) {
-                    if (Assertions.ENABLED && result.getFailure() instanceof MapperException == false) {
-                        throw new AssertionError("unexpected failure while replicating translog entry", result.getFailure());
-                    }
-                    ExceptionsHelper.reThrowIfNotNull(result.getFailure());
-                }
+                logger.info("Skipping operation {}", operation);
+                continue;
+//                Engine.Result result = indexShard().applyTranslogOperation(operation, Engine.Operation.Origin.PEER_RECOVERY);
+//                if (result.getResultType() == Engine.Result.Type.MAPPING_UPDATE_REQUIRED) {
+//                    throw new MapperException("mapping updates are not allowed [" + operation + "]");
+//                }
+//                if (result.getFailure() != null) {
+//                    if (Assertions.ENABLED && result.getFailure() instanceof MapperException == false) {
+//                        throw new AssertionError("unexpected failure while replicating translog entry", result.getFailure());
+//                    }
+//                    ExceptionsHelper.reThrowIfNotNull(result.getFailure());
+//                }
             }
             // update stats only after all operations completed (to ensure that mapping updates don't mess with stats)
-            translog.incrementRecoveredOperations(operations.size());
+//            translog.incrementRecoveredOperations(operations.size());
             indexShard().sync();
             // roll over / flush / trim if needed
-            indexShard().afterWriteOperation();
+//            indexShard().afterWriteOperation();
             return indexShard().getLocalCheckpoint();
         });
     }
@@ -455,9 +457,6 @@ public class RecoveryTarget extends AbstractRefCounted implements RecoveryTarget
             store.incRef();
             try {
                 store.cleanupAndVerify("recovery CleanFilesRequestHandler", sourceMetadata);
-                if (indexShard.indexSettings().getIndexVersionCreated().before(LegacyESVersion.V_6_0_0_rc1)) {
-                    store.ensureIndexHasHistoryUUID();
-                }
                 final String translogUUID = Translog.createEmptyTranslog(
                     indexShard.shardPath().resolveTranslog(),
                     globalCheckpoint,

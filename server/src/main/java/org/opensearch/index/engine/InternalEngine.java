@@ -48,6 +48,7 @@ import org.apache.lucene.index.SegmentCommitInfo;
 import org.apache.lucene.index.SegmentInfos;
 import org.apache.lucene.index.ShuffleForcedMergePolicy;
 import org.apache.lucene.index.SoftDeletesRetentionMergePolicy;
+import org.apache.lucene.index.StandardDirectoryReader;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.search.BooleanClause;
 import org.apache.lucene.search.BooleanQuery;
@@ -61,6 +62,10 @@ import org.apache.lucene.search.Scorer;
 import org.apache.lucene.search.TermQuery;
 import org.apache.lucene.search.Weight;
 import org.apache.lucene.store.AlreadyClosedException;
+import org.apache.lucene.store.BufferedChecksumIndexInput;
+import org.apache.lucene.store.ByteBuffersDataInput;
+import org.apache.lucene.store.ByteBuffersIndexInput;
+import org.apache.lucene.store.ChecksumIndexInput;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.LockObtainFailedException;
 import org.apache.lucene.util.BytesRef;
@@ -114,6 +119,7 @@ import org.opensearch.threadpool.ThreadPool;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -146,10 +152,10 @@ public class InternalEngine extends Engine {
     private final Translog translog;
     private final OpenSearchConcurrentMergeScheduler mergeScheduler;
 
-    private final IndexWriter indexWriter;
+    private IndexWriter indexWriter;
 
-    private final ExternalReaderManager externalReaderManager;
-    private final OpenSearchReaderManager internalReaderManager;
+    private ExternalReaderManager externalReaderManager;
+    private OpenSearchReaderManager internalReaderManager;
 
     private final Lock flushLock = new ReentrantLock();
     private final ReentrantLock optimizeLock = new ReentrantLock();
@@ -252,7 +258,7 @@ public class InternalEngine extends Engine {
             mergeScheduler = scheduler = new EngineMergeScheduler(engineConfig.getShardId(), engineConfig.getIndexSettings());
             throttle = new IndexThrottle();
             try {
-                trimUnsafeCommits(engineConfig);
+                trimUnsafeCommits(engineConfig, logger);
                 translog = openTranslog(engineConfig, translogDeletionPolicy, engineConfig.getGlobalCheckpointSupplier(), seqNo -> {
                     final LocalCheckpointTracker tracker = getLocalCheckpointTracker();
                     assert tracker != null || getTranslog().isOpen() == false;
@@ -329,6 +335,29 @@ public class InternalEngine extends Engine {
             }
         }
         logger.trace("created new InternalEngine");
+    }
+
+    @Override
+    public void closeIW() throws IOException {
+        indexWriter.close();
+    }
+
+    @Override
+    public void updateCurrentInfos(byte[] infosBytes, long version, long gen) throws IOException {
+        SegmentInfos infos = SegmentInfos.readCommit(this.store.directory(),
+            toIndexInput(infosBytes),
+            gen);
+        logger.info("Translog UUID after copy {}", infos.getUserData().get(Translog.TRANSLOG_UUID_KEY));
+        assert version ==infos.version;
+        externalReaderManager.internalReaderManager.setCurrentInfos(infos);
+        externalReaderManager.maybeRefresh();
+    }
+
+    private ChecksumIndexInput toIndexInput(byte[] input) {
+        return new BufferedChecksumIndexInput(
+            new ByteBuffersIndexInput(
+                new ByteBuffersDataInput(
+                    Arrays.asList(ByteBuffer.wrap(input))), "SegmentInfos"));
     }
 
     private LocalCheckpointTracker createLocalCheckpointTracker(
@@ -579,7 +608,7 @@ public class InternalEngine extends Engine {
     }
 
     // Package private for testing purposes only
-    Translog getTranslog() {
+    public Translog getTranslog() {
         ensureOpen();
         return translog;
     }
@@ -2338,6 +2367,25 @@ public class InternalEngine extends Engine {
     }
 
     @Override
+    public SegmentInfosRef getLatestSegmentInfos() {
+        OpenSearchDirectoryReader reader = null;
+        try {
+            reader = externalReaderManager.acquire();
+            SegmentInfos segmentInfos = ((StandardDirectoryReader) reader.getDelegate()).getSegmentInfos();
+            indexWriter.incRefDeleter(segmentInfos);
+            return new SegmentInfosRef(segmentInfos, () -> indexWriter.decRefDeleter(segmentInfos));
+        } catch (IOException e) {
+            throw new EngineException(shardId, e.getMessage(), e);
+        } finally {
+            try {
+                externalReaderManager.release(reader);
+            } catch (IOException e) {
+                throw new EngineException(shardId, e.getMessage(), e);
+            }
+        }
+    }
+
+    @Override
     public IndexCommitRef acquireSafeIndexCommit() throws EngineException {
         final IndexCommit safeCommit = combinedDeletionPolicy.acquireIndexCommit(true);
         return new Engine.IndexCommitRef(safeCommit, () -> releaseIndexCommit(safeCommit));
@@ -2526,6 +2574,18 @@ public class InternalEngine extends Engine {
         } else {
             return new IndexWriter(directory, iwc);
         }
+    }
+
+    @Override
+    public void openNewWriter() throws IOException {
+        for (String s : store.directory().listAll()) {
+            logger.info("FILES IN CREATEWRITER: {}", s);
+        }
+        final IndexWriterConfig iwc = getIndexWriterConfig();
+        iwc.setOpenMode(IndexWriterConfig.OpenMode.CREATE);
+        indexWriter = createWriter(store.directory(), iwc);
+
+
     }
 
     private IndexWriterConfig getIndexWriterConfig() {
@@ -2831,6 +2891,7 @@ public class InternalEngine extends Engine {
         return getTranslog().getLastSyncedGlobalCheckpoint();
     }
 
+    @Override
     public long getProcessedLocalCheckpoint() {
         return localCheckpointTracker.getProcessedCheckpoint();
     }
@@ -3154,7 +3215,7 @@ public class InternalEngine extends Engine {
         return true;
     }
 
-    private static void trimUnsafeCommits(EngineConfig engineConfig) throws IOException {
+    private static void trimUnsafeCommits(EngineConfig engineConfig, Logger logger) throws IOException {
         final Store store = engineConfig.getStore();
         final String translogUUID = store.readLastCommittedSegmentsInfo().getUserData().get(Translog.TRANSLOG_UUID_KEY);
         final Path translogPath = engineConfig.getTranslogConfig().getTranslogPath();

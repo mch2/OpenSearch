@@ -1801,7 +1801,7 @@ public class SnapshotResiliencyTests extends OpenSearchTestCase {
                     bigArrays,
                     scriptService,
                     clusterService,
-                    client,
+                    transportService, client,
                     new MetaStateService(nodeEnv, namedXContentRegistry),
                     Collections.emptyList(),
                     emptyMap(),

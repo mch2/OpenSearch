@@ -61,6 +61,8 @@ public interface RecoveryTargetHandler {
      */
     void finalizeRecovery(long globalCheckpoint, long trimAboveSeqNo, ActionListener<Void> listener);
 
+    default void receiveSegmentInfosBytes(long version, long gen, byte[] infosBytes, ActionListener<Void> listener) {}
+
     /**
      * Handoff the primary context between the relocation source and the relocation target.
      *

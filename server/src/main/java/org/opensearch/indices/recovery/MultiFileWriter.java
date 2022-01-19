@@ -87,7 +87,7 @@ public class MultiFileWriter extends AbstractRefCounted implements Releasable {
     }
 
     /** Get a temporary name for the provided file name. */
-    String getTempNameForFile(String origFile) {
+    protected String getTempNameForFile(String origFile) {
         return tempFilePrefix + origFile;
     }
 

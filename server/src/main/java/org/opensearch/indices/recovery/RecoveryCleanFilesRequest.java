@@ -65,7 +65,7 @@ public class RecoveryCleanFilesRequest extends RecoveryTransportRequest {
         this.globalCheckpoint = globalCheckpoint;
     }
 
-    RecoveryCleanFilesRequest(StreamInput in) throws IOException {
+    public RecoveryCleanFilesRequest(StreamInput in) throws IOException {
         super(in);
         recoveryId = in.readLong();
         shardId = new ShardId(in);

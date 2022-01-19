@@ -64,8 +64,7 @@ public class TransportShardRefreshAction extends TransportReplicationAction<
         IndicesService indicesService,
         ThreadPool threadPool,
         ShardStateAction shardStateAction,
-        ActionFilters actionFilters
-    ) {
+        ActionFilters actionFilters) {
         super(
             settings,
             NAME,
@@ -94,7 +93,6 @@ public class TransportShardRefreshAction extends TransportReplicationAction<
     ) {
         ActionListener.completeWith(listener, () -> {
             primary.refresh("api");
-            logger.trace("{} refresh request executed on primary", primary.shardId());
             return new PrimaryResult<>(shardRequest, new ReplicationResponse());
         });
     }
@@ -103,7 +101,6 @@ public class TransportShardRefreshAction extends TransportReplicationAction<
     protected void shardOperationOnReplica(BasicReplicationRequest request, IndexShard replica, ActionListener<ReplicaResult> listener) {
         ActionListener.completeWith(listener, () -> {
             replica.refresh("api");
-            logger.trace("{} refresh request executed on replica", replica.shardId());
             return new ReplicaResult();
         });
     }

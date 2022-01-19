@@ -104,11 +104,19 @@ final class StoreRecovery {
     void recoverFromStore(final IndexShard indexShard, ActionListener<Boolean> listener) {
         if (canRecover(indexShard)) {
             RecoverySource.Type recoveryType = indexShard.recoveryState().getRecoverySource().getType();
-            assert recoveryType == RecoverySource.Type.EMPTY_STORE
-                || recoveryType == RecoverySource.Type.EXISTING_STORE : "expected store recovery type but was: " + recoveryType;
+//            assert recoveryType == RecoverySource.Type.EMPTY_STORE
+//                || recoveryType == RecoverySource.Type.EXISTING_STORE : "expected store recovery type but was: " + recoveryType;
             ActionListener.completeWith(recoveryListener(indexShard, listener), () -> {
                 logger.debug("starting recovery from store ...");
-                internalRecoverFromStore(indexShard);
+                if(indexShard.shardRouting.primary()) {
+                    assert recoveryType == RecoverySource.Type.EMPTY_STORE || recoveryType == RecoverySource.Type.EXISTING_STORE :
+                        "expected store recovery type but was: " + recoveryType;
+                    internalRecoverFromStore(indexShard);
+                } else {
+                    assert recoveryType == RecoverySource.Type.PEER:
+                        "expected store recovery type but was: " + recoveryType;
+                    internalRecoverFromStoreReplica(indexShard);
+                }
                 return true;
             });
         } else {
@@ -339,9 +347,9 @@ final class StoreRecovery {
             // got closed on us, just ignore this recovery
             return false;
         }
-        if (indexShard.routingEntry().primary() == false) {
-            throw new IndexShardRecoveryException(shardId, "Trying to recover when the shard is in backup state", null);
-        }
+//        if (indexShard.routingEntry().primary() == false) {
+//            throw new IndexShardRecoveryException(shardId, "Trying to recover when the shard is in backup state", null);
+//        }
         return true;
     }
 
@@ -352,11 +360,18 @@ final class StoreRecovery {
                 // to call post recovery.
                 final IndexShardState shardState = indexShard.state();
                 final RecoveryState recoveryState = indexShard.recoveryState();
-                assert shardState != IndexShardState.CREATED && shardState != IndexShardState.RECOVERING : "recovery process of "
-                    + shardId
-                    + " didn't get to post_recovery. shardState ["
-                    + shardState
-                    + "]";
+//                assert shardState != IndexShardState.CREATED && shardState != IndexShardState.RECOVERING : "recovery process of "
+//                    + shardId
+//                    + " didn't get to post_recovery. shardState ["
+//                    + shardState
+//                    + "]";
+                if(indexShard.shardRouting.primary()) {
+                    assert shardState != IndexShardState.CREATED && shardState != IndexShardState.RECOVERING :
+                        "recovery process of " + shardId + " didn't get to post_recovery. shardState [" + shardState + "]";
+                } else {
+                    assert shardState == IndexShardState.POST_RECOVERY:
+                        "recovery process of " + shardId + " didn't get to post_recovery. shardState [" + shardState + "]";
+                }
 
                 if (logger.isTraceEnabled()) {
                     RecoveryState.Index index = recoveryState.getIndex();
@@ -503,6 +518,82 @@ final class StoreRecovery {
             indexShard.postRecovery("post recovery from shard_store");
         } catch (EngineException | IOException e) {
             throw new IndexShardRecoveryException(shardId, "failed to recover from gateway", e);
+        } finally {
+            store.decRef();
+        }
+    }
+
+    private void internalRecoverFromStoreReplica(IndexShard indexShard) throws IndexShardRecoveryException {
+        final RecoveryState recoveryState = indexShard.recoveryState();
+        final boolean indexShouldExists = false;//recoveryState.getRecoverySource().getType() != RecoverySource.Type.EMPTY_STORE;
+        indexShard.prepareForIndexRecovery();
+        SegmentInfos si = null;
+        final Store store = indexShard.store();
+        store.incRef();
+        try {
+            try {
+                store.failIfCorrupted();
+                try {
+                    si = store.readLastCommittedSegmentsInfo();
+                } catch (Exception e) {
+                    String files = "_unknown_";
+                    try {
+                        files = Arrays.toString(store.directory().listAll());
+                    } catch (Exception inner) {
+                        inner.addSuppressed(e);
+                        files += " (failure=" + ExceptionsHelper.detailedMessage(inner) + ")";
+                    }
+                    if (indexShouldExists) {
+                        throw new IndexShardRecoveryException(shardId,
+                            "shard allocated for local recovery (post api), should exist, but doesn't, current files: " + files, e);
+                    }
+                }
+                if (si != null && indexShouldExists == false) {
+                    // it exists on the directory, but shouldn't exist on the FS, its a leftover (possibly dangling)
+                    // its a "new index create" API, we have to do something, so better to clean it than use same data
+                    logger.trace("cleaning existing shard, shouldn't exists");
+                    Lucene.cleanLuceneIndex(store.directory());
+                    si = null;
+                }
+            } catch (Exception e) {
+                throw new IndexShardRecoveryException(shardId, "failed to fetch index version after copying it over", e);
+            }
+            if (recoveryState.getRecoverySource().getType() == RecoverySource.Type.LOCAL_SHARDS) {
+                assert indexShouldExists;
+                bootstrap(indexShard, store);
+                writeEmptyRetentionLeasesFile(indexShard);
+            } else if (indexShouldExists) {
+                if (recoveryState.getRecoverySource().shouldBootstrapNewHistoryUUID()) {
+                    store.bootstrapNewHistory();
+                    writeEmptyRetentionLeasesFile(indexShard);
+                }
+                // since we recover from local, just fill the files and size
+                try {
+                    final RecoveryState.Index index = recoveryState.getIndex();
+                    if (si != null) {
+                        addRecoveredFileDetails(si, store, index);
+                    }
+                } catch (IOException e) {
+                    logger.debug("failed to list file details", e);
+                }
+            } else {
+                store.createEmpty(indexShard.indexSettings().getIndexVersionCreated().luceneVersion);
+                final String translogUUID = Translog.createEmptyTranslog(
+                    indexShard.shardPath().resolveTranslog(), SequenceNumbers.NO_OPS_PERFORMED, shardId,
+                    indexShard.getPendingPrimaryTerm());
+                store.associateIndexWithNewTranslog(translogUUID);
+                writeEmptyRetentionLeasesFile(indexShard);
+            }
+            indexShard.recoveryState().getIndex().setFileDetailsComplete();
+            indexShard.openEngineAndRecoverFromTranslog();
+            indexShard.getEngine().fillSeqNoGaps(indexShard.getPendingPrimaryTerm());
+            indexShard.markAllocationIdAsInSync(indexShard.routingEntry().allocationId().getId(), indexShard.getLastKnownGlobalCheckpoint());
+            indexShard.finalizeRecovery();
+            indexShard.postRecovery("post recovery from shard_store");
+        } catch (EngineException | IOException e) {
+            throw new IndexShardRecoveryException(shardId, "failed to recover from gateway", e);
+        } catch (InterruptedException e) {
+            logger.error("Error", e);
         } finally {
             store.decRef();
         }

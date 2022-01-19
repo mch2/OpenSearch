@@ -66,6 +66,7 @@ import org.opensearch.index.seqno.RetentionLeaseSyncer;
 import org.opensearch.index.shard.PrimaryReplicaSyncer;
 import org.opensearch.index.shard.ShardId;
 import org.opensearch.indices.recovery.PeerRecoveryTargetService;
+import org.opensearch.indices.segmentcopy.copy.SegmentReplicationTargetService;
 import org.opensearch.repositories.RepositoriesService;
 import org.opensearch.threadpool.TestThreadPool;
 import org.opensearch.threadpool.ThreadPool;
@@ -549,7 +550,7 @@ public class IndicesClusterStateServiceRandomUpdatesTests extends AbstractIndice
             Collections.emptyMap(),
             threadPool
         );
-        final PeerRecoveryTargetService recoveryTargetService = new PeerRecoveryTargetService(
+        final SegmentReplicationTargetService recoveryTargetService = new SegmentReplicationTargetService(
             threadPool,
             transportService,
             null,

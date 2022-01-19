@@ -42,6 +42,7 @@ import org.opensearch.common.util.concurrent.ConcurrentCollections;
 import org.opensearch.index.shard.IndexShard;
 import org.opensearch.index.shard.IndexShardClosedException;
 import org.opensearch.index.shard.ShardId;
+import org.opensearch.indices.segmentcopy.copy.ReplicationTarget;
 import org.opensearch.threadpool.ThreadPool;
 
 import java.util.ArrayList;
@@ -81,6 +82,17 @@ public class RecoveriesCollection {
         TimeValue activityTimeout
     ) {
         RecoveryTarget recoveryTarget = new RecoveryTarget(indexShard, sourceNode, listener);
+        startRecoveryInternal(recoveryTarget, activityTimeout);
+        return recoveryTarget.recoveryId();
+    }
+
+    public long startReplication(
+        IndexShard indexShard,
+        DiscoveryNode sourceNode,
+        PeerRecoveryTargetService.RecoveryListener listener,
+        TimeValue activityTimeout
+    ) {
+        ReplicationTarget recoveryTarget = new ReplicationTarget(indexShard, sourceNode, listener);
         startRecoveryInternal(recoveryTarget, activityTimeout);
         return recoveryTarget.recoveryId();
     }

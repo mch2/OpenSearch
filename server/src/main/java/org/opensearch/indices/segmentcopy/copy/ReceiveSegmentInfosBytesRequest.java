@@ -30,47 +30,66 @@
  * GitHub history for details.
  */
 
-package org.opensearch.indices.recovery;
+package org.opensearch.indices.segmentcopy.copy;
 
-import org.opensearch.LegacyESVersion;
 import org.opensearch.common.io.stream.StreamInput;
 import org.opensearch.common.io.stream.StreamOutput;
-import org.opensearch.index.seqno.SequenceNumbers;
 import org.opensearch.index.shard.ShardId;
+import org.opensearch.indices.recovery.RecoveryTransportRequest;
 
 import java.io.IOException;
 
-public final class RecoveryFinalizeRecoveryRequest extends RecoveryTransportRequest {
+public final class ReceiveSegmentInfosBytesRequest extends RecoveryTransportRequest {
 
     private final long recoveryId;
     private final ShardId shardId;
-    private final long globalCheckpoint;
-    private final long trimAboveSeqNo;
+    private final long gen;
+    private final long version;
+    private final byte[] infosBytes;
 
-    public RecoveryFinalizeRecoveryRequest(StreamInput in) throws IOException {
-        super(in);
-        recoveryId = in.readLong();
-        shardId = new ShardId(in);
-        globalCheckpoint = in.readZLong();
-        if (in.getVersion().onOrAfter(LegacyESVersion.V_7_4_0)) {
-            trimAboveSeqNo = in.readZLong();
-        } else {
-            trimAboveSeqNo = SequenceNumbers.UNASSIGNED_SEQ_NO;
-        }
+    public long getRecoveryId() {
+        return recoveryId;
     }
 
-    public RecoveryFinalizeRecoveryRequest(
-        final long recoveryId,
-        final long requestSeqNo,
-        final ShardId shardId,
-        final long globalCheckpoint,
-        final long trimAboveSeqNo
-    ) {
+    public ShardId getShardId() {
+        return shardId;
+    }
+
+    public long getGen() {
+        return gen;
+    }
+
+    public long getVersion() {
+        return version;
+    }
+
+    public byte[] getInfosBytes() {
+        return infosBytes;
+    }
+
+    public ReceiveSegmentInfosBytesRequest(StreamInput in) throws IOException {
+        super(in);
+        recoveryId = in.readVLong();
+        shardId = new ShardId(in);
+        gen = in.readVLong();
+        version = in.readVLong();
+        int infosBytesLength = in.readVInt();
+        infosBytes = new byte[infosBytesLength];
+        in.readBytes(infosBytes, 0, infosBytesLength);
+    }
+
+    ReceiveSegmentInfosBytesRequest(final long recoveryId,
+                                    final long requestSeqNo,
+                                    final ShardId shardId,
+                                    final long gen,
+                                    final long version,
+                                    final byte[] infosBytes) {
         super(requestSeqNo);
         this.recoveryId = recoveryId;
         this.shardId = shardId;
-        this.globalCheckpoint = globalCheckpoint;
-        this.trimAboveSeqNo = trimAboveSeqNo;
+        this.gen = gen;
+        this.version = version;
+        this.infosBytes = infosBytes;
     }
 
     public long recoveryId() {
@@ -81,23 +100,15 @@ public final class RecoveryFinalizeRecoveryRequest extends RecoveryTransportRequ
         return shardId;
     }
 
-    public long globalCheckpoint() {
-        return globalCheckpoint;
-    }
-
-    public long trimAboveSeqNo() {
-        return trimAboveSeqNo;
-    }
-
     @Override
     public void writeTo(StreamOutput out) throws IOException {
         super.writeTo(out);
-        out.writeLong(recoveryId);
+        out.writeVLong(recoveryId);
         shardId.writeTo(out);
-        out.writeZLong(globalCheckpoint);
-        if (out.getVersion().onOrAfter(LegacyESVersion.V_7_4_0)) {
-            out.writeZLong(trimAboveSeqNo);
-        }
+        out.writeVLong(gen);
+        out.writeVLong(version);
+        out.writeVInt(infosBytes.length);
+        out.writeBytes(infosBytes, 0, infosBytes.length);
     }
 
 }

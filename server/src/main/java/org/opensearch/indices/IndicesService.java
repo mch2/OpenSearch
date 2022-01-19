@@ -137,6 +137,8 @@ import org.opensearch.indices.fielddata.cache.IndicesFieldDataCache;
 import org.opensearch.indices.mapper.MapperRegistry;
 import org.opensearch.indices.recovery.PeerRecoveryTargetService;
 import org.opensearch.indices.recovery.RecoveryState;
+import org.opensearch.indices.segmentcopy.checkpoint.TransportCheckpointPublisher;
+import org.opensearch.indices.segmentcopy.copy.SegmentReplicationTargetService;
 import org.opensearch.node.Node;
 import org.opensearch.plugins.IndexStorePlugin;
 import org.opensearch.plugins.PluginsService;
@@ -149,6 +151,7 @@ import org.opensearch.search.internal.ShardSearchRequest;
 import org.opensearch.search.query.QueryPhase;
 import org.opensearch.search.query.QuerySearchResult;
 import org.opensearch.threadpool.ThreadPool;
+import org.opensearch.transport.TransportService;
 
 import java.io.Closeable;
 import java.io.IOException;
@@ -737,8 +740,8 @@ public class IndicesService extends AbstractLifecycleComponent
             indicesFieldDataCache,
             namedWriteableRegistry,
             this::isIdFieldDataEnabled,
-            valuesSourceRegistry
-        );
+            valuesSourceRegistry,
+            new TransportCheckpointPublisher(client));
     }
 
     private EngineConfigFactory getEngineConfigFactory(final IndexSettings idxSettings) {

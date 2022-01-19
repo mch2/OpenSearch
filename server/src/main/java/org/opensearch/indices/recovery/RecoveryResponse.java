@@ -41,21 +41,21 @@ import java.util.List;
 
 public final class RecoveryResponse extends TransportResponse {
 
-    final List<String> phase1FileNames;
-    final List<Long> phase1FileSizes;
-    final List<String> phase1ExistingFileNames;
-    final List<Long> phase1ExistingFileSizes;
-    final long phase1TotalSize;
-    final long phase1ExistingTotalSize;
-    final long phase1Time;
-    final long phase1ThrottlingWaitTime;
+    public final List<String> phase1FileNames;
+    public final List<Long> phase1FileSizes;
+    public final List<String> phase1ExistingFileNames;
+    public final List<Long> phase1ExistingFileSizes;
+    public final long phase1TotalSize;
+    public final long phase1ExistingTotalSize;
+    public final long phase1Time;
+    public final long phase1ThrottlingWaitTime;
 
-    final long startTime;
+    public final long startTime;
 
-    final int phase2Operations;
-    final long phase2Time;
+    public final int phase2Operations;
+    public final long phase2Time;
 
-    RecoveryResponse(
+    public RecoveryResponse(
         List<String> phase1FileNames,
         List<Long> phase1FileSizes,
         List<String> phase1ExistingFileNames,
@@ -81,7 +81,7 @@ public final class RecoveryResponse extends TransportResponse {
         this.phase2Time = phase2Time;
     }
 
-    RecoveryResponse(StreamInput in) throws IOException {
+    public RecoveryResponse(StreamInput in) throws IOException {
         super(in);
         phase1FileNames = in.readStringList();
         phase1FileSizes = in.readList(StreamInput::readVLong);
