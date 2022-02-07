@@ -40,14 +40,14 @@ import org.opensearch.index.shard.ShardId;
 
 import java.io.IOException;
 
-final class RecoveryFinalizeRecoveryRequest extends RecoveryTransportRequest {
+public final class RecoveryFinalizeRecoveryRequest extends RecoveryTransportRequest {
 
     private final long recoveryId;
     private final ShardId shardId;
     private final long globalCheckpoint;
     private final long trimAboveSeqNo;
 
-    RecoveryFinalizeRecoveryRequest(StreamInput in) throws IOException {
+    public RecoveryFinalizeRecoveryRequest(StreamInput in) throws IOException {
         super(in);
         recoveryId = in.readLong();
         shardId = new ShardId(in);
@@ -59,7 +59,7 @@ final class RecoveryFinalizeRecoveryRequest extends RecoveryTransportRequest {
         }
     }
 
-    RecoveryFinalizeRecoveryRequest(
+    public RecoveryFinalizeRecoveryRequest(
         final long recoveryId,
         final long requestSeqNo,
         final ShardId shardId,

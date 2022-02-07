@@ -392,6 +392,9 @@ public class RecoveryTarget extends AbstractRefCounted implements RecoveryTarget
              */
             indexShard().updateRetentionLeasesOnReplica(retentionLeases);
             for (Translog.Operation operation : operations) {
+//                logger.info("Skipping operation {}", operation);
+//                continue;
+                // TODO: Segrep - remove this hack.  We should be able to use segrep after shard starts empty and not touch this class.
                 Engine.Result result = indexShard().applyTranslogOperation(operation, Engine.Operation.Origin.PEER_RECOVERY);
                 if (result.getResultType() == Engine.Result.Type.MAPPING_UPDATE_REQUIRED) {
                     throw new MapperException("mapping updates are not allowed [" + operation + "]");

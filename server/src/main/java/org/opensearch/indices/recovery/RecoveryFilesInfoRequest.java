@@ -45,12 +45,12 @@ public class RecoveryFilesInfoRequest extends RecoveryTransportRequest {
     private long recoveryId;
     private ShardId shardId;
 
-    List<String> phase1FileNames;
-    List<Long> phase1FileSizes;
-    List<String> phase1ExistingFileNames;
-    List<Long> phase1ExistingFileSizes;
+    public List<String> phase1FileNames;
+    public List<Long> phase1FileSizes;
+    public List<String> phase1ExistingFileNames;
+    public List<Long> phase1ExistingFileSizes;
 
-    int totalTranslogOps;
+    public int totalTranslogOps;
 
     public RecoveryFilesInfoRequest(StreamInput in) throws IOException {
         super(in);
@@ -82,7 +82,7 @@ public class RecoveryFilesInfoRequest extends RecoveryTransportRequest {
         totalTranslogOps = in.readVInt();
     }
 
-    RecoveryFilesInfoRequest(
+    public RecoveryFilesInfoRequest(
         long recoveryId,
         long requestSeqNo,
         ShardId shardId,

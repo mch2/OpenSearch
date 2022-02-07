@@ -137,6 +137,7 @@ import org.opensearch.indices.fielddata.cache.IndicesFieldDataCache;
 import org.opensearch.indices.mapper.MapperRegistry;
 import org.opensearch.indices.recovery.PeerRecoveryTargetService;
 import org.opensearch.indices.recovery.RecoveryState;
+import org.opensearch.indices.segmentcopy.checkpoint.TransportCheckpointPublisher;
 import org.opensearch.node.Node;
 import org.opensearch.plugins.IndexStorePlugin;
 import org.opensearch.plugins.PluginsService;
@@ -737,8 +738,8 @@ public class IndicesService extends AbstractLifecycleComponent
             indicesFieldDataCache,
             namedWriteableRegistry,
             this::isIdFieldDataEnabled,
-            valuesSourceRegistry
-        );
+            valuesSourceRegistry,
+            new TransportCheckpointPublisher(client));
     }
 
     private EngineConfigFactory getEngineConfigFactory(final IndexSettings idxSettings) {

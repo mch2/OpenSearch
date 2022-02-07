@@ -1086,7 +1086,7 @@ public class ReplicationTracker extends AbstractIndexShardComponent implements L
         final long previousGlobalCheckpoint = globalCheckpoint;
         if (newGlobalCheckpoint > previousGlobalCheckpoint) {
             globalCheckpoint = newGlobalCheckpoint;
-            logger.trace("updated global checkpoint from [{}] to [{}] due to [{}]", previousGlobalCheckpoint, globalCheckpoint, reason);
+            logger.info("updated global checkpoint from [{}] to [{}] due to [{}]", previousGlobalCheckpoint, globalCheckpoint, reason);
             onGlobalCheckpointUpdated.accept(globalCheckpoint);
         }
         assert invariant();

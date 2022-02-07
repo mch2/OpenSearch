@@ -215,7 +215,7 @@ public class PeerRecoveryTargetService implements IndexEventListener {
         final String actionName;
         final TransportRequest requestToSend;
         final StartRecoveryRequest startRequest;
-        final RecoveryState.Timer timer;
+        final Timer timer;
         CancellableThreads cancellableThreads;
         try (RecoveryRef recoveryRef = onGoingRecoveries.getRecovery(recoveryId)) {
             if (recoveryRef == null) {
@@ -636,13 +636,13 @@ public class PeerRecoveryTargetService implements IndexEventListener {
         }
     }
 
-    private class RecoveryResponseHandler implements TransportResponseHandler<RecoveryResponse> {
+    public class RecoveryResponseHandler implements TransportResponseHandler<RecoveryResponse> {
 
         private final long recoveryId;
         private final StartRecoveryRequest request;
-        private final RecoveryState.Timer timer;
+        private final Timer timer;
 
-        private RecoveryResponseHandler(final StartRecoveryRequest request, final RecoveryState.Timer timer) {
+        public RecoveryResponseHandler(final StartRecoveryRequest request, final Timer timer) {
             this.recoveryId = request.recoveryId();
             this.request = request;
             this.timer = timer;

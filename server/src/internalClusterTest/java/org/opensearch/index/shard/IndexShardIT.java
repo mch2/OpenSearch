@@ -778,8 +778,9 @@ public class IndexShardIT extends OpenSearchSingleNodeTestCase {
             Arrays.asList(listeners),
             () -> {},
             RetentionLeaseSyncer.EMPTY,
-            cbs
-        );
+            cbs,
+            null,
+                additionalRefreshListeners);
     }
 
     private static ShardRouting getInitializingShardRouting(ShardRouting existingShardRouting) {
