@@ -251,6 +251,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
 
     private final IndexingOperationListener indexingOperationListeners;
     private final Runnable globalCheckpointSyncer;
+    private volatile long latestSeqNo = -1;
 
     Runnable getGlobalCheckpointSyncer() {
         return globalCheckpointSyncer;
@@ -1518,7 +1519,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
             this.shardId,
             getOperationPrimaryTerm(),
             getLatestSegmentInfos().getGeneration(),
-            getProcessedLocalCheckpoint()
+            shardRouting.primary() ? getProcessedLocalCheckpoint() : latestSeqNo
         );
     }
 
@@ -3743,6 +3744,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
                     @Override
                     public void onReplicationDone(ReplicationState state) {
                         markReplicationComplete();
+                        latestSeqNo = checkpoint.getSeqNo();
                         logger.debug("Replication complete to {}", getLatestReplicationCheckpoint());
                     }
 

@@ -147,7 +147,7 @@ public class ReplicationTarget extends AbstractRefCounted {
             final Store store = store();
             store.incRef();
             try {
-                store.cleanupAndVerify("recovery CleanFilesRequestHandler", checkpointInfo.getSnapshot());
+//                store.cleanupAndVerify("recovery CleanFilesRequestHandler", checkpointInfo.getSnapshot());
                 if (indexShard.getRetentionLeases().leases().isEmpty()) {
                     // if empty, may be a fresh IndexShard, so write an empty leases file to disk
                     indexShard.persistRetentionLeases();
@@ -156,11 +156,6 @@ public class ReplicationTarget extends AbstractRefCounted {
                     assert indexShard.assertRetentionLeasesPersisted();
                 }
                 final long segmentsGen = checkpointInfo.getCheckpoint().getSegmentsGen();
-                // force an fsync if we are receiving a new gen.
-                if (segmentsGen > indexShard.getLatestSegmentInfos().getGeneration()) {
-                    final Directory directory = store().directory();
-                    directory.sync(Arrays.asList(directory.listAll()));
-                }
                 indexShard.updateCurrentInfos(segmentsGen, checkpointInfo.getInfosBytes(), checkpointInfo.getCheckpoint().getSeqNo());
             } catch (CorruptIndexException | IndexFormatTooNewException | IndexFormatTooOldException ex) {
                 // this is a fatal exception at this stage.

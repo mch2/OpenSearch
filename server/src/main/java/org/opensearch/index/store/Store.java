@@ -105,6 +105,7 @@ import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -364,7 +365,7 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
                 final String remove = tempFileMap.remove(tempFile);
                 assert remove != null;
             }
-            directory.syncMetaData();
+//            directory.syncMetaData();
         } finally {
             metadataLock.writeLock().unlock();
         }
@@ -694,7 +695,7 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
                     // ignore, we don't really care, will get deleted later on
                 }
             }
-            directory.syncMetaData();
+//            directory.syncMetaData();
             final Store.MetadataSnapshot metadataOrEmpty = getMetadata((IndexCommit) null);
             verifyAfterCleanup(sourceMetadata, metadataOrEmpty);
         } finally {
@@ -766,6 +767,16 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
         @Override
         public void close() {
             assert false : "Nobody should close this directory except of the Store itself";
+        }
+
+        @Override
+        public void sync(Collection<String> names) {
+
+        }
+
+        @Override
+        public void syncMetaData() {
+
         }
 
         public void deleteFile(String msg, String name) throws IOException {
