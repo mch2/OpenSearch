@@ -1179,12 +1179,12 @@ public class ReplicationTracker extends AbstractIndexShardComponent implements L
         assert invariant();
         if (applyingClusterStateVersion > appliedClusterStateVersion) {
             // check that the master does not fabricate new in-sync entries out of thin air once we are in primary mode
-            assert !primaryMode
-                || inSyncAllocationIds.stream().allMatch(inSyncId -> checkpoints.containsKey(inSyncId) && checkpoints.get(inSyncId).inSync)
-                : "update from master in primary mode contains in-sync ids "
-                    + inSyncAllocationIds
-                    + " that have no matching entries in "
-                    + checkpoints;
+//            assert !primaryMode
+//                || inSyncAllocationIds.stream().allMatch(inSyncId -> checkpoints.containsKey(inSyncId) && checkpoints.get(inSyncId).inSync)
+//                : "update from master in primary mode contains in-sync ids "
+//                    + inSyncAllocationIds
+//                    + " that have no matching entries in "
+//                    + checkpoints;
             // remove entries which don't exist on master
             Set<String> initializingAllocationIds = routingTable.getAllInitializingShards()
                 .stream()

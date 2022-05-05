@@ -55,6 +55,7 @@ import org.opensearch.index.translog.TranslogConfig;
 import org.opensearch.index.translog.TranslogDeletionPolicyFactory;
 import org.opensearch.indices.IndexingMemoryController;
 import org.opensearch.indices.breaker.CircuitBreakerService;
+import org.opensearch.indices.replication.copy.PrimaryShardReplicationSource;
 import org.opensearch.threadpool.ThreadPool;
 
 import java.util.List;
@@ -96,6 +97,7 @@ public final class EngineConfig {
     private final LongSupplier globalCheckpointSupplier;
     private final Supplier<RetentionLeases> retentionLeasesSupplier;
     private boolean isReadOnly;
+    private PrimaryShardReplicationSource replicationSource;
 
     /**
      * A supplier of the outstanding retention leases. This is used during merged operations to determine which operations that have been
@@ -154,6 +156,7 @@ public final class EngineConfig {
         IndexSettings indexSettings,
         Engine.Warmer warmer,
         Store store,
+        PrimaryShardReplicationSource replicationSource,
         MergePolicy mergePolicy,
         Analyzer analyzer,
         Similarity similarity,
@@ -179,6 +182,7 @@ public final class EngineConfig {
             indexSettings,
             warmer,
             store,
+            replicationSource,
             mergePolicy,
             analyzer,
             similarity,
@@ -210,6 +214,7 @@ public final class EngineConfig {
         IndexSettings indexSettings,
         Engine.Warmer warmer,
         Store store,
+        PrimaryShardReplicationSource replicationSource,
         MergePolicy mergePolicy,
         Analyzer analyzer,
         Similarity similarity,
@@ -235,6 +240,7 @@ public final class EngineConfig {
         this.threadPool = threadPool;
         this.warmer = warmer == null ? (a) -> {} : warmer;
         this.store = store;
+        this.replicationSource = replicationSource;
         this.mergePolicy = mergePolicy;
         this.analyzer = analyzer;
         this.similarity = similarity;
@@ -465,6 +471,10 @@ public final class EngineConfig {
 
     public boolean isReadOnly() {
         return isReadOnly;
+    }
+
+    public PrimaryShardReplicationSource getReplicationSource() {
+        return replicationSource;
     }
 
     /**

@@ -405,6 +405,7 @@ public class IndexingMemoryControllerTests extends IndexShardTestCase {
             config.getIndexSettings(),
             config.getWarmer(),
             config.getStore(),
+            config.getReplicationSource(),
             config.getMergePolicy(),
             config.getAnalyzer(),
             config.getSimilarity(),

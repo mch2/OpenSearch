@@ -139,7 +139,7 @@ public class PublishCheckpointAction extends TransportReplicationAction<
                             // the index was deleted or the shard is closed
                             return;
                         }
-                        logger.warn(
+                        logger.error(
                             new ParameterizedMessage("{} segment replication checkpoint publishing failed", indexShard.shardId()),
                             e
                         );

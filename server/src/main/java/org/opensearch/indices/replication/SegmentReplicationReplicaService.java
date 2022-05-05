@@ -100,6 +100,7 @@ public class SegmentReplicationReplicaService implements IndexEventListener {
         ActionListener<TrackShardResponse> listener
     ) {
         setupReplicaShard(indexShard);
+        logger.info("Track shard req");
         final TimeValue initialDelay = TimeValue.timeValueMillis(200);
         final TimeValue timeout = recoverySettings.internalActionRetryTimeout();
         final RetryableAction retryableAction = new RetryableAction(logger, threadPool, initialDelay, timeout, listener) {
@@ -224,10 +225,13 @@ public class SegmentReplicationReplicaService implements IndexEventListener {
         indexShard.markAsReplicating();
         StepListener<TrackShardResponse> trackShardListener = new StepListener<>();
         trackShardListener.whenComplete(
-            r -> { startReplication(indexShard.getLatestReplicationCheckpoint(), indexShard, replicationSource, replicationListener); },
+            r -> { startReplication(new ReplicationCheckpoint(indexShard.shardId(), 0, 0, 0, 0), indexShard, replicationSource, replicationListener); },
             e -> { replicationListener.onFailure(indexShard.getReplicationState(), new ReplicationFailedException(indexShard, e), true); }
         );
         prepareForReplication(indexShard, targetNode, sourceNode, trackShardListener);
+//        indexShard.markReplicationComplete();
+        logger.info("Indexshard state {} {} {}", indexShard.recoveryState(), indexShard.getReplicationState(), indexShard.state());
+//        replicationListener.onDone(indexShard.getReplicationState());
     }
 
     class ReplicationRunner extends AbstractRunnable {

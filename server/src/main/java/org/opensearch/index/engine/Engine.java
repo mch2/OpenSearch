@@ -43,6 +43,7 @@ import org.apache.lucene.index.SegmentCommitInfo;
 import org.apache.lucene.index.SegmentInfos;
 import org.apache.lucene.index.SegmentReader;
 import org.apache.lucene.index.Term;
+import org.apache.lucene.replicator.nrt.CopyState;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.QueryCache;
 import org.apache.lucene.search.QueryCachingPolicy;
@@ -83,6 +84,8 @@ import org.opensearch.index.shard.ShardId;
 import org.opensearch.index.store.Store;
 import org.opensearch.index.translog.Translog;
 import org.opensearch.index.translog.TranslogStats;
+import org.opensearch.indices.replication.copy.CopyStateOld;
+import org.opensearch.indices.replication.copy.ReplicationCheckpoint;
 import org.opensearch.search.suggest.completion.CompletionStats;
 
 import java.io.Closeable;
@@ -240,6 +243,16 @@ public abstract class Engine implements Closeable {
     public long getProcessedLocalCheckpoint() {
         return 0L;
     };
+
+    public CopyState getCopyState() throws IOException {
+        return null;
+    }
+
+    public void onNewCheckpoint(ReplicationCheckpoint checkpoint) throws IOException {
+    }
+
+    public void closeCopyState(CopyState copyState) throws IOException {
+    }
 
     /**
      * A throttling class that can be activated, causing the

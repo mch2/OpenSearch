@@ -61,7 +61,7 @@ public abstract class ReplicationTarget extends AbstractRefCounted {
         this.recoveryStateIndex = recoveryStateIndex;
         this.indexShard = indexShard;
         this.store = indexShard.store();
-        final String tempFilePrefix = getPrefix() + UUIDs.randomBase64UUID() + ".";
+        final String tempFilePrefix = getPrefix() + ".";
         this.multiFileWriter = new MultiFileWriter(indexShard.store(), recoveryStateIndex, tempFilePrefix, logger, this::ensureRefCount);
         // make sure the store is not released until we are done.
         store.incRef();

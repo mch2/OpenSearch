@@ -40,6 +40,7 @@ import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.SegmentInfos;
 import org.apache.lucene.index.StandardDirectoryReader;
 import org.apache.lucene.index.SoftDeletesDirectoryReaderWrapper;
+import org.apache.lucene.replicator.nrt.PrimaryNode;
 import org.apache.lucene.search.ReferenceManager;
 import org.apache.lucene.search.SearcherManager;
 import org.opensearch.common.SuppressForbidden;
@@ -61,6 +62,7 @@ import java.util.List;
 @SuppressForbidden(reason = "reference counting is required here")
 class OpenSearchReaderManager extends ReferenceManager<OpenSearchDirectoryReader> {
     protected static Logger logger = LogManager.getLogger(OpenSearchReaderManager.class);
+    private final PrimaryNode primaryNode;
 
     private volatile SegmentInfos currentInfos;
 
@@ -73,6 +75,12 @@ class OpenSearchReaderManager extends ReferenceManager<OpenSearchDirectoryReader
      */
     OpenSearchReaderManager(OpenSearchDirectoryReader reader) {
         this.current = reader;
+        this.primaryNode = null;
+    }
+
+    OpenSearchReaderManager(OpenSearchDirectoryReader reader, PrimaryNode primaryNode) {
+        this.current = reader;
+        this.primaryNode = primaryNode;
     }
 
     @Override
@@ -82,6 +90,12 @@ class OpenSearchReaderManager extends ReferenceManager<OpenSearchDirectoryReader
 
     @Override
     protected OpenSearchDirectoryReader refreshIfNeeded(OpenSearchDirectoryReader referenceToRefresh) throws IOException {
+        if (this.primaryNode != null) {
+            logger.info("IS IT CLOSED {}", this.primaryNode.isClosed());
+            if (primaryNode.flushAndRefresh()) {
+                return OpenSearchDirectoryReader.wrap((DirectoryReader) primaryNode.getSearcherManager().acquire().getIndexReader(), referenceToRefresh.shardId());
+            }
+        }
         // This is directly from Lucene's SegmentInfosSearcherManager...
         List<LeafReader> subs;
         if (referenceToRefresh == null) {

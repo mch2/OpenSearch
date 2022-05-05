@@ -35,6 +35,7 @@ package org.opensearch.indices.replication.copy;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.message.ParameterizedMessage;
+import org.apache.lucene.replicator.nrt.CopyState;
 import org.opensearch.action.ActionListener;
 import org.opensearch.action.StepListener;
 import org.opensearch.action.support.ChannelActionListener;
@@ -50,7 +51,7 @@ import org.opensearch.index.shard.ShardId;
 import org.opensearch.indices.IndicesService;
 import org.opensearch.indices.recovery.DelayRecoveryException;
 import org.opensearch.indices.recovery.RecoverySettings;
-import org.opensearch.indices.replication.checkpoint.TransportCheckpointInfoResponse;
+import org.opensearch.indices.replication.checkpoint.TransportCopyStateReponse;
 import org.opensearch.tasks.Task;
 import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.TransportChannel;
@@ -119,81 +120,81 @@ public class SegmentReplicationPrimaryService {
     }
 
     private static final class CopyStateCache {
-        private final Map<ReplicationCheckpoint, CopyState> checkpointCopyState = Collections.synchronizedMap(new HashMap<>());
+        private final Map<ShardId, CopyState> checkpointCopyState = Collections.synchronizedMap(new HashMap<>());
 
-        public void addCopyState(CopyState copyState) {
-            checkpointCopyState.putIfAbsent(copyState.getCheckpoint(), copyState);
+        public void addCopyState(ShardId checkpoint, CopyState copyState) {
+            checkpointCopyState.putIfAbsent(checkpoint, copyState);
         }
 
-        public CopyState getCopyStateForCheckpoint(ReplicationCheckpoint checkpoint) {
+        public CopyState getCopyStateForCheckpoint(ShardId checkpoint) {
             return checkpointCopyState.get(checkpoint);
         }
 
-        public boolean hasCheckpoint(ReplicationCheckpoint checkpoint) {
+        public boolean hasCheckpoint(ShardId checkpoint) {
             return checkpointCopyState.containsKey(checkpoint);
         }
 
-        public synchronized void removeCopyState(ReplicationCheckpoint checkpoint) {
+        public synchronized void removeCopyState(IndexShard shard, ShardId checkpoint) {
             final Optional<CopyState> nrtCopyState = Optional.ofNullable(checkpointCopyState.get(checkpoint));
             nrtCopyState.ifPresent((state) -> {
-                if (state.decRef()) {
+                try {
+                    shard.releaseCopyState(state);
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+//                if (state.decRef()) {
                     // decRef() returns true if there are no longer any references, if so remove it from our cache.
                     checkpointCopyState.remove(checkpoint);
-                }
+//                }
             });
         }
     }
 
-    private synchronized CopyState getCopyState(ReplicationCheckpoint checkpoint) throws IOException {
+    private synchronized CopyState getCopyState(ShardId checkpoint) throws IOException {
         if (commitCache.hasCheckpoint(checkpoint)) {
             final CopyState copyState = commitCache.getCopyStateForCheckpoint(checkpoint);
-            copyState.incRef();
+//            copyState.incRef();
             return copyState;
         }
-        final CopyState copyState = buildCopyState(checkpoint.getShardId());
-        commitCache.addCopyState(copyState);
+        final CopyState copyState = buildCopyState(checkpoint);
+        commitCache.addCopyState(checkpoint, copyState);
         return copyState;
     }
 
     private CopyState buildCopyState(ShardId shardId) throws IOException {
         final IndexService indexService = indicesService.indexService(shardId.getIndex());
         final IndexShard shard = indexService.getShard(shardId.id());
-        return new CopyState(shard);
+        return shard.getCopyState();
     }
 
     private class StartReplicationRequestHandler implements TransportRequestHandler<StartReplicationRequest> {
         @Override
         public void messageReceived(StartReplicationRequest request, TransportChannel channel, Task task) throws Exception {
             final ReplicationCheckpoint checkpoint = request.getCheckpoint();
-            logger.trace("Received request for checkpoint {}", checkpoint);
-            final CopyState copyState = getCopyState(checkpoint);
-            channel.sendResponse(
-                new TransportCheckpointInfoResponse(
-                    copyState.getCheckpoint(),
-                    copyState.getMetadataSnapshot(),
-                    copyState.getInfosBytes(),
-                    copyState.getPendingDeleteFiles()
-                )
-            );
+            logger.info("Received request for checkpoint {}", checkpoint);
+            final CopyState copyState = getCopyState(checkpoint.getShardId());
+            channel.sendResponse(new TransportCopyStateReponse(copyState));
         }
     }
 
     class GetFilesRequestHandler implements TransportRequestHandler<GetFilesRequest> {
         @Override
         public void messageReceived(GetFilesRequest request, TransportChannel channel, Task task) throws Exception {
-            if (commitCache.hasCheckpoint(request.getCheckpoint())) {
+            logger.info("Requested files");
+//            if (commitCache.hasCheckpoint(request.getCheckpoint())) {
                 sendFiles(request, new ChannelActionListener<>(channel, Actions.GET_FILES, request));
-            } else {
-                channel.sendResponse(TransportResponse.Empty.INSTANCE);
-            }
+//            } else {
+//                channel.sendResponse(TransportResponse.Empty.INSTANCE);
+//            }
         }
     }
 
     private void sendFiles(GetFilesRequest request, ActionListener<GetFilesResponse> listener) {
-        final ShardId shardId = request.getCheckpoint().getShardId();
-        logger.trace("Requested file copy for checkpoint {}", request.getCheckpoint());
+//        final ShardId shardId = request.getCheckpoint().getShardId();
+        final ShardId shardId = request.getShardId();
+        logger.trace("Requested file copy for checkpoint {}", request.getShardId());
 
-        final CopyState copyState = commitCache.getCopyStateForCheckpoint(request.getCheckpoint());
+        final CopyState copyState = commitCache.getCopyStateForCheckpoint(shardId);
 
         final IndexService indexService = indicesService.indexService(shardId.getIndex());
         final IndexShard shard = indexService.getShard(shardId.id());
@@ -218,7 +219,7 @@ public class SegmentReplicationPrimaryService {
         );
         logger.debug("[{}][{}] fetching files for {}", shardId.getIndex().getName(), shardId.id(), request.getTargetNode());
         // TODO: The calling shard could die between requests without finishing.
-        handler.sendFiles(copyState, ActionListener.runAfter(listener, () -> commitCache.removeCopyState(request.getCheckpoint())));
+        handler.sendFiles(ActionListener.runAfter(listener, () -> commitCache.removeCopyState(shard, request.getShardId())));
     }
 
     class TrackShardRequestHandler implements TransportRequestHandler<TrackShardRequest> {

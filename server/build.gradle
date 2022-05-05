@@ -110,6 +110,7 @@ dependencies {
   api "org.apache.lucene:lucene-spatial-extras:${versions.lucene}"
   api "org.apache.lucene:lucene-spatial3d:${versions.lucene}"
   api "org.apache.lucene:lucene-suggest:${versions.lucene}"
+  api "org.apache.lucene:lucene-replicator:${versions.lucene}"
 
   // utilities
   api project(":libs:opensearch-cli")

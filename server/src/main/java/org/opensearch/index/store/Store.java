@@ -798,7 +798,7 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
 
         @Override
         public void close() {
-            assert false : "Nobody should close this directory except of the Store itself";
+//            assert false : "Nobody should close this directory except of the Store itself";
         }
 
         public void deleteFile(String msg, String name) throws IOException {

@@ -8,9 +8,11 @@
 
 package org.opensearch.indices.replication.copy;
 
+import org.apache.lucene.replicator.nrt.FileMetaData;
 import org.opensearch.cluster.node.DiscoveryNode;
 import org.opensearch.common.io.stream.StreamInput;
 import org.opensearch.common.io.stream.StreamOutput;
+import org.opensearch.index.shard.ShardId;
 import org.opensearch.index.store.StoreFileMetadata;
 
 import java.io.IOException;
@@ -18,39 +20,47 @@ import java.util.List;
 
 public class GetFilesRequest extends SegmentReplicationTransportRequest {
 
-    private final List<StoreFileMetadata> filesToFetch;
-    private final ReplicationCheckpoint checkpoint;
+    private final String fileName;
+    private final ShardId shardId;
+//    private final ReplicationCheckpoint checkpoint;
 
     public GetFilesRequest(
         long replicationId,
         String targetAllocationId,
         DiscoveryNode targetNode,
-        List<StoreFileMetadata> filesToFetch,
-        ReplicationCheckpoint checkpoint
+        ShardId shardId,
+        String file
     ) {
         super(replicationId, targetAllocationId, targetNode);
-        this.filesToFetch = filesToFetch;
-        this.checkpoint = checkpoint;
+        this.fileName = file;
+        this.shardId = shardId;
     }
 
     public GetFilesRequest(StreamInput in) throws IOException {
         super(in);
-        this.filesToFetch = in.readList(StoreFileMetadata::new);
-        this.checkpoint = new ReplicationCheckpoint(in);
+        this.fileName = in.readString();
+        this.shardId = new ShardId(in);
+//        this.filesToFetch = in.readList(StoreFileMetadata::new);
+//        this.checkpoint = new ReplicationCheckpoint(in);
     }
 
-    public List<StoreFileMetadata> getFilesToFetch() {
-        return filesToFetch;
+    public String getFileName() {
+        return fileName;
     }
 
-    public ReplicationCheckpoint getCheckpoint() {
-        return checkpoint;
-    }
+//    public ReplicationCheckpoint getCheckpoint() {
+//        return checkpoint;
+//    }
 
     @Override
     public void writeTo(StreamOutput out) throws IOException {
         super.writeTo(out);
-        out.writeList(filesToFetch);
-        checkpoint.writeTo(out);
+        out.writeString(fileName);
+//        out.writeList(filesToFetch);
+//        checkpoint.writeTo(out);
+    }
+
+    public ShardId getShardId() {
+        return shardId;
     }
 }

@@ -42,6 +42,7 @@ import org.apache.lucene.index.IndexCommit;
 import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.SegmentInfos;
 import org.apache.lucene.index.Term;
+import org.apache.lucene.replicator.nrt.CopyState;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.search.QueryCachingPolicy;
 import org.apache.lucene.search.ReferenceManager;
@@ -162,6 +163,7 @@ import org.opensearch.indices.recovery.RecoveryTarget;
 import org.opensearch.indices.replication.SegmentReplicationReplicaService;
 import org.opensearch.indices.replication.checkpoint.PublishCheckpointRequest;
 import org.opensearch.indices.replication.checkpoint.SegmentReplicationCheckpointPublisher;
+import org.opensearch.indices.replication.copy.CopyStateOld;
 import org.opensearch.indices.replication.copy.PrimaryShardReplicationSource;
 import org.opensearch.indices.replication.copy.ReplicationCheckpoint;
 import org.opensearch.indices.replication.copy.ReplicationFailedException;
@@ -307,6 +309,8 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
 
     private volatile ReplicationCheckpoint latestReceivedCheckpoint;
 
+    private final PrimaryShardReplicationSource replicationSource;
+
     public IndexShard(
         final ShardRouting shardRouting,
         final IndexSettings indexSettings,
@@ -328,7 +332,8 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         final Runnable globalCheckpointSyncer,
         final RetentionLeaseSyncer retentionLeaseSyncer,
         final CircuitBreakerService circuitBreakerService,
-        final SegmentReplicationCheckpointPublisher checkpointPublisher
+        final SegmentReplicationCheckpointPublisher checkpointPublisher,
+        final PrimaryShardReplicationSource replicationSource
     ) throws IOException {
         super(shardRouting.shardId(), indexSettings);
         assert shardRouting.initializing();
@@ -386,6 +391,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
             this::getSafeCommitInfo,
             pendingReplicationActions
         );
+        logger.info("HUH {}", replicationTracker.isPrimaryMode());
 
         // the query cache is a node-level thing, however we want the most popular filters
         // to be computed on a per-shard basis
@@ -413,6 +419,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         this.refreshPendingLocationListener = new RefreshPendingLocationListener();
         this.checkpointRefreshListener = new CheckpointRefreshListener(this, checkpointPublisher);
         this.segRepState = new SegmentReplicationState();
+        this.replicationSource = replicationSource;
     }
 
     public ThreadPool getThreadPool() {
@@ -1445,13 +1452,20 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
 
     public ReplicationCheckpoint getLatestReplicationCheckpoint() {
         final SegmentInfos latestSegmentInfos = getLatestSegmentInfos();
-        return new ReplicationCheckpoint(
-            this.shardId,
-            getOperationPrimaryTerm(),
-            latestSegmentInfos.getGeneration(),
-            getProcessedLocalCheckpoint(),
-            latestSegmentInfos.getVersion()
-        );
+//        final CopyState copyState;
+//        try {
+//            copyState = getCopyState();
+            return new ReplicationCheckpoint(
+                this.shardId,
+//                copyState.primaryGen,
+                getPendingPrimaryTerm(),
+                latestSegmentInfos.getGeneration(),
+                getProcessedLocalCheckpoint(),
+                latestSegmentInfos.version);
+//        } catch (IOException e) {
+//            e.printStackTrace();
+//            return null;
+//        }
     }
 
     public void finalizeReplication(SegmentInfos infos, MetadataSnapshot expectedMetadata, long seqNo) throws IOException {
@@ -1611,6 +1625,14 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
                 )
             ); // this will run the closeable on the wrapped engine reader
         }
+    }
+
+    public CopyState getCopyState() throws IOException {
+        return getEngine().getCopyState();
+    }
+
+    public void releaseCopyState(CopyState copyState) throws IOException {
+        getEngine().closeCopyState(copyState);
     }
 
     private static final class NonClosingReaderWrapper extends FilterDirectoryReader {
@@ -2833,6 +2855,9 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
              * while the global checkpoint update may have emanated from the primary when we were in that state, we could subsequently move
              * to recovery finalization, or even finished recovery before the update arrives here.
              */
+            if (indexSettings().isSegrepEnabled()) {
+                return;
+            }
             assert state() != IndexShardState.POST_RECOVERY && state() != IndexShardState.STARTED
                 : "supposedly in-sync shard copy received a global checkpoint ["
                     + globalCheckpoint
@@ -3026,6 +3051,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
                     if (indexSettings.isSegrepEnabled()) {
                         // Start a "Recovery" using segment replication. This ensures the shard is tracked by the primary
                         // and started with the latest set of segments.
+                        logger.info("Start recovery {}", shardRouting.primary());
                         segmentReplicationReplicaService.startRecovery(
                             this,
                             recoveryState.getTargetNode(),
@@ -3245,6 +3271,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
             indexSettings,
             warmer,
             store,
+            replicationSource,
             indexSettings.getMergePolicy(),
             mapperService != null ? mapperService.indexAnalyzer() : null,
             similarityService.similarity(mapperService),
@@ -3319,6 +3346,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
             if (replicationTracker.isPrimaryMode()) {
                 l.onResponse(r);
             } else {
+                logger.info("Shard is not in primary mode?");
                 r.close();
                 l.onFailure(new ShardNotInPrimaryModeException(shardId, state));
             }
@@ -3669,38 +3697,40 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         if (shouldProcessCheckpoint(requestCheckpoint) == false) return;
         try {
             logger.debug("Processing new checkpoint {}", requestCheckpoint);
-            segmentReplicationReplicaService.startReplication(
-                requestCheckpoint,
-                this,
-                source,
-                new SegmentReplicationReplicaService.SegmentReplicationListener() {
-                    @Override
-                    public void onReplicationDone(SegmentReplicationState state) {
-                        logger.debug("Replication complete to {}", getLatestReplicationCheckpoint());
-                        // if we received a checkpoint during the copy event that is ahead of this
-                        // try and process it.
-                        if (latestReceivedCheckpoint.isAheadOf(getLatestReplicationCheckpoint())) {
-                            threadPool.generic()
-                                .execute(
-                                    () -> onNewCheckpoint(
-                                        new PublishCheckpointRequest(latestReceivedCheckpoint),
-                                        source,
-                                        segmentReplicationReplicaService
-                                    )
-                                );
-                        }
-                    }
-
-                    @Override
-                    public void onReplicationFailure(
-                        SegmentReplicationState state,
-                        ReplicationFailedException e,
-                        boolean sendShardFailure
-                    ) {
-                        logger.error("Failure", e);
-                    }
-                }
-            );
+//            segmentReplicationReplicaService.startReplication(
+//                requestCheckpoint,
+//                this,
+//                source,
+//                new SegmentReplicationReplicaService.SegmentReplicationListener() {
+//                    @Override
+//                    public void onReplicationDone(SegmentReplicationState state) {
+//                        logger.debug("Replication complete to {}", getLatestReplicationCheckpoint());
+//                        // if we received a checkpoint during the copy event that is ahead of this
+//                        // try and process it.
+//                        if (latestReceivedCheckpoint.isAheadOf(getLatestReplicationCheckpoint())) {
+//                            threadPool.generic()
+//                                .execute(
+//                                    () -> onNewCheckpoint(
+//                                        new PublishCheckpointRequest(latestReceivedCheckpoint),
+//                                        source,
+//                                        segmentReplicationReplicaService
+//                                    )
+//                                );
+//                        }
+//                    }
+//
+//                    @Override
+//                    public void onReplicationFailure(
+//                        SegmentReplicationState state,
+//                        ReplicationFailedException e,
+//                        boolean sendShardFailure
+//                    ) {
+//                        logger.error("Failure", e);
+//                    }
+//                }
+//            );
+            logger.info("Pending {}, checkpoint {}", getOperationPrimaryTerm(), request.getCheckpoint().getPrimaryTerm());
+            getEngine().onNewCheckpoint(request.getCheckpoint());
         } catch (Exception e) {
             logger.error("Error", e);
         }

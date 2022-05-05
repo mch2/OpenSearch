@@ -24,7 +24,7 @@ import java.io.UncheckedIOException;
 import java.util.HashSet;
 import java.util.Set;
 
-public class CopyState extends AbstractRefCounted {
+public class CopyStateOld extends AbstractRefCounted {
 
     private final GatedCloseable<SegmentInfos> segmentInfosRef;
     private final ReplicationCheckpoint checkpoint;
@@ -34,7 +34,7 @@ public class CopyState extends AbstractRefCounted {
     private final byte[] infosBytes;
     private final ShardId shardId;
 
-    CopyState(IndexShard shard) throws IOException {
+    CopyStateOld(IndexShard shard) throws IOException {
         super("replication-nrt-state");
         this.shardId = shard.shardId();
         this.segmentInfosRef = shard.getLatestSegmentInfosSafe();

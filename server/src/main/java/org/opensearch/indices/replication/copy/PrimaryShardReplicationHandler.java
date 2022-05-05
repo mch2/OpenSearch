@@ -35,6 +35,8 @@ package org.opensearch.indices.replication.copy;
 import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.message.ParameterizedMessage;
 import org.apache.lucene.index.CorruptIndexException;
+import org.apache.lucene.replicator.nrt.CopyState;
+import org.apache.lucene.replicator.nrt.FileMetaData;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.util.ArrayUtil;
@@ -72,6 +74,7 @@ import java.util.Comparator;
 import java.util.Deque;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedDeque;
@@ -128,7 +131,7 @@ public class PrimaryShardReplicationHandler {
     /**
      * performs the recovery from the local engine to the target
      */
-    public void sendFiles(CopyState copyState, ActionListener<GetFilesResponse> listener) {
+    public void sendFiles(ActionListener<GetFilesResponse> listener) {
         future.addListener(listener, OpenSearchExecutors.newDirectExecutorService());
         final Closeable releaseResources = () -> IOUtils.close(resources);
         try {
@@ -158,35 +161,37 @@ public class PrimaryShardReplicationHandler {
 
             final StepListener<Void> sendFileStep = new StepListener<>();
             try {
-                Set<String> storeFiles = new HashSet<>(Arrays.asList(shard.store().directory().listAll()));
-                final StoreFileMetadata[] storeFileMetadata = request.getFilesToFetch()
-                    .stream()
-                    .filter(file -> storeFiles.contains(file.name()))
-                    .toArray(StoreFileMetadata[]::new);
+//                Set<String> storeFiles = new HashSet<>(Arrays.asList(shard.store().directory().listAll()));
+                final Map<String, StoreFileMetadata> stringStoreFileMetadataMap = shard.store().getMetadata(shard.getLatestSegmentInfos()).asMap();
+                final StoreFileMetadata[] storeFileMetadata = new StoreFileMetadata[] {stringStoreFileMetadataMap.get(request.getFileName())};
                 sendFiles(shard.store(), storeFileMetadata, sendFileStep);
             } catch (final Exception e) {
                 throw new RecoveryEngineException(shard.shardId(), 1, "sendFileStep failed", e);
             }
 
             sendFileStep.whenComplete(r -> {
-                runUnderPrimaryPermit(
-                    () -> shard.updateLocalCheckpointForShard(targetAllocationId, request.getCheckpoint().getSeqNo()),
-                    shardId + " updating local checkpoint for " + targetAllocationId,
-                    shard,
-                    cancellableThreads,
-                    logger
-                );
-                runUnderPrimaryPermit(
-                    () -> shard.markAllocationIdAsInSync(targetAllocationId, request.getCheckpoint().getSeqNo()),
-                    shardId + " marking " + targetAllocationId + " as in sync",
-                    shard,
-                    cancellableThreads,
-                    logger
-                );
+//                runUnderPrimaryPermit(
+//                    () -> shard.updateLocalCheckpointForShard(targetAllocationId, request.getCheckpoint().getSeqNo()),
+//                    shardId + " updating local checkpoint for " + targetAllocationId,
+//                    shard,
+//                    cancellableThreads,
+//                    logger
+//                );
+//                runUnderPrimaryPermit(
+//                    () -> shard.markAllocationIdAsInSync(targetAllocationId, request.getCheckpoint().getSeqNo()),
+//                    shardId + " marking " + targetAllocationId + " as in sync",
+//                    shard,
+//                    cancellableThreads,
+//                    logger
+//                );
                 try {
                     future.onResponse(new GetFilesResponse());
                 } finally {
                     IOUtils.close(resources);
+//                    final CopyState copyState = shard.getCopyState();
+//                    shard.releaseCopyState(copyState);
+//                    shard.releaseCopyState(copyState);
+                    logger.info("Closing");
                 }
             }, onFailure);
         } catch (Exception e) {

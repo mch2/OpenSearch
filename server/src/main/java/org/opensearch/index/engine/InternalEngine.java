@@ -52,6 +52,7 @@ import org.apache.lucene.index.SoftDeletesRetentionMergePolicy;
 import org.apache.lucene.index.StandardDirectoryReader;
 import org.apache.lucene.index.SoftDeletesDirectoryReaderWrapper;
 import org.apache.lucene.index.Term;
+import org.apache.lucene.replicator.nrt.CopyState;
 import org.apache.lucene.sandbox.index.MergeOnFlushMergePolicy;
 import org.apache.lucene.search.BooleanClause;
 import org.apache.lucene.search.BooleanQuery;
@@ -113,11 +114,15 @@ import org.opensearch.index.translog.TranslogConfig;
 import org.opensearch.index.translog.TranslogCorruptedException;
 import org.opensearch.index.translog.TranslogDeletionPolicy;
 import org.opensearch.index.translog.TranslogStats;
+import org.opensearch.indices.replication.copy.PrimaryShardReplicationSource;
+import org.opensearch.indices.replication.copy.ReplicationCheckpoint;
 import org.opensearch.search.suggest.completion.CompletionStats;
 import org.opensearch.threadpool.ThreadPool;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.io.OutputStream;
+import java.io.PrintStream;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
@@ -217,6 +222,9 @@ public class InternalEngine extends Engine {
     @Nullable
     private volatile String forceMergeUUID;
 
+    private SegrepPrimaryNode segrepPrimaryNode;
+    private SegrepReplicaNode segrepReplicaNode;
+
     public InternalEngine(EngineConfig engineConfig) {
         this(engineConfig, IndexWriter.MAX_DOCS, LocalCheckpointTracker::new);
     }
@@ -295,6 +303,11 @@ public class InternalEngine extends Engine {
                     throw e;
                 }
             }
+            if (engineConfig.isReadOnly() == false) {
+                segrepPrimaryNode = new SegrepPrimaryNode(indexWriter, shardId.id(), 1, -1, null, new PrintStream(System.out));
+            } else {
+                segrepReplicaNode = new SegrepReplicaNode(shardId, engineConfig.getStore(), engineConfig.getReplicationSource(), 1, null, new PrintStream(System.out));
+            }
             externalReaderManager = createReaderManager(new RefreshWarmerListener(logger, isClosed, engineConfig));
             internalReaderManager = externalReaderManager.internalReaderManager;
             this.internalReaderManager = internalReaderManager;
@@ -326,6 +339,9 @@ public class InternalEngine extends Engine {
             completionStatsCache = new CompletionStatsCache(() -> acquireSearcher("completion_stats"));
             this.externalReaderManager.addListener(completionStatsCache);
             success = true;
+
+        } catch (IOException e) {
+            throw new EngineCreationFailureException(shardId, "failed to create engine", e);
         } finally {
             if (success == false) {
                 IOUtils.closeWhileHandlingException(writer, translog, internalReaderManager, externalReaderManager, scheduler);
@@ -337,6 +353,21 @@ public class InternalEngine extends Engine {
         }
         logger.trace("created new InternalEngine");
     }
+
+    @Override
+    public CopyState getCopyState() throws IOException {
+        return segrepPrimaryNode.getCopyState();
+    }
+
+    @Override
+    public void onNewCheckpoint(ReplicationCheckpoint checkpoint) throws IOException {
+        segrepReplicaNode.newNRTPoint(checkpoint.getPrimaryTerm(), checkpoint.getVersion());
+    }
+
+    public void closeCopyState(CopyState copyState) throws IOException {
+        segrepPrimaryNode.releaseCopyState(copyState);
+    }
+
 
     @Override
     public synchronized void finalizeReplication(SegmentInfos infos, Store.MetadataSnapshot expectedMetadata, long seqNo)
@@ -696,7 +727,11 @@ public class InternalEngine extends Engine {
         try {
             try {
                 final OpenSearchDirectoryReader directoryReader = OpenSearchDirectoryReader.wrap(getDirectoryReader(), shardId);
-                internalReaderManager = new OpenSearchReaderManager(directoryReader);
+                if (segrepPrimaryNode != null) {
+                    internalReaderManager = new OpenSearchReaderManager(directoryReader, segrepPrimaryNode);
+                } else {
+                    internalReaderManager = new OpenSearchReaderManager(directoryReader);
+                }
                 lastCommittedSegmentInfos = store.readLastCommittedSegmentsInfo();
                 ExternalReaderManager externalReaderManager = new ExternalReaderManager(internalReaderManager, externalRefreshListener);
                 success = true;
@@ -722,9 +757,12 @@ public class InternalEngine extends Engine {
         // We should always wrap the DirectoryReader used on replicas with SoftDeletesDirectoryReaderWrapper so that we filter out soft
         // deletes
         if (engineConfig.isReadOnly()) {
-            return new SoftDeletesDirectoryReaderWrapper(DirectoryReader.open(store.directory()), Lucene.SOFT_DELETES_FIELD);
+//            return new SoftDeletesDirectoryReaderWrapper(DirectoryReader.open(store.directory()), Lucene.SOFT_DELETES_FIELD);
+            return (DirectoryReader) segrepReplicaNode.getSearcherManager().acquire().getIndexReader();
         }
-        return DirectoryReader.open(indexWriter);
+        final ReferenceManager<IndexSearcher> searcherManager = segrepPrimaryNode.getSearcherManager();
+          return (DirectoryReader) searcherManager.acquire().getIndexReader();
+//        return DirectoryReader.open(indexWriter);
     }
 
     @Override
@@ -2316,8 +2354,7 @@ public class InternalEngine extends Engine {
             /* This is safe, as we always wrap Standard reader with a SoftDeletesDirectoryReaderWrapper for replicas when segment
             replication is enabled */
             if (engineConfig.isReadOnly()) {
-                return ((StandardDirectoryReader) ((SoftDeletesDirectoryReaderWrapper) reader.getDelegate()).getDelegate())
-                    .getSegmentInfos();
+                return ((StandardDirectoryReader) reader.getDelegate()).getSegmentInfos();
             }
             return ((StandardDirectoryReader) reader.getDelegate()).getSegmentInfos();
         } catch (IOException e) {
@@ -2461,6 +2498,12 @@ public class InternalEngine extends Engine {
                 this.versionMap.clear();
                 if (internalReaderManager != null) {
                     internalReaderManager.removeListener(versionMap);
+                }
+                if (segrepReplicaNode != null) {
+                    segrepReplicaNode.close();
+                }
+                if (segrepPrimaryNode != null) {
+                    segrepPrimaryNode.close();
                 }
                 try {
                     IOUtils.close(externalReaderManager, internalReaderManager);

@@ -154,6 +154,7 @@ public class RefreshListenersTests extends OpenSearchTestCase {
             indexSettings,
             null,
             store,
+            null,
             newMergePolicy(),
             iwc.getAnalyzer(),
             iwc.getSimilarity(),

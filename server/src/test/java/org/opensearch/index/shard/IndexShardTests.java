@@ -4397,6 +4397,7 @@ public class IndexShardTests extends IndexShardTestCase {
                 config.getIndexSettings(),
                 warmer,
                 config.getStore(),
+                config.getReplicationSource(),
                 config.getMergePolicy(),
                 config.getAnalyzer(),
                 config.getSimilarity(),

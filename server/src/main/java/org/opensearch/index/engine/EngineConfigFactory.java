@@ -29,6 +29,7 @@ import org.opensearch.index.store.Store;
 import org.opensearch.index.translog.TranslogConfig;
 import org.opensearch.index.translog.TranslogDeletionPolicyFactory;
 import org.opensearch.indices.breaker.CircuitBreakerService;
+import org.opensearch.indices.replication.copy.PrimaryShardReplicationSource;
 import org.opensearch.plugins.EnginePlugin;
 import org.opensearch.plugins.PluginsService;
 import org.opensearch.threadpool.ThreadPool;
@@ -128,6 +129,7 @@ public class EngineConfigFactory {
         IndexSettings indexSettings,
         Engine.Warmer warmer,
         Store store,
+        PrimaryShardReplicationSource replicationSource,
         MergePolicy mergePolicy,
         Analyzer analyzer,
         Similarity similarity,
@@ -158,6 +160,7 @@ public class EngineConfigFactory {
             indexSettings,
             warmer,
             store,
+            replicationSource,
             mergePolicy,
             analyzer,
             similarity,

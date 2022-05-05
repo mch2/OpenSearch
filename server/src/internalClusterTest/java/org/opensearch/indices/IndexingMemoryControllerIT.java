@@ -87,6 +87,7 @@ public class IndexingMemoryControllerIT extends OpenSearchSingleNodeTestCase {
                 indexSettings,
                 config.getWarmer(),
                 config.getStore(),
+                config.getReplicationSource(),
                 config.getMergePolicy(),
                 config.getAnalyzer(),
                 config.getSimilarity(),

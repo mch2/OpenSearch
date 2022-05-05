@@ -10,6 +10,7 @@ package org.opensearch.indices.replication.copy;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.apache.lucene.replicator.nrt.CopyState;
 import org.apache.lucene.store.RateLimiter;
 import org.opensearch.ExceptionsHelper;
 import org.opensearch.action.ActionListener;
@@ -33,11 +34,10 @@ import org.opensearch.index.IndexService;
 import org.opensearch.index.seqno.SequenceNumbers;
 import org.opensearch.index.shard.IndexShard;
 import org.opensearch.index.shard.ShardId;
-import org.opensearch.index.store.StoreFileMetadata;
 import org.opensearch.indices.IndicesService;
 import org.opensearch.indices.recovery.RecoverySettings;
 import org.opensearch.indices.replication.SegmentReplicationReplicaService;
-import org.opensearch.indices.replication.checkpoint.TransportCheckpointInfoResponse;
+import org.opensearch.indices.replication.checkpoint.TransportCopyStateReponse;
 import org.opensearch.tasks.Task;
 import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.ConnectTransportException;
@@ -50,12 +50,10 @@ import org.opensearch.transport.TransportRequestOptions;
 import org.opensearch.transport.TransportResponse;
 import org.opensearch.transport.TransportService;
 
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 
-import static org.opensearch.indices.replication.copy.SegmentReplicationPrimaryService.Actions.GET_CHECKPOINT_INFO;
-import static org.opensearch.indices.replication.copy.SegmentReplicationPrimaryService.Actions.GET_FILES;
+import static org.opensearch.indices.replication.copy.SegmentReplicationPrimaryService.Actions.*;
 
 /**
  * The source for replication where the source is the primary shard of a cluster.
@@ -70,6 +68,8 @@ public class PrimaryShardReplicationSource {
     private final ThreadPool threadPool;
     private final RecoverySettings recoverySettings;
     private final SegmentReplicationReplicaService segmentReplicationReplicaService;
+
+    private final Map<String, ActionListener> activeTransfers = ConcurrentCollections.newConcurrentMap();
 
     // TODO: Segrep - Cancellation doesn't make sense here as it should be per replication event.
     private volatile boolean isCancelled = false;
@@ -103,13 +103,14 @@ public class PrimaryShardReplicationSource {
     public void getCheckpointInfo(
         long replicationId,
         ReplicationCheckpoint checkpoint,
-        StepListener<TransportCheckpointInfoResponse> listener
+        ActionListener<CopyState> listener
     ) {
+        logger.info("Get copy state");
         final ShardId shardId = checkpoint.getShardId();
         DiscoveryNode primaryNode = getPrimaryNode(shardId);
         final DiscoveryNodes nodes = clusterService.state().nodes();
-        final Writeable.Reader<TransportCheckpointInfoResponse> reader = TransportCheckpointInfoResponse::new;
-        final ActionListener<TransportCheckpointInfoResponse> responseListener = ActionListener.map(listener, r -> r);
+        final Writeable.Reader<TransportCopyStateReponse> reader = TransportCopyStateReponse::new;
+        final ActionListener<TransportCopyStateReponse> responseListener = ActionListener.map(listener, TransportCopyStateReponse::getCopyState);
         StartReplicationRequest request = new StartReplicationRequest(
             replicationId,
             getAllocationId(shardId),
@@ -119,13 +120,13 @@ public class PrimaryShardReplicationSource {
         executeRetryableAction(primaryNode, GET_CHECKPOINT_INFO, request, responseListener, reader);
     }
 
-    public void getFiles(
+    public void getFile(
         long replicationId,
-        ReplicationCheckpoint checkpoint,
-        List<StoreFileMetadata> filesToFetch,
+        ShardId shardId,
+        String fileName,
         StepListener<GetFilesResponse> listener
     ) {
-        final ShardId shardId = checkpoint.getShardId();
+        logger.info("Get file {}", fileName);
         DiscoveryNode primaryNode = getPrimaryNode(shardId);
         final DiscoveryNodes nodes = clusterService.state().nodes();
         final Writeable.Reader<GetFilesResponse> reader = GetFilesResponse::new;
@@ -135,9 +136,10 @@ public class PrimaryShardReplicationSource {
             replicationId,
             getAllocationId(shardId),
             nodes.getLocalNode(),
-            filesToFetch,
-            checkpoint
+            shardId,
+            fileName
         );
+        activeTransfers.putIfAbsent(fileName, new StepListener<Void>());
         executeRetryableAction(primaryNode, GET_FILES, request, responseListener, reader);
     }
 
@@ -171,6 +173,7 @@ public class PrimaryShardReplicationSource {
 
             @Override
             public void tryAction(ActionListener<T> listener) {
+                logger.info("invoking {}", action);
                 transportService.sendRequest(
                     sourceNode,
                     action,
@@ -232,9 +235,17 @@ public class PrimaryShardReplicationSource {
                     .getReplicationSafe(request.getReplicationId(), request.shardId())
             ) {
                 final SegmentReplicationTarget replicationTarget = replicationRef.get();
-                final ActionListener<Void> listener = createOrFinishListener(replicationRef, channel, Actions.FILE_CHUNK, request);
-                if (listener == null) {
+                final ActionListener<Void> l = createOrFinishListener(replicationRef, channel, Actions.FILE_CHUNK, request);
+                final ActionListener<Void> actionListener = activeTransfers.get(request.name());
+                if (l == null) {
                     return;
+                }
+                ActionListener listener;
+                if (actionListener != null) {
+                    listener = ActionListener.runAfter(l, () -> actionListener.onResponse(null));
+                    activeTransfers.remove(request.name());
+                } else {
+                    listener = l;
                 }
 
                 // final ReplicationState.Index indexState = replicationTarget.state().getIndex();

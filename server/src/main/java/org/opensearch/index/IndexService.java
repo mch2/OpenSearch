@@ -95,6 +95,7 @@ import org.opensearch.indices.fielddata.cache.IndicesFieldDataCache;
 import org.opensearch.indices.mapper.MapperRegistry;
 import org.opensearch.indices.recovery.RecoveryState;
 import org.opensearch.indices.replication.checkpoint.SegmentReplicationCheckpointPublisher;
+import org.opensearch.indices.replication.copy.PrimaryShardReplicationSource;
 import org.opensearch.plugins.IndexStorePlugin;
 import org.opensearch.script.ScriptService;
 import org.opensearch.search.aggregations.support.ValuesSourceRegistry;
@@ -420,8 +421,9 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
         final ShardRouting routing,
         final Consumer<ShardId> globalCheckpointSyncer,
         final RetentionLeaseSyncer retentionLeaseSyncer,
-        final SegmentReplicationCheckpointPublisher checkpointPublisher
-    ) throws IOException {
+        final SegmentReplicationCheckpointPublisher checkpointPublisher,
+        final PrimaryShardReplicationSource replicationSource
+        ) throws IOException {
         Objects.requireNonNull(retentionLeaseSyncer);
         /*
          * TODO: we execute this in parallel but it's a synced method. Yet, we might
@@ -523,7 +525,8 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
                 () -> globalCheckpointSyncer.accept(shardId),
                 retentionLeaseSyncer,
                 circuitBreakerService,
-                checkpointPublisher
+                checkpointPublisher,
+                replicationSource
             );
             eventListener.indexShardStateChanged(indexShard, null, indexShard.state(), "shard created");
             eventListener.afterIndexShardCreated(indexShard);
