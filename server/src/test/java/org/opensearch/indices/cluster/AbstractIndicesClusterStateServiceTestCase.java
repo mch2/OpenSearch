@@ -57,6 +57,7 @@ import org.opensearch.indices.cluster.IndicesClusterStateService.AllocatedIndice
 import org.opensearch.indices.cluster.IndicesClusterStateService.Shard;
 import org.opensearch.indices.recovery.PeerRecoveryTargetService;
 import org.opensearch.indices.recovery.RecoveryState;
+import org.opensearch.indices.replication.common.EventStateListener;
 import org.opensearch.repositories.RepositoriesService;
 import org.opensearch.test.OpenSearchTestCase;
 import org.junit.Before;
@@ -251,15 +252,15 @@ public abstract class AbstractIndicesClusterStateServiceTestCase extends OpenSea
 
         @Override
         public MockIndexShard createShard(
-            final ShardRouting shardRouting,
-            final PeerRecoveryTargetService recoveryTargetService,
-            final PeerRecoveryTargetService.RecoveryListener recoveryListener,
-            final RepositoriesService repositoriesService,
-            final Consumer<IndexShard.ShardFailure> onShardFailure,
-            final Consumer<ShardId> globalCheckpointSyncer,
-            final RetentionLeaseSyncer retentionLeaseSyncer,
-            final DiscoveryNode targetNode,
-            final DiscoveryNode sourceNode
+            ShardRouting shardRouting,
+            PeerRecoveryTargetService recoveryTargetService,
+            EventStateListener<RecoveryState> recoveryListener,
+            RepositoriesService repositoriesService,
+            Consumer<IndexShard.ShardFailure> onShardFailure,
+            Consumer<ShardId> globalCheckpointSyncer,
+            RetentionLeaseSyncer retentionLeaseSyncer,
+            DiscoveryNode targetNode,
+            DiscoveryNode sourceNode
         ) throws IOException {
             failRandomly();
             RecoveryState recoveryState = new RecoveryState(shardRouting, targetNode, sourceNode);

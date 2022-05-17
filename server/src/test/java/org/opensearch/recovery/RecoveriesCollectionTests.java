@@ -38,11 +38,10 @@ import org.opensearch.index.replication.OpenSearchIndexLevelReplicationTestCase;
 import org.opensearch.index.shard.IndexShard;
 import org.opensearch.index.shard.ShardId;
 import org.opensearch.index.store.Store;
-import org.opensearch.indices.recovery.RecoveriesCollection;
-import org.opensearch.indices.recovery.RecoveryFailedException;
 import org.opensearch.indices.recovery.RecoveryState;
-import org.opensearch.indices.recovery.PeerRecoveryTargetService;
 import org.opensearch.indices.recovery.RecoveryTarget;
+import org.opensearch.indices.recovery.TargetCollection;
+import org.opensearch.indices.replication.common.EventStateListener;
 
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -50,28 +49,29 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.lessThan;
+import static org.opensearch.indices.recovery.TargetCollection.*;
 
 public class RecoveriesCollectionTests extends OpenSearchIndexLevelReplicationTestCase {
-    static final PeerRecoveryTargetService.RecoveryListener listener = new PeerRecoveryTargetService.RecoveryListener() {
+    static final EventStateListener<RecoveryState> listener = new EventStateListener<>() {
         @Override
-        public void onRecoveryDone(RecoveryState state) {
+        public void onDone(RecoveryState state) {
 
         }
 
         @Override
-        public void onRecoveryFailure(RecoveryState state, RecoveryFailedException e, boolean sendShardFailure) {
+        public void onFailure(RecoveryState state, OpenSearchException e, boolean sendShardFailure) {
 
         }
     };
 
     public void testLastAccessTimeUpdate() throws Exception {
         try (ReplicationGroup shards = createGroup(0)) {
-            final RecoveriesCollection collection = new RecoveriesCollection(logger, threadPool);
+            final TargetCollection<RecoveryTarget> collection = new TargetCollection<>(logger, threadPool);
             final long recoveryId = startRecovery(collection, shards.getPrimaryNode(), shards.addReplica());
-            try (RecoveriesCollection.RecoveryRef status = collection.getRecovery(recoveryId)) {
+            try (TargetRef<RecoveryTarget> status = collection.getRecovery(recoveryId)) {
                 final long lastSeenTime = status.get().lastAccessTime();
                 assertBusy(() -> {
-                    try (RecoveriesCollection.RecoveryRef currentStatus = collection.getRecovery(recoveryId)) {
+                    try (TargetRef<RecoveryTarget> currentStatus = collection.getRecovery(recoveryId)) {
                         assertThat("access time failed to update", lastSeenTime, lessThan(currentStatus.get().lastAccessTime()));
                     }
                 });
@@ -83,21 +83,21 @@ public class RecoveriesCollectionTests extends OpenSearchIndexLevelReplicationTe
 
     public void testRecoveryTimeout() throws Exception {
         try (ReplicationGroup shards = createGroup(0)) {
-            final RecoveriesCollection collection = new RecoveriesCollection(logger, threadPool);
+            final TargetCollection<RecoveryTarget> collection = new TargetCollection<>(logger, threadPool);
             final AtomicBoolean failed = new AtomicBoolean();
             final CountDownLatch latch = new CountDownLatch(1);
             final long recoveryId = startRecovery(
                 collection,
                 shards.getPrimaryNode(),
                 shards.addReplica(),
-                new PeerRecoveryTargetService.RecoveryListener() {
+                new EventStateListener<RecoveryState>() {
                     @Override
-                    public void onRecoveryDone(RecoveryState state) {
+                    public void onDone(RecoveryState state) {
                         latch.countDown();
                     }
 
                     @Override
-                    public void onRecoveryFailure(RecoveryState state, RecoveryFailedException e, boolean sendShardFailure) {
+                    public void onFailure(RecoveryState state, OpenSearchException e, boolean sendShardFailure) {
                         failed.set(true);
                         latch.countDown();
                     }
@@ -116,10 +116,10 @@ public class RecoveriesCollectionTests extends OpenSearchIndexLevelReplicationTe
 
     public void testRecoveryCancellation() throws Exception {
         try (ReplicationGroup shards = createGroup(0)) {
-            final RecoveriesCollection collection = new RecoveriesCollection(logger, threadPool);
+            final TargetCollection<RecoveryTarget> collection = new TargetCollection<>(logger, threadPool);
             final long recoveryId = startRecovery(collection, shards.getPrimaryNode(), shards.addReplica());
             final long recoveryId2 = startRecovery(collection, shards.getPrimaryNode(), shards.addReplica());
-            try (RecoveriesCollection.RecoveryRef recoveryRef = collection.getRecovery(recoveryId)) {
+            try (TargetRef<RecoveryTarget> recoveryRef = collection.getRecovery(recoveryId)) {
                 ShardId shardId = recoveryRef.get().shardId();
                 assertTrue("failed to cancel recoveries", collection.cancelRecoveriesForShard(shardId, "test"));
                 assertThat("all recoveries should be cancelled", collection.size(), equalTo(0));
@@ -135,7 +135,7 @@ public class RecoveriesCollectionTests extends OpenSearchIndexLevelReplicationTe
             shards.startAll();
             int numDocs = randomIntBetween(1, 15);
             shards.indexDocs(numDocs);
-            final RecoveriesCollection collection = new RecoveriesCollection(logger, threadPool);
+            final TargetCollection<RecoveryTarget> collection = new TargetCollection<>(logger, threadPool);
             IndexShard shard = shards.addReplica();
             final long recoveryId = startRecovery(collection, shards.getPrimaryNode(), shard);
             RecoveryTarget recoveryTarget = collection.getRecoveryTarget(recoveryId);
@@ -158,7 +158,7 @@ public class RecoveriesCollectionTests extends OpenSearchIndexLevelReplicationTe
             String resetTempFileName = resetRecovery.getTempNameForFile("foobar");
             assertNotEquals(tempFileName, resetTempFileName);
             assertEquals(currentAsTarget, shard.recoveryStats().currentAsTarget());
-            try (RecoveriesCollection.RecoveryRef newRecoveryRef = collection.getRecovery(resetRecoveryId)) {
+            try (TargetRef<RecoveryTarget> newRecoveryRef = collection.getRecovery(resetRecoveryId)) {
                 shards.recoverReplica(shard, (s, n) -> {
                     assertSame(s, newRecoveryRef.get().indexShard());
                     return newRecoveryRef.get();
@@ -169,20 +169,20 @@ public class RecoveriesCollectionTests extends OpenSearchIndexLevelReplicationTe
         }
     }
 
-    long startRecovery(RecoveriesCollection collection, DiscoveryNode sourceNode, IndexShard shard) {
+    long startRecovery(TargetCollection<RecoveryTarget> collection, DiscoveryNode sourceNode, IndexShard shard) {
         return startRecovery(collection, sourceNode, shard, listener, TimeValue.timeValueMinutes(60));
     }
 
     long startRecovery(
-        RecoveriesCollection collection,
+        TargetCollection<RecoveryTarget> collection,
         DiscoveryNode sourceNode,
         IndexShard indexShard,
-        PeerRecoveryTargetService.RecoveryListener listener,
+        EventStateListener<RecoveryState> listener,
         TimeValue timeValue
     ) {
         final DiscoveryNode rNode = getDiscoveryNode(indexShard.routingEntry().currentNodeId());
         indexShard.markAsRecovering("remote", new RecoveryState(indexShard.routingEntry(), sourceNode, rNode));
         indexShard.prepareForIndexRecovery();
-        return collection.startRecovery(indexShard, sourceNode, listener, timeValue);
+        return collection.startRecovery(timeValue, new RecoveryTarget(indexShard, sourceNode, listener));
     }
 }

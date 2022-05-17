@@ -34,8 +34,8 @@ package org.opensearch.indices.recovery;
 
 import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.message.ParameterizedMessage;
+import org.opensearch.OpenSearchException;
 import org.opensearch.OpenSearchTimeoutException;
-import org.opensearch.cluster.node.DiscoveryNode;
 import org.opensearch.common.concurrent.AutoCloseableRefCounted;
 import org.opensearch.common.unit.TimeValue;
 import org.opensearch.common.util.concurrent.AbstractRunnable;
@@ -43,6 +43,7 @@ import org.opensearch.common.util.concurrent.ConcurrentCollections;
 import org.opensearch.index.shard.IndexShard;
 import org.opensearch.index.shard.IndexShardClosedException;
 import org.opensearch.index.shard.ShardId;
+import org.opensearch.indices.replication.common.ShardCopyTarget;
 import org.opensearch.threadpool.ThreadPool;
 
 import java.util.ArrayList;
@@ -51,22 +52,20 @@ import java.util.List;
 import java.util.concurrent.ConcurrentMap;
 
 /**
- * This class holds a collection of all on going recoveries on the current node (i.e., the node is the target node
- * of those recoveries). The class is used to guarantee concurrent semantics such that once a recoveries was done/cancelled/failed
- * no other thread will be able to find it. Last, the {@link RecoveryRef} inner class verifies that recovery temporary files
+ * This class holds a collection of all ongoing events on the current node (i.e., the node is the target node
+ * of those events). The class is used to guarantee concurrent semantics such that once a recoveries was done/cancelled/failed
+ * no other thread will be able to find it. Last, the {@link TargetRef} inner class verifies that recovery temporary files
  * and store will only be cleared once on going usage is finished.
- *
- * @opensearch.internal
  */
-public class RecoveriesCollection {
+public class TargetCollection<T extends ShardCopyTarget<?>> {
 
     /** This is the single source of truth for ongoing recoveries. If it's not here, it was canceled or done */
-    private final ConcurrentMap<Long, RecoveryTarget> onGoingRecoveries = ConcurrentCollections.newConcurrentMap();
+    private final ConcurrentMap<Long, T> onGoingRecoveries = ConcurrentCollections.newConcurrentMap();
 
     private final Logger logger;
     private final ThreadPool threadPool;
 
-    public RecoveriesCollection(Logger logger, ThreadPool threadPool) {
+    public TargetCollection(Logger logger, ThreadPool threadPool) {
         this.logger = logger;
         this.threadPool = threadPool;
     }
@@ -76,28 +75,22 @@ public class RecoveriesCollection {
      *
      * @return the id of the new recovery.
      */
-    public long startRecovery(
-        IndexShard indexShard,
-        DiscoveryNode sourceNode,
-        PeerRecoveryTargetService.RecoveryListener listener,
-        TimeValue activityTimeout
-    ) {
-        RecoveryTarget recoveryTarget = new RecoveryTarget(indexShard, sourceNode, listener);
-        startRecoveryInternal(recoveryTarget, activityTimeout);
-        return recoveryTarget.recoveryId();
+    public long startRecovery(TimeValue activityTimeout, T event) {
+        startRecoveryInternal(event, activityTimeout);
+        return event.getId();
     }
 
-    private void startRecoveryInternal(RecoveryTarget recoveryTarget, TimeValue activityTimeout) {
-        RecoveryTarget existingTarget = onGoingRecoveries.putIfAbsent(recoveryTarget.recoveryId(), recoveryTarget);
+    private void startRecoveryInternal(T recoveryTarget, TimeValue activityTimeout) {
+        T existingTarget = onGoingRecoveries.putIfAbsent(recoveryTarget.getId(), recoveryTarget);
         assert existingTarget == null : "found two RecoveryStatus instances with the same id";
         logger.trace(
             "{} started recovery from {}, id [{}]",
-            recoveryTarget.shardId(),
-            recoveryTarget.sourceNode(),
-            recoveryTarget.recoveryId()
+            recoveryTarget.indexShard().shardId(),
+            recoveryTarget.source(),
+            recoveryTarget.getId()
         );
         threadPool.schedule(
-            new RecoveryMonitor(recoveryTarget.recoveryId(), recoveryTarget.lastAccessTime(), activityTimeout),
+            new EventMonitor(recoveryTarget.getId(), recoveryTarget.lastAccessTime(), activityTimeout),
             activityTimeout,
             ThreadPool.Names.GENERIC
         );
@@ -109,53 +102,56 @@ public class RecoveriesCollection {
      * @see IndexShard#performRecoveryRestart()
      * @return newly created RecoveryTarget
      */
-    public RecoveryTarget resetRecovery(final long recoveryId, final TimeValue activityTimeout) {
-        RecoveryTarget oldRecoveryTarget = null;
-        final RecoveryTarget newRecoveryTarget;
+    @SuppressWarnings(value = "unchecked")
+    public T resetRecovery(final long recoveryId, final TimeValue activityTimeout) {
+        T oldTarget = null;
+        final T newTarget;
 
         try {
             synchronized (onGoingRecoveries) {
-                // swap recovery targets in a synchronized block to ensure that the newly added recovery target is picked up by
-                // cancelRecoveriesForShard whenever the old recovery target is picked up
-                oldRecoveryTarget = onGoingRecoveries.remove(recoveryId);
-                if (oldRecoveryTarget == null) {
+                // swap targets in a synchronized block to ensure that the newly added target is picked up by
+                // cancelRecoveriesForShard whenever the old target is picked up
+                oldTarget = onGoingRecoveries.remove(recoveryId);
+                if (oldTarget == null) {
                     return null;
                 }
 
-                newRecoveryTarget = oldRecoveryTarget.retryCopy();
-                startRecoveryInternal(newRecoveryTarget, activityTimeout);
+                newTarget = (T) oldTarget.retryCopy();
+
+                startRecoveryInternal(newTarget, activityTimeout);
             }
 
             // Closes the current recovery target
-            boolean successfulReset = oldRecoveryTarget.resetRecovery(newRecoveryTarget.cancellableThreads());
+            boolean successfulReset = oldTarget.resetRecovery(newTarget.cancellableThreads());
             if (successfulReset) {
                 logger.trace(
                     "{} restarted recovery from {}, id [{}], previous id [{}]",
-                    newRecoveryTarget.shardId(),
-                    newRecoveryTarget.sourceNode(),
-                    newRecoveryTarget.recoveryId(),
-                    oldRecoveryTarget.recoveryId()
+                    newTarget.indexShard().shardId(),
+                    newTarget.source(),
+                    newTarget.getId(),
+                    oldTarget.getId()
                 );
-                return newRecoveryTarget;
+                return newTarget;
             } else {
                 logger.trace(
                     "{} recovery could not be reset as it is already cancelled, recovery from {}, id [{}], previous id [{}]",
-                    newRecoveryTarget.shardId(),
-                    newRecoveryTarget.sourceNode(),
-                    newRecoveryTarget.recoveryId(),
-                    oldRecoveryTarget.recoveryId()
+                    newTarget.indexShard().shardId(),
+                    newTarget.source(),
+                    newTarget.getId(),
+                    oldTarget.getId()
                 );
-                cancelRecovery(newRecoveryTarget.recoveryId(), "recovery cancelled during reset");
+                cancelRecovery(newTarget.getId(), "recovery cancelled during reset");
                 return null;
             }
         } catch (Exception e) {
             // fail shard to be safe
-            oldRecoveryTarget.notifyListener(new RecoveryFailedException(oldRecoveryTarget.state(), "failed to retry recovery", e), true);
+            assert oldTarget != null;
+            oldTarget.notifyListener(e, true);
             return null;
         }
     }
 
-    public RecoveryTarget getRecoveryTarget(long id) {
+    public T getRecoveryTarget(long id) {
         return onGoingRecoveries.get(id);
     }
 
@@ -166,34 +162,35 @@ public class RecoveriesCollection {
      * <p>
      * Returns null if recovery is not found
      */
-    public RecoveryRef getRecovery(long id) {
-        RecoveryTarget status = onGoingRecoveries.get(id);
+    public TargetRef<T> getRecovery(long id) {
+        T status = onGoingRecoveries.get(id);
         if (status != null && status.tryIncRef()) {
-            return new RecoveryRef(status);
+            return new TargetRef<T>(status);
         }
         return null;
     }
 
     /** Similar to {@link #getRecovery(long)} but throws an exception if no recovery is found */
-    public RecoveryRef getRecoverySafe(long id, ShardId shardId) {
-        RecoveryRef recoveryRef = getRecovery(id);
+    public TargetRef<T> getRecoverySafe(long id, ShardId shardId) {
+        TargetRef<T> recoveryRef = getRecovery(id);
         if (recoveryRef == null) {
             throw new IndexShardClosedException(shardId);
         }
-        assert recoveryRef.get().shardId().equals(shardId);
+        T recoveryTarget = recoveryRef.get();
+        assert recoveryTarget.indexShard().shardId().equals(shardId);
         return recoveryRef;
     }
 
     /** cancel the recovery with the given id (if found) and remove it from the recovery collection */
     public boolean cancelRecovery(long id, String reason) {
-        RecoveryTarget removed = onGoingRecoveries.remove(id);
+        T removed = onGoingRecoveries.remove(id);
         boolean cancelled = false;
         if (removed != null) {
             logger.trace(
                 "{} canceled recovery from {}, id [{}] (reason [{}])",
-                removed.shardId(),
-                removed.sourceNode(),
-                removed.recoveryId(),
+                removed.indexShard().shardId(),
+                removed.source(),
+                removed.getId(),
                 reason
             );
             removed.cancel(reason);
@@ -209,14 +206,14 @@ public class RecoveriesCollection {
      * @param e                exception with reason for the failure
      * @param sendShardFailure true a shard failed message should be sent to the master
      */
-    public void failRecovery(long id, RecoveryFailedException e, boolean sendShardFailure) {
-        RecoveryTarget removed = onGoingRecoveries.remove(id);
+    public void failRecovery(long id, OpenSearchException e, boolean sendShardFailure) {
+        T removed = onGoingRecoveries.remove(id);
         if (removed != null) {
             logger.trace(
                 "{} failing recovery from {}, id [{}]. Send shard failure: [{}]",
-                removed.shardId(),
-                removed.sourceNode(),
-                removed.recoveryId(),
+                removed.indexShard().shardId(),
+                removed.source(),
+                removed.getId(),
                 sendShardFailure
             );
             removed.fail(e, sendShardFailure);
@@ -225,9 +222,9 @@ public class RecoveriesCollection {
 
     /** mark the recovery with the given id as done (if found) */
     public void markRecoveryAsDone(long id) {
-        RecoveryTarget removed = onGoingRecoveries.remove(id);
+        T removed = onGoingRecoveries.remove(id);
         if (removed != null) {
-            logger.trace("{} marking recovery from {} as done, id [{}]", removed.shardId(), removed.sourceNode(), removed.recoveryId());
+            logger.trace("{} marking recovery from {} as done, id [{}]", removed.indexShard().shardId(), removed.source(), removed.getId());
             removed.markAsDone();
         }
     }
@@ -246,22 +243,22 @@ public class RecoveriesCollection {
      */
     public boolean cancelRecoveriesForShard(ShardId shardId, String reason) {
         boolean cancelled = false;
-        List<RecoveryTarget> matchedRecoveries = new ArrayList<>();
+        List<T> matchedRecoveries = new ArrayList<>();
         synchronized (onGoingRecoveries) {
-            for (Iterator<RecoveryTarget> it = onGoingRecoveries.values().iterator(); it.hasNext();) {
-                RecoveryTarget status = it.next();
-                if (status.shardId().equals(shardId)) {
+            for (Iterator<T> it = onGoingRecoveries.values().iterator(); it.hasNext();) {
+                T status = it.next();
+                if (status.indexShard().shardId().equals(shardId)) {
                     matchedRecoveries.add(status);
                     it.remove();
                 }
             }
         }
-        for (RecoveryTarget removed : matchedRecoveries) {
+        for (T removed : matchedRecoveries) {
             logger.trace(
-                "{} canceled recovery from {}, id [{}] (reason [{}])",
-                removed.shardId(),
-                removed.sourceNode(),
-                removed.recoveryId(),
+                "{} cancelled event from {}, id [{}] (reason [{}])",
+                removed.indexShard().shardId(),
+                removed.source(),
+                removed.getId(),
                 reason
             );
             removed.cancel(reason);
@@ -273,29 +270,26 @@ public class RecoveriesCollection {
     /**
      * a reference to {@link RecoveryTarget}, which implements {@link AutoCloseable}. closing the reference
      * causes {@link RecoveryTarget#decRef()} to be called. This makes sure that the underlying resources
-     * will not be freed until {@link RecoveryRef#close()} is called.
-     *
-     * @opensearch.internal
+     * will not be freed until {@link TargetRef#close()} is called.
      */
-    public static class RecoveryRef extends AutoCloseableRefCounted<RecoveryTarget> {
-
+    public static class TargetRef<T extends ShardCopyTarget> extends AutoCloseableRefCounted<T> {
         /**
          * Important: {@link RecoveryTarget#tryIncRef()} should
          * be *successfully* called on status before
          */
-        public RecoveryRef(RecoveryTarget status) {
+        public TargetRef(T status) {
             super(status);
             status.setLastAccessTime();
         }
     }
 
-    private class RecoveryMonitor extends AbstractRunnable {
+    private class EventMonitor extends AbstractRunnable {
         private final long recoveryId;
         private final TimeValue checkInterval;
 
         private volatile long lastSeenAccessTime;
 
-        private RecoveryMonitor(long recoveryId, long lastSeenAccessTime, TimeValue checkInterval) {
+        private EventMonitor(long recoveryId, long lastSeenAccessTime, TimeValue checkInterval) {
             this.recoveryId = recoveryId;
             this.checkInterval = checkInterval;
             this.lastSeenAccessTime = lastSeenAccessTime;
@@ -308,7 +302,7 @@ public class RecoveriesCollection {
 
         @Override
         protected void doRun() throws Exception {
-            RecoveryTarget status = onGoingRecoveries.get(recoveryId);
+            T status = onGoingRecoveries.get(recoveryId);
             if (status == null) {
                 logger.trace("[monitor] no status found for [{}], shutting down", recoveryId);
                 return;
@@ -318,7 +312,7 @@ public class RecoveriesCollection {
                 String message = "no activity after [" + checkInterval + "]";
                 failRecovery(
                     recoveryId,
-                    new RecoveryFailedException(status.state(), message, new OpenSearchTimeoutException(message)),
+                    new OpenSearchTimeoutException(message),
                     true // to be safe, we don't know what go stuck
                 );
                 return;

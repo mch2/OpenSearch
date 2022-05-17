@@ -41,6 +41,7 @@ import org.apache.lucene.index.IndexableField;
 import org.apache.lucene.index.NoMergePolicy;
 import org.apache.lucene.store.AlreadyClosedException;
 import org.opensearch.ExceptionsHelper;
+import org.opensearch.OpenSearchException;
 import org.opensearch.action.ActionListener;
 import org.opensearch.action.admin.indices.flush.FlushRequest;
 import org.opensearch.action.bulk.BulkShardRequest;
@@ -68,6 +69,7 @@ import org.opensearch.index.shard.IndexShard;
 import org.opensearch.index.store.Store;
 import org.opensearch.index.translog.SnapshotMatchers;
 import org.opensearch.index.translog.Translog;
+import org.opensearch.indices.replication.common.EventStateListener;
 
 import java.io.IOException;
 import java.util.HashMap;
@@ -450,14 +452,14 @@ public class RecoveryTests extends OpenSearchIndexLevelReplicationTestCase {
                 Exception.class,
                 () -> group.recoverReplica(
                     replica,
-                    (shard, sourceNode) -> new RecoveryTarget(shard, sourceNode, new PeerRecoveryTargetService.RecoveryListener() {
+                    (shard, sourceNode) -> new RecoveryTarget(shard, sourceNode, new EventStateListener<RecoveryState>() {
                         @Override
-                        public void onRecoveryDone(RecoveryState state) {
+                        public void onDone(RecoveryState state) {
                             throw new AssertionError("recovery must fail");
                         }
 
                         @Override
-                        public void onRecoveryFailure(RecoveryState state, RecoveryFailedException e, boolean sendShardFailure) {
+                        public void onFailure(RecoveryState state, OpenSearchException e, boolean sendShardFailure) {
                             assertThat(ExceptionsHelper.unwrap(e, IOException.class).getMessage(), equalTo("simulated"));
                         }
                     })

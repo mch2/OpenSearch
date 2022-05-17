@@ -35,6 +35,7 @@ package org.opensearch.indices.cluster;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.message.ParameterizedMessage;
+import org.opensearch.OpenSearchException;
 import org.opensearch.ResourceAlreadyExistsException;
 import org.opensearch.action.ActionListener;
 import org.opensearch.cluster.ClusterChangedEvent;
@@ -78,8 +79,8 @@ import org.opensearch.index.shard.ShardNotFoundException;
 import org.opensearch.indices.IndicesService;
 import org.opensearch.indices.recovery.PeerRecoverySourceService;
 import org.opensearch.indices.recovery.PeerRecoveryTargetService;
-import org.opensearch.indices.recovery.RecoveryFailedException;
 import org.opensearch.indices.recovery.RecoveryState;
+import org.opensearch.indices.replication.common.EventStateListener;
 import org.opensearch.repositories.RepositoriesService;
 import org.opensearch.search.SearchService;
 import org.opensearch.snapshots.SnapshotShardsService;
@@ -624,7 +625,7 @@ public class IndicesClusterStateService extends AbstractLifecycleComponent imple
             indicesService.createShard(
                 shardRouting,
                 recoveryTargetService,
-                new RecoveryListener(shardRouting, primaryTerm),
+                new RecoveryStateListener(shardRouting, primaryTerm),
                 repositoriesService,
                 failedShardHandler,
                 globalCheckpointSyncer,
@@ -739,7 +740,7 @@ public class IndicesClusterStateService extends AbstractLifecycleComponent imple
         return sourceNode;
     }
 
-    private class RecoveryListener implements PeerRecoveryTargetService.RecoveryListener {
+    private class RecoveryStateListener implements EventStateListener<RecoveryState> {
 
         /**
          * ShardRouting with which the shard was created
@@ -751,18 +752,18 @@ public class IndicesClusterStateService extends AbstractLifecycleComponent imple
          */
         private final long primaryTerm;
 
-        private RecoveryListener(final ShardRouting shardRouting, final long primaryTerm) {
+        private RecoveryStateListener(final ShardRouting shardRouting, final long primaryTerm) {
             this.shardRouting = shardRouting;
             this.primaryTerm = primaryTerm;
         }
 
         @Override
-        public void onRecoveryDone(final RecoveryState state) {
+        public void onDone(final RecoveryState state) {
             shardStateAction.shardStarted(shardRouting, primaryTerm, "after " + state.getRecoverySource(), SHARD_STATE_ACTION_LISTENER);
         }
 
         @Override
-        public void onRecoveryFailure(RecoveryState state, RecoveryFailedException e, boolean sendShardFailure) {
+        public void onFailure(RecoveryState state, OpenSearchException e, boolean sendShardFailure) {
             handleRecoveryFailure(shardRouting, sendShardFailure, e);
         }
     }
@@ -1004,7 +1005,7 @@ public class IndicesClusterStateService extends AbstractLifecycleComponent imple
         T createShard(
             ShardRouting shardRouting,
             PeerRecoveryTargetService recoveryTargetService,
-            PeerRecoveryTargetService.RecoveryListener recoveryListener,
+            EventStateListener<RecoveryState> recoveryListener,
             RepositoriesService repositoriesService,
             Consumer<IndexShard.ShardFailure> onShardFailure,
             Consumer<ShardId> globalCheckpointSyncer,

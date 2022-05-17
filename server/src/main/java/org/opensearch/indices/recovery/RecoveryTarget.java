@@ -37,8 +37,8 @@ import org.apache.lucene.index.CorruptIndexException;
 import org.apache.lucene.index.IndexFormatTooNewException;
 import org.apache.lucene.index.IndexFormatTooOldException;
 import org.opensearch.Assertions;
-import org.opensearch.OpenSearchException;
 import org.opensearch.ExceptionsHelper;
+import org.opensearch.OpenSearchException;
 import org.opensearch.action.ActionListener;
 import org.opensearch.action.admin.indices.flush.FlushRequest;
 import org.opensearch.cluster.node.DiscoveryNode;
@@ -47,7 +47,6 @@ import org.opensearch.common.bytes.BytesReference;
 import org.opensearch.common.logging.Loggers;
 import org.opensearch.common.lucene.Lucene;
 import org.opensearch.common.util.CancellableThreads;
-import org.opensearch.common.util.concurrent.AbstractRefCounted;
 import org.opensearch.index.engine.Engine;
 import org.opensearch.index.mapper.MapperException;
 import org.opensearch.index.seqno.ReplicationTracker;
@@ -61,6 +60,8 @@ import org.opensearch.index.store.Store;
 import org.opensearch.index.store.StoreFileMetadata;
 import org.opensearch.index.translog.Translog;
 import org.opensearch.indices.replication.common.ReplicationLuceneIndex;
+import org.opensearch.indices.replication.common.EventStateListener;
+import org.opensearch.indices.replication.common.ShardCopyTarget;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -71,11 +72,11 @@ import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Represents a recovery where the current node is the target node of the recovery. To track recoveries in a central place, instances of
- * this class are created through {@link RecoveriesCollection}.
+ * this class are managed through {@link TargetCollection}.
  *
  * @opensearch.internal
  */
-public class RecoveryTarget extends AbstractRefCounted implements RecoveryTargetHandler {
+public class RecoveryTarget extends ShardCopyTarget<RecoveryState> implements RecoveryTargetHandler {
 
     private final Logger logger;
 
@@ -90,11 +91,8 @@ public class RecoveryTarget extends AbstractRefCounted implements RecoveryTarget
     private final MultiFileWriter multiFileWriter;
     private final RecoveryRequestTracker requestTracker = new RecoveryRequestTracker();
     private final Store store;
-    private final PeerRecoveryTargetService.RecoveryListener listener;
 
     private final AtomicBoolean finished = new AtomicBoolean();
-
-    private final CancellableThreads cancellableThreads;
 
     // last time this status was accessed
     private volatile long lastAccessTime = System.nanoTime();
@@ -109,11 +107,9 @@ public class RecoveryTarget extends AbstractRefCounted implements RecoveryTarget
      * @param sourceNode                        source node of the recovery where we recover from
      * @param listener                          called when recovery is completed/failed
      */
-    public RecoveryTarget(IndexShard indexShard, DiscoveryNode sourceNode, PeerRecoveryTargetService.RecoveryListener listener) {
-        super("recovery_status");
-        this.cancellableThreads = new CancellableThreads();
+    public RecoveryTarget(IndexShard indexShard, DiscoveryNode sourceNode, EventStateListener<RecoveryState> listener) {
+        super("recovery_status", indexShard, listener);
         this.recoveryId = idGenerator.incrementAndGet();
-        this.listener = listener;
         this.logger = Loggers.getLogger(getClass(), indexShard.shardId());
         this.indexShard = indexShard;
         this.sourceNode = sourceNode;
@@ -137,6 +133,7 @@ public class RecoveryTarget extends AbstractRefCounted implements RecoveryTarget
      *
      * @return a copy of this recovery target
      */
+    @Override
     public RecoveryTarget retryCopy() {
         return new RecoveryTarget(indexShard, sourceNode, listener);
     }
@@ -158,16 +155,17 @@ public class RecoveryTarget extends AbstractRefCounted implements RecoveryTarget
         return indexShard;
     }
 
+    @Override
+    public String source() {
+        return sourceNode.toString();
+    }
+
     public DiscoveryNode sourceNode() {
         return this.sourceNode;
     }
 
     public RecoveryState state() {
         return indexShard.recoveryState();
-    }
-
-    public CancellableThreads cancellableThreads() {
-        return cancellableThreads;
     }
 
     /** return the last time this RecoveryStatus was used (based on System.nanoTime() */
@@ -185,11 +183,16 @@ public class RecoveryTarget extends AbstractRefCounted implements RecoveryTarget
         return store;
     }
 
+    @Override
+    public void notifyListener(Exception e, boolean sendShardFailure) {
+        listener.onFailure(state(), new RecoveryFailedException(state(), e.getMessage(), e), sendShardFailure);
+    }
+
     /**
      * Closes the current recovery target and waits up to a certain timeout for resources to be freed.
      * Returns true if resetting the recovery was successful, false if the recovery target is already cancelled / failed or marked as done.
      */
-    boolean resetRecovery(CancellableThreads newTargetCancellableThreads) throws IOException {
+    public boolean resetRecovery(CancellableThreads newTargetCancellableThreads) throws IOException {
         if (finished.compareAndSet(false, true)) {
             try {
                 logger.debug("reset of recovery with shard {} and id [{}]", shardId, recoveryId);
@@ -223,63 +226,14 @@ public class RecoveryTarget extends AbstractRefCounted implements RecoveryTarget
     }
 
     /**
-     * cancel the recovery. calling this method will clean temporary files and release the store
-     * unless this object is in use (in which case it will be cleaned once all ongoing users call
-     * {@link #decRef()}
-     * <p>
-     * if {@link #cancellableThreads()} was used, the threads will be interrupted.
+     * mark the current recovery as done
      */
-    public void cancel(String reason) {
-        if (finished.compareAndSet(false, true)) {
-            try {
-                logger.debug("recovery canceled (reason: [{}])", reason);
-                cancellableThreads.cancel(reason);
-            } finally {
-                // release the initial reference. recovery files will be cleaned as soon as ref count goes to zero, potentially now
-                decRef();
-            }
-        }
-    }
-
-    /**
-     * fail the recovery and call listener
-     *
-     * @param e                exception that encapsulating the failure
-     * @param sendShardFailure indicates whether to notify the cluster-manager of the shard failure
-     */
-    public void fail(RecoveryFailedException e, boolean sendShardFailure) {
-        if (finished.compareAndSet(false, true)) {
-            try {
-                notifyListener(e, sendShardFailure);
-            } finally {
-                try {
-                    cancellableThreads.cancel("failed recovery [" + ExceptionsHelper.stackTrace(e) + "]");
-                } finally {
-                    // release the initial reference. recovery files will be cleaned as soon as ref count goes to zero, potentially now
-                    decRef();
-                }
-            }
-        }
-    }
-
-    public void notifyListener(RecoveryFailedException e, boolean sendShardFailure) {
-        listener.onRecoveryFailure(state(), e, sendShardFailure);
-    }
-
-    /** mark the current recovery as done */
-    public void markAsDone() {
-        if (finished.compareAndSet(false, true)) {
-            assert multiFileWriter.tempFileNames.isEmpty() : "not all temporary files are renamed";
-            try {
-                // this might still throw an exception ie. if the shard is CLOSED due to some other event.
-                // it's safer to decrement the reference in a try finally here.
-                indexShard.postRecovery("peer recovery done");
-            } finally {
-                // release the initial reference. recovery files will be cleaned as soon as ref count goes to zero, potentially now
-                decRef();
-            }
-            listener.onRecoveryDone(state());
-        }
+    @Override
+    public void onDone() {
+        assert multiFileWriter.tempFileNames.isEmpty() : "not all temporary files are renamed";
+        // this might still throw an exception ie. if the shard is CLOSED due to some other event.
+        // it's safer to decrement the reference in a try finally here.
+        indexShard.postRecovery("peer recovery done");
     }
 
     @Override
@@ -297,14 +251,6 @@ public class RecoveryTarget extends AbstractRefCounted implements RecoveryTarget
     @Override
     public String toString() {
         return shardId + " [" + recoveryId + "]";
-    }
-
-    private void ensureRefCount() {
-        if (refCount() <= 0) {
-            throw new OpenSearchException(
-                "RecoveryStatus is used but it's refcount is 0. Probably a mismatch between incRef/decRef " + "calls"
-            );
-        }
     }
 
     /*** Implementation of {@link RecoveryTargetHandler } */
