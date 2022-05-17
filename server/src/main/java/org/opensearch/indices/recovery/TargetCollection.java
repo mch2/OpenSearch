@@ -57,7 +57,7 @@ import java.util.concurrent.ConcurrentMap;
  * no other thread will be able to find it. Last, the {@link TargetRef} inner class verifies that recovery temporary files
  * and store will only be cleared once on going usage is finished.
  */
-public class TargetCollection<T extends ShardCopyTarget<?>> {
+public class TargetCollection<T extends ShardCopyTarget> {
 
     /** This is the single source of truth for ongoing recoveries. If it's not here, it was canceled or done */
     private final ConcurrentMap<Long, T> onGoingRecoveries = ConcurrentCollections.newConcurrentMap();

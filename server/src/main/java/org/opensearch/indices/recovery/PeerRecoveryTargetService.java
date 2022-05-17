@@ -193,7 +193,7 @@ public class PeerRecoveryTargetService implements IndexEventListener {
     public void startRecovery(
         final IndexShard indexShard,
         final DiscoveryNode sourceNode,
-        final EventStateListener<RecoveryState> listener
+        final EventStateListener listener
     ) {
         // create a new recovery status, and process...
         final long recoveryId = onGoingRecoveries.startRecovery(

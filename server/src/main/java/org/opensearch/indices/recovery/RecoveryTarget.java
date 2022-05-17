@@ -76,7 +76,7 @@ import java.util.concurrent.atomic.AtomicLong;
  *
  * @opensearch.internal
  */
-public class RecoveryTarget extends ShardCopyTarget<RecoveryState> implements RecoveryTargetHandler {
+public class RecoveryTarget extends ShardCopyTarget implements RecoveryTargetHandler {
 
     private final Logger logger;
 
@@ -107,7 +107,7 @@ public class RecoveryTarget extends ShardCopyTarget<RecoveryState> implements Re
      * @param sourceNode                        source node of the recovery where we recover from
      * @param listener                          called when recovery is completed/failed
      */
-    public RecoveryTarget(IndexShard indexShard, DiscoveryNode sourceNode, EventStateListener<RecoveryState> listener) {
+    public RecoveryTarget(IndexShard indexShard, DiscoveryNode sourceNode, EventStateListener listener) {
         super("recovery_status", indexShard, listener);
         this.recoveryId = idGenerator.incrementAndGet();
         this.logger = Loggers.getLogger(getClass(), indexShard.shardId());
@@ -164,6 +164,7 @@ public class RecoveryTarget extends ShardCopyTarget<RecoveryState> implements Re
         return this.sourceNode;
     }
 
+    @Override
     public RecoveryState state() {
         return indexShard.recoveryState();
     }

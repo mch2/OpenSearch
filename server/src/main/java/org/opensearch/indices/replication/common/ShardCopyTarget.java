@@ -20,7 +20,7 @@ import java.io.IOException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
-public abstract class ShardCopyTarget<T> extends AbstractRefCounted {
+public abstract class ShardCopyTarget extends AbstractRefCounted {
 
     // TODO will this cause issues because its shared between subclasses?
     private static final AtomicLong ID_GENERATOR = new AtomicLong();
@@ -31,19 +31,21 @@ public abstract class ShardCopyTarget<T> extends AbstractRefCounted {
 
     protected final AtomicBoolean finished = new AtomicBoolean();
     protected final IndexShard indexShard;
-    protected final EventStateListener<T> listener;
+    protected final EventStateListener listener;
     protected final Logger logger;
     protected final CancellableThreads cancellableThreads;
 
     protected abstract void onDone();
 
-    public abstract T state();
+    public interface ShardCopyState {}
 
-    public abstract ShardCopyTarget<T> retryCopy();
+    public abstract ShardCopyState state();
+
+    public abstract ShardCopyTarget retryCopy();
 
     public abstract String source();
 
-    public EventStateListener<T> getListener() {
+    public EventStateListener getListener() {
         return listener;
     }
 
@@ -53,7 +55,7 @@ public abstract class ShardCopyTarget<T> extends AbstractRefCounted {
 
     public abstract void notifyListener(Exception e, boolean sendShardFailure);
 
-    public ShardCopyTarget(String name, IndexShard indexShard, EventStateListener<T> listener) {
+    public ShardCopyTarget(String name, IndexShard indexShard, EventStateListener listener) {
         super(name);
         this.logger = Loggers.getLogger(getClass(), indexShard.shardId());
         this.listener = listener;

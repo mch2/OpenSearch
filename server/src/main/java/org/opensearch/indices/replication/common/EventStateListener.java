@@ -10,10 +10,10 @@ package org.opensearch.indices.replication.common;
 
 import org.opensearch.OpenSearchException;
 
-public interface EventStateListener<T> {
+public interface EventStateListener {
 
-    void onDone(T state);
+    void onDone(ShardCopyTarget.ShardCopyState state);
 
-    void onFailure(T state, OpenSearchException exception, boolean sendShardFailure);
+    void onFailure(ShardCopyTarget.ShardCopyState state, OpenSearchException exception, boolean sendShardFailure);
 
 }

@@ -52,7 +52,7 @@ import static org.hamcrest.Matchers.lessThan;
 import static org.opensearch.indices.recovery.TargetCollection.*;
 
 public class RecoveriesCollectionTests extends OpenSearchIndexLevelReplicationTestCase {
-    static final EventStateListener<RecoveryState> listener = new EventStateListener<>() {
+    static final EventStateListener listener = new EventStateListener() {
         @Override
         public void onDone(RecoveryState state) {
 

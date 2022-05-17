@@ -47,6 +47,7 @@ import org.opensearch.index.shard.IndexShard;
 import org.opensearch.index.shard.ShardId;
 import org.opensearch.indices.replication.common.ReplicationLuceneIndex;
 import org.opensearch.indices.replication.common.ReplicationTimer;
+import org.opensearch.indices.replication.common.ShardCopyTarget;
 
 import java.io.IOException;
 import java.util.Locale;
@@ -56,7 +57,7 @@ import java.util.Locale;
  *
  * @opensearch.internal
  */
-public class RecoveryState implements ToXContentFragment, Writeable {
+public class RecoveryState implements ToXContentFragment, Writeable, ShardCopyTarget.ShardCopyState {
 
     /**
      * The stage of the recovery state
