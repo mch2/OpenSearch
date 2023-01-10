@@ -1502,6 +1502,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
      * @return true if checkpoint should be processed
      */
     public final boolean shouldProcessCheckpoint(ReplicationCheckpoint requestCheckpoint) {
+        logger.info("Checking if segrep is allowed on received checkpoint {}", requestCheckpoint);
         if (isSegmentReplicationAllowed() == false) {
             return false;
         }
@@ -3816,6 +3817,28 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         getEngine().translogManager().syncTranslog();
     }
 
+    public final boolean isOperationIndexed(Translog.Location location) {
+        if (indexSettings.isSegRepEnabled() && routingEntry().primary() == false) {
+            logger.info("isOperationIndexed");
+            final Translog.Operation operation;
+            try {
+                operation = getEngine().translogManager().readOperation(location);
+            } catch (IOException e) {
+                logger.error("Error fetching operation from xlog?", e);
+                return false;
+            }
+            logger.info("Operation read from xlog - {} - {}", location, operation);
+            final ReplicationCheckpoint latestReplicationCheckpoint = getLatestReplicationCheckpoint();
+            logger.info("Latest repl checkpoint {}", latestReplicationCheckpoint);
+            final boolean b = operation.seqNo() <= latestReplicationCheckpoint.getSeqNo();
+            logger.info("IS OP IN INDEX: {}", b);
+            return b;
+//            return latestReplicationCheckpoint.getSeqNo() >= replicationTracker.getGlobalCheckpoint();
+        }
+        logger.info("isOperationIndexed on primary");
+        return true;
+    }
+
     /**
      * Checks if the underlying storage sync is required.
      */
@@ -3909,7 +3932,8 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
             () -> refresh("too_many_listeners"),
             logger,
             threadPool.getThreadContext(),
-            externalRefreshMetric
+            externalRefreshMetric,
+            this::isOperationIndexed
         );
     }
 
@@ -4081,8 +4105,10 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
             }
         }
         if (readAllowed) {
-            refreshListeners.addOrNotify(location, listener);
+            final boolean b = refreshListeners.addOrNotify(location, listener);
+            logger.info("Register listener to call later? {}", b);
         } else {
+            logger.info("readAllowed is false");
             // we're not yet ready fo ready for reads, just ignore refresh cycles
             listener.accept(false);
         }

@@ -64,6 +64,7 @@ public class NRTReplicationReaderManager extends OpenSearchReaderManager {
         logger.trace(
             () -> new ParameterizedMessage("updated to SegmentInfosVersion=" + currentInfos.getVersion() + " reader=" + innerReader)
         );
+        logger.info("Returning from refreshIfNeeded");
         return OpenSearchDirectoryReader.wrap(softDeletesDirectoryReaderWrapper, referenceToRefresh.shardId());
     }
 
@@ -78,6 +79,7 @@ public class NRTReplicationReaderManager extends OpenSearchReaderManager {
         // is always increased.
         infos.updateGeneration(currentInfos);
         currentInfos = infos;
+        logger.info("Invoking maybeRefresh");
         maybeRefresh();
     }
 

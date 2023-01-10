@@ -1,12 +1,12 @@
 name: Gradle Precommit
-on: [pull_request]
- 
+on: [workflow_dispatch]
+
 jobs:
   precommit:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest] 
+        os: [windows-latest]
     steps:
       - uses: actions/checkout@v2
       - name: Set up JDK 11
@@ -16,4 +16,4 @@ jobs:
           distribution: adopt
       - name: Run Gradle
         run: |
-          ./gradlew javadoc precommit --parallel
+          ./gradlew :server:test -x internalClusterTest

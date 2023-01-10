@@ -817,7 +817,7 @@ public class IndicesClusterStateService extends AbstractLifecycleComponent imple
                 new SegmentReplicationTargetService.SegmentReplicationListener() {
                     @Override
                     public void onReplicationDone(SegmentReplicationState state) {
-                        logger.trace(
+                        logger.info(
                             () -> new ParameterizedMessage(
                                 "[shardId {}] [replication id {}] Replication complete, timing data: {}",
                                 indexShard.shardId().getId(),
@@ -834,7 +834,7 @@ public class IndicesClusterStateService extends AbstractLifecycleComponent imple
                         ReplicationFailedException e,
                         boolean sendShardFailure
                     ) {
-                        logger.trace(
+                        logger.info(
                             () -> new ParameterizedMessage(
                                 "[shardId {}] [replication id {}] Replication failed, timing data: {}",
                                 indexShard.shardId().getId(),

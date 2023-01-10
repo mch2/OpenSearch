@@ -35,11 +35,13 @@ public class CheckpointRefreshListener implements ReferenceManager.RefreshListen
 
     @Override
     public void beforeRefresh() throws IOException {
+        logger.info("Before Refresh invoked?");
         // Do nothing
     }
 
     @Override
     public void afterRefresh(boolean didRefresh) throws IOException {
+        logger.info("After Refresh invoked: {}", didRefresh);
         if (didRefresh && shard.state() != IndexShardState.CLOSED && shard.getReplicationTracker().isPrimaryMode()) {
             publisher.publish(shard);
         }

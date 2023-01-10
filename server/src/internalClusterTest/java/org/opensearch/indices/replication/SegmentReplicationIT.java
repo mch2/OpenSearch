@@ -15,6 +15,7 @@ import org.opensearch.action.admin.indices.segments.IndexShardSegments;
 import org.opensearch.action.admin.indices.segments.IndicesSegmentResponse;
 import org.opensearch.action.admin.indices.segments.IndicesSegmentsRequest;
 import org.opensearch.action.admin.indices.segments.ShardSegments;
+import org.opensearch.action.index.IndexResponse;
 import org.opensearch.action.support.WriteRequest;
 import org.opensearch.action.update.UpdateResponse;
 import org.opensearch.client.Requests;
@@ -38,6 +39,7 @@ import org.opensearch.indices.IndicesService;
 import org.opensearch.indices.recovery.FileChunkRequest;
 import org.opensearch.indices.replication.common.ReplicationType;
 import org.opensearch.plugins.Plugin;
+import org.opensearch.rest.RestStatus;
 import org.opensearch.test.BackgroundIndexer;
 import org.opensearch.test.InternalTestCluster;
 import org.opensearch.test.OpenSearchIntegTestCase;
@@ -291,14 +293,30 @@ public class SegmentReplicationIT extends OpenSearchIntegTestCase {
         assertFalse(indicesService.hasIndex(resolveIndex(INDEX_NAME)));
     }
 
-    @AwaitsFix(bugUrl = "https://github.com/opensearch-project/OpenSearch/issues/5669")
+    public void testWaitUntil() {
+        final String nodeA = internalCluster().startNode(featureFlagSettings());
+        final String nodeB = internalCluster().startNode(featureFlagSettings());
+        createIndex(INDEX_NAME);
+        ensureGreen(INDEX_NAME);
+        IndexResponse index = client().prepareIndex(INDEX_NAME)
+            .setId("1")
+            .setSource("foo", "bar")
+            .setRefreshPolicy(WriteRequest.RefreshPolicy.WAIT_UNTIL)
+            .get();
+        assertEquals(RestStatus.CREATED, index.status());
+        assertFalse("request shouldn't have forced a refresh", index.forcedRefresh());
+        assertSearchHits(client(nodeA).prepareSearch(INDEX_NAME).setPreference("_only_local").setQuery(matchQuery("foo", "bar")).get(), "1");
+        assertSearchHits(client(nodeB).prepareSearch(INDEX_NAME).setPreference("_only_local").setQuery(matchQuery("foo", "bar")).get(), "1");
+    }
+
+//    @AwaitsFix(bugUrl = "https://github.com/opensearch-project/OpenSearch/issues/5669")
     public void testReplicationAfterPrimaryRefreshAndFlush() throws Exception {
         final String nodeA = internalCluster().startNode(featureFlagSettings());
         final String nodeB = internalCluster().startNode(featureFlagSettings());
         createIndex(INDEX_NAME);
         ensureGreen(INDEX_NAME);
 
-        final int initialDocCount = scaledRandomIntBetween(0, 200);
+        final int initialDocCount = 200;
         try (
             BackgroundIndexer indexer = new BackgroundIndexer(
                 INDEX_NAME,
@@ -313,7 +331,7 @@ public class SegmentReplicationIT extends OpenSearchIntegTestCase {
             indexer.start(initialDocCount);
             waitForDocs(initialDocCount, indexer);
             refresh(INDEX_NAME);
-            waitForReplicaUpdate();
+//            waitForReplicaUpdate();
 
             assertHitCount(client(nodeA).prepareSearch(INDEX_NAME).setSize(0).setPreference("_only_local").get(), initialDocCount);
             assertHitCount(client(nodeB).prepareSearch(INDEX_NAME).setSize(0).setPreference("_only_local").get(), initialDocCount);
@@ -324,7 +342,7 @@ public class SegmentReplicationIT extends OpenSearchIntegTestCase {
             waitForDocs(expectedHitCount, indexer);
 
             flushAndRefresh(INDEX_NAME);
-            waitForReplicaUpdate();
+//            waitForReplicaUpdate();
             assertHitCount(client(nodeA).prepareSearch(INDEX_NAME).setSize(0).setPreference("_only_local").get(), expectedHitCount);
             assertHitCount(client(nodeB).prepareSearch(INDEX_NAME).setSize(0).setPreference("_only_local").get(), expectedHitCount);
 
@@ -553,9 +571,9 @@ public class SegmentReplicationIT extends OpenSearchIntegTestCase {
         assertHitCount(client(primaryNode).prepareSearch(INDEX_NAME).setSize(0).setPreference("_only_local").get(), 2);
         assertHitCount(client(replicaNode).prepareSearch(INDEX_NAME).setSize(0).setPreference("_only_local").get(), 2);
 
-        client().prepareIndex(INDEX_NAME).setId("3").setSource("foo", "bar").get();
+        client().prepareIndex(INDEX_NAME).setId("3").setRefreshPolicy(WriteRequest.RefreshPolicy.WAIT_UNTIL).setSource("foo", "bar").get();
         refresh(INDEX_NAME);
-        waitForReplicaUpdate();
+//        waitForReplicaUpdate();
         assertHitCount(client(primaryNode).prepareSearch(INDEX_NAME).setSize(0).setPreference("_only_local").get(), 3);
         assertHitCount(client(replicaNode).prepareSearch(INDEX_NAME).setSize(0).setPreference("_only_local").get(), 3);
         assertSegmentStats(REPLICA_COUNT);

@@ -127,8 +127,8 @@ public class OpenSearchTestBasePlugin implements Plugin<Project> {
             test.exclude("**/*$*.class");
 
             test.jvmArgs(
-                "-Xmx" + System.getProperty("tests.heap.size", "512m"),
-                "-Xms" + System.getProperty("tests.heap.size", "512m"),
+                "-Xmx" + System.getProperty("tests.heap.size", "6g"),
+                "-Xms" + System.getProperty("tests.heap.size", "1g"),
                 "-XX:+HeapDumpOnOutOfMemoryError"
             );
 

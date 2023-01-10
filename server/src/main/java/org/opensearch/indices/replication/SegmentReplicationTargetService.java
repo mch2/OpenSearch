@@ -237,6 +237,7 @@ public class SegmentReplicationTargetService implements IndexEventListener {
         final IndexShard indexShard,
         final SegmentReplicationListener listener
     ) {
+        logger.info("Starting replication from {}", indexShard.getLatestReplicationCheckpoint());
         final SegmentReplicationTarget target = new SegmentReplicationTarget(
             checkpoint,
             indexShard,

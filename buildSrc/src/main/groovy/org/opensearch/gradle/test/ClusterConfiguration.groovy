@@ -103,8 +103,8 @@ class ClusterConfiguration {
     boolean autoSetHostsProvider = true
 
     @Input
-    String jvmArgs = "-Xms" + System.getProperty('tests.heap.size', '512m') +
-        " " + "-Xmx" + System.getProperty('tests.heap.size', '512m') +
+    String jvmArgs = "-Xms" + System.getProperty('tests.heap.size', '1g') +
+        " " + "-Xmx" + System.getProperty('tests.heap.size', '6g') +
         " " + System.getProperty('tests.jvm.argline', '')
 
     /**

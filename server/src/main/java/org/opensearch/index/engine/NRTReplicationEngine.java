@@ -126,6 +126,7 @@ public class NRTReplicationEngine extends Engine {
         ensureOpen();
         try (ReleasableLock lock = writeLock.acquire()) {
             final long incomingGeneration = infos.getGeneration();
+            localCheckpointTracker.fastForwardProcessedSeqNo(seqNo);
             readerManager.updateSegments(infos);
 
             // Commit and roll the translog when we receive a different generation than what was last received.
@@ -136,7 +137,6 @@ public class NRTReplicationEngine extends Engine {
                 translogManager.rollTranslogGeneration();
             }
             lastReceivedGen = incomingGeneration;
-            localCheckpointTracker.fastForwardProcessedSeqNo(seqNo);
         }
     }
 
@@ -305,11 +305,23 @@ public class NRTReplicationEngine extends Engine {
     }
 
     @Override
-    public void refresh(String source) throws EngineException {}
+    public void refresh(String source) throws EngineException {
+        logger.info("Refresh invoked on Engine");
+        try {
+            readerManager.maybeRefresh();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
 
     @Override
     public boolean maybeRefresh(String source) throws EngineException {
-        return false;
+        try {
+            return readerManager.maybeRefresh();
+        } catch (IOException e) {
+            e.printStackTrace();
+            return false;
+        }
     }
 
     @Override

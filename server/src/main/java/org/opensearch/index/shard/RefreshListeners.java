@@ -46,6 +46,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.IntSupplier;
 import java.util.function.Supplier;
 
@@ -65,6 +66,7 @@ public final class RefreshListeners implements ReferenceManager.RefreshListener,
     private final Logger logger;
     private final ThreadContext threadContext;
     private final MeanMetric refreshMetric;
+    private final Function<Translog.Location, Boolean> isOperationIndexed;
 
     /**
      * Time in nanosecond when beforeRefresh() is called. Used for calculating refresh metrics.
@@ -107,6 +109,16 @@ public final class RefreshListeners implements ReferenceManager.RefreshListener,
         this.logger = logger;
         this.threadContext = threadContext;
         this.refreshMetric = refreshMetric;
+        isOperationIndexed = null;
+    }
+
+    public RefreshListeners(IntSupplier getMaxRefreshListeners, Runnable too_many_listeners, Logger logger, ThreadContext threadContext, MeanMetric externalRefreshMetric, Function<Translog.Location, Boolean> isOperationIndexed) {
+        this.getMaxRefreshListeners = getMaxRefreshListeners;
+        this.forceRefresh = too_many_listeners;
+        this.logger = logger;
+        this.threadContext = threadContext;
+        this.refreshMetric = externalRefreshMetric;
+        this.isOperationIndexed = isOperationIndexed;
     }
 
     /**
@@ -147,9 +159,10 @@ public final class RefreshListeners implements ReferenceManager.RefreshListener,
     public boolean addOrNotify(Translog.Location location, Consumer<Boolean> listener) {
         requireNonNull(listener, "listener cannot be null");
         requireNonNull(location, "location cannot be null");
-
-        if (lastRefreshedLocation != null && lastRefreshedLocation.compareTo(location) >= 0) {
+        logger.info("Add or notify");
+        if (lastRefreshedLocation != null && lastRefreshedLocation.compareTo(location) >= 0 && this.isOperationIndexed.apply(location)) {
             // Location already visible, just call the listener
+            logger.info("location already visible? {}", location);
             listener.accept(false);
             return true;
         }
@@ -159,11 +172,13 @@ public final class RefreshListeners implements ReferenceManager.RefreshListener,
             }
             List<Tuple<Translog.Location, Consumer<Boolean>>> listeners = refreshListeners;
             final int maxRefreshes = getMaxRefreshListeners.getAsInt();
+            logger.info("Max listeners {}", maxRefreshes);
             if (refreshForcers == 0 && maxRefreshes > 0 && (listeners == null || listeners.size() < maxRefreshes)) {
                 ThreadContext.StoredContext storedContext = threadContext.newStoredContext(true);
                 Consumer<Boolean> contextPreservingListener = forced -> {
                     try (ThreadContext.StoredContext ignore = threadContext.stashContext()) {
                         storedContext.restore();
+                        logger.info("Forced: {}", forced);
                         listener.accept(forced);
                     }
                 };
@@ -172,12 +187,14 @@ public final class RefreshListeners implements ReferenceManager.RefreshListener,
                 }
                 // We have a free slot so register the listener
                 listeners.add(new Tuple<>(location, contextPreservingListener));
+                logger.info("Set listeners - lastRefreshedLocation? {}", lastRefreshedLocation);
                 refreshListeners = listeners;
                 return false;
             }
         }
         // No free slot so force a refresh and call the listener in this thread
         forceRefresh.run();
+        logger.info("End - lastRefreshedLocation? {}", lastRefreshedLocation);
         listener.accept(true);
         return true;
     }
@@ -270,7 +287,8 @@ public final class RefreshListeners implements ReferenceManager.RefreshListener,
         List<Tuple<Translog.Location, Consumer<Boolean>>> preservedListeners = null;
         for (Tuple<Translog.Location, Consumer<Boolean>> tuple : candidates) {
             Translog.Location location = tuple.v1();
-            if (location.compareTo(currentRefreshLocation) <= 0) {
+            if (location.compareTo(currentRefreshLocation) <= 0
+                && (this.isOperationIndexed.apply(location))) {
                 if (listenersToFire == null) {
                     listenersToFire = new ArrayList<>();
                 }
