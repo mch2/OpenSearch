@@ -248,6 +248,7 @@ public class SegmentReplicationIT extends SegmentReplicationBaseIT {
         }
     }
 
+    @AwaitsFix(bugUrl = "https://github.com/opensearch-project/OpenSearch/issues/5669")
     public void testIndexReopenClose() throws Exception {
         final String primary = internalCluster().startNode();
         final String replica = internalCluster().startNode();
@@ -282,6 +283,7 @@ public class SegmentReplicationIT extends SegmentReplicationBaseIT {
         verifyStoreContent();
     }
 
+    @AwaitsFix(bugUrl = "https://github.com/opensearch-project/OpenSearch/issues/5669")
     public void testMultipleShards() throws Exception {
         Settings indexSettings = Settings.builder()
             .put(super.indexSettings())
@@ -325,6 +327,7 @@ public class SegmentReplicationIT extends SegmentReplicationBaseIT {
         }
     }
 
+    @AwaitsFix(bugUrl = "https://github.com/opensearch-project/OpenSearch/issues/5669")
     public void testReplicationAfterForceMerge() throws Exception {
         final String nodeA = internalCluster().startNode();
         final String nodeB = internalCluster().startNode();
@@ -363,6 +366,7 @@ public class SegmentReplicationIT extends SegmentReplicationBaseIT {
         }
     }
 
+    @AwaitsFix(bugUrl = "https://github.com/opensearch-project/OpenSearch/issues/5669")
     public void testCancellation() throws Exception {
         final String primaryNode = internalCluster().startNode();
         createIndex(INDEX_NAME, Settings.builder().put(indexSettings()).put(IndexMetadata.SETTING_NUMBER_OF_REPLICAS, 1).build());
@@ -461,6 +465,7 @@ public class SegmentReplicationIT extends SegmentReplicationBaseIT {
         verifyStoreContent();
     }
 
+    @AwaitsFix(bugUrl = "https://github.com/opensearch-project/OpenSearch/issues/5669")
     public void testDeleteOperations() throws Exception {
         final String nodeA = internalCluster().startNode();
         final String nodeB = internalCluster().startNode();
