@@ -168,6 +168,6 @@ public class PitTestsUtil {
     }
 
     public static void assertSegments(boolean isEmpty, Client client, String pitId) {
-        assertSegments(isEmpty, "index", 2, client, pitId);
+        assertSegments(isEmpty, "test-idx-1", 1, client, pitId);
     }
 }

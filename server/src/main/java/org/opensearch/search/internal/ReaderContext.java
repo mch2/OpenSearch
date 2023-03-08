@@ -32,6 +32,8 @@
 
 package org.opensearch.search.internal;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.opensearch.common.lease.Releasable;
 import org.opensearch.common.lease.Releasables;
 import org.opensearch.common.util.concurrent.AbstractRefCounted;
@@ -39,6 +41,7 @@ import org.opensearch.index.IndexService;
 import org.opensearch.index.engine.Engine;
 import org.opensearch.index.shard.IndexShard;
 import org.opensearch.search.RescoreDocIds;
+import org.opensearch.search.SearchService;
 import org.opensearch.search.dfs.AggregatedDfs;
 import org.opensearch.transport.TransportRequest;
 
@@ -127,8 +130,10 @@ public class ReaderContext implements Releasable {
             refCounted.decRef();
         }
     }
+    private static final Logger logger = LogManager.getLogger(ReaderContext.class);
 
     void doClose() {
+        logger.info("Releasing searcher supplier");
         Releasables.close(Releasables.wrap(onCloses), searcherSupplier);
     }
 
@@ -149,6 +154,7 @@ public class ReaderContext implements Releasable {
     }
 
     public Engine.Searcher acquireSearcher(String source) {
+        logger.info("Acquire searcher? {}", source);
         return searcherSupplier.acquireSearcher(source);
     }
 

@@ -85,7 +85,7 @@ public class NRTReplicationReaderManager extends OpenSearchReaderManager {
         return currentInfos;
     }
 
-    private StandardDirectoryReader unwrapStandardReader(OpenSearchDirectoryReader reader) {
+    public static StandardDirectoryReader unwrapStandardReader(OpenSearchDirectoryReader reader) {
         final DirectoryReader delegate = reader.getDelegate();
         if (delegate instanceof SoftDeletesDirectoryReaderWrapper) {
             return (StandardDirectoryReader) ((SoftDeletesDirectoryReaderWrapper) delegate).getDelegate();

@@ -108,6 +108,7 @@ abstract class SearchScrollAsyncAction<T extends SearchPhaseResult> implements R
 
     public final void run() {
         final SearchContextIdForNode[] context = scrollId.getContext();
+        logger.info("scrollId context {}", List.of(context));
         if (context.length == 0) {
             listener.onFailure(new SearchPhaseExecutionException("query", "no nodes to search on", ShardSearchFailure.EMPTY_ARRAY));
         } else {
@@ -291,6 +292,7 @@ abstract class SearchScrollAsyncAction<T extends SearchPhaseResult> implements R
             if (request.scroll() != null) {
                 scrollId = request.scrollId();
             }
+            logger.info("Scroll response async?");
             listener.onResponse(
                 new SearchResponse(
                     internalResponse,

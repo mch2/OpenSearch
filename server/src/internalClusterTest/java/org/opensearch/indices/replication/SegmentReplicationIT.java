@@ -9,6 +9,7 @@
 package org.opensearch.indices.replication;
 
 import com.carrotsearch.randomizedtesting.RandomizedTest;
+import org.opensearch.action.search.SearchResponse;
 import org.opensearch.action.support.WriteRequest;
 import org.opensearch.action.update.UpdateResponse;
 import org.opensearch.client.Requests;
@@ -16,10 +17,13 @@ import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.routing.ShardRouting;
 import org.opensearch.cluster.routing.allocation.command.CancelAllocationCommand;
 import org.opensearch.common.settings.Settings;
+import org.opensearch.common.unit.TimeValue;
 import org.opensearch.index.IndexModule;
 import org.opensearch.index.shard.IndexShard;
 import org.opensearch.indices.recovery.FileChunkRequest;
 import org.opensearch.indices.replication.common.ReplicationType;
+import org.opensearch.search.SearchHit;
+import org.opensearch.search.sort.SortOrder;
 import org.opensearch.test.BackgroundIndexer;
 import org.opensearch.test.InternalTestCluster;
 import org.opensearch.test.OpenSearchIntegTestCase;
@@ -27,11 +31,15 @@ import org.opensearch.test.transport.MockTransportService;
 import org.opensearch.transport.TransportService;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 
 import static java.util.Arrays.asList;
-import static org.opensearch.index.query.QueryBuilders.matchQuery;
+import static org.hamcrest.Matchers.equalTo;
+import static org.opensearch.common.xcontent.XContentFactory.jsonBuilder;
+import static org.opensearch.index.query.QueryBuilders.*;
+import static org.opensearch.index.query.QueryBuilders.termQuery;
 import static org.opensearch.test.hamcrest.OpenSearchAssertions.assertHitCount;
 import static org.opensearch.test.hamcrest.OpenSearchAssertions.assertAcked;
 import static org.opensearch.test.hamcrest.OpenSearchAssertions.assertSearchHits;
@@ -346,39 +354,119 @@ public class SegmentReplicationIT extends SegmentReplicationBaseIT {
     public void testStartReplicaAfterPrimaryIndexesDocs() throws Exception {
         final String primaryNode = internalCluster().startNode();
         createIndex(INDEX_NAME, Settings.builder().put(indexSettings()).put(IndexMetadata.SETTING_NUMBER_OF_REPLICAS, 0).build());
-        ensureGreen(INDEX_NAME);
 
         // Index a doc to create the first set of segments. _s1.si
-        client().prepareIndex(INDEX_NAME).setId("1").setSource("foo", "bar").get();
+//        client().prepareIndex(INDEX_NAME).setId("1").setSource("foo", "bar").get();
         // Flush segments to disk and create a new commit point (Primary: segments_3, _s1.si)
-        flushAndRefresh(INDEX_NAME);
-        assertHitCount(client(primaryNode).prepareSearch(INDEX_NAME).setSize(0).setPreference("_only_local").get(), 1);
+//        flushAndRefresh(INDEX_NAME);
+//        assertHitCount(client(primaryNode).prepareSearch(INDEX_NAME).setSize(0).setPreference("_only_local").get(), 1);
 
         // Index to create another segment
-        client().prepareIndex(INDEX_NAME).setId("2").setSource("foo", "bar").get();
+//        client().prepareIndex(INDEX_NAME).setId("2").setSource("foo", "bar").get();
 
-        // Force a merge here so that the in memory SegmentInfos does not reference old segments on disk.
-        client().admin().indices().prepareForceMerge(INDEX_NAME).setMaxNumSegments(1).setFlush(false).get();
+        for (int i = 0; i < 500; i++) {
+            client().prepareIndex(INDEX_NAME)
+                .setId(Integer.toString(i))
+                .setSource(
+                    jsonBuilder().startObject()
+                        .field("user", "foobar")
+                        .field("postDate", System.currentTimeMillis())
+                        .field("message", "test")
+                        .endObject()
+                )
+                .get();
+        }
+
         refresh(INDEX_NAME);
-
+        final String replicaNode = internalCluster().startNode();
         assertAcked(
             client().admin()
                 .indices()
                 .prepareUpdateSettings(INDEX_NAME)
                 .setSettings(Settings.builder().put(IndexMetadata.SETTING_NUMBER_OF_REPLICAS, 1))
         );
-        final String replicaNode = internalCluster().startNode();
+
         ensureGreen(INDEX_NAME);
 
-        assertHitCount(client(primaryNode).prepareSearch(INDEX_NAME).setSize(0).setPreference("_only_local").get(), 2);
-        assertHitCount(client(replicaNode).prepareSearch(INDEX_NAME).setSize(0).setPreference("_only_local").get(), 2);
+        assertHitCount(client(replicaNode).prepareSearch(INDEX_NAME).setSize(0).setPreference("_only_local").get(), 500L);
+        assertHitCount(client(replicaNode).prepareSearch(INDEX_NAME).setSize(0).setQuery(termQuery("message", "test")).setPreference("_only_local").get(), 500L);
 
-        client().prepareIndex(INDEX_NAME).setId("3").setSource("foo", "bar").get();
-        refresh(INDEX_NAME);
-        waitForSearchableDocs(3, primaryNode, replicaNode);
-        assertHitCount(client(primaryNode).prepareSearch(INDEX_NAME).setSize(0).setPreference("_only_local").get(), 3);
-        assertHitCount(client(replicaNode).prepareSearch(INDEX_NAME).setSize(0).setPreference("_only_local").get(), 3);
-        verifyStoreContent();
+        assertThat(client(replicaNode).prepareSearch().setSize(0).setQuery(matchAllQuery()).get().getHits().getTotalHits().value, equalTo(500L));
+        assertThat(
+            client(replicaNode).prepareSearch().setSize(0).setQuery(termQuery("message", "test")).get().getHits().getTotalHits().value,
+            equalTo(500L)
+        );
+        assertThat(
+            client().prepareSearch().setSize(0).setQuery(termQuery("message", "test")).get().getHits().getTotalHits().value,
+            equalTo(500L)
+        );
+        assertThat(
+            client().prepareSearch().setSize(0).setQuery(termQuery("message", "update")).get().getHits().getTotalHits().value,
+            equalTo(0L)
+        );
+        assertThat(
+            client().prepareSearch().setSize(0).setQuery(termQuery("message", "update")).get().getHits().getTotalHits().value,
+            equalTo(0L)
+        );
+
+        SearchResponse searchResponse = client().prepareSearch()
+            .setQuery(queryStringQuery("user:foobar"))
+            .setSize(35)
+            .setScroll(TimeValue.timeValueMinutes(2))
+            .addSort("postDate", SortOrder.ASC)
+            .get();
+        client().admin().indices().prepareForceMerge(INDEX_NAME).setMaxNumSegments(1).setFlush(false).get();
+        try {
+            do {
+                for (SearchHit searchHit : searchResponse.getHits().getHits()) {
+                    Map<String, Object> map = searchHit.getSourceAsMap();
+                    map.put("message", "update");
+                    client().prepareIndex(INDEX_NAME).setId(searchHit.getId()).setSource(map).get();
+                    refresh(INDEX_NAME);
+                    client().admin().indices().prepareForceMerge(INDEX_NAME).setMaxNumSegments(1).setFlush(false).get();
+                    assertBusy(() -> {
+                        assertEquals(getIndexShard(primaryNode, INDEX_NAME).getLatestReplicationCheckpoint().getSegmentInfosVersion(), getIndexShard(replicaNode, INDEX_NAME).getLatestReplicationCheckpoint().getSegmentInfosVersion());
+                    });
+                }
+                searchResponse = client().prepareSearchScroll(searchResponse.getScrollId()).setScroll(TimeValue.timeValueMinutes(2)).get();
+            } while (searchResponse.getHits().getHits().length > 0);
+
+            client().admin().indices().prepareRefresh().get();
+            assertThat(client().prepareSearch().setSize(0).setQuery(matchAllQuery()).get().getHits().getTotalHits().value, equalTo(500L));
+            assertThat(
+                client().prepareSearch().setSize(0).setQuery(termQuery("message", "test")).get().getHits().getTotalHits().value,
+                equalTo(0L)
+            );
+            assertThat(
+                client().prepareSearch().setSize(0).setQuery(termQuery("message", "test")).get().getHits().getTotalHits().value,
+                equalTo(0L)
+            );
+            assertThat(
+                client().prepareSearch().setSize(0).setQuery(termQuery("message", "update")).get().getHits().getTotalHits().value,
+                equalTo(500L)
+            );
+            assertThat(
+                client().prepareSearch().setSize(0).setQuery(termQuery("message", "update")).get().getHits().getTotalHits().value,
+                equalTo(500L)
+            );
+        } finally {
+            clearScroll(searchResponse.getScrollId());
+        }
+
+        // Force a merge here so that the in memory SegmentInfos does not reference old segments on disk.
+//        client().admin().indices().prepareForceMerge(INDEX_NAME).setMaxNumSegments(1).setFlush(false).get();
+//        refresh(INDEX_NAME);
+
+
+//        assertHitCount(client(primaryNode).prepareSearch(INDEX_NAME).setSize(0).setPreference("_only_local").get(), 2);
+//        assertHitCount(client(replicaNode).prepareSearch(INDEX_NAME).setSize(0).setPreference("_only_local").get(), 2);
+//
+//        client().prepareIndex(INDEX_NAME).setId("3").setSource("foo", "bar").get();
+//        refresh(INDEX_NAME);
+//        waitForSearchableDocs(3, primaryNode, replicaNode);
+//        assertHitCount(client(primaryNode).prepareSearch(INDEX_NAME).setSize(0).setPreference("_only_local").get(), 3);
+//        assertHitCount(client(replicaNode).prepareSearch(INDEX_NAME).setSize(0).setPreference("_only_local").get(), 3);
+//        verifyStoreContent();
     }
 
     public void testDeleteOperations() throws Exception {

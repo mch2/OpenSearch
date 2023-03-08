@@ -42,6 +42,7 @@ import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.SegmentCommitInfo;
 import org.apache.lucene.index.SegmentInfos;
 import org.apache.lucene.index.SegmentReader;
+import org.apache.lucene.index.SoftDeletesDirectoryReaderWrapper;
 import org.apache.lucene.index.StandardDirectoryReader;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.search.IndexSearcher;
@@ -201,6 +202,10 @@ public abstract class Engine implements LifecycleAware, Closeable {
         return new GatedCloseable<>(getLatestSegmentInfos(), () -> {});
     }
 
+    public GatedCloseable<OpenSearchDirectoryReader> getReader() throws IOException {
+        return new GatedCloseable<>(null, () -> {});
+    }
+
     public MergeStats getMergeStats() {
         return new MergeStats();
     }
@@ -287,7 +292,18 @@ public abstract class Engine implements LifecycleAware, Closeable {
      */
     public long getMaxSeqNoFromSegmentInfos(SegmentInfos segmentInfos) throws IOException {
         try (DirectoryReader innerReader = StandardDirectoryReader.open(store.directory(), segmentInfos, null, null)) {
-            final IndexSearcher searcher = new IndexSearcher(innerReader);
+            final DirectoryReader softDeletesDirectoryReaderWrapper = new SoftDeletesDirectoryReaderWrapper(
+                innerReader,
+                Lucene.SOFT_DELETES_FIELD
+            );
+            final IndexSearcher searcher = new IndexSearcher(softDeletesDirectoryReaderWrapper);
+//            logger.info("STORE {}", List.of(store.directory().listAll()));
+            for (String file : segmentInfos.files(false)) {
+                 if (List.of(store.directory().listAll()).contains(file) == false) {
+                     logger.info("FILE {} is missing", file);
+                 }
+            }
+//            logger.info("INFOS {}", segmentInfos.files(false));
             return getMaxSeqNoFromSearcher(searcher);
         }
     }

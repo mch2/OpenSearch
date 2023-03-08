@@ -78,7 +78,7 @@ final class SearchScrollQueryThenFetchAsyncAction extends SearchScrollAsyncActio
     }
 
     protected void onFirstPhaseResult(int shardId, ScrollQuerySearchResult result) {
-        queryResults.setOnce(shardId, result.queryResult());
+        logger.info("wat");
     }
 
     @Override
@@ -87,6 +87,7 @@ final class SearchScrollQueryThenFetchAsyncAction extends SearchScrollAsyncActio
         InternalScrollSearchRequest internalRequest,
         SearchActionListener<ScrollQuerySearchResult> searchActionListener
     ) {
+        logger.info("wat");
         searchTransportService.sendExecuteScrollQuery(connection, internalRequest, task, searchActionListener);
     }
 
@@ -95,6 +96,7 @@ final class SearchScrollQueryThenFetchAsyncAction extends SearchScrollAsyncActio
         return new SearchPhase("fetch") {
             @Override
             public void run() {
+                logger.info("wat");
                 final SearchPhaseController.ReducedQueryPhase reducedQueryPhase = searchPhaseController.reducedScrollQueryPhase(
                     queryResults.asList()
                 );

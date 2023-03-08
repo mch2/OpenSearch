@@ -61,6 +61,7 @@ import org.opensearch.common.io.stream.StreamOutput;
 import org.opensearch.common.lease.Releasable;
 import org.opensearch.common.lease.Releasables;
 import org.opensearch.common.lucene.Lucene;
+import org.opensearch.common.lucene.index.OpenSearchDirectoryReader;
 import org.opensearch.common.settings.Setting;
 import org.opensearch.common.settings.Setting.Property;
 import org.opensearch.common.settings.Settings;
@@ -76,6 +77,7 @@ import org.opensearch.index.IndexNotFoundException;
 import org.opensearch.index.IndexService;
 import org.opensearch.index.IndexSettings;
 import org.opensearch.index.engine.Engine;
+import org.opensearch.index.engine.NRTReplicationReaderManager;
 import org.opensearch.index.query.InnerHitContextBuilder;
 import org.opensearch.index.query.MatchAllQueryBuilder;
 import org.opensearch.index.query.MatchNoneQueryBuilder;
@@ -445,6 +447,7 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
     }
 
     protected void putReaderContext(ReaderContext context) {
+        logger.info("Putting reader context {}", context);
         final ReaderContext previous = activeReaders.put(context.id().getId(), context);
         assert previous == null;
         // ensure that if we race against afterIndexRemoved, we remove the context from the active list.
@@ -714,6 +717,7 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
         final LegacyReaderContext readerContext = (LegacyReaderContext) findReaderContext(request.contextId(), request);
         final Releasable markAsUsed;
         try {
+            logger.info("executeFetchPhase {}", request.scroll());
             markAsUsed = readerContext.markAsUsed(getScrollKeepAlive(request.scroll()));
         } catch (Exception e) {
             // We need to release the reader context of the scroll when we hit any exception (here the keep_alive can be too large)
@@ -801,6 +805,12 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
         IndexService indexService = indicesService.indexServiceSafe(request.shardId().getIndex());
         IndexShard shard = indexService.getShard(request.shardId().id());
         Engine.SearcherSupplier reader = shard.acquireSearcherSupplier();
+        try
+            (final Engine.Searcher external = reader.acquireSearcher("search")) {
+            logger.info("Files when fetching reader {}", NRTReplicationReaderManager.unwrapStandardReader((OpenSearchDirectoryReader) external.getDirectoryReader()).getSegmentInfos().files(false));
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
         return createAndPutReaderContext(request, indexService, shard, reader, keepStatesInContext);
     }
 
@@ -838,6 +848,7 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
                     decreaseScrollContexts = null;
                 }
             } else {
+                logger.info("Creating new reader context");
                 readerContext = new ReaderContext(id, indexService, shard, reader, keepAlive, request.keepAlive() == null);
             }
             reader = null;
@@ -889,6 +900,10 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
                     );
                 }
                 searcherSupplier = shard.acquireSearcherSupplier();
+                try (final Engine.Searcher fu = searcherSupplier.acquireSearcher("fu")) {
+                    logger.info("Files {}", List.of(fu.getDirectoryReader().directory().listAll()));
+                }
+                logger.info("Creating PIT context {}", shard.routingEntry());
                 final ShardSearchContextId id = new ShardSearchContextId(sessionId, idGenerator.incrementAndGet());
                 readerContext = new PitReaderContext(id, indexService, shard, searcherSupplier, keepAlive.millis(), false);
                 final ReaderContext finalReaderContext = readerContext;

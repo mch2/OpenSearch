@@ -361,6 +361,12 @@ public class InternalEngine extends Engine {
         logger.trace("created new InternalEngine");
     }
 
+    @Override
+    public GatedCloseable<OpenSearchDirectoryReader> getReader() throws IOException {
+        final OpenSearchDirectoryReader acquire = internalReaderManager.acquire();
+        return new GatedCloseable<>(acquire, () -> internalReaderManager.release(acquire));
+    }
+
     private LocalCheckpointTracker createLocalCheckpointTracker(
         BiFunction<Long, Long, LocalCheckpointTracker> localCheckpointTrackerSupplier
     ) throws IOException {

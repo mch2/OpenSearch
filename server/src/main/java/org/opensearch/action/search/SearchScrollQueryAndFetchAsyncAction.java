@@ -75,16 +75,19 @@ final class SearchScrollQueryAndFetchAsyncAction extends SearchScrollAsyncAction
         InternalScrollSearchRequest internalRequest,
         SearchActionListener<ScrollQueryFetchSearchResult> searchActionListener
     ) {
+        logger.info("wat");
         searchTransportService.sendExecuteScrollFetch(connection, internalRequest, task, searchActionListener);
     }
 
     @Override
     protected SearchPhase moveToNextPhase(BiFunction<String, String, DiscoveryNode> clusterNodeLookup) {
+        logger.info("wat");
         return sendResponsePhase(searchPhaseController.reducedScrollQueryPhase(queryFetchResults.asList()), queryFetchResults);
     }
 
     @Override
     protected void onFirstPhaseResult(int shardId, ScrollQueryFetchSearchResult result) {
+        logger.info("wat");
         queryFetchResults.setOnce(shardId, result.result());
     }
 }

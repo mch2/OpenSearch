@@ -36,6 +36,10 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.LeafReaderContext;
+import org.apache.lucene.index.StandardDirectoryReader;
+import org.opensearch.common.lucene.index.OpenSearchDirectoryReader;
+import org.opensearch.index.engine.Engine;
+import org.opensearch.index.engine.NRTReplicationReaderManager;
 import org.opensearch.lucene.queries.SearchAfterSortedDocQuery;
 import org.apache.lucene.search.BooleanClause;
 import org.apache.lucene.search.BooleanQuery;
@@ -69,6 +73,7 @@ import org.opensearch.threadpool.ThreadPool;
 
 import java.io.IOException;
 import java.util.LinkedList;
+import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 
@@ -128,6 +133,16 @@ public class QueryPhase {
     }
 
     public void execute(SearchContext searchContext) throws QueryPhaseExecutionException {
+        try (final Engine.Searcher searcher = searchContext.readerContext().acquireSearcher("search")) {
+            try {
+                final StandardDirectoryReader standardDirectoryReader = NRTReplicationReaderManager.unwrapStandardReader((OpenSearchDirectoryReader) searcher.getDirectoryReader());
+                LOGGER.info("Files when querying reader {}", standardDirectoryReader.getSegmentInfos().files(false));
+                LOGGER.info("Store state {}", List.of(standardDirectoryReader.directory().listAll()));
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+
         if (searchContext.hasOnlySuggest()) {
             suggestPhase.execute(searchContext);
             searchContext.queryResult()

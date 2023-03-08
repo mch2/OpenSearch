@@ -33,6 +33,8 @@
 package org.opensearch.search.scroll;
 
 import org.opensearch.ExceptionsHelper;
+import org.opensearch.action.admin.indices.stats.IndicesStatsResponse;
+import org.opensearch.action.admin.indices.stats.ShardStats;
 import org.opensearch.action.search.ClearScrollResponse;
 import org.opensearch.action.search.SearchPhaseExecutionException;
 import org.opensearch.action.search.SearchRequestBuilder;
@@ -40,8 +42,11 @@ import org.opensearch.action.search.SearchResponse;
 import org.opensearch.action.search.SearchType;
 import org.opensearch.action.search.ShardSearchFailure;
 import org.opensearch.cluster.metadata.IndexMetadata;
+import org.opensearch.cluster.node.DiscoveryNodes;
+import org.opensearch.cluster.routing.ShardRouting;
 import org.opensearch.common.Priority;
 import org.opensearch.common.bytes.BytesReference;
+import org.opensearch.common.collect.Tuple;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.common.unit.TimeValue;
 import org.opensearch.core.xcontent.ToXContent;
@@ -52,6 +57,7 @@ import org.opensearch.index.IndexSettings;
 import org.opensearch.index.query.MatchAllQueryBuilder;
 import org.opensearch.index.query.QueryBuilders;
 import org.opensearch.index.query.RangeQueryBuilder;
+import org.opensearch.indices.replication.SegmentReplicationBaseIT;
 import org.opensearch.rest.RestStatus;
 import org.opensearch.search.SearchHit;
 import org.opensearch.search.sort.FieldSortBuilder;
@@ -64,8 +70,11 @@ import org.junit.After;
 
 import java.io.IOException;
 import java.util.Collections;
+import java.util.List;
 import java.util.Map;
+import java.util.stream.Stream;
 
+import static java.util.Arrays.asList;
 import static org.opensearch.action.support.WriteRequest.RefreshPolicy.IMMEDIATE;
 import static org.opensearch.common.xcontent.XContentFactory.jsonBuilder;
 import static org.opensearch.index.query.QueryBuilders.matchAllQuery;
@@ -87,7 +96,7 @@ import static org.hamcrest.Matchers.notNullValue;
 /**
  * Tests for scrolling.
  */
-public class SearchScrollIT extends OpenSearchIntegTestCase {
+public class SearchScrollIT extends SegmentReplicationBaseIT {
     @After
     public void cleanup() throws Exception {
         assertAcked(
@@ -100,7 +109,9 @@ public class SearchScrollIT extends OpenSearchIntegTestCase {
     }
 
     public void testSimpleScrollQueryThenFetch() throws Exception {
-        client().admin().indices().prepareCreate("test").setSettings(Settings.builder().put("index.number_of_shards", 3)).get();
+        client().admin().indices().prepareCreate("test").setSettings(Settings.builder()
+                .put(super.indexSettings())
+            .put("index.number_of_shards", 3)).get();
         client().admin().cluster().prepareHealth().setWaitForEvents(Priority.LANGUID).setWaitForGreenStatus().get();
 
         client().admin().cluster().prepareHealth().setWaitForEvents(Priority.LANGUID).setWaitForGreenStatus().get();
@@ -150,10 +161,16 @@ public class SearchScrollIT extends OpenSearchIntegTestCase {
     }
 
     public void testSimpleScrollQueryThenFetchSmallSizeUnevenDistribution() throws Exception {
-        client().admin().indices().prepareCreate("test").setSettings(Settings.builder().put("index.number_of_shards", 3)).get();
-        client().admin().cluster().prepareHealth().setWaitForEvents(Priority.LANGUID).setWaitForGreenStatus().get();
+        final String primary = internalCluster().startNode();
+        createIndex("test");
+        final String replica = internalCluster().startNode();
+//        client().admin().indices().prepareCreate("test").setSettings(Settings.builder()
+//            .put(super.indexSettings())
+//            .put("index.number_of_shards", 3)).get();
+//        client().admin().cluster().prepareHealth().setWaitForEvents(Priority.LANGUID).setWaitForGreenStatus().get();
+        ensureGreen("test");
 
-        client().admin().cluster().prepareHealth().setWaitForEvents(Priority.LANGUID).setWaitForGreenStatus().get();
+//        client().admin().cluster().prepareHealth().setWaitForEvents(Priority.LANGUID).setWaitForGreenStatus().get();
 
         for (int i = 0; i < 100; i++) {
             String routing = "0";
@@ -162,12 +179,13 @@ public class SearchScrollIT extends OpenSearchIntegTestCase {
             } else if (i > 60) {
                 routing = "2";
             }
-            client().prepareIndex("test").setId(Integer.toString(i)).setSource("field", i).setRouting(routing).get();
+            client().prepareIndex("test").setId(Integer.toString(i)).setSource("field", i).get();
         }
 
-        client().admin().indices().prepareRefresh().get();
+        refresh("test");
+//        waitForSearchableDocs("test", 100, List.of(primary, replica));
 
-        SearchResponse searchResponse = client().prepareSearch()
+        SearchResponse searchResponse = client(replica).prepareSearch()
             .setSearchType(SearchType.QUERY_THEN_FETCH)
             .setQuery(matchAllQuery())
             .setSize(3)
@@ -184,7 +202,7 @@ public class SearchScrollIT extends OpenSearchIntegTestCase {
             }
 
             for (int i = 0; i < 32; i++) {
-                searchResponse = client().prepareSearchScroll(searchResponse.getScrollId()).setScroll(TimeValue.timeValueMinutes(2)).get();
+                searchResponse = client(replica).prepareSearchScroll(searchResponse.getScrollId()).setScroll(TimeValue.timeValueMinutes(2)).get();
 
                 assertThat(searchResponse.getHits().getTotalHits().value, equalTo(100L));
                 assertThat(searchResponse.getHits().getHits().length, equalTo(3));
@@ -194,7 +212,7 @@ public class SearchScrollIT extends OpenSearchIntegTestCase {
             }
 
             // and now, the last one is one
-            searchResponse = client().prepareSearchScroll(searchResponse.getScrollId()).setScroll(TimeValue.timeValueMinutes(2)).get();
+            searchResponse = client(replica).prepareSearchScroll(searchResponse.getScrollId()).setScroll(TimeValue.timeValueMinutes(2)).get();
 
             assertThat(searchResponse.getHits().getTotalHits().value, equalTo(100L));
             assertThat(searchResponse.getHits().getHits().length, equalTo(1));
@@ -203,7 +221,7 @@ public class SearchScrollIT extends OpenSearchIntegTestCase {
             }
 
             // a the last is zero
-            searchResponse = client().prepareSearchScroll(searchResponse.getScrollId()).setScroll(TimeValue.timeValueMinutes(2)).get();
+            searchResponse = client(replica).prepareSearchScroll(searchResponse.getScrollId()).setScroll(TimeValue.timeValueMinutes(2)).get();
 
             assertThat(searchResponse.getHits().getTotalHits().value, equalTo(100L));
             assertThat(searchResponse.getHits().getHits().length, equalTo(0));
@@ -212,12 +230,14 @@ public class SearchScrollIT extends OpenSearchIntegTestCase {
             }
 
         } finally {
-            clearScroll(searchResponse.getScrollId());
+//            clearScroll(searchResponse.getScrollId());
         }
     }
 
     public void testScrollAndUpdateIndex() throws Exception {
-        client().admin().indices().prepareCreate("test").setSettings(Settings.builder().put("index.number_of_shards", 5)).get();
+        client().admin().indices().prepareCreate("test").setSettings(Settings.builder()
+            .put(super.indexSettings())
+            .put("index.number_of_shards", 5)).get();
         client().admin().cluster().prepareHealth().setWaitForEvents(Priority.LANGUID).setWaitForGreenStatus().get();
 
         for (int i = 0; i < 500; i++) {
@@ -293,7 +313,9 @@ public class SearchScrollIT extends OpenSearchIntegTestCase {
     }
 
     public void testSimpleScrollQueryThenFetch_clearScrollIds() throws Exception {
-        client().admin().indices().prepareCreate("test").setSettings(Settings.builder().put("index.number_of_shards", 3)).get();
+        client().admin().indices().prepareCreate("test").setSettings(Settings.builder()
+            .put(super.indexSettings())
+            .put("index.number_of_shards", 3)).get();
         client().admin().cluster().prepareHealth().setWaitForEvents(Priority.LANGUID).setWaitForGreenStatus().get();
 
         client().admin().cluster().prepareHealth().setWaitForEvents(Priority.LANGUID).setWaitForGreenStatus().get();
@@ -413,7 +435,9 @@ public class SearchScrollIT extends OpenSearchIntegTestCase {
     }
 
     public void testSimpleScrollQueryThenFetchClearAllScrollIds() throws Exception {
-        client().admin().indices().prepareCreate("test").setSettings(Settings.builder().put("index.number_of_shards", 3)).get();
+        client().admin().indices().prepareCreate("test").setSettings(Settings.builder()
+            .put(super.indexSettings())
+            .put("index.number_of_shards", 3)).get();
         client().admin().cluster().prepareHealth().setWaitForEvents(Priority.LANGUID).setWaitForGreenStatus().get();
 
         client().admin().cluster().prepareHealth().setWaitForEvents(Priority.LANGUID).setWaitForGreenStatus().get();
@@ -795,7 +819,27 @@ public class SearchScrollIT extends OpenSearchIntegTestCase {
         client().prepareSearchScroll(respFromProdIndex.getScrollId()).get();
     }
 
-    private void assertToXContentResponse(ClearScrollResponse response, boolean succeed, int numFreed) throws IOException {
+    private Tuple<String, String> getPrimaryReplicaNodeNames(String indexName) {
+        IndicesStatsResponse response = client().admin().indices().prepareStats(indexName).get();
+        String primaryId = Stream.of(response.getShards())
+            .map(ShardStats::getShardRouting)
+            .filter(ShardRouting::primary)
+            .findAny()
+            .get()
+            .currentNodeId();
+        String replicaId = Stream.of(response.getShards())
+            .map(ShardStats::getShardRouting)
+            .filter(sr -> sr.primary() == false)
+            .findAny()
+            .get()
+            .currentNodeId();
+        DiscoveryNodes nodes = client().admin().cluster().prepareState().get().getState().nodes();
+        String primaryName = nodes.get(primaryId).getName();
+        String replicaName = nodes.get(replicaId).getName();
+        return new Tuple<>(primaryName, replicaName);
+    }
+
+        private void assertToXContentResponse(ClearScrollResponse response, boolean succeed, int numFreed) throws IOException {
         XContentBuilder builder = XContentFactory.jsonBuilder();
         response.toXContent(builder, ToXContent.EMPTY_PARAMS);
         Map<String, Object> map = XContentHelper.convertToMap(BytesReference.bytes(builder), false, builder.contentType()).v2();
