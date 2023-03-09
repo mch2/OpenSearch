@@ -56,6 +56,7 @@ import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -181,21 +182,30 @@ public class PitMultiNodeIT extends SegmentReplicationBaseIT {
         ensureYellowAndNoInitializingShards(INDEX_NAME);
         final String replica = internalCluster().startNode();
         ensureGreen(INDEX_NAME);
-        client().prepareIndex(INDEX_NAME).setId("1").setSource("foo", "bar").setRefreshPolicy(WriteRequest.RefreshPolicy.IMMEDIATE).get();
+        client().prepareIndex(INDEX_NAME).setId("1")
+            .setSource("foo", randomInt()).setRefreshPolicy(WriteRequest.RefreshPolicy.IMMEDIATE).get();
         refresh(INDEX_NAME);
 
-        client().prepareIndex(INDEX_NAME).setId("2").setSource("foo", "bar").setRefreshPolicy(WriteRequest.RefreshPolicy.IMMEDIATE).get();
-
-        CreatePitRequest request = new CreatePitRequest(TimeValue.timeValueDays(1), true);
+        client().prepareIndex(INDEX_NAME).setId("2").setSource("foo", randomInt()).setRefreshPolicy(WriteRequest.RefreshPolicy.IMMEDIATE).get();
+        for (int i = 3; i < 100; i++) {
+            client().prepareIndex(INDEX_NAME).setId(String.valueOf(i)).setSource("foo", randomInt()).setRefreshPolicy(WriteRequest.RefreshPolicy.IMMEDIATE).get();
+            refresh(INDEX_NAME);
+        }
+        CreatePitRequest request = new CreatePitRequest(TimeValue.timeValueDays(1), false);
+        request.setPreference("_only_local");
         request.setIndices(new String[] { INDEX_NAME });
-        ActionFuture<CreatePitResponse> execute = client(replica).execute(CreatePitAction.INSTANCE, request);
+        ActionFuture<CreatePitResponse> execute = client(replica)
+            .execute(CreatePitAction.INSTANCE, request);
         CreatePitResponse pitResponse = execute.get();
         SearchResponse searchResponse = client(replica).prepareSearch(INDEX_NAME)
-            .setSize(2)
+            .setSize(10)
             .setPreference("_only_local")
+            .setRequestCache(false)
+            .addSort("foo", SortOrder.ASC)
+            .searchAfter(new Object[] { 30 })
             .setPointInTime(new PointInTimeBuilder(pitResponse.getId()).setKeepAlive(TimeValue.timeValueDays(1)))
             .get();
-        logger.info("Hits : {}", searchResponse.getHits().getTotalHits());
+        logger.info("Hits : {}", List.of(searchResponse.getHits().getHits()));
         assertEquals(1, searchResponse.getSuccessfulShards());
         assertEquals(1, searchResponse.getTotalShards());
         FlushRequest flushRequest = Requests.flushRequest(INDEX_NAME);
@@ -207,8 +217,8 @@ public class PitMultiNodeIT extends SegmentReplicationBaseIT {
         logger.info("Primary store {}", List.of(primaryShard.store().directory().listAll()));
         logger.info("Replica store {}", List.of(replicaShard.store().directory().listAll()));
 
-        for (int i = 3; i < 100; i++) {
-            client().prepareIndex(INDEX_NAME).setId(String.valueOf(i)).setSource("foo", "bar").setRefreshPolicy(WriteRequest.RefreshPolicy.IMMEDIATE).get();
+        for (int i = 101; i < 200; i++) {
+            client().prepareIndex(INDEX_NAME).setId(String.valueOf(i)).setSource("foo", randomInt()).setRefreshPolicy(WriteRequest.RefreshPolicy.IMMEDIATE).get();
             refresh(INDEX_NAME);
             if (randomBoolean()) {
                 client().admin().indices().prepareForceMerge(INDEX_NAME).setMaxNumSegments(1).setFlush(true).get();
@@ -241,11 +251,14 @@ public class PitMultiNodeIT extends SegmentReplicationBaseIT {
         logger.info("Primary store {}", List.of(primaryShard.store().directory().listAll()));
         logger.info("Replica store {}", List.of(replicaShard.store().directory().listAll()));
         SearchResponse resp = client(replica).prepareSearch(INDEX_NAME)
-            .setSize(2)
+            .setSize(10)
             .setPreference("_only_local")
+            .addSort("foo", SortOrder.ASC)
+            .searchAfter(new Object[] { 30 })
             .setPointInTime(new PointInTimeBuilder(pitResponse.getId()).setKeepAlive(TimeValue.timeValueDays(1)))
+            .setRequestCache(false)
             .get();
-        logger.info("Hits : {}", resp.getHits().getTotalHits());
+        logger.info("Hits : {}", List.of(resp.getHits().getHits()));
         PitTestsUtil.assertUsingGetAllPits(client(replica), pitResponse.getId(), pitResponse.getCreationTime());
         assertSegments(false, client(replica), pitResponse.getId());
     }

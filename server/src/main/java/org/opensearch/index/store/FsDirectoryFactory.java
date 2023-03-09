@@ -97,13 +97,13 @@ public class FsDirectoryFactory implements IndexStorePlugin.DirectoryFactory {
             case HYBRIDFS:
                 // Use Lucene defaults
                 final FSDirectory primaryDirectory = FSDirectory.open(location, lockFactory);
-                final Set<String> mmapExtensions = new HashSet<>(indexSettings.getValue(IndexModule.INDEX_STORE_HYBRID_MMAP_EXTENSIONS));
-                if (primaryDirectory instanceof MMapDirectory) {
-                    MMapDirectory mMapDirectory = (MMapDirectory) primaryDirectory;
-                    return new HybridDirectory(lockFactory, setPreload(mMapDirectory, lockFactory, preLoadExtensions), mmapExtensions);
-                } else {
+//                final Set<String> mmapExtensions = new HashSet<>(indexSettings.getValue(IndexModule.INDEX_STORE_HYBRID_MMAP_EXTENSIONS));
+//                if (primaryDirectory instanceof MMapDirectory) {
+//                    MMapDirectory mMapDirectory = (MMapDirectory) primaryDirectory;
+//                    return new HybridDirectory(lockFactory, setPreload(mMapDirectory, lockFactory, preLoadExtensions), mmapExtensions);
+//                } else {
                     return primaryDirectory;
-                }
+//                }
             case MMAPFS:
                 return setPreload(new MMapDirectory(location, lockFactory), lockFactory, preLoadExtensions);
             // simplefs was removed in Lucene 9; support for enum is maintained for bwc
