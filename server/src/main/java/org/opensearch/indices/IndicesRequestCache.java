@@ -89,13 +89,13 @@ public final class IndicesRequestCache implements RemovalListener<IndicesRequest
      */
     public static final Setting<Boolean> INDEX_CACHE_REQUEST_ENABLED_SETTING = Setting.boolSetting(
         "index.requests.cache.enable",
-        true,
+        false,
         Property.Dynamic,
         Property.IndexScope
     );
     public static final Setting<ByteSizeValue> INDICES_CACHE_QUERY_SIZE = Setting.memorySizeSetting(
         "indices.requests.cache.size",
-        "1%",
+        "0%",
         Property.NodeScope
     );
     public static final Setting<TimeValue> INDICES_CACHE_QUERY_EXPIRE = Setting.positiveTimeSetting(
