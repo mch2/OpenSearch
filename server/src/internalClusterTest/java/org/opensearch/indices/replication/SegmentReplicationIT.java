@@ -640,7 +640,7 @@ public class SegmentReplicationIT extends SegmentReplicationBaseIT {
             SegmentReplicationPerGroupStats groupStats = shardStats.get(primaryShard.shardId());
             Set<SegmentReplicationShardStats> replicaStats = groupStats.getReplicaStats();
             assertEquals(1, replicaStats.size());
-            assertEquals(replica.routingEntry().currentNodeId(), replicaStats.stream().findFirst().get().getNodeId());
+            assertEquals(replica.routingEntry().currentNodeId(), replicaStats.stream().findFirst().get().getAllocationId());
 
             // assert replica node returns nothing.
             SegmentReplicationPressureService replicaNode_service = internalCluster().getInstance(
@@ -672,7 +672,7 @@ public class SegmentReplicationIT extends SegmentReplicationBaseIT {
             assertEquals(1, replicaNode_service.nodeStats().getShardStats().size());
             replicaStats = replicaNode_service.nodeStats().getShardStats().get(primaryShard.shardId()).getReplicaStats();
             assertEquals(1, replicaStats.size());
-            assertEquals(replica.routingEntry().currentNodeId(), replicaStats.stream().findFirst().get().getNodeId());
+            assertEquals(replica.routingEntry().currentNodeId(), replicaStats.stream().findFirst().get().getAllocationId());
 
             // test a checkpoint without any new segments
             flush(INDEX_NAME);

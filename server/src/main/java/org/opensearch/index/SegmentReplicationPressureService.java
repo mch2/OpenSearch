@@ -10,6 +10,8 @@ package org.opensearch.index;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.opensearch.action.ActionListener;
+import org.opensearch.cluster.action.shard.ShardStateAction;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.inject.Inject;
 import org.opensearch.common.settings.ClusterSettings;
@@ -20,8 +22,11 @@ import org.opensearch.common.util.concurrent.OpenSearchRejectedExecutionExceptio
 import org.opensearch.index.shard.IndexShard;
 import org.opensearch.index.shard.ShardId;
 import org.opensearch.indices.IndicesService;
+import org.opensearch.indices.cluster.IndicesClusterStateService;
+import org.opensearch.threadpool.ThreadPool;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -71,11 +76,13 @@ public class SegmentReplicationPressureService {
     );
 
     private final IndicesService indicesService;
+    private final ShardStateAction shardStateAction;
     private final SegmentReplicationStatsTracker tracker;
 
     @Inject
-    public SegmentReplicationPressureService(Settings settings, ClusterService clusterService, IndicesService indicesService) {
+    public SegmentReplicationPressureService(Settings settings, ClusterService clusterService, IndicesService indicesService, ShardStateAction shardStateAction) {
         this.indicesService = indicesService;
+        this.shardStateAction = shardStateAction;
         this.tracker = new SegmentReplicationStatsTracker(this.indicesService);
 
         final ClusterSettings clusterSettings = clusterService.getClusterSettings();
@@ -150,6 +157,50 @@ public class SegmentReplicationPressureService {
 
     public void setMaxReplicationTime(TimeValue maxReplicationTime) {
         this.maxReplicationTime = maxReplicationTime;
+    }
+
+    final class AsyncFailStaleReplicaTask extends IndexService.BaseAsyncTask {
+
+        AsyncFailStaleReplicaTask(final IndexService indexService) {
+            super(indexService, TimeValue.timeValueSeconds(30));
+        }
+
+        @Override
+        protected void runInternal() {
+            final SegmentReplicationStats stats = tracker.getStats();
+            for (Map.Entry<ShardId, SegmentReplicationPerGroupStats> entry : stats.getShardStats().entrySet()) {
+                final List<SegmentReplicationShardStats> staleReplicas = getStaleReplicas(entry.getValue().getReplicaStats());
+                final ShardId shardId = entry.getKey();
+                final IndexService indexService = indicesService.indexService(shardId.getIndex());
+                final IndexShard primaryShard = indexService.getShard(shardId.getId());
+                for (SegmentReplicationShardStats staleReplica : staleReplicas) {
+                    if (staleReplica.getCurrentReplicationTimeMillis() > 2 * maxReplicationTime.millis()) {
+                        shardStateAction.remoteShardFailed(shardId, staleReplica.getAllocationId(), primaryShard.getOperationPrimaryTerm(), true, "replica too far behind primary, marking as stale", null, new ActionListener<>() {
+                            @Override
+                            public void onResponse(Void unused) {
+                                logger.trace("Successfully failed remote shardId [{}] allocation id [{}]", shardId, staleReplica.getAllocationId());
+                            }
+
+                            @Override
+                            public void onFailure(Exception e) {
+                                logger.error("Failed to send remote shard failure", e);
+                            }
+                        });
+                    }
+                }
+            }
+        }
+
+        @Override
+        protected String getThreadPool() {
+            return ThreadPool.Names.MANAGEMENT;
+        }
+
+        @Override
+        public String toString() {
+            return "retention_lease_sync";
+        }
+
     }
 
 }
