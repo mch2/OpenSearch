@@ -67,7 +67,7 @@ public class RecoverySettings {
         "indices.recovery.max_concurrent_file_chunks",
         2,
         1,
-        5,
+        10000,
         Property.Dynamic,
         Property.NodeScope
     );
