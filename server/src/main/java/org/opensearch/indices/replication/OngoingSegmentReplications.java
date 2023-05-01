@@ -58,8 +58,8 @@ class OngoingSegmentReplications {
     OngoingSegmentReplications(IndicesService indicesService, RecoverySettings recoverySettings) {
         this.indicesService = indicesService;
         this.recoverySettings = recoverySettings;
-        this.copyStateMap = Collections.synchronizedMap(new HashMap<>());
-        this.allocationIdToHandlers = ConcurrentCollections.newConcurrentMap();
+        this.copyStateMap = ConcurrentCollections.newConcurrentMapWithAggressiveConcurrency();
+        this.allocationIdToHandlers = ConcurrentCollections.newConcurrentMapWithAggressiveConcurrency();
     }
 
     /**
@@ -71,9 +71,9 @@ class OngoingSegmentReplications {
      * and returns the cached value if one is present. If the key is not present, a {@link CopyState}
      * object is constructed and stored in the map before being returned.
      */
-    synchronized CopyState getCachedCopyState(ReplicationCheckpoint checkpoint) throws IOException {
-        if (isInCopyStateMap(checkpoint)) {
-            final CopyState copyState = fetchFromCopyStateMap(checkpoint);
+    CopyState getCachedCopyState(ReplicationCheckpoint checkpoint) throws IOException {
+        final CopyState copyState = fetchFromCopyStateMap(checkpoint);
+        if (copyState != null) {
             // we incref the copyState for every replica that is using this checkpoint.
             // decref will happen when copy completes.
             copyState.incRef();
@@ -84,7 +84,7 @@ class OngoingSegmentReplications {
             final IndexService indexService = indicesService.indexServiceSafe(shardId.getIndex());
             final IndexShard indexShard = indexService.getShard(shardId.id());
             // build the CopyState object and cache it before returning
-            final CopyState copyState = new CopyState(checkpoint, indexShard);
+            final CopyState latestCopyState = new CopyState(checkpoint, indexShard);
 
             /**
              * Use the checkpoint from the request as the key in the map, rather than
@@ -93,8 +93,8 @@ class OngoingSegmentReplications {
              * Replication targets are expected to fetch the checkpoint in the response
              * CopyState to bring themselves up to date.
              */
-            addToCopyStateMap(checkpoint, copyState);
-            return copyState;
+            addToCopyStateMap(checkpoint, latestCopyState);
+            return latestCopyState;
         }
     }
 
@@ -257,9 +257,9 @@ class OngoingSegmentReplications {
      *
      * @param copyState {@link CopyState}
      */
-    private synchronized void removeCopyState(CopyState copyState) {
+    private void removeCopyState(CopyState copyState) {
         if (copyState.decRef() == true) {
-            copyStateMap.remove(copyState.getRequestedReplicationCheckpoint());
+            copyStateMap.remove(copyState.getRequestedReplicationCheckpoint(), copyState);
         }
     }
 
@@ -284,7 +284,8 @@ class OngoingSegmentReplications {
 
     /**
      * Clear copystate and target handlers for any non insync allocationIds.
-     * @param shardId {@link ShardId}
+     *
+     * @param shardId             {@link ShardId}
      * @param inSyncAllocationIds {@link List} of in-sync allocation Ids.
      */
     public void clearOutOfSyncIds(ShardId shardId, Set<String> inSyncAllocationIds) {
