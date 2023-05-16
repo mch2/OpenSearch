@@ -82,7 +82,7 @@ public final class RetryableTransportClient {
     ) {
         final Object key = new Object();
         final ActionListener<T> removeListener = ActionListener.runBefore(actionListener, () -> onGoingRetryableActions.remove(key));
-        final TimeValue initialDelay = TimeValue.timeValueMillis(200);
+        final TimeValue initialDelay = TimeValue.timeValueMillis(1);
         final RetryableAction<T> retryableAction = new RetryableAction<T>(logger, threadPool, initialDelay, retryTimeout, removeListener) {
 
             @Override

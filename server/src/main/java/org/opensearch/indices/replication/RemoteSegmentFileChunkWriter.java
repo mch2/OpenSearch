@@ -8,11 +8,14 @@
 
 package org.opensearch.indices.replication;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.apache.lucene.store.RateLimiter;
 import org.opensearch.OpenSearchException;
 import org.opensearch.action.ActionListener;
 import org.opensearch.common.bytes.BytesReference;
 import org.opensearch.common.io.stream.Writeable;
+import org.opensearch.common.unit.TimeValue;
 import org.opensearch.index.shard.ShardId;
 import org.opensearch.index.store.StoreFileMetadata;
 import org.opensearch.indices.recovery.FileChunkRequest;
@@ -41,6 +44,7 @@ public final class RemoteSegmentFileChunkWriter implements FileChunkWriter {
     private final TransportRequestOptions fileChunkRequestOptions;
     private final Consumer<Long> onSourceThrottle;
     private final String action;
+    private static final Logger logger = LogManager.getLogger(RemoteSegmentFileChunkWriter.class);
 
     public RemoteSegmentFileChunkWriter(
         long replicationId,
@@ -74,6 +78,7 @@ public final class RemoteSegmentFileChunkWriter implements FileChunkWriter {
         int totalTranslogOps,
         ActionListener<Void> listener
     ) {
+        logger.info("Sending file chunk {} {} {} {} {}", fileMetadata.name(), position, content.length(), lastChunk, System.currentTimeMillis());
         // Pause using the rate limiter, if desired, to throttle the recovery
         final long throttleTimeInNanos;
         // always fetch the ratelimiter - it might be updated in real-time on the recovery settings

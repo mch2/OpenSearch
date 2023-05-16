@@ -24,6 +24,7 @@ import org.opensearch.action.StepListener;
 import org.opensearch.common.UUIDs;
 import org.opensearch.common.bytes.BytesReference;
 import org.opensearch.common.lucene.Lucene;
+import org.opensearch.common.unit.TimeValue;
 import org.opensearch.common.util.CancellableThreads;
 import org.opensearch.index.shard.IndexShard;
 import org.opensearch.index.store.Store;
@@ -136,9 +137,10 @@ public class SegmentReplicationTarget extends ReplicationTarget {
         ActionListener<Void> listener
     ) {
         try {
-            logger.info("Writing chunk {} {} {} {}", metadata.name(), content.ramBytesUsed(), content.length(), metadata.length());
+            final long start = System.currentTimeMillis();
+            logger.info("Writing chunk {} {} {} {} {}", metadata.name(), position, content.length(), metadata.length(), start);
             multiFileWriter.writeFileChunk(metadata, position, content, lastChunk);
-            logger.info("Finished writing chunk {} {}", metadata.name(), content.length());
+            logger.info("Finished writing chunk {} {} {} {}", metadata.name(), position, content.length(), System.currentTimeMillis() - start);
             listener.onResponse(null);
         } catch (Exception e) {
             listener.onFailure(e);

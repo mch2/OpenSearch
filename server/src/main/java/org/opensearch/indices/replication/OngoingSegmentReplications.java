@@ -58,7 +58,7 @@ class OngoingSegmentReplications {
     OngoingSegmentReplications(IndicesService indicesService, SegmentReplicationSettings recoverySettings) {
         this.indicesService = indicesService;
         this.segmentReplicationSettings = recoverySettings;
-        this.copyStateMap = Collections.synchronizedMap(new HashMap<>());
+        this.copyStateMap = ConcurrentCollections.newConcurrentMap();
         this.allocationIdToHandlers = ConcurrentCollections.newConcurrentMap();
     }
 
@@ -71,13 +71,11 @@ class OngoingSegmentReplications {
      * and returns the cached value if one is present. If the key is not present, a {@link CopyState}
      * object is constructed and stored in the map before being returned.
      */
-    synchronized CopyState getCachedCopyState(ReplicationCheckpoint checkpoint) throws IOException {
-        if (isInCopyStateMap(checkpoint)) {
-            final CopyState copyState = fetchFromCopyStateMap(checkpoint);
-            // we incref the copyState for every replica that is using this checkpoint.
-            // decref will happen when copy completes.
-            copyState.incRef();
-            return copyState;
+    CopyState getCachedCopyState(ReplicationCheckpoint checkpoint) throws IOException {
+        final CopyState state = copyStateMap.get(checkpoint);
+        if (state != null) {
+            state.incRef();
+            return state;
         } else {
             // From the checkpoint's shard ID, fetch the IndexShard
             ShardId shardId = checkpoint.getShardId();
@@ -93,7 +91,12 @@ class OngoingSegmentReplications {
              * Replication targets are expected to fetch the checkpoint in the response
              * CopyState to bring themselves up to date.
              */
-            addToCopyStateMap(checkpoint, copyState);
+            final CopyState result = copyStateMap.putIfAbsent(checkpoint, copyState);
+            if (result != null) {
+                copyState.decRef();
+                result.incRef();
+                return result;
+            }
             return copyState;
         }
     }
@@ -235,28 +238,12 @@ class OngoingSegmentReplications {
     }
 
     /**
-     * Adds the input {@link CopyState} object to {@link #copyStateMap}.
-     * The key is the CopyState's {@link ReplicationCheckpoint} object.
-     */
-    private void addToCopyStateMap(ReplicationCheckpoint checkpoint, CopyState copyState) {
-        copyStateMap.putIfAbsent(checkpoint, copyState);
-    }
-
-    /**
-     * Given a {@link ReplicationCheckpoint}, return the corresponding
-     * {@link CopyState} object, if any, from {@link #copyStateMap}.
-     */
-    private CopyState fetchFromCopyStateMap(ReplicationCheckpoint replicationCheckpoint) {
-        return copyStateMap.get(replicationCheckpoint);
-    }
-
-    /**
      * Remove a CopyState. Intended to be called after a replication event completes.
      * This method will remove a copyState from the copyStateMap only if its refCount hits 0.
      *
      * @param copyState {@link CopyState}
      */
-    private synchronized void removeCopyState(CopyState copyState) {
+    private void removeCopyState(CopyState copyState) {
         if (copyState.decRef() == true) {
             copyStateMap.remove(copyState.getRequestedReplicationCheckpoint());
         }
