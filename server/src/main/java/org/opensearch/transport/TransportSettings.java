@@ -271,7 +271,7 @@ public final class TransportSettings {
 
     public static final Setting<Integer> CONNECTIONS_PER_NODE_RECOVERY = intSetting(
         "transport.connections_per_node.recovery",
-        2,
+        4,
         1,
         Setting.Property.NodeScope
     );

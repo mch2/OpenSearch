@@ -79,12 +79,12 @@ public class SegmentReplicationSourceServiceTests extends OpenSearchTestCase {
 
         final Settings settings = Settings.builder().put("node.name", SegmentReplicationTargetServiceTests.class.getSimpleName()).build();
         final ClusterSettings clusterSettings = new ClusterSettings(settings, ClusterSettings.BUILT_IN_CLUSTER_SETTINGS);
-        final RecoverySettings recoverySettings = new RecoverySettings(settings, clusterSettings);
+        final SegmentReplicationSettings segmentReplicationSettings = new SegmentReplicationSettings(settings, clusterSettings);
 
         SegmentReplicationSourceService segmentReplicationSourceService = new SegmentReplicationSourceService(
             mockIndicesService,
             transportService,
-            recoverySettings
+            segmentReplicationSettings
         );
     }
 

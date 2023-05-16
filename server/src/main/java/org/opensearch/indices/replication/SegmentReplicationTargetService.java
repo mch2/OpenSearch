@@ -123,7 +123,7 @@ public class SegmentReplicationTargetService implements IndexEventListener {
 
         transportService.registerRequestHandler(
             Actions.FILE_CHUNK,
-            ThreadPool.Names.GENERIC,
+            ThreadPool.Names.SYSTEM_WRITE,
             FileChunkRequest::new,
             new FileChunkTransportRequestHandler()
         );

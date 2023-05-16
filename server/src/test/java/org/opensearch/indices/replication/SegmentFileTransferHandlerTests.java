@@ -107,8 +107,7 @@ public class SegmentFileTransferHandlerTests extends IndexShardTestCase {
             logger,
             shard.getThreadPool(),
             cancellableThreads,
-            fileChunkSizeInBytes,
-            maxConcurrentFileChunks
+            mock(ReplicationSettings.class)
         );
         final MultiChunkTransfer<StoreFileMetadata, SegmentFileTransferHandler.FileChunk> transfer = handler.createTransfer(
             shard.store(),
@@ -145,8 +144,7 @@ public class SegmentFileTransferHandlerTests extends IndexShardTestCase {
             logger,
             shard.getThreadPool(),
             cancellableThreads,
-            fileChunkSizeInBytes,
-            maxConcurrentFileChunks
+            mock(ReplicationSettings.class)
         );
 
         final MultiChunkTransfer<StoreFileMetadata, SegmentFileTransferHandler.FileChunk> transfer = handler.createTransfer(
@@ -196,8 +194,7 @@ public class SegmentFileTransferHandlerTests extends IndexShardTestCase {
             logger,
             shard.getThreadPool(),
             cancellableThreads,
-            fileChunkSizeInBytes,
-            maxConcurrentFileChunks
+            mock(ReplicationSettings.class)
         );
 
         final MultiChunkTransfer<StoreFileMetadata, SegmentFileTransferHandler.FileChunk> transfer = handler.createTransfer(
@@ -234,8 +231,7 @@ public class SegmentFileTransferHandlerTests extends IndexShardTestCase {
             logger,
             shard.getThreadPool(),
             cancellableThreads,
-            fileChunkSizeInBytes,
-            maxConcurrentFileChunks
+            mock(ReplicationSettings.class)
         );
         final StoreFileMetadata SEGMENTS_FILE = new StoreFileMetadata(
             IndexFileNames.SEGMENTS,

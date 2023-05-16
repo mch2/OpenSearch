@@ -110,24 +110,21 @@ public abstract class RecoverySourceHandler {
     protected final int shardId;
     // Request containing source and target node information
     protected final StartRecoveryRequest request;
-    private final int chunkSizeInBytes;
     private final RecoveryTargetHandler recoveryTarget;
-    private final int maxConcurrentOperations;
     private final ThreadPool threadPool;
     protected final CancellableThreads cancellableThreads = new CancellableThreads();
     protected final List<Closeable> resources = new CopyOnWriteArrayList<>();
     protected final ListenableFuture<RecoveryResponse> future = new ListenableFuture<>();
     public static final String PEER_RECOVERY_NAME = "peer-recovery";
     private final SegmentFileTransferHandler transferHandler;
+    private final RecoverySettings recoverySettings;
 
     RecoverySourceHandler(
         IndexShard shard,
         RecoveryTargetHandler recoveryTarget,
         ThreadPool threadPool,
         StartRecoveryRequest request,
-        int fileChunkSizeInBytes,
-        int maxConcurrentFileChunks,
-        int maxConcurrentOperations
+        RecoverySettings recoverySettings
     ) {
         this.logger = Loggers.getLogger(RecoverySourceHandler.class, request.shardId(), "recover to " + request.targetNode().getName());
         this.transferHandler = new SegmentFileTransferHandler(
@@ -137,17 +134,14 @@ public abstract class RecoverySourceHandler {
             logger,
             threadPool,
             cancellableThreads,
-            fileChunkSizeInBytes,
-            maxConcurrentFileChunks
+            recoverySettings
         );
         this.shard = shard;
         this.threadPool = threadPool;
         this.request = request;
         this.recoveryTarget = recoveryTarget;
         this.shardId = this.request.shardId().id();
-        this.chunkSizeInBytes = fileChunkSizeInBytes;
-        // if the target is on an old version, it won't be able to handle out-of-order file chunks.
-        this.maxConcurrentOperations = maxConcurrentOperations;
+        this.recoverySettings = recoverySettings;
     }
 
     public StartRecoveryRequest getRequest() {
@@ -716,7 +710,7 @@ public abstract class RecoverySourceHandler {
             long mappingVersion,
             ActionListener<Void> listener
         ) {
-            super(logger, threadPool.getThreadContext(), listener, maxConcurrentOperations, Collections.singletonList(snapshot));
+            super(logger, threadPool.getThreadContext(), listener, recoverySettings.getMaxConcurrentOperations(), Collections.singletonList(snapshot));
             this.startingSeqNo = startingSeqNo;
             this.endingSeqNo = endingSeqNo;
             this.snapshot = snapshot;
@@ -749,7 +743,7 @@ public abstract class RecoverySourceHandler {
                 sentOps.incrementAndGet();
 
                 // check if this request is past bytes threshold, and if so, send it off
-                if (batchSizeInBytes >= chunkSizeInBytes) {
+                if (batchSizeInBytes >= recoverySettings.getChunkSize()) {
                     break;
                 }
             }

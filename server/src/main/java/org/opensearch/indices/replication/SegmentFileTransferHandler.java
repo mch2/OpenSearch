@@ -52,10 +52,9 @@ public final class SegmentFileTransferHandler {
     private final IndexShard shard;
     private final FileChunkWriter chunkWriter;
     private final ThreadPool threadPool;
-    private final int chunkSizeInBytes;
-    private final int maxConcurrentFileChunks;
     private final DiscoveryNode targetNode;
     private final CancellableThreads cancellableThreads;
+    private final ReplicationSettings replicationSettings;
 
     public SegmentFileTransferHandler(
         IndexShard shard,
@@ -64,8 +63,7 @@ public final class SegmentFileTransferHandler {
         Logger logger,
         ThreadPool threadPool,
         CancellableThreads cancellableThreads,
-        int fileChunkSizeInBytes,
-        int maxConcurrentFileChunks
+        ReplicationSettings replicationSettings
     ) {
         this.shard = shard;
         this.targetNode = targetNode;
@@ -73,9 +71,7 @@ public final class SegmentFileTransferHandler {
         this.logger = logger;
         this.threadPool = threadPool;
         this.cancellableThreads = cancellableThreads;
-        this.chunkSizeInBytes = fileChunkSizeInBytes;
-        // if the target is on an old version, it won't be able to handle out-of-order file chunks.
-        this.maxConcurrentFileChunks = maxConcurrentFileChunks;
+        this.replicationSettings = replicationSettings;
     }
 
     /**
@@ -94,7 +90,7 @@ public final class SegmentFileTransferHandler {
         ActionListener<Void> listener
     ) {
         ArrayUtil.timSort(files, Comparator.comparingLong(StoreFileMetadata::length)); // send smallest first
-        return new MultiChunkTransfer<>(logger, threadPool.getThreadContext(), listener, maxConcurrentFileChunks, Arrays.asList(files)) {
+        return new MultiChunkTransfer<>(logger, threadPool.getThreadContext(), listener, replicationSettings.getMaxConcurrentFileChunks(), Arrays.asList(files)) {
 
             final Deque<byte[]> buffers = new ConcurrentLinkedDeque<>();
             InputStreamIndexInput currentInput = null;
@@ -118,7 +114,7 @@ public final class SegmentFileTransferHandler {
                 if (buffer != null) {
                     return buffer;
                 }
-                return new byte[chunkSizeInBytes];
+                return new byte[replicationSettings.getChunkSize()];
             }
 
             @Override

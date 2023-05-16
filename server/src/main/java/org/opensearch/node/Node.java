@@ -47,6 +47,7 @@ import org.opensearch.index.IndexingPressureService;
 import org.opensearch.index.store.remote.filecache.FileCache;
 import org.opensearch.index.store.remote.filecache.FileCacheCleaner;
 import org.opensearch.index.store.remote.filecache.FileCacheFactory;
+import org.opensearch.indices.replication.SegmentReplicationSettings;
 import org.opensearch.indices.replication.SegmentReplicationSourceFactory;
 import org.opensearch.indices.replication.SegmentReplicationTargetService;
 import org.opensearch.indices.replication.SegmentReplicationSourceService;
@@ -885,6 +886,7 @@ public class Node implements Closeable {
             );
 
             final RecoverySettings recoverySettings = new RecoverySettings(settings, settingsModule.getClusterSettings());
+            final SegmentReplicationSettings segmentReplicationSettings = new SegmentReplicationSettings(settings, settingsModule.getClusterSettings());
             RepositoriesModule repositoriesModule = new RepositoriesModule(
                 this.environment,
                 pluginsService.filterPlugins(RepositoryPlugin.class),
@@ -1089,7 +1091,7 @@ public class Node implements Closeable {
                             )
                         );
                     b.bind(SegmentReplicationSourceService.class)
-                        .toInstance(new SegmentReplicationSourceService(indicesService, transportService, recoverySettings));
+                        .toInstance(new SegmentReplicationSourceService(indicesService, transportService, segmentReplicationSettings));
                 }
                 b.bind(HttpServerTransport.class).toInstance(httpServerTransport);
                 pluginComponents.stream().forEach(p -> b.bind((Class) p.getClass()).toInstance(p));

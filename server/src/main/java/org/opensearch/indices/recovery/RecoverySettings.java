@@ -43,13 +43,15 @@ import org.opensearch.common.settings.Settings;
 import org.opensearch.common.unit.ByteSizeUnit;
 import org.opensearch.common.unit.ByteSizeValue;
 import org.opensearch.common.unit.TimeValue;
+import org.opensearch.indices.replication.ReplicationSettings;
+import org.opensearch.transport.TransportRequestOptions;
 
 /**
  * Settings for the recovery mechanism
  *
  * @opensearch.internal
  */
-public class RecoverySettings {
+public class RecoverySettings implements ReplicationSettings {
 
     private static final Logger logger = LogManager.getLogger(RecoverySettings.class);
 
@@ -214,6 +216,10 @@ public class RecoverySettings {
         return internalActionTimeout;
     }
 
+    public TransportRequestOptions.Type getTransportRequestType() {
+        return TransportRequestOptions.Type.RECOVERY;
+    }
+
     public TimeValue internalActionRetryTimeout() {
         return internalActionRetryTimeout;
     }
@@ -222,8 +228,8 @@ public class RecoverySettings {
         return internalActionLongTimeout;
     }
 
-    public ByteSizeValue getChunkSize() {
-        return chunkSize;
+    public int getChunkSize() {
+        return Math.toIntExact(chunkSize.getBytes());
     }
 
     public void setChunkSize(ByteSizeValue chunkSize) { // only settable for tests

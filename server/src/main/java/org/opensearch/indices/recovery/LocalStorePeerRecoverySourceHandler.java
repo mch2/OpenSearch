@@ -48,11 +48,9 @@ public class LocalStorePeerRecoverySourceHandler extends RecoverySourceHandler {
         RecoveryTargetHandler recoveryTarget,
         ThreadPool threadPool,
         StartRecoveryRequest request,
-        int fileChunkSizeInBytes,
-        int maxConcurrentFileChunks,
-        int maxConcurrentOperations
+        RecoverySettings recoverySettings
     ) {
-        super(shard, recoveryTarget, threadPool, request, fileChunkSizeInBytes, maxConcurrentFileChunks, maxConcurrentOperations);
+        super(shard, recoveryTarget, threadPool, request, recoverySettings);
     }
 
     @Override

@@ -30,9 +30,7 @@ public class RecoverySourceHandlerFactory {
                 recoveryTarget,
                 shard.getThreadPool(),
                 request,
-                Math.toIntExact(recoverySettings.getChunkSize().getBytes()),
-                recoverySettings.getMaxConcurrentFileChunks(),
-                recoverySettings.getMaxConcurrentOperations()
+                recoverySettings
             );
         } else {
             return new LocalStorePeerRecoverySourceHandler(
@@ -40,9 +38,7 @@ public class RecoverySourceHandlerFactory {
                 recoveryTarget,
                 shard.getThreadPool(),
                 request,
-                Math.toIntExact(recoverySettings.getChunkSize().getBytes()),
-                recoverySettings.getMaxConcurrentFileChunks(),
-                recoverySettings.getMaxConcurrentOperations()
+                recoverySettings
             );
         }
     }

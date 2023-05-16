@@ -16,7 +16,6 @@ import org.opensearch.common.io.stream.Writeable;
 import org.opensearch.index.shard.ShardId;
 import org.opensearch.index.store.StoreFileMetadata;
 import org.opensearch.indices.recovery.FileChunkRequest;
-import org.opensearch.indices.recovery.RecoverySettings;
 import org.opensearch.indices.recovery.RetryableTransportClient;
 import org.opensearch.indices.recovery.FileChunkWriter;
 import org.opensearch.transport.TransportRequestOptions;
@@ -36,7 +35,7 @@ public final class RemoteSegmentFileChunkWriter implements FileChunkWriter {
     private final AtomicLong requestSeqNoGenerator;
     private final RetryableTransportClient retryableTransportClient;
     private final ShardId shardId;
-    private final RecoverySettings recoverySettings;
+    private final ReplicationSettings replicationSettings;
     private final long replicationId;
     private final AtomicLong bytesSinceLastPause = new AtomicLong();
     private final TransportRequestOptions fileChunkRequestOptions;
@@ -45,7 +44,7 @@ public final class RemoteSegmentFileChunkWriter implements FileChunkWriter {
 
     public RemoteSegmentFileChunkWriter(
         long replicationId,
-        RecoverySettings recoverySettings,
+        ReplicationSettings replicationSettings,
         RetryableTransportClient retryableTransportClient,
         ShardId shardId,
         String action,
@@ -53,14 +52,14 @@ public final class RemoteSegmentFileChunkWriter implements FileChunkWriter {
         Consumer<Long> onSourceThrottle
     ) {
         this.replicationId = replicationId;
-        this.recoverySettings = recoverySettings;
+        this.replicationSettings = replicationSettings;
         this.retryableTransportClient = retryableTransportClient;
         this.shardId = shardId;
         this.requestSeqNoGenerator = requestSeqNoGenerator;
         this.onSourceThrottle = onSourceThrottle;
         this.fileChunkRequestOptions = TransportRequestOptions.builder()
-            .withType(TransportRequestOptions.Type.RECOVERY)
-            .withTimeout(recoverySettings.internalActionTimeout())
+            .withType(replicationSettings.getTransportRequestType())
+            .withTimeout(replicationSettings.internalActionTimeout())
             .build();
 
         this.action = action;
@@ -78,7 +77,7 @@ public final class RemoteSegmentFileChunkWriter implements FileChunkWriter {
         // Pause using the rate limiter, if desired, to throttle the recovery
         final long throttleTimeInNanos;
         // always fetch the ratelimiter - it might be updated in real-time on the recovery settings
-        final RateLimiter rl = recoverySettings.rateLimiter();
+        final RateLimiter rl = replicationSettings.rateLimiter();
         if (rl != null) {
             long bytes = bytesSinceLastPause.addAndGet(content.length());
             if (bytes > rl.getMinPauseCheckBytes()) {

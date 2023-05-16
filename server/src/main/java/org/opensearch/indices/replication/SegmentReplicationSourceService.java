@@ -68,7 +68,7 @@ public class SegmentReplicationSourceService extends AbstractLifecycleComponent 
     };
 
     private static final Logger logger = LogManager.getLogger(SegmentReplicationSourceService.class);
-    private final RecoverySettings recoverySettings;
+    private final SegmentReplicationSettings segmentReplicationSettings;
     private final TransportService transportService;
     private final IndicesService indicesService;
 
@@ -87,7 +87,7 @@ public class SegmentReplicationSourceService extends AbstractLifecycleComponent 
 
     // Used only for empty implementation.
     private SegmentReplicationSourceService() {
-        recoverySettings = null;
+        segmentReplicationSettings = null;
         ongoingSegmentReplications = null;
         transportService = null;
         indicesService = null;
@@ -96,11 +96,11 @@ public class SegmentReplicationSourceService extends AbstractLifecycleComponent 
     public SegmentReplicationSourceService(
         IndicesService indicesService,
         TransportService transportService,
-        RecoverySettings recoverySettings
+        SegmentReplicationSettings segmentReplicationSettings
     ) {
         this.transportService = transportService;
         this.indicesService = indicesService;
-        this.recoverySettings = recoverySettings;
+        this.segmentReplicationSettings = segmentReplicationSettings;
         transportService.registerRequestHandler(
             Actions.GET_CHECKPOINT_INFO,
             ThreadPool.Names.GENERIC,
@@ -113,7 +113,7 @@ public class SegmentReplicationSourceService extends AbstractLifecycleComponent 
             GetSegmentFilesRequest::new,
             new GetSegmentFilesRequestHandler()
         );
-        this.ongoingSegmentReplications = new OngoingSegmentReplications(indicesService, recoverySettings);
+        this.ongoingSegmentReplications = new OngoingSegmentReplications(indicesService, segmentReplicationSettings);
     }
 
     private class CheckpointInfoRequestHandler implements TransportRequestHandler<CheckpointInfoRequest> {
@@ -123,11 +123,11 @@ public class SegmentReplicationSourceService extends AbstractLifecycleComponent 
             timer.start();
             final RemoteSegmentFileChunkWriter segmentSegmentFileChunkWriter = new RemoteSegmentFileChunkWriter(
                 request.getReplicationId(),
-                recoverySettings,
+                segmentReplicationSettings,
                 new RetryableTransportClient(
                     transportService,
                     request.getTargetNode(),
-                    recoverySettings.internalActionRetryTimeout(),
+                    segmentReplicationSettings.internalActionTimeout(),
                     logger
                 ),
                 request.getCheckpoint().getShardId(),

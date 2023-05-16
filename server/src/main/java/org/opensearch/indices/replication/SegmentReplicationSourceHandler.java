@@ -66,8 +66,6 @@ class SegmentReplicationSourceHandler {
      * @param writer                  {@link FileChunkWriter} implementation that sends file chunks over the transport layer.
      * @param threadPool              {@link ThreadPool} Thread pool.
      * @param copyState               {@link CopyState} CopyState holding segment file metadata.
-     * @param fileChunkSizeInBytes    {@link Integer}
-     * @param maxConcurrentFileChunks {@link Integer}
      */
     SegmentReplicationSourceHandler(
         DiscoveryNode targetNode,
@@ -75,8 +73,7 @@ class SegmentReplicationSourceHandler {
         ThreadPool threadPool,
         CopyState copyState,
         String allocationId,
-        int fileChunkSizeInBytes,
-        int maxConcurrentFileChunks
+        ReplicationSettings replicationSettings
     ) {
         this.targetNode = targetNode;
         this.shard = copyState.getShard();
@@ -92,8 +89,7 @@ class SegmentReplicationSourceHandler {
             logger,
             threadPool,
             cancellableThreads,
-            fileChunkSizeInBytes,
-            maxConcurrentFileChunks
+            replicationSettings
         );
         this.allocationId = allocationId;
         this.copyState = copyState;

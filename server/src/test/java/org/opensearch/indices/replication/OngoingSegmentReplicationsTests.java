@@ -24,7 +24,6 @@ import org.opensearch.index.shard.IndexShardTestCase;
 import org.opensearch.index.shard.ShardId;
 import org.opensearch.indices.IndicesService;
 import org.opensearch.indices.recovery.FileChunkWriter;
-import org.opensearch.indices.recovery.RecoverySettings;
 import org.opensearch.indices.replication.checkpoint.ReplicationCheckpoint;
 import org.opensearch.indices.replication.common.CopyState;
 import org.opensearch.indices.replication.common.ReplicationType;
@@ -61,7 +60,7 @@ public class OngoingSegmentReplicationsTests extends IndexShardTestCase {
         .put(IndexMetadata.SETTING_REPLICATION_TYPE, ReplicationType.SEGMENT)
         .build();
     final ClusterSettings clusterSettings = new ClusterSettings(settings, ClusterSettings.BUILT_IN_CLUSTER_SETTINGS);
-    final RecoverySettings recoverySettings = new RecoverySettings(settings, clusterSettings);
+    final SegmentReplicationSettings segmentReplicationSettings = new SegmentReplicationSettings(settings, clusterSettings);
 
     @Override
     public void setUp() throws Exception {
@@ -97,7 +96,7 @@ public class OngoingSegmentReplicationsTests extends IndexShardTestCase {
     public void testSuccessfulCodecCompatibilityCheck() throws Exception {
         indexDoc(primary, "1", "{\"foo\" : \"baz\"}", XContentType.JSON, "foobar");
         primary.refresh("Test");
-        OngoingSegmentReplications replications = spy(new OngoingSegmentReplications(mockIndicesService, recoverySettings));
+        OngoingSegmentReplications replications = spy(new OngoingSegmentReplications(mockIndicesService, segmentReplicationSettings));
         // replica checkpoint is on same/higher lucene codec than primary
         final CheckpointInfoRequest request = new CheckpointInfoRequest(
             1L,
@@ -114,7 +113,7 @@ public class OngoingSegmentReplicationsTests extends IndexShardTestCase {
     public void testFailCodecCompatibilityCheck() throws Exception {
         indexDoc(primary, "1", "{\"foo\" : \"baz\"}", XContentType.JSON, "foobar");
         primary.refresh("Test");
-        OngoingSegmentReplications replications = spy(new OngoingSegmentReplications(mockIndicesService, recoverySettings));
+        OngoingSegmentReplications replications = spy(new OngoingSegmentReplications(mockIndicesService, segmentReplicationSettings));
         // replica checkpoint is on lower/older lucene codec than primary
         final CheckpointInfoRequest request = new CheckpointInfoRequest(
             1L,
@@ -135,7 +134,7 @@ public class OngoingSegmentReplicationsTests extends IndexShardTestCase {
     public void testPrepareAndSendSegments() throws IOException {
         indexDoc(primary, "1", "{\"foo\" : \"baz\"}", XContentType.JSON, "foobar");
         primary.refresh("Test");
-        OngoingSegmentReplications replications = spy(new OngoingSegmentReplications(mockIndicesService, recoverySettings));
+        OngoingSegmentReplications replications = spy(new OngoingSegmentReplications(mockIndicesService, segmentReplicationSettings));
         final CheckpointInfoRequest request = new CheckpointInfoRequest(
             1L,
             replica.routingEntry().allocationId().getId(),
@@ -176,7 +175,7 @@ public class OngoingSegmentReplicationsTests extends IndexShardTestCase {
     }
 
     public void testCancelReplication() throws IOException {
-        OngoingSegmentReplications replications = new OngoingSegmentReplications(mockIndicesService, recoverySettings);
+        OngoingSegmentReplications replications = new OngoingSegmentReplications(mockIndicesService, segmentReplicationSettings);
         final CheckpointInfoRequest request = new CheckpointInfoRequest(
             1L,
             replica.routingEntry().allocationId().getId(),
@@ -199,7 +198,7 @@ public class OngoingSegmentReplicationsTests extends IndexShardTestCase {
 
     public void testCancelReplication_AfterSendFilesStarts() throws IOException, InterruptedException {
         CountDownLatch latch = new CountDownLatch(1);
-        OngoingSegmentReplications replications = new OngoingSegmentReplications(mockIndicesService, recoverySettings);
+        OngoingSegmentReplications replications = new OngoingSegmentReplications(mockIndicesService, segmentReplicationSettings);
         // add a doc and refresh so primary has more than one segment.
         indexDoc(primary, "1", "{\"foo\" : \"baz\"}", XContentType.JSON, "foobar");
         primary.refresh("Test");
@@ -231,6 +230,7 @@ public class OngoingSegmentReplicationsTests extends IndexShardTestCase {
 
             @Override
             public void onFailure(Exception e) {
+                logger.error("Error", e);
                 assertEquals(CancellableThreads.ExecutionCancelledException.class, e.getClass());
                 assertEquals(0, copyState.refCount());
                 assertEquals(0, replications.size());
@@ -246,7 +246,7 @@ public class OngoingSegmentReplicationsTests extends IndexShardTestCase {
         IndexShard secondReplica = newShard(primary.shardId(), false);
         recoverReplica(secondReplica, primary, true);
 
-        OngoingSegmentReplications replications = new OngoingSegmentReplications(mockIndicesService, recoverySettings);
+        OngoingSegmentReplications replications = new OngoingSegmentReplications(mockIndicesService, segmentReplicationSettings);
         final CheckpointInfoRequest request = new CheckpointInfoRequest(
             1L,
             replica.routingEntry().allocationId().getId(),
@@ -282,7 +282,7 @@ public class OngoingSegmentReplicationsTests extends IndexShardTestCase {
     }
 
     public void testStartCopyWithoutPrepareStep() {
-        OngoingSegmentReplications replications = new OngoingSegmentReplications(mockIndicesService, recoverySettings);
+        OngoingSegmentReplications replications = new OngoingSegmentReplications(mockIndicesService, segmentReplicationSettings);
         final ActionListener<GetSegmentFilesResponse> listener = spy(new ActionListener<>() {
             @Override
             public void onResponse(GetSegmentFilesResponse getSegmentFilesResponse) {
@@ -308,7 +308,7 @@ public class OngoingSegmentReplicationsTests extends IndexShardTestCase {
     }
 
     public void testShardAlreadyReplicatingToNode() throws IOException {
-        OngoingSegmentReplications replications = spy(new OngoingSegmentReplications(mockIndicesService, recoverySettings));
+        OngoingSegmentReplications replications = spy(new OngoingSegmentReplications(mockIndicesService, segmentReplicationSettings));
         final CheckpointInfoRequest request = new CheckpointInfoRequest(
             1L,
             replica.routingEntry().allocationId().getId(),
@@ -325,7 +325,7 @@ public class OngoingSegmentReplicationsTests extends IndexShardTestCase {
 
     public void testStartReplicationWithNoFilesToFetch() throws IOException {
         // create a replications object and request a checkpoint.
-        OngoingSegmentReplications replications = spy(new OngoingSegmentReplications(mockIndicesService, recoverySettings));
+        OngoingSegmentReplications replications = spy(new OngoingSegmentReplications(mockIndicesService, segmentReplicationSettings));
         final CheckpointInfoRequest request = new CheckpointInfoRequest(
             1L,
             replica.routingEntry().allocationId().getId(),
@@ -371,7 +371,7 @@ public class OngoingSegmentReplicationsTests extends IndexShardTestCase {
         IndexShard replica_2 = newShard(primary.shardId(), false);
         recoverReplica(replica_2, primary, true);
 
-        OngoingSegmentReplications replications = new OngoingSegmentReplications(mockIndicesService, recoverySettings);
+        OngoingSegmentReplications replications = new OngoingSegmentReplications(mockIndicesService, segmentReplicationSettings);
         final CheckpointInfoRequest request = new CheckpointInfoRequest(
             1L,
             replica.routingEntry().allocationId().getId(),
@@ -407,7 +407,7 @@ public class OngoingSegmentReplicationsTests extends IndexShardTestCase {
         IndexShard replica_2 = newShard(primary.shardId(), false);
         recoverReplica(replica_2, primary, true);
 
-        OngoingSegmentReplications replications = new OngoingSegmentReplications(mockIndicesService, recoverySettings);
+        OngoingSegmentReplications replications = new OngoingSegmentReplications(mockIndicesService, segmentReplicationSettings);
         final String replicaAllocationId = replica.routingEntry().allocationId().getId();
         final CheckpointInfoRequest request = new CheckpointInfoRequest(1L, replicaAllocationId, primaryDiscoveryNode, testCheckpoint);
 

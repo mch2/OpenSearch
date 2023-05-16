@@ -44,7 +44,7 @@ import java.util.stream.Collectors;
 class OngoingSegmentReplications {
 
     private static final Logger logger = LogManager.getLogger(OngoingSegmentReplications.class);
-    private final RecoverySettings recoverySettings;
+    private final SegmentReplicationSettings segmentReplicationSettings;
     private final IndicesService indicesService;
     private final Map<ReplicationCheckpoint, CopyState> copyStateMap;
     private final Map<String, SegmentReplicationSourceHandler> allocationIdToHandlers;
@@ -55,9 +55,9 @@ class OngoingSegmentReplications {
      * @param indicesService   {@link IndicesService}
      * @param recoverySettings {@link RecoverySettings}
      */
-    OngoingSegmentReplications(IndicesService indicesService, RecoverySettings recoverySettings) {
+    OngoingSegmentReplications(IndicesService indicesService, SegmentReplicationSettings recoverySettings) {
         this.indicesService = indicesService;
-        this.recoverySettings = recoverySettings;
+        this.segmentReplicationSettings = recoverySettings;
         this.copyStateMap = Collections.synchronizedMap(new HashMap<>());
         this.allocationIdToHandlers = ConcurrentCollections.newConcurrentMap();
     }
@@ -230,8 +230,7 @@ class OngoingSegmentReplications {
             copyState.getShard().getThreadPool(),
             copyState,
             allocationId,
-            Math.toIntExact(recoverySettings.getChunkSize().getBytes()),
-            recoverySettings.getMaxConcurrentFileChunks()
+            segmentReplicationSettings
         );
     }
 

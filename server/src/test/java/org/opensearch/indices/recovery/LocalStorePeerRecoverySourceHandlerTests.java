@@ -142,6 +142,8 @@ import static org.mockito.Mockito.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
+import static org.opensearch.indices.recovery.RecoverySettings.INDICES_RECOVERY_MAX_CONCURRENT_FILE_CHUNKS_SETTING;
+import static org.opensearch.indices.recovery.RecoverySettings.INDICES_RECOVERY_MAX_CONCURRENT_OPERATIONS_SETTING;
 
 /**
  * This covers test cases for {@link RecoverySourceHandler} and {@link LocalStorePeerRecoverySourceHandler}.
@@ -156,6 +158,7 @@ public class LocalStorePeerRecoverySourceHandlerTests extends OpenSearchTestCase
 
     private ThreadPool threadPool;
     private Executor recoveryExecutor;
+    private RecoverySettings recoverySettings;
 
     @Before
     public void setUpThreadPool() {
@@ -170,6 +173,11 @@ public class LocalStorePeerRecoverySourceHandlerTests extends OpenSearchTestCase
             );
             recoveryExecutor = threadPool.executor("recovery_executor");
         }
+        final Settings settings = Settings.builder()
+            .put(INDICES_RECOVERY_MAX_CONCURRENT_OPERATIONS_SETTING.getKey(), between(1,4))
+            .put(INDICES_RECOVERY_MAX_CONCURRENT_FILE_CHUNKS_SETTING.getKey(), between(1,5))
+            .build();
+        recoverySettings = new RecoverySettings(settings, service);
     }
 
     @After
@@ -178,7 +186,6 @@ public class LocalStorePeerRecoverySourceHandlerTests extends OpenSearchTestCase
     }
 
     public void testSendFiles() throws Throwable {
-        final RecoverySettings recoverySettings = new RecoverySettings(Settings.EMPTY, service);
         final StartRecoveryRequest request = getStartRecoveryRequest();
         Store store = newStore(createTempDir());
         Directory dir = store.directory();
@@ -223,9 +230,7 @@ public class LocalStorePeerRecoverySourceHandlerTests extends OpenSearchTestCase
             new AsyncRecoveryTarget(target, recoveryExecutor),
             threadPool,
             request,
-            Math.toIntExact(recoverySettings.getChunkSize().getBytes()),
-            between(1, 5),
-            between(1, 5)
+            recoverySettings
         );
         PlainActionFuture<Void> sendFilesFuture = new PlainActionFuture<>();
         handler.sendFiles(store, metas.toArray(new StoreFileMetadata[0]), () -> 0, sendFilesFuture);
@@ -261,7 +266,6 @@ public class LocalStorePeerRecoverySourceHandlerTests extends OpenSearchTestCase
     }
 
     public void testSendSnapshotSendsOps() throws IOException {
-        final int fileChunkSizeInBytes = between(1, 4096);
         final StartRecoveryRequest request = getStartRecoveryRequest();
         final IndexShard shard = mock(IndexShard.class);
         when(shard.state()).thenReturn(IndexShardState.STARTED);
@@ -304,9 +308,7 @@ public class LocalStorePeerRecoverySourceHandlerTests extends OpenSearchTestCase
             new AsyncRecoveryTarget(recoveryTarget, threadPool.generic()),
             threadPool,
             request,
-            fileChunkSizeInBytes,
-            between(1, 10),
-            between(1, 10)
+            recoverySettings
         );
         PlainActionFuture<RecoverySourceHandler.SendSnapshotResult> future = new PlainActionFuture<>();
         handler.phase2(
@@ -333,7 +335,6 @@ public class LocalStorePeerRecoverySourceHandlerTests extends OpenSearchTestCase
     }
 
     public void testSendSnapshotStopOnError() throws Exception {
-        final int fileChunkSizeInBytes = between(1, 10 * 1024);
         final StartRecoveryRequest request = getStartRecoveryRequest();
         final IndexShard shard = mock(IndexShard.class);
         when(shard.state()).thenReturn(IndexShardState.STARTED);
@@ -367,9 +368,7 @@ public class LocalStorePeerRecoverySourceHandlerTests extends OpenSearchTestCase
             new AsyncRecoveryTarget(recoveryTarget, threadPool.generic()),
             threadPool,
             request,
-            fileChunkSizeInBytes,
-            between(1, 10),
-            between(1, 10)
+            recoverySettings
         );
         PlainActionFuture<RecoverySourceHandler.SendSnapshotResult> future = new PlainActionFuture<>();
         final long startingSeqNo = randomLongBetween(0, ops.size() - 1L);
@@ -441,9 +440,7 @@ public class LocalStorePeerRecoverySourceHandlerTests extends OpenSearchTestCase
             new AsyncRecoveryTarget(target, recoveryExecutor),
             threadPool,
             getStartRecoveryRequest(),
-            between(1, 10 * 1024),
-            between(1, 5),
-            between(1, 5)
+            recoverySettings
         );
         handler.phase2(
             startingSeqNo,
@@ -560,9 +557,7 @@ public class LocalStorePeerRecoverySourceHandlerTests extends OpenSearchTestCase
             new AsyncRecoveryTarget(target, recoveryExecutor),
             threadPool,
             request,
-            Math.toIntExact(recoverySettings.getChunkSize().getBytes()),
-            between(1, 8),
-            between(1, 8)
+            recoverySettings
         );
         SetOnce<Exception> sendFilesError = new SetOnce<>();
         CountDownLatch latch = new CountDownLatch(1);
@@ -635,9 +630,7 @@ public class LocalStorePeerRecoverySourceHandlerTests extends OpenSearchTestCase
             new AsyncRecoveryTarget(target, recoveryExecutor),
             threadPool,
             request,
-            Math.toIntExact(recoverySettings.getChunkSize().getBytes()),
-            between(1, 10),
-            between(1, 4)
+            recoverySettings
         );
         PlainActionFuture<Void> sendFilesFuture = new PlainActionFuture<>();
         handler.sendFiles(store, metas.toArray(new StoreFileMetadata[0]), () -> 0, sendFilesFuture);
@@ -688,9 +681,7 @@ public class LocalStorePeerRecoverySourceHandlerTests extends OpenSearchTestCase
             mock(RecoveryTargetHandler.class),
             threadPool,
             request,
-            Math.toIntExact(recoverySettings.getChunkSize().getBytes()),
-            between(1, 8),
-            between(1, 8)
+            recoverySettings
         ) {
 
             @Override
@@ -793,16 +784,14 @@ public class LocalStorePeerRecoverySourceHandlerTests extends OpenSearchTestCase
                 sentChunks.incrementAndGet();
             }
         };
-        final int maxConcurrentChunks = between(1, 8);
-        final int chunkSize = between(1, 32);
+        final int maxConcurrentChunks = recoverySettings.getMaxConcurrentFileChunks();
+        final int chunkSize = recoverySettings.getChunkSize();
         final RecoverySourceHandler handler = new LocalStorePeerRecoverySourceHandler(
             shard,
             recoveryTarget,
             threadPool,
             getStartRecoveryRequest(),
-            chunkSize,
-            maxConcurrentChunks,
-            between(1, 10)
+            recoverySettings
         );
         Store store = newStore(createTempDir(), false);
         List<StoreFileMetadata> files = generateFiles(store, between(1, 10), () -> between(1, chunkSize * 20));
@@ -866,16 +855,14 @@ public class LocalStorePeerRecoverySourceHandlerTests extends OpenSearchTestCase
                 sentChunks.incrementAndGet();
             }
         };
-        final int maxConcurrentChunks = between(1, 4);
-        final int chunkSize = between(1, 16);
+        final int maxConcurrentChunks = recoverySettings.getMaxConcurrentFileChunks();
+        final int chunkSize = recoverySettings.getChunkSize();
         final RecoverySourceHandler handler = new LocalStorePeerRecoverySourceHandler(
             null,
             new AsyncRecoveryTarget(recoveryTarget, recoveryExecutor),
             threadPool,
             getStartRecoveryRequest(),
-            chunkSize,
-            maxConcurrentChunks,
-            between(1, 5)
+            recoverySettings
         );
         Store store = newStore(createTempDir(), false);
         List<StoreFileMetadata> files = generateFiles(store, between(1, 10), () -> between(1, chunkSize * 20));
@@ -981,9 +968,7 @@ public class LocalStorePeerRecoverySourceHandlerTests extends OpenSearchTestCase
             recoveryTarget,
             threadPool,
             startRecoveryRequest,
-            between(1, 16),
-            between(1, 4),
-            between(1, 4)
+            recoverySettings
         ) {
             @Override
             void createRetentionLease(long startingSeqNo, ActionListener<RetentionLease> listener) {
@@ -1020,9 +1005,7 @@ public class LocalStorePeerRecoverySourceHandlerTests extends OpenSearchTestCase
             new TestRecoveryTargetHandler(),
             threadPool,
             getStartRecoveryRequest(),
-            between(1, 16),
-            between(1, 4),
-            between(1, 4)
+            recoverySettings
         );
 
         String syncId = UUIDs.randomBase64UUID();

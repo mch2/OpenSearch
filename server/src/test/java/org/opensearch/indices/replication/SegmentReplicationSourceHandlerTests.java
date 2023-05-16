@@ -17,6 +17,7 @@ import org.opensearch.Version;
 import org.opensearch.action.ActionListener;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.node.DiscoveryNode;
+import org.opensearch.common.settings.ClusterSettings;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.common.util.CancellableThreads;
 import org.opensearch.common.xcontent.XContentType;
@@ -46,6 +47,7 @@ public class SegmentReplicationSourceHandlerTests extends IndexShardTestCase {
     private IndexShard replica;
 
     private FileChunkWriter chunkWriter;
+    private SegmentReplicationSettings segmentReplicationSettings;
 
     @Override
     public void setUp() throws Exception {
@@ -55,6 +57,8 @@ public class SegmentReplicationSourceHandlerTests extends IndexShardTestCase {
         replica = newShard(false, settings, new NRTReplicationEngineFactory());
         recoverReplica(replica, primary, true);
         replicaDiscoveryNode = replica.recoveryState().getTargetNode();
+        final ClusterSettings clusterSettings = new ClusterSettings(settings, ClusterSettings.BUILT_IN_CLUSTER_SETTINGS);
+        segmentReplicationSettings = new SegmentReplicationSettings(settings, clusterSettings);
     }
 
     @Override
@@ -74,8 +78,7 @@ public class SegmentReplicationSourceHandlerTests extends IndexShardTestCase {
             threadPool,
             copyState,
             replica.routingEntry().allocationId().getId(),
-            5000,
-            1
+            segmentReplicationSettings
         );
 
         final List<StoreFileMetadata> expectedFiles = List.copyOf(copyState.getMetadataMap().values());
@@ -112,8 +115,7 @@ public class SegmentReplicationSourceHandlerTests extends IndexShardTestCase {
             threadPool,
             copyState,
             replica.routingEntry().allocationId().getId(),
-            5000,
-            1
+            segmentReplicationSettings
         );
 
         final GetSegmentFilesRequest getSegmentFilesRequest = new GetSegmentFilesRequest(
@@ -154,8 +156,7 @@ public class SegmentReplicationSourceHandlerTests extends IndexShardTestCase {
             threadPool,
             copyState,
             primary.routingEntry().allocationId().getId(),
-            5000,
-            1
+            segmentReplicationSettings
         );
 
         final List<StoreFileMetadata> expectedFiles = List.copyOf(copyState.getMetadataMap().values());
@@ -192,8 +193,7 @@ public class SegmentReplicationSourceHandlerTests extends IndexShardTestCase {
             threadPool,
             copyState,
             replica.routingEntry().allocationId().getId(),
-            5000,
-            1
+            segmentReplicationSettings
         );
 
         final GetSegmentFilesRequest getSegmentFilesRequest = new GetSegmentFilesRequest(
@@ -220,8 +220,7 @@ public class SegmentReplicationSourceHandlerTests extends IndexShardTestCase {
             threadPool,
             copyState,
             primary.routingEntry().allocationId().getId(),
-            5000,
-            1
+            segmentReplicationSettings
         );
 
         final GetSegmentFilesRequest getSegmentFilesRequest = new GetSegmentFilesRequest(
