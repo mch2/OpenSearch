@@ -16,6 +16,7 @@ import org.opensearch.action.ActionListener;
 import org.opensearch.cluster.routing.ShardRouting;
 import org.opensearch.common.Nullable;
 import org.opensearch.common.settings.Settings;
+import org.opensearch.common.unit.TimeValue;
 import org.opensearch.common.util.CancellableThreads;
 import org.opensearch.common.util.concurrent.ConcurrentCollections;
 import org.opensearch.index.shard.IndexEventListener;
@@ -55,7 +56,7 @@ public class SegmentReplicationTargetService implements IndexEventListener {
     private static final Logger logger = LogManager.getLogger(SegmentReplicationTargetService.class);
 
     private final ThreadPool threadPool;
-    private final RecoverySettings recoverySettings;
+    private final SegmentReplicationSettings recoverySettings;
 
     private final ReplicationCollection<SegmentReplicationTarget> onGoingReplications;
 
@@ -110,7 +111,7 @@ public class SegmentReplicationTargetService implements IndexEventListener {
 
     public SegmentReplicationTargetService(
         final ThreadPool threadPool,
-        final RecoverySettings recoverySettings,
+        final SegmentReplicationSettings recoverySettings,
         final TransportService transportService,
         final SegmentReplicationSourceFactory sourceFactory,
         final IndicesService indicesService
@@ -289,7 +290,7 @@ public class SegmentReplicationTargetService implements IndexEventListener {
 
     // pkg-private for integration tests
     void startReplication(final SegmentReplicationTarget target) {
-        final long replicationId = onGoingReplications.start(target, recoverySettings.activityTimeout());
+        final long replicationId = onGoingReplications.start(target, TimeValue.timeValueMinutes(15));
         threadPool.generic().execute(new ReplicationRunner(replicationId));
     }
 

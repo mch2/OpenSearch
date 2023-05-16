@@ -136,7 +136,9 @@ public class SegmentReplicationTarget extends ReplicationTarget {
         ActionListener<Void> listener
     ) {
         try {
+            logger.info("Writing chunk {} {} {} {}", metadata.name(), content.ramBytesUsed(), content.length(), metadata.length());
             multiFileWriter.writeFileChunk(metadata, position, content, lastChunk);
+            logger.info("Finished writing chunk {} {}", metadata.name(), content.length());
             listener.onResponse(null);
         } catch (Exception e) {
             listener.onFailure(e);

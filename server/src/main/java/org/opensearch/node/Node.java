@@ -1084,7 +1084,7 @@ public class Node implements Closeable {
                         .toInstance(
                             new SegmentReplicationTargetService(
                                 threadPool,
-                                recoverySettings,
+                                segmentReplicationSettings,
                                 transportService,
                                 new SegmentReplicationSourceFactory(transportService, recoverySettings, clusterService),
                                 indicesService
