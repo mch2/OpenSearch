@@ -2786,11 +2786,11 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
      * @param allocationId     the allocation ID to update the global checkpoint for
      * @param visibleCheckpoint the visible checkpoint
      */
-    public void updateVisibleCheckpointForShard(final String allocationId, final ReplicationCheckpoint visibleCheckpoint) {
+    public void updateVisibleCheckpointForShard(final String allocationId, final ReplicationCheckpoint visibleCheckpoint, long time) {
         // Update target replication checkpoint only when in active primary mode
         if (this.isPrimaryMode()) {
             verifyNotClosed();
-            replicationTracker.updateVisibleCheckpointForShard(allocationId, visibleCheckpoint);
+            replicationTracker.updateVisibleCheckpointForShard(allocationId, visibleCheckpoint, time);
         }
     }
 

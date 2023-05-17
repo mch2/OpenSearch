@@ -31,6 +31,8 @@ public class SegmentReplicationShardStats implements Writeable, ToXContentFragme
     private final long bytesBehindCount;
     private final long currentReplicationTimeMillis;
     private final long lastCompletedReplicationTimeMillis;
+    private final long averageCopyLag;
+    private final long lastCompletedSyncTime;
 
     @Nullable
     private SegmentReplicationState currentReplicationState;
@@ -40,13 +42,16 @@ public class SegmentReplicationShardStats implements Writeable, ToXContentFragme
         long checkpointsBehindCount,
         long bytesBehindCount,
         long currentReplicationTimeMillis,
-        long lastCompletedReplicationTime
-    ) {
+        long lastCompletedReplicationTime,
+        long averageCopyLag,
+        long lastCompletedSyncTime) {
         this.allocationId = allocationId;
         this.checkpointsBehindCount = checkpointsBehindCount;
         this.bytesBehindCount = bytesBehindCount;
         this.currentReplicationTimeMillis = currentReplicationTimeMillis;
         this.lastCompletedReplicationTimeMillis = lastCompletedReplicationTime;
+        this.averageCopyLag = averageCopyLag;
+        this.lastCompletedSyncTime = lastCompletedSyncTime;
     }
 
     public SegmentReplicationShardStats(StreamInput in) throws IOException {
@@ -55,6 +60,8 @@ public class SegmentReplicationShardStats implements Writeable, ToXContentFragme
         this.bytesBehindCount = in.readVLong();
         this.currentReplicationTimeMillis = in.readVLong();
         this.lastCompletedReplicationTimeMillis = in.readVLong();
+        this.averageCopyLag = in.readVLong();
+        this.lastCompletedSyncTime = in.readVLong();
     }
 
     public String getAllocationId() {
@@ -86,6 +93,7 @@ public class SegmentReplicationShardStats implements Writeable, ToXContentFragme
         return currentReplicationState;
     }
 
+
     @Override
     public XContentBuilder toXContent(XContentBuilder builder, Params params) throws IOException {
         builder.startObject();
@@ -110,6 +118,8 @@ public class SegmentReplicationShardStats implements Writeable, ToXContentFragme
         out.writeVLong(bytesBehindCount);
         out.writeVLong(currentReplicationTimeMillis);
         out.writeVLong(lastCompletedReplicationTimeMillis);
+        out.writeVLong(averageCopyLag);
+        out.writeVLong(lastCompletedSyncTime);
     }
 
     @Override
@@ -128,5 +138,13 @@ public class SegmentReplicationShardStats implements Writeable, ToXContentFragme
             + ", currentReplicationState="
             + currentReplicationState
             + '}';
+    }
+
+    public long getAverageCopyLag() {
+        return averageCopyLag;
+    }
+
+    public long getLastCompletedSyncTime() {
+        return lastCompletedSyncTime;
     }
 }

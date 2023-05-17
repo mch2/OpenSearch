@@ -31,6 +31,8 @@ import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.Transports;
 
 import java.io.Closeable;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
@@ -103,6 +105,8 @@ class SegmentReplicationSourceHandler {
      * @param listener {@link ActionListener} that completes with the list of files sent.
      */
     public synchronized void sendFiles(GetSegmentFilesRequest request, ActionListener<GetSegmentFilesResponse> listener) {
+        logger.info("[replication id {} Checkpoint {} ] Starting file send to target node [{}]", request.getReplicationId(), copyState.getCheckpoint().getSegmentInfosVersion(), request.getTargetNode().getName());
+        final Instant now = Instant.now();
         final ReplicationTimer timer = new ReplicationTimer();
         if (isReplicating.compareAndSet(false, true) == false) {
             throw new OpenSearchException("Replication to {} is already running.", shard.shardId());
@@ -155,7 +159,10 @@ class SegmentReplicationSourceHandler {
 
             sendFileStep.whenComplete(r -> {
                 try {
-                    shard.updateVisibleCheckpointForShard(allocationId, copyState.getCheckpoint());
+                    final Instant stop = Instant.now();
+                    final long duration = Duration.between(now, stop).toMillis();
+                    logger.info("[replication id {} Checkpoint {} ] finished file send to target node [{}] - Duration {}", request.getReplicationId(), copyState.getCheckpoint().getSegmentInfosVersion(), request.getTargetNode().getName(), duration);
+                    shard.updateVisibleCheckpointForShard(allocationId, copyState.getCheckpoint(), duration);
                     future.onResponse(new GetSegmentFilesResponse(List.of(storeFileMetadata)));
                 } finally {
                     IOUtils.close(resources);

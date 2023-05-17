@@ -49,6 +49,7 @@ import org.opensearch.common.collect.Tuple;
 import org.opensearch.common.io.stream.StreamInput;
 import org.opensearch.common.io.stream.StreamOutput;
 import org.opensearch.common.io.stream.Writeable;
+import org.opensearch.common.metrics.MeanMetric;
 import org.opensearch.common.util.concurrent.ConcurrentCollections;
 import org.opensearch.core.xcontent.NamedXContentRegistry;
 import org.opensearch.gateway.WriteStateException;
@@ -723,6 +724,10 @@ public class ReplicationTracker extends AbstractIndexShardComponent implements L
          */
         long lastCompletedReplicationLag;
 
+        MeanMetric averageSyncTime;
+
+        long lastCompletedSyncTime;
+
         public CheckpointState(long localCheckpoint, long globalCheckpoint, boolean inSync, boolean tracked, boolean replicated) {
             this.localCheckpoint = localCheckpoint;
             this.globalCheckpoint = globalCheckpoint;
@@ -730,6 +735,7 @@ public class ReplicationTracker extends AbstractIndexShardComponent implements L
             this.tracked = tracked;
             this.replicated = replicated;
             this.checkpointTimers = ConcurrentCollections.newConcurrentMap();
+            this.averageSyncTime = new MeanMetric();
         }
 
         public CheckpointState(StreamInput in) throws IOException {
@@ -1168,7 +1174,7 @@ public class ReplicationTracker extends AbstractIndexShardComponent implements L
      * @param allocationId     the allocation ID to update the global checkpoint for
      * @param visibleCheckpoint the visible checkpoint
      */
-    public synchronized void updateVisibleCheckpointForShard(final String allocationId, final ReplicationCheckpoint visibleCheckpoint) {
+    public synchronized void updateVisibleCheckpointForShard(final String allocationId, final ReplicationCheckpoint visibleCheckpoint, long timing) {
         assert indexSettings.isSegRepEnabled();
         assert primaryMode;
         assert handoffInProgress == false;
@@ -1200,6 +1206,8 @@ public class ReplicationTracker extends AbstractIndexShardComponent implements L
             )
         );
         cps.visibleReplicationCheckpoint = visibleCheckpoint;
+        cps.averageSyncTime.inc(timing);
+        cps.lastCompletedSyncTime = timing;
         assert invariant();
     }
 
@@ -1265,8 +1273,9 @@ public class ReplicationTracker extends AbstractIndexShardComponent implements L
                 ? latestCheckpointLength
                 : Math.max(latestCheckpointLength - checkpointState.visibleReplicationCheckpoint.getLength(), 0),
             checkpointTimers.values().stream().mapToLong(ReplicationTimer::time).max().orElse(0),
-            checkpointState.lastCompletedReplicationLag
-        );
+            checkpointState.lastCompletedReplicationLag,
+            Double.valueOf(checkpointState.averageSyncTime.mean()).longValue(),
+            checkpointState.lastCompletedSyncTime);
     }
 
     /**

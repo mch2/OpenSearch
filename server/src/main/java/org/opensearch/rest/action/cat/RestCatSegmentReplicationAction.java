@@ -100,6 +100,8 @@ public class RestCatSegmentReplicationAction extends AbstractCatAction {
             .addCell("bytes_behind", "alias:bb;desc:bytes behind primary")
             .addCell("current_lag", "alias:clag;desc:ongoing time elapsed waiting for replica to catch up to primary")
             .addCell("last_completed_lag", "alias:lcl;desc:time taken for replica to catch up to latest primary refresh")
+            .addCell("last_completed_sync", "alias:lcs;desc:time taken for replica to catch up to latest primary refresh")
+            .addCell("avg_sync_lag", "alias:asl;desc:time taken for replica to catch up to latest primary refresh")
             .addCell("rejected_requests", "alias:rr;desc:count of rejected requests for the replication group");
         if (detailed) {
             t.addCell("stage", "alias:st;desc:segment replication event stage")
@@ -172,6 +174,8 @@ public class RestCatSegmentReplicationAction extends AbstractCatAction {
                     t.addCell(new ByteSizeValue(shardStats.getBytesBehindCount()));
                     t.addCell(new TimeValue(shardStats.getCurrentReplicationTimeMillis()));
                     t.addCell(new TimeValue(shardStats.getLastCompletedReplicationTimeMillis()));
+                    t.addCell(new TimeValue(shardStats.getLastCompletedSyncTime()));
+                    t.addCell(new TimeValue(shardStats.getAverageCopyLag()));
                     t.addCell(perGroupStats.getRejectedRequestCount());
                     if (detailed) {
                         t.addCell(state.getStage().toString().toLowerCase(Locale.ROOT));

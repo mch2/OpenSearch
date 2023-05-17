@@ -1842,7 +1842,7 @@ public class ReplicationTrackerTests extends ReplicationTrackerTestCase {
         for (String id : inSyncAllocationIds) {
             final ReplicationTracker.CheckpointState checkpointState = checkpoints.get(id);
             assertEquals(3, checkpointState.checkpointTimers.size());
-            tracker.updateVisibleCheckpointForShard(id, initialCheckpoint);
+            tracker.updateVisibleCheckpointForShard(id, initialCheckpoint, 0L);
             assertEquals(2, checkpointState.checkpointTimers.size());
         }
 
@@ -1856,7 +1856,7 @@ public class ReplicationTrackerTests extends ReplicationTrackerTestCase {
         for (String id : inSyncAllocationIds) {
             final ReplicationTracker.CheckpointState checkpointState = checkpoints.get(id);
             assertEquals(2, checkpointState.checkpointTimers.size());
-            tracker.updateVisibleCheckpointForShard(id, thirdCheckpoint);
+            tracker.updateVisibleCheckpointForShard(id, thirdCheckpoint, 0L);
             assertEquals(0, checkpointState.checkpointTimers.size());
         }
 

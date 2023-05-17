@@ -128,7 +128,7 @@ class OngoingSegmentReplications {
                 // before completion, alert the primary of the replica's state.
                 handler.getCopyState()
                     .getShard()
-                    .updateVisibleCheckpointForShard(request.getTargetAllocationId(), handler.getCopyState().getCheckpoint());
+                    .updateVisibleCheckpointForShard(request.getTargetAllocationId(), handler.getCopyState().getCheckpoint(), 0L);
                 wrappedListener.onResponse(new GetSegmentFilesResponse(Collections.emptyList()));
             } else {
                 handler.sendFiles(request, wrappedListener);

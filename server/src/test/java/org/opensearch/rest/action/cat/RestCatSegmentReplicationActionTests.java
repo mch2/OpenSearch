@@ -84,8 +84,9 @@ public class RestCatSegmentReplicationActionTests extends OpenSearchTestCase {
                 0L,
                 0L,
                 0L,
-                0L
-            );
+                0L,
+                    0L,
+                0L);
             segmentReplicationShardStats.setCurrentReplicationState(state);
             final SegmentReplicationPerGroupStats perGroupStats = new SegmentReplicationPerGroupStats(
                 shardId,

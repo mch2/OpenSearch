@@ -1372,7 +1372,8 @@ public abstract class IndexShardTestCase extends OpenSearchTestCase {
                             assertEquals(recoveryDiff.identical.size(), primaryMetadata.size());
                             primaryShard.updateVisibleCheckpointForShard(
                                 replica.routingEntry().allocationId().getId(),
-                                primaryShard.getLatestReplicationCheckpoint()
+                                primaryShard.getLatestReplicationCheckpoint(),
+                                0L
                             );
                         } catch (Exception e) {
                             throw ExceptionsHelper.convertToRuntime(e);
