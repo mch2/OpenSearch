@@ -13,6 +13,7 @@ import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.message.ParameterizedMessage;
 import org.opensearch.OpenSearchException;
 import org.opensearch.action.ActionListener;
+import org.opensearch.action.StepListener;
 import org.opensearch.cluster.node.DiscoveryNode;
 import org.opensearch.common.concurrent.GatedCloseable;
 import org.opensearch.common.util.CancellableThreads;
@@ -30,6 +31,7 @@ import org.opensearch.indices.recovery.RecoverySettings;
 import org.opensearch.indices.recovery.RetryableTransportClient;
 import org.opensearch.indices.replication.checkpoint.ReplicationCheckpoint;
 import org.opensearch.indices.replication.common.CopyState;
+import org.opensearch.transport.TransportResponse;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -107,6 +109,7 @@ class OngoingSegmentReplications {
         final Store.RecoveryDiff recoveryDiff = Store.segmentReplicationDiff(copyState.getMetadataMap(), request.getMetadataMap());
         // update the given listener to release the CopyState before it resolves.
         final ActionListener<GetSegmentFilesResponse> wrappedListener = ActionListener.runBefore(listener, () -> {
+            logger.info("Finished replication, removing handler {}", request.getTargetAllocationId());
             final SegmentReplicationSourceHandler sourceHandler = allocationIdToHandlers.remove(request.getTargetAllocationId());
 //                if (sourceHandler != null) {
 //                    removeCopyState(sourceHandler.getCopyState());
@@ -121,11 +124,17 @@ class OngoingSegmentReplications {
             try {
                 copyStateGatedCloseable.close();
             } catch (IOException e) {
+                logger.error("Error", e);
                 e.printStackTrace();
             }
             wrappedListener.onResponse(new GetSegmentFilesResponse(Collections.emptyList(), copyState.getCheckpoint(), copyState.getInfosBytes()));
         } else {
-            handler.sendFiles(request, recoveryDiff.missing, wrappedListener);
+            StepListener<TransportResponse> l = new StepListener<>();
+            client.executeRetryableAction(SegmentReplicationTargetService.Actions.FILE_INFO,
+                new SegmentReplicationFileInfoRequest(request.getReplicationId(), request.getTargetAllocationId(), request.getTargetNode(), recoveryDiff.missing),
+                l,
+                in -> TransportResponse.Empty.INSTANCE);
+            l.whenComplete((r) -> handler.sendFiles(request, recoveryDiff.missing, wrappedListener), listener::onFailure);
         }
 //    } else
 //

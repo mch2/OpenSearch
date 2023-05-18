@@ -151,6 +151,7 @@ class SegmentReplicationSourceHandler {
                 .filter(file -> storeFiles.contains(file.name()))
                 .toArray(StoreFileMetadata[]::new);
 
+
             final MultiChunkTransfer<StoreFileMetadata, SegmentFileTransferHandler.FileChunk> transfer = segmentFileTransferHandler
                 .createTransfer(shard.store(), storeFileMetadata, () -> 0, sendFileStep);
             resources.add(transfer);

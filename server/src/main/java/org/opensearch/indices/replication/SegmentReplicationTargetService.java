@@ -23,15 +23,20 @@ import org.opensearch.index.shard.IndexEventListener;
 import org.opensearch.index.shard.IndexShard;
 import org.opensearch.index.shard.IndexShardState;
 import org.opensearch.index.shard.ShardId;
+import org.opensearch.index.store.StoreFileMetadata;
 import org.opensearch.indices.IndicesService;
 import org.opensearch.indices.recovery.FileChunkRequest;
 import org.opensearch.indices.recovery.ForceSyncRequest;
+import org.opensearch.indices.recovery.PeerRecoveryTargetService;
+import org.opensearch.indices.recovery.RecoveryFilesInfoRequest;
 import org.opensearch.indices.recovery.RecoverySettings;
+import org.opensearch.indices.recovery.RecoveryTarget;
 import org.opensearch.indices.replication.checkpoint.ReplicationCheckpoint;
 import org.opensearch.indices.replication.common.ReplicationCollection;
 import org.opensearch.indices.replication.common.ReplicationCollection.ReplicationRef;
 import org.opensearch.indices.replication.common.ReplicationFailedException;
 import org.opensearch.indices.replication.common.ReplicationListener;
+import org.opensearch.indices.replication.common.ReplicationLuceneIndex;
 import org.opensearch.indices.replication.common.ReplicationState;
 import org.opensearch.tasks.Task;
 import org.opensearch.threadpool.ThreadPool;
@@ -105,6 +110,7 @@ public class SegmentReplicationTargetService implements IndexEventListener {
      * @opensearch.internal
      */
     public static class Actions {
+        public static final String FILE_INFO = "internal:index/shard/replication/file_info";
         public static final String FILE_CHUNK = "internal:index/shard/replication/file_chunk";
         public static final String FORCE_SYNC = "internal:index/shard/replication/segments_sync";
     }
@@ -133,6 +139,12 @@ public class SegmentReplicationTargetService implements IndexEventListener {
             ThreadPool.Names.GENERIC,
             ForceSyncRequest::new,
             new ForceSyncTransportRequestHandler()
+        );
+        transportService.registerRequestHandler(
+            Actions.FILE_INFO,
+            ThreadPool.Names.GENERIC,
+            SegmentReplicationFileInfoRequest::new,
+            new FilesInfoRequestHandler()
         );
     }
 
@@ -382,6 +394,22 @@ public class SegmentReplicationTargetService implements IndexEventListener {
                 final SegmentReplicationTarget target = ref.get();
                 final ActionListener<Void> listener = target.createOrFinishListener(channel, Actions.FILE_CHUNK, request);
                 target.handleFileChunk(request, target, bytesSinceLastPause, recoverySettings.rateLimiter(), listener);
+            }
+        }
+    }
+
+    class FilesInfoRequestHandler implements TransportRequestHandler<SegmentReplicationFileInfoRequest> {
+
+        @Override
+        public void messageReceived(SegmentReplicationFileInfoRequest request, TransportChannel channel, Task task) throws Exception {
+            logger.info("Received file info request {} {}", request.getFiles(), request.getReplicationId());
+            try (ReplicationRef<SegmentReplicationTarget> recoveryRef = onGoingReplications.get(request.getReplicationId())) {
+                final SegmentReplicationTarget recoveryTarget = recoveryRef.get();
+                final ReplicationLuceneIndex index = recoveryTarget.state().getIndex();
+                for (StoreFileMetadata file : request.getFiles()) {
+                    index.addFileDetail(file.name(), file.length(), false);
+                }
+                channel.sendResponse(TransportResponse.Empty.INSTANCE);
             }
         }
     }
