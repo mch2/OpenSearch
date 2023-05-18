@@ -179,6 +179,7 @@ import org.opensearch.indices.recovery.RecoveryState;
 import org.opensearch.indices.recovery.RecoveryTarget;
 import org.opensearch.indices.replication.checkpoint.ReplicationCheckpoint;
 import org.opensearch.indices.replication.checkpoint.SegmentReplicationCheckpointPublisher;
+import org.opensearch.indices.replication.common.CopyState;
 import org.opensearch.repositories.RepositoriesService;
 import org.opensearch.repositories.Repository;
 import org.opensearch.rest.RestStatus;
@@ -275,6 +276,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
 
     private final IndexingOperationListener indexingOperationListeners;
     private final Runnable globalCheckpointSyncer;
+    private CopyState copyState;
 
     Runnable getGlobalCheckpointSyncer() {
         return globalCheckpointSyncer;
@@ -1806,6 +1808,19 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
     public void onCheckpointPublished(ReplicationCheckpoint checkpoint) {
         replicationTracker.setLatestReplicationCheckpoint(checkpoint);
     }
+
+    public void refreshCopyState() {
+        try {
+            this.copyState = new CopyState(this);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    public CopyState getCopyState() {
+        return this.copyState;
+    }
+
 
     /**
      * Wrapper for a non-closing reader

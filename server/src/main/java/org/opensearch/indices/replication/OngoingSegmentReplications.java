@@ -161,29 +161,14 @@ class OngoingSegmentReplications {
         }
     }
 
-    public void setCopyState(IndexShard indexShard) {
-        if (indexShard.state() == IndexShardState.STARTED) {
-            try {
-                final CopyState state = new CopyState(indexShard);
-                final CopyState oldCopyState = copyStateMap.remove(indexShard.shardId());
-                if (oldCopyState != null) {
-                    oldCopyState.decRef();
-                }
-                copyStateMap.put(indexShard.shardId(), state);
-            } catch (IOException e) {
-                throw new UncheckedIOException(e);
-            }
-        }
-    }
-
     public GatedCloseable<CopyState> getCopyState(ShardId shardId) {
-        final CopyState copyState = copyStateMap.get(shardId);
+        final IndexService indexService = indicesService.indexService(shardId.getIndex());
+        final IndexShard indexShard = indexService.getShard(shardId.id());
+        final CopyState copyState = indexShard.getCopyState();
         if (copyState != null) {
             copyState.incRef();
             return new GatedCloseable<>(copyState, copyState::decRef);
         }
-        final IndexService indexService = indicesService.indexService(shardId.getIndex());
-        final IndexShard indexShard = indexService.getShard(shardId.id());
         throw new IndexShardNotStartedException(shardId, indexShard.state());
     }
 

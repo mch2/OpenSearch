@@ -35,6 +35,7 @@ public class SegmentReplicationCheckpointPublisher {
     public void publish(IndexShard indexShard, ReplicationCheckpoint checkpoint) {
         publishAction.publish(indexShard, checkpoint);
         indexShard.onCheckpointPublished(checkpoint);
+        indexShard.refreshCopyState();
     }
 
     /**
