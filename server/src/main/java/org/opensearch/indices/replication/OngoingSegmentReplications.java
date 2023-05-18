@@ -14,23 +14,31 @@ import org.apache.logging.log4j.message.ParameterizedMessage;
 import org.opensearch.OpenSearchException;
 import org.opensearch.action.ActionListener;
 import org.opensearch.cluster.node.DiscoveryNode;
+import org.opensearch.common.concurrent.GatedCloseable;
 import org.opensearch.common.util.CancellableThreads;
 import org.opensearch.common.util.concurrent.ConcurrentCollections;
 import org.opensearch.index.IndexService;
 import org.opensearch.index.shard.IndexShard;
+import org.opensearch.index.shard.IndexShardNotStartedException;
+import org.opensearch.index.shard.IndexShardState;
 import org.opensearch.index.shard.ShardId;
+import org.opensearch.index.store.Store;
+import org.opensearch.index.store.StoreFileMetadata;
 import org.opensearch.indices.IndicesService;
 import org.opensearch.indices.recovery.FileChunkWriter;
 import org.opensearch.indices.recovery.RecoverySettings;
+import org.opensearch.indices.recovery.RetryableTransportClient;
 import org.opensearch.indices.replication.checkpoint.ReplicationCheckpoint;
 import org.opensearch.indices.replication.common.CopyState;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
@@ -46,7 +54,7 @@ class OngoingSegmentReplications {
     private static final Logger logger = LogManager.getLogger(OngoingSegmentReplications.class);
     private final SegmentReplicationSettings segmentReplicationSettings;
     private final IndicesService indicesService;
-    private final Map<ReplicationCheckpoint, CopyState> copyStateMap;
+    private final Map<ShardId, CopyState> copyStateMap;
     private final Map<String, SegmentReplicationSourceHandler> allocationIdToHandlers;
 
     /**
@@ -63,80 +71,69 @@ class OngoingSegmentReplications {
     }
 
     /**
-     * Operations on the {@link #copyStateMap} member.
-     */
-
-    /**
-     * A synchronized method that checks {@link #copyStateMap} for the given {@link ReplicationCheckpoint} key
-     * and returns the cached value if one is present. If the key is not present, a {@link CopyState}
-     * object is constructed and stored in the map before being returned.
-     */
-    CopyState getCachedCopyState(ReplicationCheckpoint checkpoint) throws IOException {
-        final CopyState state = copyStateMap.get(checkpoint);
-        if (state != null) {
-            state.incRef();
-            return state;
-        } else {
-            // From the checkpoint's shard ID, fetch the IndexShard
-            ShardId shardId = checkpoint.getShardId();
-            final IndexService indexService = indicesService.indexServiceSafe(shardId.getIndex());
-            final IndexShard indexShard = indexService.getShard(shardId.id());
-            // build the CopyState object and cache it before returning
-            final CopyState copyState = new CopyState(checkpoint, indexShard);
-
-            /**
-             * Use the checkpoint from the request as the key in the map, rather than
-             * the checkpoint from the created CopyState. This maximizes cache hits
-             * if replication targets make a request with an older checkpoint.
-             * Replication targets are expected to fetch the checkpoint in the response
-             * CopyState to bring themselves up to date.
-             */
-            final CopyState result = copyStateMap.putIfAbsent(checkpoint, copyState);
-            if (result != null) {
-                copyState.decRef();
-                result.incRef();
-                return result;
-            }
-            return copyState;
-        }
-    }
-
-    /**
      * Start sending files to the replica.
      *
      * @param request  {@link GetSegmentFilesRequest}
      * @param listener {@link ActionListener} that resolves when sending files is complete.
      */
-    void startSegmentCopy(GetSegmentFilesRequest request, ActionListener<GetSegmentFilesResponse> listener) {
-        final SegmentReplicationSourceHandler handler = allocationIdToHandlers.get(request.getTargetAllocationId());
-        if (handler != null) {
-            if (handler.isReplicating()) {
-                throw new OpenSearchException(
-                    "Replication to shard {}, on node {} has already started",
-                    request.getCheckpoint().getShardId(),
-                    request.getTargetNode()
-                );
+    void startSegmentCopy(GetSegmentFilesRequest request, RetryableTransportClient client, ActionListener<GetSegmentFilesResponse> listener) {
+        final RemoteSegmentFileChunkWriter segmentSegmentFileChunkWriter = new RemoteSegmentFileChunkWriter(
+            request.getReplicationId(),
+            segmentReplicationSettings,
+            client,
+            request.getCheckpoint().getShardId(),
+            SegmentReplicationTargetService.Actions.FILE_CHUNK,
+            new AtomicLong(0),
+            (throttleTime) -> {
             }
-            // update the given listener to release the CopyState before it resolves.
-            final ActionListener<GetSegmentFilesResponse> wrappedListener = ActionListener.runBefore(listener, () -> {
-                final SegmentReplicationSourceHandler sourceHandler = allocationIdToHandlers.remove(request.getTargetAllocationId());
-                if (sourceHandler != null) {
-                    removeCopyState(sourceHandler.getCopyState());
-                }
-            });
-            if (request.getFilesToFetch().isEmpty()) {
-                // before completion, alert the primary of the replica's state.
-                handler.getCopyState()
-                    .getShard()
-                    .updateVisibleCheckpointForShard(request.getTargetAllocationId(), handler.getCopyState().getCheckpoint(), 0L);
-                wrappedListener.onResponse(new GetSegmentFilesResponse(Collections.emptyList()));
-            } else {
-                handler.sendFiles(request, wrappedListener);
-            }
-        } else {
-            listener.onResponse(new GetSegmentFilesResponse(Collections.emptyList()));
+        );
+        final GatedCloseable<CopyState> copyStateGatedCloseable = getCopyState(request.getCheckpoint().getShardId());
+        final CopyState copyState = copyStateGatedCloseable.get();
+        final SegmentReplicationSourceHandler handler = createTargetHandler(request.getTargetNode(), copyState, request.getTargetAllocationId(), segmentSegmentFileChunkWriter);
+        final SegmentReplicationSourceHandler segmentReplicationSourceHandler = allocationIdToHandlers.putIfAbsent(
+            request.getTargetAllocationId(),
+            handler
+        );
+        if (segmentReplicationSourceHandler != null) {
+            logger.error("Shard is already replicating, id {}", request.getReplicationId());
+            throw new OpenSearchException(
+                "Shard copy {} on node {} already replicating to {} rejecting id {}",
+                request.getCheckpoint().getShardId(),
+                request.getTargetNode(),
+                segmentReplicationSourceHandler.getCopyState().getCheckpoint(),
+                request.getReplicationId()
+            );
         }
-    }
+        final Store.RecoveryDiff recoveryDiff = Store.segmentReplicationDiff(copyState.getMetadataMap(), request.getMetadataMap());
+        // update the given listener to release the CopyState before it resolves.
+        final ActionListener<GetSegmentFilesResponse> wrappedListener = ActionListener.runBefore(listener, () -> {
+            final SegmentReplicationSourceHandler sourceHandler = allocationIdToHandlers.remove(request.getTargetAllocationId());
+//                if (sourceHandler != null) {
+//                    removeCopyState(sourceHandler.getCopyState());
+//                }
+            copyStateGatedCloseable.close();
+        });
+        if (recoveryDiff.missing.isEmpty()) {
+            // before completion, alert the primary of the replica's state.
+            handler.getCopyState()
+                .getShard()
+                .updateVisibleCheckpointForShard(request.getTargetAllocationId(), handler.getCopyState().getCheckpoint(), 0L);
+            try {
+                copyStateGatedCloseable.close();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+            wrappedListener.onResponse(new GetSegmentFilesResponse(Collections.emptyList(), copyState.getCheckpoint(), copyState.getInfosBytes()));
+        } else {
+            handler.sendFiles(request, recoveryDiff.missing, wrappedListener);
+        }
+//    } else
+//
+//    {
+//        listener.onResponse(new GetSegmentFilesResponse(Collections.emptyList(), copyState.getCheckpoint(), copyState.getInfosBytes()));
+//    }
+
+}
 
     /**
      * Prepare for a Replication event. This method constructs a {@link CopyState} holding files to be sent off of the current
@@ -146,25 +143,48 @@ class OngoingSegmentReplications {
      *
      * @param request         {@link CheckpointInfoRequest}
      * @param fileChunkWriter {@link FileChunkWriter} writer to handle sending files over the transport layer.
-     * @return {@link CopyState} the built CopyState for this replication event.
-     * @throws IOException - When there is an IO error building CopyState.
      */
-    CopyState prepareForReplication(CheckpointInfoRequest request, FileChunkWriter fileChunkWriter) throws IOException {
-        final CopyState copyState = getCachedCopyState(request.getCheckpoint());
-        if (copyState.getCheckpoint().getCodec().equals(request.getCheckpoint().getCodec()) == false) {
-            logger.trace("Requested unsupported codec version {}", request.getCheckpoint().getCodec());
-            throw new CancellableThreads.ExecutionCancelledException(
-                new ParameterizedMessage("Requested unsupported codec version {}", request.getCheckpoint().getCodec()).toString()
+    void prepareForReplication(GetSegmentFilesRequest request, FileChunkWriter fileChunkWriter, CopyState copyState) {
+        final SegmentReplicationSourceHandler segmentReplicationSourceHandler = allocationIdToHandlers.putIfAbsent(
+            request.getTargetAllocationId(),
+            createTargetHandler(request.getTargetNode(), copyState, request.getTargetAllocationId(), fileChunkWriter)
+        );
+        if (segmentReplicationSourceHandler != null) {
+            logger.error("Shard is already replicating, id {}", request.getReplicationId());
+            throw new OpenSearchException(
+                "Shard copy {} on node {} already replicating to {} rejecting id {}",
+                request.getCheckpoint().getShardId(),
+                request.getTargetNode(),
+                segmentReplicationSourceHandler.getCopyState().getCheckpoint(),
+                request.getReplicationId()
             );
         }
-        allocationIdToHandlers.compute(request.getTargetAllocationId(), (allocationId, segrepHandler) -> {
-            if (segrepHandler != null) {
-                logger.warn("Override handler for allocation id {}", request.getTargetAllocationId());
-                cancelHandlers(handler -> handler.getAllocationId().equals(request.getTargetAllocationId()), "cancel due to retry");
+    }
+
+    public void setCopyState(IndexShard indexShard) {
+        if (indexShard.state() == IndexShardState.STARTED) {
+            try {
+                final CopyState state = new CopyState(indexShard);
+                final CopyState oldCopyState = copyStateMap.remove(indexShard.shardId());
+                if (oldCopyState != null) {
+                    oldCopyState.decRef();
+                }
+                copyStateMap.put(indexShard.shardId(), state);
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
             }
-            return createTargetHandler(request.getTargetNode(), copyState, request.getTargetAllocationId(), fileChunkWriter);
-        });
-        return copyState;
+        }
+    }
+
+    public GatedCloseable<CopyState> getCopyState(ShardId shardId) {
+        final CopyState copyState = copyStateMap.get(shardId);
+        if (copyState != null) {
+            copyState.incRef();
+            return new GatedCloseable<>(copyState, copyState::decRef);
+        }
+        final IndexService indexService = indicesService.indexService(shardId.getIndex());
+        final IndexShard indexShard = indexService.getShard(shardId.id());
+        throw new IndexShardNotStartedException(shardId, indexShard.state());
     }
 
     /**
@@ -187,7 +207,7 @@ class OngoingSegmentReplications {
         final SegmentReplicationSourceHandler handler = allocationIdToHandlers.remove(allocationId);
         if (handler != null) {
             handler.cancel(reason);
-            removeCopyState(handler.getCopyState());
+//            removeCopyState(handler.getCopyState());
         }
     }
 
@@ -243,11 +263,11 @@ class OngoingSegmentReplications {
      *
      * @param copyState {@link CopyState}
      */
-    private void removeCopyState(CopyState copyState) {
-        if (copyState.decRef() == true) {
-            copyStateMap.remove(copyState.getRequestedReplicationCheckpoint());
-        }
-    }
+//    private void removeCopyState(CopyState copyState) {
+//        if (copyState.decRef() == true) {
+//            copyStateMap.remove(copyState.getRequestedReplicationCheckpoint());
+//        }
+//    }
 
     /**
      * Remove handlers from allocationIdToHandlers map based on a filter predicate.
@@ -270,7 +290,8 @@ class OngoingSegmentReplications {
 
     /**
      * Clear copystate and target handlers for any non insync allocationIds.
-     * @param shardId {@link ShardId}
+     *
+     * @param shardId             {@link ShardId}
      * @param inSyncAllocationIds {@link List} of in-sync allocation Ids.
      */
     public void clearOutOfSyncIds(ShardId shardId, Set<String> inSyncAllocationIds) {

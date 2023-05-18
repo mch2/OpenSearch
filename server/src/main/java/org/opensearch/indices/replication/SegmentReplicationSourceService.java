@@ -25,8 +25,8 @@ import org.opensearch.index.IndexService;
 import org.opensearch.index.shard.IndexEventListener;
 import org.opensearch.index.shard.IndexShard;
 import org.opensearch.index.shard.ShardId;
+import org.opensearch.index.store.Store;
 import org.opensearch.indices.IndicesService;
-import org.opensearch.indices.recovery.RecoverySettings;
 import org.opensearch.indices.recovery.RetryableTransportClient;
 import org.opensearch.indices.replication.common.CopyState;
 import org.opensearch.indices.replication.common.ReplicationTimer;
@@ -40,6 +40,7 @@ import java.io.IOException;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
+
 
 /**
  * Service class that handles segment replication requests from replica shards.
@@ -119,43 +120,51 @@ public class SegmentReplicationSourceService extends AbstractLifecycleComponent 
     private class CheckpointInfoRequestHandler implements TransportRequestHandler<CheckpointInfoRequest> {
         @Override
         public void messageReceived(CheckpointInfoRequest request, TransportChannel channel, Task task) throws Exception {
-            final ReplicationTimer timer = new ReplicationTimer();
-            timer.start();
-            final RemoteSegmentFileChunkWriter segmentSegmentFileChunkWriter = new RemoteSegmentFileChunkWriter(
-                request.getReplicationId(),
-                segmentReplicationSettings,
-                new RetryableTransportClient(
-                    transportService,
-                    request.getTargetNode(),
-                    segmentReplicationSettings.internalActionTimeout(),
-                    logger
-                ),
-                request.getCheckpoint().getShardId(),
-                SegmentReplicationTargetService.Actions.FILE_CHUNK,
-                new AtomicLong(0),
-                (throttleTime) -> {}
-            );
-            final CopyState copyState = ongoingSegmentReplications.prepareForReplication(request, segmentSegmentFileChunkWriter);
-            channel.sendResponse(
-                new CheckpointInfoResponse(copyState.getCheckpoint(), copyState.getMetadataMap(), copyState.getInfosBytes())
-            );
-            timer.stop();
-            logger.trace(
-                new ParameterizedMessage(
-                    "[replication id {}] Source node sent checkpoint info [{}] to target node [{}], timing: {}",
-                    request.getReplicationId(),
-                    copyState.getCheckpoint(),
-                    request.getTargetNode().getId(),
-                    timer.time()
-                )
-            );
+//            final ReplicationTimer timer = new ReplicationTimer();
+//            timer.start();
+//            final RemoteSegmentFileChunkWriter segmentSegmentFileChunkWriter = new RemoteSegmentFileChunkWriter(
+//                request.getReplicationId(),
+//                segmentReplicationSettings,
+//                new RetryableTransportClient(
+//                    transportService,
+//                    request.getTargetNode(),
+//                    segmentReplicationSettings.internalActionTimeout(),
+//                    logger
+//                ),
+//                request.getCheckpoint().getShardId(),
+//                SegmentReplicationTargetService.Actions.FILE_CHUNK,
+//                new AtomicLong(0),
+//                (throttleTime) -> {
+//                }
+//            );
+//            final CopyState copyState = ongoingSegmentReplications.prepareForReplication(request, segmentSegmentFileChunkWriter);
+//            channel.sendResponse(
+//                new CheckpointInfoResponse(copyState.getCheckpoint(), copyState.getMetadataMap(), copyState.getInfosBytes())
+//            );
+//            timer.stop();
+//            logger.trace(
+//                new ParameterizedMessage(
+//                    "[replication id {}] Source node sent checkpoint info [{}] to target node [{}], timing: {}",
+//                    request.getReplicationId(),
+//                    copyState.getCheckpoint(),
+//                    request.getTargetNode().getId(),
+//                    timer.time()
+//                )
+//            );
         }
     }
 
     private class GetSegmentFilesRequestHandler implements TransportRequestHandler<GetSegmentFilesRequest> {
         @Override
         public void messageReceived(GetSegmentFilesRequest request, TransportChannel channel, Task task) throws Exception {
-            ongoingSegmentReplications.startSegmentCopy(request, new ChannelActionListener<>(channel, Actions.GET_SEGMENT_FILES, request));
+//            final CopyState copyState = ongoingSegmentReplications.prepareForReplication(request, segmentSegmentFileChunkWriter);
+//            final Store.RecoveryDiff recoveryDiff = Store.segmentReplicationDiff(copyState.getMetadataMap(), request.getMetadataMap());
+            ongoingSegmentReplications.startSegmentCopy(request, new RetryableTransportClient(
+                transportService,
+                request.getTargetNode(),
+                segmentReplicationSettings.internalActionTimeout(),
+                logger
+            ), new ChannelActionListener<>(channel, Actions.GET_SEGMENT_FILES, request));
         }
     }
 
@@ -207,7 +216,6 @@ public class SegmentReplicationSourceService extends AbstractLifecycleComponent 
     }
 
     /**
-     *
      * Cancels any replications on this node to a replica shard that is about to be closed.
      */
     @Override

@@ -22,6 +22,7 @@ import org.opensearch.transport.TransportRequestOptions;
 import org.opensearch.transport.TransportService;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.opensearch.indices.replication.SegmentReplicationSourceService.Actions.GET_CHECKPOINT_INFO;
 import static org.opensearch.indices.replication.SegmentReplicationSourceService.Actions.GET_SEGMENT_FILES;
@@ -78,7 +79,7 @@ public class PrimaryShardReplicationSource implements SegmentReplicationSource {
     public void getSegmentFiles(
         long replicationId,
         ReplicationCheckpoint checkpoint,
-        List<StoreFileMetadata> filesToFetch,
+        Map<String, StoreFileMetadata> metadataMap,
         Store store,
         ActionListener<GetSegmentFilesResponse> listener
     ) {
@@ -88,7 +89,7 @@ public class PrimaryShardReplicationSource implements SegmentReplicationSource {
             replicationId,
             targetAllocationId,
             targetNode,
-            filesToFetch,
+            metadataMap,
             checkpoint
         );
         final TransportRequestOptions options = TransportRequestOptions.builder()

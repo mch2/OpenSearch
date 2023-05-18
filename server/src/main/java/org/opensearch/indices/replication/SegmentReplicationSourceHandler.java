@@ -104,7 +104,7 @@ class SegmentReplicationSourceHandler {
      * @param request  {@link GetSegmentFilesRequest} request object containing list of files to be sent.
      * @param listener {@link ActionListener} that completes with the list of files sent.
      */
-    public synchronized void sendFiles(GetSegmentFilesRequest request, ActionListener<GetSegmentFilesResponse> listener) {
+    public synchronized void sendFiles(GetSegmentFilesRequest request, List<StoreFileMetadata> filesToFetch, ActionListener<GetSegmentFilesResponse> listener) {
         logger.info("[replication id {} Checkpoint {} ] Starting file send to target node [{}]", request.getReplicationId(), copyState.getCheckpoint().getSegmentInfosVersion(), request.getTargetNode().getName());
         final Instant now = Instant.now();
         final ReplicationTimer timer = new ReplicationTimer();
@@ -146,7 +146,7 @@ class SegmentReplicationSourceHandler {
 
             final StepListener<Void> sendFileStep = new StepListener<>();
             Set<String> storeFiles = new HashSet<>(Arrays.asList(shard.store().directory().listAll()));
-            final StoreFileMetadata[] storeFileMetadata = request.getFilesToFetch()
+            final StoreFileMetadata[] storeFileMetadata = filesToFetch
                 .stream()
                 .filter(file -> storeFiles.contains(file.name()))
                 .toArray(StoreFileMetadata[]::new);
@@ -163,7 +163,7 @@ class SegmentReplicationSourceHandler {
                     final long duration = Duration.between(now, stop).toMillis();
                     logger.info("[replication id {} Checkpoint {} ] finished file send to target node [{}] - Duration {}", request.getReplicationId(), copyState.getCheckpoint().getSegmentInfosVersion(), request.getTargetNode().getName(), duration);
                     shard.updateVisibleCheckpointForShard(allocationId, copyState.getCheckpoint(), duration);
-                    future.onResponse(new GetSegmentFilesResponse(List.of(storeFileMetadata)));
+                    future.onResponse(new GetSegmentFilesResponse(List.of(storeFileMetadata), copyState.getCheckpoint(), copyState.getInfosBytes()));
                 } finally {
                     IOUtils.close(resources);
                     timer.stop();

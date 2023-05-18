@@ -17,6 +17,7 @@ import org.opensearch.indices.replication.common.SegmentReplicationTransportRequ
 
 import java.io.IOException;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Request object for fetching a list of segment files metadata from a {@link SegmentReplicationSource}.
@@ -26,12 +27,12 @@ import java.util.List;
  */
 public class GetSegmentFilesRequest extends SegmentReplicationTransportRequest {
 
-    private final List<StoreFileMetadata> filesToFetch;
+    private final Map<String, StoreFileMetadata> metadataMap;
     private final ReplicationCheckpoint checkpoint;
 
     public GetSegmentFilesRequest(StreamInput in) throws IOException {
         super(in);
-        this.filesToFetch = in.readList(StoreFileMetadata::new);
+        this.metadataMap = in.readMap(StreamInput::readString, StoreFileMetadata::new);
         this.checkpoint = new ReplicationCheckpoint(in);
     }
 
@@ -39,18 +40,18 @@ public class GetSegmentFilesRequest extends SegmentReplicationTransportRequest {
         long replicationId,
         String targetAllocationId,
         DiscoveryNode targetNode,
-        List<StoreFileMetadata> filesToFetch,
+        Map<String, StoreFileMetadata> metadataMap,
         ReplicationCheckpoint checkpoint
     ) {
         super(replicationId, targetAllocationId, targetNode);
-        this.filesToFetch = filesToFetch;
         this.checkpoint = checkpoint;
+        this.metadataMap = metadataMap;
     }
 
     @Override
     public void writeTo(StreamOutput out) throws IOException {
         super.writeTo(out);
-        out.writeList(filesToFetch);
+        out.writeMap(metadataMap, StreamOutput::writeString, (valueOut, fc) -> fc.writeTo(valueOut));
         checkpoint.writeTo(out);
     }
 
@@ -58,7 +59,7 @@ public class GetSegmentFilesRequest extends SegmentReplicationTransportRequest {
         return checkpoint;
     }
 
-    public List<StoreFileMetadata> getFilesToFetch() {
-        return filesToFetch;
+    public Map<String, StoreFileMetadata> getMetadataMap() {
+        return metadataMap;
     }
 }

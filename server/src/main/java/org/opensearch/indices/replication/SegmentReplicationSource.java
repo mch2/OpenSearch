@@ -15,6 +15,7 @@ import org.opensearch.index.store.StoreFileMetadata;
 import org.opensearch.indices.replication.checkpoint.ReplicationCheckpoint;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * Represents the source of a replication event.
@@ -37,14 +38,14 @@ public interface SegmentReplicationSource {
      *
      * @param replicationId {@link long} - ID of the replication event.
      * @param checkpoint    {@link ReplicationCheckpoint} Checkpoint to fetch metadata for.
-     * @param filesToFetch  {@link List} List of files to fetch.
+     * @param metadataMap  {@link Map} List of files to fetch.
      * @param store         {@link Store} Reference to the local store.
      * @param listener      {@link ActionListener} Listener that completes with the list of files copied.
      */
     void getSegmentFiles(
         long replicationId,
         ReplicationCheckpoint checkpoint,
-        List<StoreFileMetadata> filesToFetch,
+        Map<String, StoreFileMetadata> metadataMap,
         Store store,
         ActionListener<GetSegmentFilesResponse> listener
     );
