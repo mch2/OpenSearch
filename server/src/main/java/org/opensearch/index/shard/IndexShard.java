@@ -1818,6 +1818,9 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
     }
 
     public CopyState getCopyState() {
+        if (this.copyState == null) {
+            refreshCopyState();
+        }
         return this.copyState;
     }
 
