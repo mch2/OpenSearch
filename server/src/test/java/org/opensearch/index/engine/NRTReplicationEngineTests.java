@@ -11,11 +11,13 @@ package org.opensearch.index.engine;
 import org.apache.lucene.document.Field;
 import org.apache.lucene.document.TextField;
 import org.apache.lucene.index.IndexCommit;
+import org.apache.lucene.index.IndexFileNames;
 import org.apache.lucene.index.NoMergePolicy;
 import org.apache.lucene.index.SegmentInfos;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.search.ReferenceManager;
 import org.apache.lucene.search.TermQuery;
+import org.apache.lucene.store.IOContext;
 import org.hamcrest.MatcherAssert;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.common.bytes.BytesReference;
@@ -37,6 +39,7 @@ import org.opensearch.test.IndexSettingsModule;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -87,16 +90,6 @@ public class NRTReplicationEngineTests extends EngineTestCase {
             final Store nrtEngineStore = createStore(INDEX_SETTINGS, newDirectory());
             final NRTReplicationEngine nrtEngine = buildNrtReplicaEngine(globalCheckpoint, nrtEngineStore)
         ) {
-            engine.refresh("warm_up");
-            Engine.Searcher searchResult = engine.acquireSearcher("test");
-            MatcherAssert.assertThat(searchResult, EngineSearcherTotalHitsMatcher.engineSearcherTotalHits(0));
-            searchResult.close();
-
-            nrtEngine.refresh("warm_up");
-            searchResult = nrtEngine.acquireSearcher("test");
-            MatcherAssert.assertThat(searchResult, EngineSearcherTotalHitsMatcher.engineSearcherTotalHits(0));
-            searchResult.close();
-
             // create a document
             ParseContext.Document document = testDocumentWithTextField();
             document.add(new Field(SourceFieldMapper.NAME, BytesReference.toBytes(B_1), SourceFieldMapper.Defaults.FIELD_TYPE));
@@ -104,43 +97,17 @@ public class NRTReplicationEngineTests extends EngineTestCase {
             engine.index(indexForDoc(doc));
             nrtEngine.index(indexForDoc(doc));
 
-            searchResult = engine.acquireSearcher("test");
-            MatcherAssert.assertThat(searchResult, EngineSearcherTotalHitsMatcher.engineSearcherTotalHits(0));
-            MatcherAssert.assertThat(
-                searchResult,
-                EngineSearcherTotalHitsMatcher.engineSearcherTotalHits(new TermQuery(new Term("value", "test")), 0)
-            );
-            searchResult.close();
+            final BiFunction<String, Engine.SearcherScope, Engine.Searcher> searcherFactory = nrtEngine::acquireSearcher;
 
-            searchResult = nrtEngine.acquireSearcher("test");
-            MatcherAssert.assertThat(searchResult, EngineSearcherTotalHitsMatcher.engineSearcherTotalHits(0));
-            MatcherAssert.assertThat(
-                searchResult,
-                EngineSearcherTotalHitsMatcher.engineSearcherTotalHits(new TermQuery(new Term("value", "test")), 0)
-            );
-            searchResult.close();
-
-            final BiFunction<String, Engine.SearcherScope, Engine.Searcher> searcherFactory = engine::acquireSearcher;
-            final BiFunction<String, Engine.SearcherScope, Engine.Searcher> nrtSearcherFactory = nrtEngine::acquireSearcher;
-
-
-            // but, not there non realtime
-            try (Engine.GetResult getResult = engine.get(newGet(false, doc), searcherFactory)) {
+            // not present if realtime=false
+            try (Engine.GetResult getResult = nrtEngine.get(newGet(false, doc), searcherFactory)) {
                 assertThat(getResult.exists(), equalTo(false));
             }
 
-            // but, we can still get it (in realtime)
-            try (Engine.GetResult getResult = engine.get(newGet(true, doc), searcherFactory)) {
-                assertThat(getResult.exists(), equalTo(true));
-                assertThat(getResult.docIdAndVersion(), notNullValue());
-                logger.info(getResult.docIdAndVersion().docId);
-            }
-
-            // but, we can still get it (in realtime)
+            // present with realtime=true
             try (Engine.GetResult getResult = nrtEngine.get(newGet(true, doc), searcherFactory)) {
                 assertThat(getResult.exists(), equalTo(true));
                 assertThat(getResult.docIdAndVersion(), notNullValue());
-                logger.info(getResult.docIdAndVersion().docBase);
             }
 
             // now do an update
@@ -151,19 +118,71 @@ public class NRTReplicationEngineTests extends EngineTestCase {
             engine.index(indexForDoc(doc));
             nrtEngine.index(indexForDoc(doc));
 
-            // but, we can still get it (in realtime)
-            try (Engine.GetResult getResult = engine.get(newGet(true, doc), searcherFactory)) {
+            // update present with realtime=true
+            try (Engine.GetResult getResult = nrtEngine.get(newGet(true, doc), searcherFactory)) {
                 assertThat(getResult.exists(), equalTo(true));
                 assertThat(getResult.docIdAndVersion(), notNullValue());
             }
+
+            // refresh primary to flush new segments to disk.
+            engine.refresh("test");
+            // copy segments from primary to replica's store.
+            Lucene.cleanLuceneIndex(nrtEngine.store.directory());
+            for (String file : engine.store.directory().listAll()) {
+                // skip segments_n
+                if (file.startsWith(IndexFileNames.SEGMENTS)) {
+                    continue;
+                }
+                nrtEngine.store.directory().copyFrom(engine.store.directory(), file, file, IOContext.DEFAULT);
+            }
+            // update nrtEngine with primary's latest infos.
+            nrtEngine.updateSegments(engine.getLatestSegmentInfos());
+
+            // doc is now present non realtime
+            try (Engine.GetResult getResult = nrtEngine.get(newGet(false, doc), searcherFactory)) {
+                assertThat(getResult.exists(), equalTo(true));
+            }
+
+            assertTrue("VersionMap is empty post refresh", engine.getVersionMap().isEmpty());
+            assertTrue("VersionMap empty post segment update", nrtEngine.getVersionMap().isEmpty());
+
             // now delete
             nrtEngine.delete(new Engine.Delete("1", newUid(doc), primaryTerm.get()));
 
-            // get should not see it (in realtime)
+            // doc is no longer present realtime=true
             try (Engine.GetResult getResult = nrtEngine.get(newGet(true, doc), searcherFactory)) {
                 assertThat(getResult.exists(), equalTo(false));
             }
 
+            // doc is still present realtime=false
+            try (Engine.GetResult getResult = nrtEngine.get(newGet(false, doc), searcherFactory)) {
+                assertThat(getResult.exists(), equalTo(true));
+            }
+
+            // create a document
+            document = testDocumentWithTextField();
+            document.add(new Field(SourceFieldMapper.NAME, BytesReference.toBytes(B_1), SourceFieldMapper.Defaults.FIELD_TYPE));
+            doc = testParsedDocument("1", null, document, B_1, null);
+            engine.index(indexForDoc(doc));
+            nrtEngine.index(indexForDoc(doc));
+
+            // last received gen should be same and live map should not be wiped
+            // refresh primary to flush new segments to disk.
+            engine.refresh("test");
+            // wipe anything the replica has in its dir and copy all files from primary's directory.
+            // copy segments from primary to replica's store.
+            Lucene.cleanLuceneIndex(nrtEngine.store.directory());
+            for (String file : engine.store.directory().listAll()) {
+                // skip segments_n
+                if (file.startsWith(IndexFileNames.SEGMENTS)) {
+                    continue;
+                }
+                nrtEngine.store.directory().copyFrom(engine.store.directory(), file, file, IOContext.DEFAULT);
+            }
+            // update nrtEngine with primary's latest infos.
+            nrtEngine.updateSegments(engine.getLatestSegmentInfos());
+            assertEquals("VersionMap is empty post refresh", Collections.emptyMap(), engine.getVersionMap());
+            assertEquals("VersionMap is empty post refresh", Collections.emptyMap(), nrtEngine.getVersionMap());
         }
     }
 
@@ -196,7 +215,6 @@ public class NRTReplicationEngineTests extends EngineTestCase {
 
             final BiFunction<String, Engine.SearcherScope, Engine.Searcher> searcherFactory = engine::acquireSearcher;
             final Engine.GetResult getResult = engine.get(newGet(true, doc), searcherFactory);
-            logger.info(getResult);
 
             // we don't index into nrtEngine, so get the doc ids from the regular engine.
             final List<DocIdSeqNoAndSource> docs = getDocIds(engine, true);

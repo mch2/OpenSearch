@@ -45,6 +45,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CountDownLatch;
 import java.util.function.BiFunction;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static org.opensearch.index.seqno.SequenceNumbers.MAX_SEQ_NO;
 
@@ -88,6 +90,8 @@ public class NRTReplicationEngine extends Engine {
             for (ReferenceManager.RefreshListener listener : engineConfig.getInternalRefreshListener()) {
                 this.readerManager.addListener(listener);
             }
+            // add versionMap as a listener to our reader,
+            this.readerManager.addListener(versionMap);
             final Map<String, String> userData = store.readLastCommittedSegmentsInfo().getUserData();
             final String translogUUID = Objects.requireNonNull(userData.get(Translog.TRANSLOG_UUID_KEY));
             translogManagerRef = new WriteOnlyTranslogManager(
@@ -219,41 +223,40 @@ public class NRTReplicationEngine extends Engine {
     @Override
     public IndexResult index(Index index) throws IOException {
         ensureOpen();
-        IndexResult indexResult = new IndexResult(index.version(), index.primaryTerm(), index.seqNo(), false);
-        final Translog.Location location = translogManager.add(new Translog.Index(index, indexResult));
-        indexResult.setTranslogLocation(location);
-        indexResult.setTook(System.nanoTime() - index.startTime());
-        indexResult.freeze();
         try (
             Releasable ignored = versionMap.acquireLock(index.uid().bytes());
         ) {
-            final VersionValue versionFromMap = getVersionFromMap(index.uid().bytes());
+            IndexResult indexResult = new IndexResult(index.version(), index.primaryTerm(), index.seqNo(), false);
+            final Translog.Location location = translogManager.add(new Translog.Index(index, indexResult));
+            indexResult.setTranslogLocation(location);
+            indexResult.setTook(System.nanoTime() - index.startTime());
+            indexResult.freeze();
+
+            final VersionValue versionFromMap = versionMap.getUnderLock(index.uid().bytes());
             long version = versionFromMap != null ? versionFromMap.version : Versions.NOT_FOUND;
             versionMap.enforceSafeAccess();
             versionMap.maybePutIndexUnderLock(index.uid().bytes(),
                 new IndexVersionValue(indexResult.getTranslogLocation(), version, index.seqNo(), index.primaryTerm())
             );
+            localCheckpointTracker.advanceMaxSeqNo(index.seqNo());
+            return indexResult;
         }
-        localCheckpointTracker.advanceMaxSeqNo(index.seqNo());
-        return indexResult;
     }
 
     @Override
     public DeleteResult delete(Delete delete) throws IOException {
         ensureOpen();
-        versionMap.enforceSafeAccess();
-        DeleteResult deleteResult = new DeleteResult(delete.version(), delete.primaryTerm(), delete.seqNo(), true);
-        final Translog.Location location = translogManager.add(new Translog.Delete(delete, deleteResult));
-        deleteResult.setTranslogLocation(location);
-        deleteResult.setTook(System.nanoTime() - delete.startTime());
-        deleteResult.freeze();
-        try (
-            Releasable ignored = versionMap.acquireLock(delete.uid().bytes());
-        ) {
+        try (Releasable ignored = versionMap.acquireLock(delete.uid().bytes())) {
+            versionMap.enforceSafeAccess();
+            DeleteResult deleteResult = new DeleteResult(delete.version(), delete.primaryTerm(), delete.seqNo(), true);
+            final Translog.Location location = translogManager.add(new Translog.Delete(delete, deleteResult));
+            deleteResult.setTranslogLocation(location);
+            deleteResult.setTook(System.nanoTime() - delete.startTime());
             versionMap.putDeleteUnderLock(delete.uid().bytes(), new DeleteVersionValue(delete.version(), delete.seqNo(), delete.primaryTerm(), engineConfig.getThreadPool().relativeTimeInMillis()));
+            deleteResult.freeze();
+            localCheckpointTracker.advanceMaxSeqNo(delete.seqNo());
+            return deleteResult;
         }
-        localCheckpointTracker.advanceMaxSeqNo(delete.seqNo());
-        return deleteResult;
     }
 
     @Override
@@ -268,65 +271,60 @@ public class NRTReplicationEngine extends Engine {
         return noOpResult;
     }
 
-    private VersionValue getVersionFromMap(BytesRef id) {
-        if (versionMap.isUnsafe()) {
-            synchronized (versionMap) {
-                // we are switching from an unsafe map to a safe map. This might happen concurrently
-                // but we only need to do this once since the last operation per ID is to add to the version
-                // map so once we pass this point we can safely lookup from the version map.
-                if (versionMap.isUnsafe()) {
-//                    refresh("unsafe_version_map", SearcherScope.INTERNAL, true);
-                }
-                versionMap.enforceSafeAccess();
-            }
-        }
-        return versionMap.getUnderLock(id);
+    // for testing
+    final Map<BytesRef, VersionValue> getVersionMap() {
+        return Stream.concat(versionMap.getAllCurrent().entrySet().stream(), versionMap.getAllTombstones().entrySet().stream())
+            .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
     }
 
     @Override
     public GetResult get(Get get, BiFunction<String, SearcherScope, Searcher> searcherFactory) throws EngineException {
         assert Objects.equals(get.uid().field(), IdFieldMapper.NAME) : get.uid().field();
-        try (ReleasableLock ignored = readLock.acquire()) {
-            try (Releasable ignore = versionMap.acquireLock(get.uid().bytes())) {
-                final VersionValue versionFromMap = getVersionFromMap(get.uid().bytes());
-                logger.info(versionMap.getAllCurrent());
-                if (versionFromMap.isDelete()) {
-                    return GetResult.NOT_EXISTS;
-                }
-                if (versionFromMap.getLocation() != null) {
-                    try {
-                        final Translog.Operation operation = translogManager.readOperation(versionFromMap.getLocation());
-                        if (operation != null) {
-                            final Translog.Index index = (Translog.Index) operation;
-                            TranslogLeafReader reader = new TranslogLeafReader(index);
-                            return new GetResult(
-                                new Engine.Searcher(
-                                    "realtime_get",
-                                    reader,
-                                    IndexSearcher.getDefaultSimilarity(),
-                                    null,
-                                    IndexSearcher.getDefaultQueryCachingPolicy(),
-                                    reader
-                                ),
-                                new VersionsAndSeqNoResolver.DocIdAndVersion(
-                                    0,
-                                    index.version(),
-                                    index.seqNo(),
-                                    index.primaryTerm(),
-                                    reader,
-                                    0
-                                ),
-                                true
-                            );
+        if (get.realtime()) {
+            try (ReleasableLock ignored = readLock.acquire()) {
+                try (Releasable ignore = versionMap.acquireLock(get.uid().bytes())) {
+                    final VersionValue versionFromMap = versionMap.getUnderLock(get.uid().bytes());
+                    if (versionFromMap != null) {
+                        if (versionFromMap.isDelete()) {
+                            return GetResult.NOT_EXISTS;
                         }
-                    } catch (IOException e) {
-                        logger.error("WTF", e);
+                        if (versionFromMap.getLocation() != null) {
+                            try {
+                                final Translog.Operation operation = translogManager.readOperation(versionFromMap.getLocation());
+                                if (operation != null) {
+                                    final Translog.Index index = (Translog.Index) operation;
+                                    TranslogLeafReader reader = new TranslogLeafReader(index);
+                                    return new GetResult(
+                                        new Engine.Searcher(
+                                            "realtime_get",
+                                            reader,
+                                            IndexSearcher.getDefaultSimilarity(),
+                                            null,
+                                            IndexSearcher.getDefaultQueryCachingPolicy(),
+                                            reader
+                                        ),
+                                        new VersionsAndSeqNoResolver.DocIdAndVersion(
+                                            0,
+                                            index.version(),
+                                            index.seqNo(),
+                                            index.primaryTerm(),
+                                            reader,
+                                            0
+                                        ),
+                                        true
+                                    );
+                                }
+                            } catch (IOException e) {
+                                maybeFailEngine("realtime_get", e);
+                                throw new EngineException(shardId, "failed to read operation from translog", e);
+                            }
+                        }
                     }
                 }
-                // if doc is not in translog search the index
-                return getFromSearcher(get, searcherFactory, SearcherScope.EXTERNAL);
             }
         }
+        // if realtime=false or doc is not in translog search the index
+        return getFromSearcher(get, searcherFactory, SearcherScope.EXTERNAL);
     }
 
     @Override
