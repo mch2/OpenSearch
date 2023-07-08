@@ -12,14 +12,20 @@ import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.IndexCommit;
 import org.apache.lucene.index.SegmentInfos;
 import org.apache.lucene.index.SoftDeletesDirectoryReaderWrapper;
+import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.ReferenceManager;
+import org.apache.lucene.util.BytesRef;
 import org.opensearch.common.concurrent.GatedCloseable;
+import org.opensearch.common.lease.Releasable;
 import org.opensearch.common.lucene.Lucene;
 import org.opensearch.common.lucene.index.OpenSearchDirectoryReader;
+import org.opensearch.common.lucene.uid.Versions;
+import org.opensearch.common.lucene.uid.VersionsAndSeqNoResolver;
 import org.opensearch.common.unit.ByteSizeValue;
 import org.opensearch.common.unit.TimeValue;
 import org.opensearch.common.util.concurrent.ReleasableLock;
 import org.opensearch.common.util.io.IOUtils;
+import org.opensearch.index.mapper.IdFieldMapper;
 import org.opensearch.index.seqno.LocalCheckpointTracker;
 import org.opensearch.index.seqno.SeqNoStats;
 import org.opensearch.index.seqno.SequenceNumbers;
@@ -58,7 +64,7 @@ public class NRTReplicationEngine extends Engine {
     private final WriteOnlyTranslogManager translogManager;
 
     private volatile long lastReceivedGen = SequenceNumbers.NO_OPS_PERFORMED;
-
+    private final LiveVersionMap versionMap = new LiveVersionMap();
     private static final int SI_COUNTER_INCREMENT = 10;
 
     public NRTReplicationEngine(EngineConfig engineConfig) {
@@ -168,11 +174,10 @@ public class NRTReplicationEngine extends Engine {
 
     /**
      * Persist the latest live SegmentInfos.
-     *
+     * <p>
      * This method creates a commit point from the latest SegmentInfos. It is intended to be used when this shard is about to be promoted as the new primary.
-     *
+     * <p>
      * TODO: If this method is invoked while the engine is currently updating segments on its reader, wait for that update to complete so the updated segments are used.
-     *
      *
      * @throws IOException - When there is an IO error committing the SegmentInfos.
      */
@@ -219,6 +224,16 @@ public class NRTReplicationEngine extends Engine {
         indexResult.setTranslogLocation(location);
         indexResult.setTook(System.nanoTime() - index.startTime());
         indexResult.freeze();
+        try (
+            Releasable ignored = versionMap.acquireLock(index.uid().bytes());
+        ) {
+            final VersionValue versionFromMap = getVersionFromMap(index.uid().bytes());
+            long version = versionFromMap != null ? versionFromMap.version : Versions.NOT_FOUND;
+            versionMap.enforceSafeAccess();
+            versionMap.maybePutIndexUnderLock(index.uid().bytes(),
+                new IndexVersionValue(indexResult.getTranslogLocation(), version, index.seqNo(), index.primaryTerm())
+            );
+        }
         localCheckpointTracker.advanceMaxSeqNo(index.seqNo());
         return indexResult;
     }
@@ -226,11 +241,17 @@ public class NRTReplicationEngine extends Engine {
     @Override
     public DeleteResult delete(Delete delete) throws IOException {
         ensureOpen();
+        versionMap.enforceSafeAccess();
         DeleteResult deleteResult = new DeleteResult(delete.version(), delete.primaryTerm(), delete.seqNo(), true);
         final Translog.Location location = translogManager.add(new Translog.Delete(delete, deleteResult));
         deleteResult.setTranslogLocation(location);
         deleteResult.setTook(System.nanoTime() - delete.startTime());
         deleteResult.freeze();
+        try (
+            Releasable ignored = versionMap.acquireLock(delete.uid().bytes());
+        ) {
+            versionMap.putDeleteUnderLock(delete.uid().bytes(), new DeleteVersionValue(delete.version(), delete.seqNo(), delete.primaryTerm(), engineConfig.getThreadPool().relativeTimeInMillis()));
+        }
         localCheckpointTracker.advanceMaxSeqNo(delete.seqNo());
         return deleteResult;
     }
@@ -247,9 +268,65 @@ public class NRTReplicationEngine extends Engine {
         return noOpResult;
     }
 
+    private VersionValue getVersionFromMap(BytesRef id) {
+        if (versionMap.isUnsafe()) {
+            synchronized (versionMap) {
+                // we are switching from an unsafe map to a safe map. This might happen concurrently
+                // but we only need to do this once since the last operation per ID is to add to the version
+                // map so once we pass this point we can safely lookup from the version map.
+                if (versionMap.isUnsafe()) {
+//                    refresh("unsafe_version_map", SearcherScope.INTERNAL, true);
+                }
+                versionMap.enforceSafeAccess();
+            }
+        }
+        return versionMap.getUnderLock(id);
+    }
+
     @Override
     public GetResult get(Get get, BiFunction<String, SearcherScope, Searcher> searcherFactory) throws EngineException {
-        return getFromSearcher(get, searcherFactory, SearcherScope.EXTERNAL);
+        assert Objects.equals(get.uid().field(), IdFieldMapper.NAME) : get.uid().field();
+        try (ReleasableLock ignored = readLock.acquire()) {
+            try (Releasable ignore = versionMap.acquireLock(get.uid().bytes())) {
+                final VersionValue versionFromMap = getVersionFromMap(get.uid().bytes());
+                logger.info(versionMap.getAllCurrent());
+                if (versionFromMap.isDelete()) {
+                    return GetResult.NOT_EXISTS;
+                }
+                if (versionFromMap.getLocation() != null) {
+                    try {
+                        final Translog.Operation operation = translogManager.readOperation(versionFromMap.getLocation());
+                        if (operation != null) {
+                            final Translog.Index index = (Translog.Index) operation;
+                            TranslogLeafReader reader = new TranslogLeafReader(index);
+                            return new GetResult(
+                                new Engine.Searcher(
+                                    "realtime_get",
+                                    reader,
+                                    IndexSearcher.getDefaultSimilarity(),
+                                    null,
+                                    IndexSearcher.getDefaultQueryCachingPolicy(),
+                                    reader
+                                ),
+                                new VersionsAndSeqNoResolver.DocIdAndVersion(
+                                    0,
+                                    index.version(),
+                                    index.seqNo(),
+                                    index.primaryTerm(),
+                                    reader,
+                                    0
+                                ),
+                                true
+                            );
+                        }
+                    } catch (IOException e) {
+                        logger.error("WTF", e);
+                    }
+                }
+                // if doc is not in translog search the index
+                return getFromSearcher(get, searcherFactory, SearcherScope.EXTERNAL);
+            }
+        }
     }
 
     @Override
@@ -351,7 +428,8 @@ public class NRTReplicationEngine extends Engine {
     }
 
     @Override
-    public void writeIndexingBuffer() throws EngineException {}
+    public void writeIndexingBuffer() throws EngineException {
+    }
 
     @Override
     public boolean shouldPeriodicallyFlush() {
@@ -359,7 +437,8 @@ public class NRTReplicationEngine extends Engine {
     }
 
     @Override
-    public void flush(boolean force, boolean waitIfOngoing) throws EngineException {}
+    public void flush(boolean force, boolean waitIfOngoing) throws EngineException {
+    }
 
     @Override
     public void forceMerge(
@@ -369,13 +448,15 @@ public class NRTReplicationEngine extends Engine {
         boolean upgrade,
         boolean upgradeOnlyAncientSegments,
         String forceMergeUUID
-    ) throws EngineException, IOException {}
+    ) throws EngineException, IOException {
+    }
 
     @Override
     public GatedCloseable<IndexCommit> acquireLastIndexCommit(boolean flushFirst) throws EngineException {
         try {
             final IndexCommit indexCommit = Lucene.getIndexCommit(lastCommittedSegmentInfos, store.directory());
-            return new GatedCloseable<>(indexCommit, () -> {});
+            return new GatedCloseable<>(indexCommit, () -> {
+            });
         } catch (IOException e) {
             throw new EngineException(shardId, "Unable to build latest IndexCommit", e);
         }
@@ -417,10 +498,12 @@ public class NRTReplicationEngine extends Engine {
     }
 
     @Override
-    public void activateThrottling() {}
+    public void activateThrottling() {
+    }
 
     @Override
-    public void deactivateThrottling() {}
+    public void deactivateThrottling() {
+    }
 
     @Override
     public int fillSeqNoGaps(long primaryTerm) throws IOException {
@@ -428,10 +511,12 @@ public class NRTReplicationEngine extends Engine {
     }
 
     @Override
-    public void maybePruneDeletes() {}
+    public void maybePruneDeletes() {
+    }
 
     @Override
-    public void updateMaxUnsafeAutoIdTimestamp(long newTimestamp) {}
+    public void updateMaxUnsafeAutoIdTimestamp(long newTimestamp) {
+    }
 
     @Override
     public long getMaxSeqNoOfUpdatesOrDeletes() {
@@ -439,7 +524,8 @@ public class NRTReplicationEngine extends Engine {
     }
 
     @Override
-    public void advanceMaxSeqNoOfUpdatesOrDeletes(long maxSeqNoOfUpdatesOnPrimary) {}
+    public void advanceMaxSeqNoOfUpdatesOrDeletes(long maxSeqNoOfUpdatesOnPrimary) {
+    }
 
     @Override
     public void onSettingsChanged(TimeValue translogRetentionAge, ByteSizeValue translogRetentionSize, long softDeletesRetentionOps) {

@@ -8,16 +8,25 @@
 
 package org.opensearch.index.engine;
 
+import org.apache.lucene.document.Field;
+import org.apache.lucene.document.TextField;
 import org.apache.lucene.index.IndexCommit;
 import org.apache.lucene.index.NoMergePolicy;
 import org.apache.lucene.index.SegmentInfos;
+import org.apache.lucene.index.Term;
 import org.apache.lucene.search.ReferenceManager;
+import org.apache.lucene.search.TermQuery;
+import org.hamcrest.MatcherAssert;
 import org.opensearch.cluster.metadata.IndexMetadata;
+import org.opensearch.common.bytes.BytesReference;
 import org.opensearch.common.concurrent.GatedCloseable;
 import org.opensearch.common.lucene.Lucene;
 import org.opensearch.common.lucene.index.OpenSearchDirectoryReader;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.index.IndexSettings;
+import org.opensearch.index.mapper.ParseContext;
+import org.opensearch.index.mapper.ParsedDocument;
+import org.opensearch.index.mapper.SourceFieldMapper;
 import org.opensearch.index.seqno.LocalCheckpointTracker;
 import org.opensearch.index.seqno.SequenceNumbers;
 import org.opensearch.index.store.Store;
@@ -32,9 +41,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiFunction;
 import java.util.stream.Collectors;
 
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.notNullValue;
 import static org.opensearch.index.seqno.SequenceNumbers.NO_OPS_PERFORMED;
 import static org.opensearch.index.seqno.SequenceNumbers.LOCAL_CHECKPOINT_KEY;
 import static org.opensearch.index.seqno.SequenceNumbers.MAX_SEQ_NO;
@@ -69,6 +81,92 @@ public class NRTReplicationEngineTests extends EngineTestCase {
         }
     }
 
+    public void testGet() throws IOException {
+        final AtomicLong globalCheckpoint = new AtomicLong(SequenceNumbers.NO_OPS_PERFORMED);
+        try (
+            final Store nrtEngineStore = createStore(INDEX_SETTINGS, newDirectory());
+            final NRTReplicationEngine nrtEngine = buildNrtReplicaEngine(globalCheckpoint, nrtEngineStore)
+        ) {
+            engine.refresh("warm_up");
+            Engine.Searcher searchResult = engine.acquireSearcher("test");
+            MatcherAssert.assertThat(searchResult, EngineSearcherTotalHitsMatcher.engineSearcherTotalHits(0));
+            searchResult.close();
+
+            nrtEngine.refresh("warm_up");
+            searchResult = nrtEngine.acquireSearcher("test");
+            MatcherAssert.assertThat(searchResult, EngineSearcherTotalHitsMatcher.engineSearcherTotalHits(0));
+            searchResult.close();
+
+            // create a document
+            ParseContext.Document document = testDocumentWithTextField();
+            document.add(new Field(SourceFieldMapper.NAME, BytesReference.toBytes(B_1), SourceFieldMapper.Defaults.FIELD_TYPE));
+            ParsedDocument doc = testParsedDocument("1", null, document, B_1, null);
+            engine.index(indexForDoc(doc));
+            nrtEngine.index(indexForDoc(doc));
+
+            searchResult = engine.acquireSearcher("test");
+            MatcherAssert.assertThat(searchResult, EngineSearcherTotalHitsMatcher.engineSearcherTotalHits(0));
+            MatcherAssert.assertThat(
+                searchResult,
+                EngineSearcherTotalHitsMatcher.engineSearcherTotalHits(new TermQuery(new Term("value", "test")), 0)
+            );
+            searchResult.close();
+
+            searchResult = nrtEngine.acquireSearcher("test");
+            MatcherAssert.assertThat(searchResult, EngineSearcherTotalHitsMatcher.engineSearcherTotalHits(0));
+            MatcherAssert.assertThat(
+                searchResult,
+                EngineSearcherTotalHitsMatcher.engineSearcherTotalHits(new TermQuery(new Term("value", "test")), 0)
+            );
+            searchResult.close();
+
+            final BiFunction<String, Engine.SearcherScope, Engine.Searcher> searcherFactory = engine::acquireSearcher;
+            final BiFunction<String, Engine.SearcherScope, Engine.Searcher> nrtSearcherFactory = nrtEngine::acquireSearcher;
+
+
+            // but, not there non realtime
+            try (Engine.GetResult getResult = engine.get(newGet(false, doc), searcherFactory)) {
+                assertThat(getResult.exists(), equalTo(false));
+            }
+
+            // but, we can still get it (in realtime)
+            try (Engine.GetResult getResult = engine.get(newGet(true, doc), searcherFactory)) {
+                assertThat(getResult.exists(), equalTo(true));
+                assertThat(getResult.docIdAndVersion(), notNullValue());
+                logger.info(getResult.docIdAndVersion().docId);
+            }
+
+            // but, we can still get it (in realtime)
+            try (Engine.GetResult getResult = nrtEngine.get(newGet(true, doc), searcherFactory)) {
+                assertThat(getResult.exists(), equalTo(true));
+                assertThat(getResult.docIdAndVersion(), notNullValue());
+                logger.info(getResult.docIdAndVersion().docBase);
+            }
+
+            // now do an update
+            document = testDocument();
+            document.add(new TextField("value", "test1", Field.Store.YES));
+            document.add(new Field(SourceFieldMapper.NAME, BytesReference.toBytes(B_2), SourceFieldMapper.Defaults.FIELD_TYPE));
+            doc = testParsedDocument("1", null, document, B_2, null);
+            engine.index(indexForDoc(doc));
+            nrtEngine.index(indexForDoc(doc));
+
+            // but, we can still get it (in realtime)
+            try (Engine.GetResult getResult = engine.get(newGet(true, doc), searcherFactory)) {
+                assertThat(getResult.exists(), equalTo(true));
+                assertThat(getResult.docIdAndVersion(), notNullValue());
+            }
+            // now delete
+            nrtEngine.delete(new Engine.Delete("1", newUid(doc), primaryTerm.get()));
+
+            // get should not see it (in realtime)
+            try (Engine.GetResult getResult = nrtEngine.get(newGet(true, doc), searcherFactory)) {
+                assertThat(getResult.exists(), equalTo(false));
+            }
+
+        }
+    }
+
     public void testEngineWritesOpsToTranslog() throws Exception {
         final AtomicLong globalCheckpoint = new AtomicLong(SequenceNumbers.NO_OPS_PERFORMED);
 
@@ -93,6 +191,13 @@ public class NRTReplicationEngineTests extends EngineTestCase {
             );
             assertEquals(nrtEngine.getLastSyncedGlobalCheckpoint(), engine.getLastSyncedGlobalCheckpoint());
 
+            ParsedDocument doc = testParsedDocument("1", null, testDocumentWithTextField(), B_1, null);
+            engine.index(indexForDoc(doc));
+
+            final BiFunction<String, Engine.SearcherScope, Engine.Searcher> searcherFactory = engine::acquireSearcher;
+            final Engine.GetResult getResult = engine.get(newGet(true, doc), searcherFactory);
+            logger.info(getResult);
+
             // we don't index into nrtEngine, so get the doc ids from the regular engine.
             final List<DocIdSeqNoAndSource> docs = getDocIds(engine, true);
 
@@ -108,6 +213,10 @@ public class NRTReplicationEngineTests extends EngineTestCase {
             }
             assertEngineCleanedUp(nrtEngine, assertAndGetInternalTranslogManager(nrtEngine.translogManager()).getDeletionPolicy());
         }
+    }
+
+    public void testGetRequests() {
+
     }
 
     public void testUpdateSegments_replicaReceivesSISWithHigherGen() throws IOException {
