@@ -407,22 +407,16 @@ public class NRTReplicationEngine extends Engine {
 
     @Override
     public void refresh(String source) throws EngineException {
-        maybeRefresh(source);
+        // refresh must no-op here so that our versionmap is not wiped after a triggered/scheduled "refresh".
+        // refresh will only happen internally after a new set of segments has arrived, at which point we can
+        // safely clear the version map up to the checkpoint received in the new set of segments.
+
+        // on primary a new map is created before each refresh
     }
 
     @Override
     public boolean maybeRefresh(String source) throws EngineException {
-        ensureOpen();
-        try {
-            return readerManager.maybeRefresh();
-        } catch (IOException e) {
-            try {
-                failEngine("refresh failed source[" + source + "]", e);
-            } catch (Exception inner) {
-                e.addSuppressed(inner);
-            }
-            throw new RefreshFailedEngineException(shardId, e);
-        }
+        return false;
     }
 
     @Override

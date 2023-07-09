@@ -117,6 +117,7 @@ public class NRTReplicationEngineTests extends EngineTestCase {
             doc = testParsedDocument("1", null, document, B_2, null);
             engine.index(indexForDoc(doc));
             nrtEngine.index(indexForDoc(doc));
+            nrtEngine.refresh("test");
 
             // update present with realtime=true
             try (Engine.GetResult getResult = nrtEngine.get(newGet(true, doc), searcherFactory)) {
