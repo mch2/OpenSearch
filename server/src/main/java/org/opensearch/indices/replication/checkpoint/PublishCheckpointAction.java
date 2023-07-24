@@ -138,7 +138,7 @@ public class PublishCheckpointAction extends TransportReplicationAction<
                     @Override
                     public void handleResponse(ReplicationResponse response) {
                         timer.stop();
-                        logger.trace(
+                        logger.info(
                             () -> new ParameterizedMessage(
                                 "[shardId {}] Completed publishing checkpoint [{}], timing: {}",
                                 indexShard.shardId().getId(),
@@ -153,7 +153,7 @@ public class PublishCheckpointAction extends TransportReplicationAction<
                     @Override
                     public void handleException(TransportException e) {
                         timer.stop();
-                        logger.trace("[shardId {}] Failed to publish checkpoint, timing: {}", indexShard.shardId().getId(), timer.time());
+                        logger.info("[shardId {}] Failed to publish checkpoint, timing: {}", indexShard.shardId().getId(), timer.time());
                         task.setPhase("finished");
                         taskManager.unregister(task);
                         if (ExceptionsHelper.unwrap(
@@ -174,7 +174,7 @@ public class PublishCheckpointAction extends TransportReplicationAction<
                     }
                 }
             );
-            logger.trace(
+            logger.info(
                 () -> new ParameterizedMessage(
                     "[shardId {}] Publishing replication checkpoint [{}]",
                     checkpoint.getShardId().getId(),
@@ -198,7 +198,7 @@ public class PublishCheckpointAction extends TransportReplicationAction<
         Objects.requireNonNull(request);
         Objects.requireNonNull(replica);
         ActionListener.completeWith(listener, () -> {
-            logger.trace(() -> new ParameterizedMessage("Checkpoint {} received on replica {}", request, replica.shardId()));
+            logger.info(() -> new ParameterizedMessage("Checkpoint {} received on replica {}", request, replica.shardId()));
             if (request.getCheckpoint().getShardId().equals(replica.shardId())) {
                 replicationService.onNewCheckpoint(request.getCheckpoint(), replica);
             }

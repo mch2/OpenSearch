@@ -2955,7 +2955,6 @@ public class IndexShardTests extends IndexShardTestCase {
 
         assertTrue(future.actionGet());
         assertDocs(target, "1", "2");
-
         storeDirectory = ((FilterDirectory) ((FilterDirectory) target.store().directory()).getDelegate()).getDelegate();
         ((BaseDirectoryWrapper) storeDirectory).setCheckIndexOnClose(false);
         closeShards(target);

@@ -724,6 +724,10 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
                                     }
                                 }
                             });
+                            if (indexSettings.isSegRepEnabled()) {
+                                // force publish a new checkpoint to replicas.
+                                checkpointPublisher.publish(this, getLatestReplicationCheckpoint());
+                            }
                         } catch (final AlreadyClosedException e) {
                             // okay, the index was deleted
                         }
@@ -1529,8 +1533,16 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         }
     }
 
-    public void finalizeReplication(SegmentInfos infos) throws IOException {
+    /**
+     * Finalize a Segment Replication event.
+     * This function updates the latest replication checkpoint for a replica and loads the new SegmentInfos onto its reader.
+     * @param checkpoint
+     * @param infos
+     * @throws IOException
+     */
+    public void finalizeReplication(ReplicationCheckpoint checkpoint, SegmentInfos infos) throws IOException {
         if (getReplicationEngine().isPresent()) {
+            replicationTracker.setLatestReplicationCheckpoint(checkpoint);
             getReplicationEngine().get().updateSegments(infos);
         }
     }
@@ -1554,15 +1566,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
      * @return EMPTY checkpoint before the engine is opened and null for non-segrep enabled indices
      */
     public ReplicationCheckpoint getLatestReplicationCheckpoint() {
-        final Tuple<GatedCloseable<SegmentInfos>, ReplicationCheckpoint> infosAndCheckpoint = getLatestSegmentInfosAndCheckpoint();
-        if (infosAndCheckpoint == null) {
-            return null;
-        }
-        try (final GatedCloseable<SegmentInfos> ignored = infosAndCheckpoint.v1()) {
-            return infosAndCheckpoint.v2();
-        } catch (IOException e) {
-            throw new OpenSearchException("Error Closing SegmentInfos Snapshot", e);
-        }
+        return replicationTracker.getLatestReplicationCheckpoint();
     }
 
     /**
@@ -1576,9 +1580,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
      *
      */
     public Tuple<GatedCloseable<SegmentInfos>, ReplicationCheckpoint> getLatestSegmentInfosAndCheckpoint() {
-        if (indexSettings.isSegRepEnabled() == false) {
-            return null;
-        }
+        assert indexSettings.isSegRepEnabled();
 
         Tuple<GatedCloseable<SegmentInfos>, ReplicationCheckpoint> nullSegmentInfosEmptyCheckpoint = new Tuple<>(
             new GatedCloseable<>(null, () -> {}),
@@ -1594,21 +1596,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
             snapshot = getSegmentInfosSnapshot();
             if (snapshot.get() != null) {
                 SegmentInfos segmentInfos = snapshot.get();
-                return new Tuple<>(
-                    snapshot,
-                    new ReplicationCheckpoint(
-                        this.shardId,
-                        getOperationPrimaryTerm(),
-                        segmentInfos.getGeneration(),
-                        segmentInfos.getVersion(),
-                        // TODO: Update replicas to compute length from SegmentInfos. Replicas do not yet incref segments with
-                        // getSegmentInfosSnapshot, so computing length from SegmentInfos can cause issues.
-                        shardRouting.primary()
-                            ? store.getSegmentMetadataMap(segmentInfos).values().stream().mapToLong(StoreFileMetadata::length).sum()
-                            : store.stats(StoreStats.UNKNOWN_RESERVED_BYTES).getSizeInBytes(),
-                        getEngine().config().getCodec().getName()
-                    )
-                );
+                return new Tuple<>(snapshot, buildReplicationCheckpoint(segmentInfos));
             }
         } catch (IOException | AlreadyClosedException e) {
             logger.error("Error Fetching SegmentInfos and latest checkpoint", e);
@@ -1621,6 +1609,17 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
             }
         }
         return nullSegmentInfosEmptyCheckpoint;
+    }
+
+    private ReplicationCheckpoint buildReplicationCheckpoint(SegmentInfos segmentInfos) throws IOException {
+        return new ReplicationCheckpoint(
+            this.shardId,
+            getOperationPrimaryTerm(),
+            segmentInfos.getGeneration(),
+            segmentInfos.getVersion(),
+            store.getSegmentMetadataMap(segmentInfos).values().stream().mapToLong(StoreFileMetadata::length).sum(),
+            getEngine().config().getCodec().getName()
+        );
     }
 
     /**
@@ -1859,10 +1858,6 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
      */
     public void resetToWriteableEngine() throws IOException, InterruptedException, TimeoutException {
         indexShardOperationPermits.blockOperations(30, TimeUnit.MINUTES, () -> { resetEngineToGlobalCheckpoint(); });
-    }
-
-    public void onCheckpointPublished(ReplicationCheckpoint checkpoint) {
-        replicationTracker.setLatestReplicationCheckpoint(checkpoint);
     }
 
     /**
@@ -3670,6 +3665,9 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
 
         internalRefreshListener.clear();
         internalRefreshListener.add(new RefreshMetricUpdater(refreshMetric));
+        if (indexSettings.isSegRepEnabled() && routingEntry().primary()) {
+            internalRefreshListener.add(new ReplicationCheckpointUpdater());
+        }
         if (this.checkpointPublisher != null && shardRouting.primary() && indexSettings.isSegRepLocalEnabled()) {
             internalRefreshListener.add(new CheckpointRefreshListener(this, this.checkpointPublisher));
         }
@@ -4473,6 +4471,31 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         }
     }
 
+    /**
+     * Refresh listener to update the Shard's ReplicationCheckpoint post refresh and start replication lag timers.
+     */
+    private class ReplicationCheckpointUpdater implements ReferenceManager.RefreshListener {
+        @Override
+        public void beforeRefresh() throws IOException {}
+
+        @Override
+        public void afterRefresh(boolean didRefresh) throws IOException {
+            if (didRefresh && routingEntry().primary()) {
+                refreshPrimaryReplicationCheckpoint();
+            }
+        }
+    }
+
+    private void refreshPrimaryReplicationCheckpoint() {
+        Optional.ofNullable(getEngineOrNull()).ifPresent((engine) -> {
+            try (final GatedCloseable<SegmentInfos> snapshot = engine.getSegmentInfosSnapshot()) {
+                replicationTracker.setLatestReplicationCheckpoint(buildReplicationCheckpoint(snapshot.get()));
+            } catch (IOException e) {
+                throw new OpenSearchException("Error Updating Latest Replication Checkpoint", e);
+            }
+        });
+    }
+
     private EngineConfig.TombstoneDocSupplier tombstoneDocSupplier() {
         final RootObjectMapper.Builder noopRootMapper = new RootObjectMapper.Builder("__noop");
         final DocumentMapper noopDocumentMapper = mapperService != null
@@ -4690,7 +4713,17 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
                             store.commitSegmentInfos(infosSnapshot, processedLocalCheckpoint, processedLocalCheckpoint);
                         }
                     } else {
-                        finalizeReplication(infosSnapshot);
+                        finalizeReplication(
+                            new ReplicationCheckpoint(
+                                shardId,
+                                remoteSegmentMetadata.getPrimaryTerm(),
+                                remoteSegmentMetadata.getGeneration(),
+                                infosSnapshot.getVersion(),
+                                infosSnapshot.size(),
+                                ""
+                            ),
+                            infosSnapshot
+                        );
                     }
                 }
             }
@@ -4777,6 +4810,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
             Set<String> localSegmentFiles = Sets.newHashSet(storeDirectory.listAll());
             if (overrideLocal) {
                 for (String file : localSegmentFiles) {
+                    logger.info("Deleting {}", file);
                     storeDirectory.deleteFile(file);
                 }
             }

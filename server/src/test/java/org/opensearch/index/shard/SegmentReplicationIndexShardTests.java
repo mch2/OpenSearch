@@ -128,19 +128,15 @@ public class SegmentReplicationIndexShardTests extends OpenSearchIndexLevelRepli
 
             // assert before any indexing:
             // replica:
-            Tuple<GatedCloseable<SegmentInfos>, ReplicationCheckpoint> replicaTuple = replica.getLatestSegmentInfosAndCheckpoint();
-            try (final GatedCloseable<SegmentInfos> gatedCloseable = replicaTuple.v1()) {
-                assertReplicationCheckpoint(replica, gatedCloseable.get(), replicaTuple.v2());
-            }
+            assertEquals(primary.getLatestReplicationCheckpoint(), replica.getLatestReplicationCheckpoint());
 
             // primary:
             Tuple<GatedCloseable<SegmentInfos>, ReplicationCheckpoint> primaryTuple = primary.getLatestSegmentInfosAndCheckpoint();
             try (final GatedCloseable<SegmentInfos> gatedCloseable = primaryTuple.v1()) {
                 assertReplicationCheckpoint(primary, gatedCloseable.get(), primaryTuple.v2());
             }
-            // We use compareTo here instead of equals because we ignore segments gen with replicas performing their own commits.
-            // However infos version we expect to be equal.
-            assertEquals(1, primary.getLatestReplicationCheckpoint().compareTo(replica.getLatestReplicationCheckpoint()));
+
+            assertEquals(primary.getLatestReplicationCheckpoint(), replica.getLatestReplicationCheckpoint());
 
             // index and copy segments to replica.
             int numDocs = randomIntBetween(10, 100);
@@ -148,21 +144,14 @@ public class SegmentReplicationIndexShardTests extends OpenSearchIndexLevelRepli
             primary.refresh("test");
             replicateSegments(primary, List.of(replica));
 
-            replicaTuple = replica.getLatestSegmentInfosAndCheckpoint();
-            try (final GatedCloseable<SegmentInfos> gatedCloseable = replicaTuple.v1()) {
-                assertReplicationCheckpoint(replica, gatedCloseable.get(), replicaTuple.v2());
-            }
+            assertEquals(primary.getLatestReplicationCheckpoint(), replica.getLatestReplicationCheckpoint());
 
             primaryTuple = primary.getLatestSegmentInfosAndCheckpoint();
             try (final GatedCloseable<SegmentInfos> gatedCloseable = primaryTuple.v1()) {
                 assertReplicationCheckpoint(primary, gatedCloseable.get(), primaryTuple.v2());
             }
 
-            replicaTuple = replica.getLatestSegmentInfosAndCheckpoint();
-            try (final GatedCloseable<SegmentInfos> gatedCloseable = replicaTuple.v1()) {
-                assertReplicationCheckpoint(replica, gatedCloseable.get(), replicaTuple.v2());
-            }
-            assertEquals(1, primary.getLatestReplicationCheckpoint().compareTo(replica.getLatestReplicationCheckpoint()));
+            assertEquals(primary.getLatestReplicationCheckpoint(), replica.getLatestReplicationCheckpoint());
         }
     }
 
@@ -225,7 +214,7 @@ public class SegmentReplicationIndexShardTests extends OpenSearchIndexLevelRepli
                 test.close();
                 n.callRealMethod();
                 return null;
-            }).when(spyShard).finalizeReplication(any());
+            }).when(spyShard).finalizeReplication(any(), any());
             replicateSegments(primaryShard, List.of(spyShard));
             shards.assertAllEqual(numDocs);
         }
@@ -274,7 +263,7 @@ public class SegmentReplicationIndexShardTests extends OpenSearchIndexLevelRepli
                 engine.updateSegments(engine.getSegmentInfosSnapshot().get());
                 n.callRealMethod();
                 return null;
-            }).when(spyShard).finalizeReplication(any());
+            }).when(spyShard).finalizeReplication(any(), any());
             replicateSegments(primaryShard, List.of(spyShard));
             shards.assertAllEqual(numDocs);
         }
@@ -352,7 +341,11 @@ public class SegmentReplicationIndexShardTests extends OpenSearchIndexLevelRepli
                 runnablePostGetFiles
             );
             when(sourceFactory.get(any())).thenReturn(segmentReplicationSource);
-            targetService.startReplication(replica, getTargetListener(primaryShard, replica, primaryMetadata, countDownLatch));
+            targetService.startReplication(
+                replica,
+                primaryShard.getLatestReplicationCheckpoint(),
+                getTargetListener(primaryShard, replica, primaryMetadata, countDownLatch)
+            );
             countDownLatch.await(30, TimeUnit.SECONDS);
             assertEquals("Replication failed", 0, countDownLatch.getCount());
             shards.assertAllEqual(numDocs);
@@ -537,7 +530,7 @@ public class SegmentReplicationIndexShardTests extends OpenSearchIndexLevelRepli
         spy.onNewCheckpoint(new ReplicationCheckpoint(primaryShard.shardId(), 0L, 0L, 0L, Codec.getDefault().getName()), spyShard);
 
         // Verify that checkpoint is not processed as shard routing is primary.
-        verify(spy, times(0)).startReplication(any(), any());
+        verify(spy, times(0)).startReplication(any(), any(), any());
         closeShards(primaryShard);
     }
 
@@ -1198,7 +1191,7 @@ public class SegmentReplicationIndexShardTests extends OpenSearchIndexLevelRepli
 
             primary.refresh("Test");
 
-            doThrow(AlreadyClosedException.class).when(replicaSpy).finalizeReplication(any());
+            doThrow(AlreadyClosedException.class).when(replicaSpy).finalizeReplication(any(), any());
 
             replicateSegments(primary, List.of(replicaSpy));
         }
@@ -1370,10 +1363,7 @@ public class SegmentReplicationIndexShardTests extends OpenSearchIndexLevelRepli
 
     private void resolveCheckpointInfoResponseListener(ActionListener<CheckpointInfoResponse> listener, IndexShard primary) {
         try {
-            final CopyState copyState = new CopyState(
-                ReplicationCheckpoint.empty(primary.shardId, primary.getLatestReplicationCheckpoint().getCodec()),
-                primary
-            );
+            final CopyState copyState = new CopyState(ReplicationCheckpoint.empty(primary.shardId), primary);
             listener.onResponse(
                 new CheckpointInfoResponse(copyState.getCheckpoint(), copyState.getMetadataMap(), copyState.getInfosBytes())
             );
@@ -1388,6 +1378,7 @@ public class SegmentReplicationIndexShardTests extends OpenSearchIndexLevelRepli
         CountDownLatch latch = new CountDownLatch(1);
         final SegmentReplicationTarget target = targetService.startReplication(
             replica,
+            ReplicationCheckpoint.empty(replica.shardId),
             new SegmentReplicationTargetService.SegmentReplicationListener() {
                 @Override
                 public void onReplicationDone(SegmentReplicationState state) {

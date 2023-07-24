@@ -66,6 +66,7 @@ import org.opensearch.common.blobstore.BlobPath;
 import org.opensearch.common.blobstore.BlobStore;
 import org.opensearch.common.blobstore.fs.FsBlobContainer;
 import org.opensearch.common.blobstore.fs.FsBlobStore;
+import org.opensearch.common.collect.Tuple;
 import org.opensearch.core.common.bytes.BytesArray;
 import org.opensearch.common.concurrent.GatedCloseable;
 import org.opensearch.common.io.PathUtils;
@@ -1460,7 +1461,7 @@ public abstract class IndexShardTestCase extends OpenSearchTestCase {
             ) {
                 try {
                     final CopyState copyState = new CopyState(
-                        ReplicationCheckpoint.empty(primaryShard.shardId, primaryShard.getLatestReplicationCheckpoint().getCodec()),
+                        ReplicationCheckpoint.empty(primaryShard.shardId),
                         primaryShard
                     );
                     listener.onResponse(
@@ -1506,7 +1507,8 @@ public abstract class IndexShardTestCase extends OpenSearchTestCase {
         throws IOException, InterruptedException {
         final CountDownLatch countDownLatch = new CountDownLatch(replicaShards.size());
         Map<String, StoreFileMetadata> primaryMetadata;
-        try (final GatedCloseable<SegmentInfos> segmentInfosSnapshot = primaryShard.getSegmentInfosSnapshot()) {
+        final Tuple<GatedCloseable<SegmentInfos>, ReplicationCheckpoint> tuple = primaryShard.getLatestSegmentInfosAndCheckpoint();
+        try (final GatedCloseable<SegmentInfos> segmentInfosSnapshot = tuple.v1()) {
             final SegmentInfos primarySegmentInfos = segmentInfosSnapshot.get();
             primaryMetadata = primaryShard.store().getSegmentMetadataMap(primarySegmentInfos);
         }
@@ -1515,6 +1517,7 @@ public abstract class IndexShardTestCase extends OpenSearchTestCase {
             final SegmentReplicationTargetService targetService = prepareForReplication(primaryShard, replica);
             final SegmentReplicationTarget target = targetService.startReplication(
                 replica,
+                tuple.v2(),
                 getTargetListener(primaryShard, replica, primaryMetadata, countDownLatch)
             );
             ids.add(target);

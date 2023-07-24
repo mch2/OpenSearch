@@ -74,13 +74,13 @@ public class NRTReplicationReaderManager extends OpenSearchReaderManager {
         }
         // Segment_n here is ignored because it is either already committed on disk as part of previous commit point or
         // does not yet exist on store (not yet committed)
-        final Collection<String> files = currentInfos.files(false);
+        final Collection<String> files = currentInfos.files(true);
         DirectoryReader innerReader = StandardDirectoryReader.open(referenceToRefresh.directory(), currentInfos, subs, null);
         final DirectoryReader softDeletesDirectoryReaderWrapper = new SoftDeletesDirectoryReaderWrapper(
             innerReader,
             Lucene.SOFT_DELETES_FIELD
         );
-        logger.trace(
+        logger.info(
             () -> new ParameterizedMessage("updated to SegmentInfosVersion=" + currentInfos.getVersion() + " reader=" + innerReader)
         );
         final OpenSearchDirectoryReader reader = OpenSearchDirectoryReader.wrap(
@@ -103,7 +103,7 @@ public class NRTReplicationReaderManager extends OpenSearchReaderManager {
         // is always increased.
         infos.updateGeneration(currentInfos);
         currentInfos = infos;
-        maybeRefreshBlocking();
+        maybeRefresh();
     }
 
     public SegmentInfos getSegmentInfos() {

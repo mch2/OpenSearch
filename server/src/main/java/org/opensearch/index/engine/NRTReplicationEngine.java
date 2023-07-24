@@ -34,6 +34,7 @@ import org.opensearch.search.suggest.completion.CompletionStats;
 import java.io.Closeable;
 import java.io.IOException;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -77,13 +78,16 @@ public class NRTReplicationEngine extends Engine {
             this.completionStatsCache = new CompletionStatsCache(() -> acquireSearcher("completion_stats"));
             this.readerManager = readerManager;
             this.readerManager.addListener(completionStatsCache);
-            for (ReferenceManager.RefreshListener listener : engineConfig.getExternalRefreshListener()) {
-                this.readerManager.addListener(listener);
-            }
+            // NRT Replicas do not have a concept of Internal vs External listeners.
+            // We also do not want to wire up refresh listeners for waitFor & pending refresh location.
+            // which are the current external listeners set from IndexShard.
+            // Only wire up the internal listeners.
             for (ReferenceManager.RefreshListener listener : engineConfig.getInternalRefreshListener()) {
                 this.readerManager.addListener(listener);
             }
-            final Map<String, String> userData = store.readLastCommittedSegmentsInfo().getUserData();
+            // always protect latest commit on disk.
+            store.incRefFileDeleter(this.lastCommittedSegmentInfos.files(true));
+            final Map<String, String> userData = this.lastCommittedSegmentInfos.getUserData();
             final String translogUUID = Objects.requireNonNull(userData.get(Translog.TRANSLOG_UUID_KEY));
             translogManagerRef = new WriteOnlyTranslogManager(
                 engineConfig.getTranslogConfig(),
@@ -135,11 +139,13 @@ public class NRTReplicationEngine extends Engine {
     }
 
     public synchronized void updateSegments(final SegmentInfos infos) throws IOException {
+        store.incRef();
         try (ReleasableLock lock = writeLock.acquire()) {
             // Update the current infos reference on the Engine's reader.
             ensureOpen();
             final long maxSeqNo = Long.parseLong(infos.userData.get(MAX_SEQ_NO));
             final long incomingGeneration = infos.getGeneration();
+            final Collection<String> previousCommitFiles = getLastCommittedSegmentInfos().files(true);
             readerManager.updateSegments(infos);
 
             // Commit and roll the translog when we receive a different generation than what was last received.
@@ -151,24 +157,41 @@ public class NRTReplicationEngine extends Engine {
             }
             lastReceivedGen = incomingGeneration;
             localCheckpointTracker.fastForwardProcessedSeqNo(maxSeqNo);
+
+            // incref the latest on-disk commit.
+
+            refreshLastCommittedSegmentInfos();
+            store.incRefFileDeleter(getLastCommittedSegmentInfos().files(true));
+            store.decRefFileDeleter(previousCommitFiles);
+        } finally {
+            store.decRef();
+        }
+    }
+
+    private void refreshLastCommittedSegmentInfos() throws IOException {
+        store.incRef();
+        try {
+            this.lastCommittedSegmentInfos = store.readLastCommittedSegmentsInfo();
+        } finally {
+            store.decRef();
         }
     }
 
     /**
      * Persist the latest live SegmentInfos.
-     *
+     * <p>
      * This method creates a commit point from the latest SegmentInfos. It is intended to be used when this shard is about to be promoted as the new primary.
-     *
+     * <p>
      * TODO: If this method is invoked while the engine is currently updating segments on its reader, wait for that update to complete so the updated segments are used.
-     *
      *
      * @throws IOException - When there is an IO error committing the SegmentInfos.
      */
     private void commitSegmentInfos(SegmentInfos infos) throws IOException {
+        // protect the latest commit point
         if (shouldCommit) {
             store.commitSegmentInfos(infos, localCheckpointTracker.getMaxSeqNo(), localCheckpointTracker.getProcessedCheckpoint());
         }
-        this.lastCommittedSegmentInfos = store.readLastCommittedSegmentsInfo();
+        refreshLastCommittedSegmentInfos();
         translogManager.syncTranslog();
     }
 
@@ -322,22 +345,13 @@ public class NRTReplicationEngine extends Engine {
 
     @Override
     public void refresh(String source) throws EngineException {
-        maybeRefresh(source);
+        // Refresh on this engine should *only* happen after updating
+        // with new segments from the primary.
     }
 
     @Override
     public boolean maybeRefresh(String source) throws EngineException {
-        ensureOpen();
-        try {
-            return readerManager.maybeRefresh();
-        } catch (IOException e) {
-            try {
-                failEngine("refresh failed source[" + source + "]", e);
-            } catch (Exception inner) {
-                e.addSuppressed(inner);
-            }
-            throw new RefreshFailedEngineException(shardId, e);
-        }
+        return false;
     }
 
     @Override
@@ -402,6 +416,7 @@ public class NRTReplicationEngine extends Engine {
                     store.directory().sync(List.of(store.directory().listAll()));
                     store.directory().syncMetaData();
                 }
+                store.incRefFileDeleter(getLastCommittedSegmentInfos().files(true));
                 IOUtils.close(readerManager, translogManager, store::decRef);
             } catch (Exception e) {
                 logger.warn("failed to close engine", e);
@@ -452,6 +467,20 @@ public class NRTReplicationEngine extends Engine {
     @Override
     protected SegmentInfos getLatestSegmentInfos() {
         return readerManager.getSegmentInfos();
+    }
+
+    @Override
+    public synchronized GatedCloseable<SegmentInfos> getSegmentInfosSnapshot() {
+        // get reference to latest infos
+        final SegmentInfos latestSegmentInfos = getLatestSegmentInfos();
+        // incref all files
+        try {
+            final Collection<String> files = latestSegmentInfos.files(true);
+            store.incRefFileDeleter(files);
+            return new GatedCloseable<>(latestSegmentInfos, () -> store.decRefFileDeleter(files));
+        } catch (IOException e) {
+            throw new EngineException(shardId, e.getMessage(), e);
+        }
     }
 
     protected LocalCheckpointTracker getLocalCheckpointTracker() {

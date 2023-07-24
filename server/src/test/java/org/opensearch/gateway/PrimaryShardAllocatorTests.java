@@ -63,7 +63,6 @@ import org.opensearch.common.util.set.Sets;
 import org.opensearch.env.Environment;
 import org.opensearch.env.ShardLockObtainFailedException;
 import org.opensearch.index.IndexSettings;
-import org.opensearch.index.codec.CodecService;
 import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.indices.replication.checkpoint.ReplicationCheckpoint;
 import org.opensearch.repositories.IndexId;
@@ -808,25 +807,13 @@ public class PrimaryShardAllocatorTests extends OpenSearchAllocationTestCase {
         public TestAllocator addData(DiscoveryNode node, String allocationId, boolean primary) {
             Settings nodeSettings = Settings.builder().put(Environment.PATH_HOME_SETTING.getKey(), createTempDir()).build();
             IndexSettings indexSettings = IndexSettingsModule.newIndexSettings("test", nodeSettings);
-            return addData(
-                node,
-                allocationId,
-                primary,
-                ReplicationCheckpoint.empty(shardId, new CodecService(null, indexSettings, null).codec("default").getName()),
-                null
-            );
+            return addData(node, allocationId, primary, ReplicationCheckpoint.empty(shardId), null);
         }
 
         public TestAllocator addData(DiscoveryNode node, String allocationId, boolean primary, @Nullable Exception storeException) {
             Settings nodeSettings = Settings.builder().put(Environment.PATH_HOME_SETTING.getKey(), createTempDir()).build();
             IndexSettings indexSettings = IndexSettingsModule.newIndexSettings("test", nodeSettings);
-            return addData(
-                node,
-                allocationId,
-                primary,
-                ReplicationCheckpoint.empty(shardId, new CodecService(null, indexSettings, null).codec("default").getName()),
-                storeException
-            );
+            return addData(node, allocationId, primary, ReplicationCheckpoint.empty(shardId), storeException);
         }
 
         public TestAllocator addData(

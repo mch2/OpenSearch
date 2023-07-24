@@ -131,7 +131,7 @@ public class SegmentReplicationSourceService extends AbstractLifecycleComponent 
                 new CheckpointInfoResponse(copyState.getCheckpoint(), copyState.getMetadataMap(), copyState.getInfosBytes())
             );
             timer.stop();
-            logger.trace(
+            logger.info(
                 new ParameterizedMessage(
                     "[replication id {}] Source node sent checkpoint info [{}] to target node [{}], timing: {}",
                     request.getReplicationId(),
@@ -168,6 +168,7 @@ public class SegmentReplicationSourceService extends AbstractLifecycleComponent 
     public void clusterChanged(ClusterChangedEvent event) {
         if (event.nodesRemoved()) {
             for (DiscoveryNode removedNode : event.nodesDelta().removedNodes()) {
+                logger.info("Cancelling on node removal {}", removedNode.getName());
                 ongoingSegmentReplications.cancelReplication(removedNode);
             }
         }

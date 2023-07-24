@@ -207,7 +207,7 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
         this.directory = new StoreDirectory(sizeCachingDir, Loggers.getLogger("index.store.deletes", shardId));
         this.shardLock = shardLock;
         this.onClose = onClose;
-        this.replicaFileTracker = indexSettings.isSegRepEnabled() ? new ReplicaFileTracker() : null;
+        this.replicaFileTracker = indexSettings.isSegRepEnabled() ? new ReplicaFileTracker(this::deleteFile) : null;
 
         assert onClose != null;
         assert shardLock != null;
@@ -443,7 +443,7 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
                 String origFile = entry.getValue();
                 // first, go and delete the existing ones
                 try {
-                    directory.deleteFile(origFile);
+                    directory.deleteFile("rename", origFile);
                 } catch (FileNotFoundException | NoSuchFileException e) {} catch (Exception ex) {
                     logger.debug(() -> new ParameterizedMessage("failed to delete file [{}]", origFile), ex);
                 }
@@ -766,19 +766,7 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
                     // checksum)
                     continue;
                 }
-                try {
-                    directory.deleteFile(reason, existingFile);
-                    // FNF should not happen since we hold a write lock?
-                } catch (IOException ex) {
-                    if (existingFile.startsWith(IndexFileNames.SEGMENTS) || existingFile.startsWith(CORRUPTED_MARKER_NAME_PREFIX)) {
-                        // TODO do we need to also fail this if we can't delete the pending commit file?
-                        // if one of those files can't be deleted we better fail the cleanup otherwise we might leave an old commit
-                        // point around?
-                        throw new IllegalStateException("Can't delete " + existingFile + " - cleanup failed", ex);
-                    }
-                    logger.debug(() -> new ParameterizedMessage("failed to delete file [{}]", existingFile), ex);
-                    // ignore, we don't really care, will get deleted later on
-                }
+                deleteFile(reason, existingFile);
             }
             directory.syncMetaData();
             final Store.MetadataSnapshot metadataOrEmpty = getMetadata();
@@ -821,18 +809,26 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
                 // checksum)
                 continue;
             }
-            try {
-                directory.deleteFile(reason, existingFile);
-            } catch (IOException ex) {
-                if (existingFile.startsWith(IndexFileNames.SEGMENTS) || existingFile.startsWith(CORRUPTED_MARKER_NAME_PREFIX)) {
-                    // TODO do we need to also fail this if we can't delete the pending commit file?
-                    // if one of those files can't be deleted we better fail the cleanup otherwise we might leave an old commit
-                    // point around?
-                    throw new IllegalStateException("Can't delete " + existingFile + " - cleanup failed", ex);
-                }
-                logger.debug(() -> new ParameterizedMessage("failed to delete file [{}]", existingFile), ex);
-                // ignore, we don't really care, will get deleted later on
+            deleteFile(reason, existingFile);
+        }
+    }
+
+    private void deleteFile(String reason, String existingFile) {
+        try {
+            directory.deleteFile(reason, existingFile);
+        } catch (IOException ex) {
+            if (ex instanceof NoSuchFileException) {
+                // do nothing, file already deleted.
+                return;
             }
+            if (existingFile.startsWith(IndexFileNames.SEGMENTS) || existingFile.startsWith(CORRUPTED_MARKER_NAME_PREFIX)) {
+                // TODO do we need to also fail this if we can't delete the pending commit file?
+                // if one of those files can't be deleted we better fail the cleanup otherwise we might leave an old commit
+                // point around?
+                throw new IllegalStateException("Can't delete " + existingFile + " - cleanup failed", ex);
+            }
+            logger.debug(() -> new ParameterizedMessage("failed to delete file [{}]", existingFile), ex);
+            // ignore, we don't really care, will get deleted later on
         }
     }
 
@@ -854,18 +850,16 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
         long segmentsGen,
         CheckedConsumer<SegmentInfos, IOException> consumer
     ) throws IOException {
-        metadataLock.writeLock().lock();
+        final List<String> values = new ArrayList<>(tmpToFileName.values());
+        // incref the new files as they arrive.
+        incRefFileDeleter(values);
         try {
-            final List<String> values = new ArrayList<>(tmpToFileName.values());
-            incRefFileDeleter(values);
-            try {
-                renameTempFilesSafe(tmpToFileName);
-                consumer.accept(buildSegmentInfos(infosBytes, segmentsGen));
-            } finally {
-                decRefFileDeleter(values);
-            }
+            renameTempFilesSafe(tmpToFileName);
+            consumer.accept(buildSegmentInfos(infosBytes, segmentsGen));
         } finally {
-            metadataLock.writeLock().unlock();
+            // decref the new files - we incref them again as they are loaded onto the reader so it is
+            // safe to decref here.
+            decRefFileDeleter(values);
         }
     }
 
@@ -957,7 +951,6 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
             latestSegmentInfos.commit(directory());
             directory.sync(latestSegmentInfos.files(true));
             directory.syncMetaData();
-            cleanupAndPreserveLatestCommitPoint(List.of(this.directory.listAll()), "After commit");
         } finally {
             metadataLock.writeLock().unlock();
         }
@@ -1973,13 +1966,6 @@ public class Store extends AbstractIndexShardComponent implements Closeable, Ref
     public void decRefFileDeleter(Collection<String> files) {
         if (this.indexSettings.isSegRepEnabled()) {
             this.replicaFileTracker.decRef(files);
-            try {
-                this.cleanupAndPreserveLatestCommitPoint(files, "On reader close");
-            } catch (IOException e) {
-                // Log but do not rethrow - we can try cleaning up again after next replication cycle.
-                // If that were to fail, the shard will as well.
-                logger.error("Unable to clean store after reader closed", e);
-            }
         }
     }
 }

@@ -59,9 +59,14 @@ public class SegmentReplicationTarget extends ReplicationTarget {
         return this.checkpoint;
     }
 
-    public SegmentReplicationTarget(IndexShard indexShard, SegmentReplicationSource source, ReplicationListener listener) {
+    public SegmentReplicationTarget(
+        IndexShard indexShard,
+        ReplicationCheckpoint checkpoint,
+        SegmentReplicationSource source,
+        ReplicationListener listener
+    ) {
         super("replication_target", indexShard, new ReplicationLuceneIndex(), listener);
-        this.checkpoint = indexShard.getLatestReplicationCheckpoint();
+        this.checkpoint = checkpoint;
         this.source = source;
         this.state = new SegmentReplicationState(
             indexShard.routingEntry(),
@@ -98,7 +103,7 @@ public class SegmentReplicationTarget extends ReplicationTarget {
     }
 
     public SegmentReplicationTarget retryCopy() {
-        return new SegmentReplicationTarget(indexShard, source, listener);
+        return new SegmentReplicationTarget(indexShard, checkpoint, source, listener);
     }
 
     @Override
@@ -209,7 +214,7 @@ public class SegmentReplicationTarget extends ReplicationTarget {
                 multiFileWriter.getTempFileNames(),
                 checkpointInfoResponse.getInfosBytes(),
                 checkpointInfoResponse.getCheckpoint().getSegmentsGen(),
-                indexShard::finalizeReplication
+                (infos) -> indexShard.finalizeReplication(checkpointInfoResponse.getCheckpoint(), infos)
             );
         } catch (CorruptIndexException | IndexFormatTooNewException | IndexFormatTooOldException ex) {
             // this is a fatal exception at this stage.

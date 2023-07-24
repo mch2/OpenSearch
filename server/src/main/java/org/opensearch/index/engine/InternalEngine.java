@@ -2141,12 +2141,14 @@ public class InternalEngine extends Engine {
     public GatedCloseable<SegmentInfos> getSegmentInfosSnapshot() {
         final SegmentInfos segmentInfos = getLatestSegmentInfos();
         try {
+            logger.info("Incref infos files {}", segmentInfos.files(true));
             indexWriter.incRefDeleter(segmentInfos);
         } catch (IOException e) {
             throw new EngineException(shardId, e.getMessage(), e);
         }
         return new GatedCloseable<>(segmentInfos, () -> {
             try {
+                logger.info("Decref infos files {}", segmentInfos.files(true));
                 indexWriter.decRefDeleter(segmentInfos);
             } catch (AlreadyClosedException e) {
                 logger.warn("Engine is already closed.", e);
