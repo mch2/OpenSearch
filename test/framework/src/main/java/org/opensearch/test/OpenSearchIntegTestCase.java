@@ -602,9 +602,6 @@ public abstract class OpenSearchIntegTestCase extends OpenSearchTestCase {
     }
 
     private void afterInternal(boolean afterClass) throws Exception {
-        if (addMockNRTReplicationEngine()) {
-            assertAcked(clusterAdmin().prepareDeleteRepository(REPOSITORY_NAME));
-        }
         final Scope currentClusterScope = getCurrentClusterScope();
         if (isInternalCluster()) {
             internalCluster().clearDisruptionScheme();
