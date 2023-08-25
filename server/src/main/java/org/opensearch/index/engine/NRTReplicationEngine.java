@@ -167,7 +167,7 @@ public class NRTReplicationEngine extends Engine {
             }
             this.lastReceivedPrimaryGen = incomingGeneration;
             localCheckpointTracker.fastForwardProcessedSeqNo(maxSeqNo);
-            logger.info("UPDATED processed {} - local max {} received {}", localCheckpointTracker.getProcessedCheckpoint(), localCheckpointTracker.getMaxSeqNo(), maxSeqNo);
+            logger.trace("Infos updated on replica - processed cp {} - local max {} received max from primary {}", localCheckpointTracker.getProcessedCheckpoint(), localCheckpointTracker.getMaxSeqNo(), maxSeqNo);
             assert localCheckpointTracker.getMaxSeqNo() >= localCheckpointTracker.getProcessedCheckpoint();
         }
     }

@@ -107,6 +107,11 @@ public class RemoteStoreBaseIntegTestCase extends OpenSearchIntegTestCase {
     }
 
     @Override
+    protected boolean addMockNRTReplicationEngine() {
+        return false;
+    }
+
+    @Override
     protected Settings nodeSettings(int nodeOrdinal) {
         return Settings.builder()
             .put(super.nodeSettings(nodeOrdinal))
@@ -151,30 +156,6 @@ public class RemoteStoreBaseIntegTestCase extends OpenSearchIntegTestCase {
             bulkRequest.add(request);
         }
         return client().bulk(bulkRequest).actionGet();
-    }
-
-    public static Settings remoteStoreClusterSettings(String segmentRepoName) {
-        return remoteStoreClusterSettings(segmentRepoName, segmentRepoName);
-    }
-
-    public static Settings remoteStoreClusterSettings(
-        String segmentRepoName,
-        String translogRepoName,
-        boolean randomizeSameRepoForRSSAndRTS
-    ) {
-        return remoteStoreClusterSettings(
-            segmentRepoName,
-            randomizeSameRepoForRSSAndRTS ? (randomBoolean() ? translogRepoName : segmentRepoName) : translogRepoName
-        );
-    }
-
-    public static Settings remoteStoreClusterSettings(String segmentRepoName, String translogRepoName) {
-        return Settings.builder()
-            .put(CLUSTER_REPLICATION_TYPE_SETTING.getKey(), ReplicationType.SEGMENT)
-            .put(CLUSTER_REMOTE_STORE_ENABLED_SETTING.getKey(), true)
-            .put(CLUSTER_REMOTE_SEGMENT_STORE_REPOSITORY_SETTING.getKey(), segmentRepoName)
-            .put(CLUSTER_REMOTE_TRANSLOG_REPOSITORY_SETTING.getKey(), translogRepoName)
-            .build();
     }
 
     private Settings defaultIndexSettings() {

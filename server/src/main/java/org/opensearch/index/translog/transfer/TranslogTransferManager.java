@@ -158,7 +158,7 @@ public class TranslogTransferManager {
     }
 
     public boolean downloadTranslog(String primaryTerm, String generation, Path location) throws IOException {
-        logger.info(
+        logger.trace(
             "Downloading translog files with: Primary Term = {}, Generation = {}, Location = {}",
             primaryTerm,
             generation,

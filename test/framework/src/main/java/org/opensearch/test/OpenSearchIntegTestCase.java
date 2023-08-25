@@ -210,7 +210,7 @@ import static org.opensearch.discovery.DiscoveryModule.DISCOVERY_SEED_PROVIDERS_
 import static org.opensearch.discovery.SettingsBasedSeedHostsProvider.DISCOVERY_SEED_HOSTS_SETTING;
 import static org.opensearch.index.IndexSettings.INDEX_SOFT_DELETES_RETENTION_LEASE_PERIOD_SETTING;
 import static org.opensearch.index.query.QueryBuilders.matchAllQuery;
-import static org.opensearch.indices.IndicesService.CLUSTER_REPLICATION_TYPE_SETTING;
+import static org.opensearch.indices.IndicesService.*;
 import static org.opensearch.test.XContentTestUtils.convertToMap;
 import static org.opensearch.test.XContentTestUtils.differenceBetweenMapsIgnoringArrayOrder;
 import static org.opensearch.test.hamcrest.OpenSearchAssertions.assertAcked;
@@ -415,7 +415,13 @@ public abstract class OpenSearchIntegTestCase extends OpenSearchTestCase {
                 setup.call();
                 break;
         }
-
+        if (addMockNRTReplicationEngine()) {
+            internalCluster().startClusterManagerOnlyNode();
+            Path absolutePath = randomRepoPath().toAbsolutePath();
+            assertAcked(
+                clusterAdmin().preparePutRepository(REPOSITORY_NAME).setType("fs").setSettings(Settings.builder().put("location", absolutePath))
+            );
+        }
     }
 
     private void printTestMessage(String message) {
@@ -596,6 +602,9 @@ public abstract class OpenSearchIntegTestCase extends OpenSearchTestCase {
     }
 
     private void afterInternal(boolean afterClass) throws Exception {
+        if (addMockNRTReplicationEngine()) {
+            assertAcked(clusterAdmin().prepareDeleteRepository(REPOSITORY_NAME));
+        }
         final Scope currentClusterScope = getCurrentClusterScope();
         if (isInternalCluster()) {
             internalCluster().clearDisruptionScheme();
@@ -778,6 +787,30 @@ public abstract class OpenSearchIntegTestCase extends OpenSearchTestCase {
 
         return builder.build();
     }
+    private static final String REPOSITORY_NAME = "test-remote-store-repo";
+    public static Settings remoteStoreClusterSettings(String repoName) {
+        return remoteStoreClusterSettings(repoName, repoName);
+    }
+
+    public static Settings remoteStoreClusterSettings(String segmentRepoName, String translogRepoName) {
+        return Settings.builder()
+            .put(CLUSTER_REPLICATION_TYPE_SETTING.getKey(), ReplicationType.SEGMENT)
+            .put(CLUSTER_REMOTE_STORE_ENABLED_SETTING.getKey(), true)
+            .put(CLUSTER_REMOTE_SEGMENT_STORE_REPOSITORY_SETTING.getKey(), segmentRepoName)
+            .put(CLUSTER_REMOTE_TRANSLOG_REPOSITORY_SETTING.getKey(), translogRepoName)
+            .build();
+    }
+
+    public static Settings remoteStoreClusterSettings(
+        String segmentRepoName,
+        String translogRepoName,
+        boolean randomizeSameRepoForRSSAndRTS
+    ) {
+        return remoteStoreClusterSettings(
+            segmentRepoName,
+            randomizeSameRepoForRSSAndRTS ? (randomBoolean() ? translogRepoName : segmentRepoName) : translogRepoName
+        );
+    }
 
     /**
      * Setting all feature flag settings at base IT, which can be overridden later by individual
@@ -792,6 +825,8 @@ public abstract class OpenSearchIntegTestCase extends OpenSearchTestCase {
         }
         // Enabling Telemetry setting by default
         featureSettings.put(FeatureFlags.TELEMETRY_SETTING.getKey(), true);
+        featureSettings.put(FeatureFlags.REMOTE_STORE, "true");
+        featureSettings.put(FeatureFlags.SEGMENT_REPLICATION_EXPERIMENTAL, "true");
         return featureSettings.build();
     }
 
@@ -1931,6 +1966,7 @@ public abstract class OpenSearchIntegTestCase extends OpenSearchTestCase {
         }
         if (addMockNRTReplicationEngine()) {
             builder.put(CLUSTER_REPLICATION_TYPE_SETTING.getKey(), ReplicationType.SEGMENT);
+            builder.put(remoteStoreClusterSettings(REPOSITORY_NAME));
         }
         return builder.build();
     }
@@ -2135,6 +2171,7 @@ public abstract class OpenSearchIntegTestCase extends OpenSearchTestCase {
                 mocks.add(MockFieldFilterPlugin.class);
             }
         } else {
+            // TODO: Remove this to randomly use NRT
             if (addMockNRTReplicationEngine()) {
                 mocks.add(MockNRTEngineFactoryPlugin.class);
             }
