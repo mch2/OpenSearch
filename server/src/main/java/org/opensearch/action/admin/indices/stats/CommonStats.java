@@ -288,6 +288,7 @@ public class CommonStats implements Writeable, ToXContentFragment {
         out.writeOptionalWriteable(translog);
         out.writeOptionalWriteable(requestCache);
         out.writeOptionalWriteable(recoveryStats);
+        out.writeOptionalWriteable(replicationStats);
     }
 
     public void add(CommonStats stats) {
@@ -420,6 +421,14 @@ public class CommonStats implements Writeable, ToXContentFragment {
         } else {
             recoveryStats.add(stats.getRecoveryStats());
         }
+        if (replicationStats == null) {
+            if (stats.getReplicationStats() != null) {
+                replicationStats = new ReplicationStats();
+                replicationStats.add(stats.getReplicationStats());
+            }
+        } else {
+            replicationStats.add(stats.getReplicationStats());
+        }
     }
 
     @Nullable
@@ -500,6 +509,11 @@ public class CommonStats implements Writeable, ToXContentFragment {
     @Nullable
     public RecoveryStats getRecoveryStats() {
         return recoveryStats;
+    }
+
+    @Nullable
+    public ReplicationStats getReplicationStats() {
+        return replicationStats;
     }
 
     /**
