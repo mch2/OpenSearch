@@ -35,6 +35,7 @@ import org.opensearch.indices.replication.common.ReplicationTarget;
 import java.io.IOException;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 /**
  * Represents the target of a replication event.

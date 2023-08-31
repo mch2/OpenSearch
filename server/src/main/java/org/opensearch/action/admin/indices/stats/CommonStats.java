@@ -62,7 +62,10 @@ import org.opensearch.search.suggest.completion.CompletionStats;
 
 import java.io.IOException;
 import java.util.Arrays;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import java.util.stream.Stream;
 
 /**
@@ -179,6 +182,9 @@ public class CommonStats implements Writeable, ToXContentFragment {
                     break;
                 case Recovery:
                     recoveryStats = new RecoveryStats();
+                    break;
+                case Replication:
+                    replicationStats = new ReplicationStats();
                     break;
                 default:
                     throw new IllegalStateException("Unknown Flag: " + flag);
@@ -540,7 +546,7 @@ public class CommonStats implements Writeable, ToXContentFragment {
     @Override
     public XContentBuilder toXContent(XContentBuilder builder, Params params) throws IOException {
         final Stream<ToXContent> stream = Arrays.stream(
-            new ToXContent[] {
+            new ToXContent[]{
                 docs,
                 store,
                 indexing,
@@ -556,7 +562,9 @@ public class CommonStats implements Writeable, ToXContentFragment {
                 segments,
                 translog,
                 requestCache,
-                recoveryStats }
+                recoveryStats,
+                replicationStats
+            }
         ).filter(Objects::nonNull);
         for (ToXContent toXContent : ((Iterable<ToXContent>) stream::iterator)) {
             toXContent.toXContent(builder, params);

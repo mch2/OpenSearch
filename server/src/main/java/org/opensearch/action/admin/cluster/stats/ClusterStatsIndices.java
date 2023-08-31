@@ -33,6 +33,7 @@
 package org.opensearch.action.admin.cluster.stats;
 
 import org.opensearch.action.admin.indices.stats.CommonStats;
+import org.opensearch.action.admin.indices.stats.ReplicationStats;
 import org.opensearch.core.xcontent.ToXContentFragment;
 import org.opensearch.core.xcontent.XContentBuilder;
 import org.opensearch.index.cache.query.QueryCacheStats;
@@ -64,6 +65,7 @@ public class ClusterStatsIndices implements ToXContentFragment {
     private SegmentsStats segments;
     private AnalysisStats analysis;
     private MappingStats mappings;
+    private ReplicationStats replication;
 
     public ClusterStatsIndices(List<ClusterStatsNodeResponse> nodeResponses, MappingStats mappingStats, AnalysisStats analysisStats) {
         Map<String, ShardStats> countsPerIndex = new HashMap<>();
@@ -74,6 +76,7 @@ public class ClusterStatsIndices implements ToXContentFragment {
         this.queryCache = new QueryCacheStats();
         this.completion = new CompletionStats();
         this.segments = new SegmentsStats();
+        this.replication = new ReplicationStats();
 
         for (ClusterStatsNodeResponse r : nodeResponses) {
             for (org.opensearch.action.admin.indices.stats.ShardStats shardStats : r.shardsStats()) {
@@ -96,6 +99,7 @@ public class ClusterStatsIndices implements ToXContentFragment {
                 queryCache.add(shardCommonStats.queryCache);
                 completion.add(shardCommonStats.completion);
                 segments.add(shardCommonStats.segments);
+                replication.add(shardCommonStats.replicationStats);
             }
         }
 
@@ -149,6 +153,10 @@ public class ClusterStatsIndices implements ToXContentFragment {
         return analysis;
     }
 
+    public ReplicationStats getReplication() {
+        return replication;
+    }
+
     /**
      * Inner Fields used for creating XContent and parsing
      *
@@ -173,6 +181,9 @@ public class ClusterStatsIndices implements ToXContentFragment {
         }
         if (analysis != null) {
             analysis.toXContent(builder, params);
+        }
+        if (replication != null) {
+            replication.toXContent(builder, params);
         }
         return builder;
     }
