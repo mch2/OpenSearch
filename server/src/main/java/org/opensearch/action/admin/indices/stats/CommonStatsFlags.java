@@ -275,7 +275,7 @@ public class CommonStatsFlags implements Writeable, Cloneable {
         // 14 was previously used for Suggest
         RequestCache("request_cache", 15),
         Recovery("recovery", 16),
-        Replication("replication", 17);
+        SegmentReplication("segment_replication", 17);
 
         private final String restName;
         private final int index;

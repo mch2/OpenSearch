@@ -62,10 +62,7 @@ import org.opensearch.search.suggest.completion.CompletionStats;
 
 import java.io.IOException;
 import java.util.Arrays;
-import java.util.HashSet;
-import java.util.List;
 import java.util.Objects;
-import java.util.Set;
 import java.util.stream.Stream;
 
 /**
@@ -183,7 +180,7 @@ public class CommonStats implements Writeable, ToXContentFragment {
                 case Recovery:
                     recoveryStats = new RecoveryStats();
                     break;
-                case Replication:
+                case SegmentReplication:
                     replicationStats = new ReplicationStats();
                     break;
                 default:
@@ -245,7 +242,7 @@ public class CommonStats implements Writeable, ToXContentFragment {
                     case Recovery:
                         recoveryStats = indexShard.recoveryStats();
                         break;
-                    case Replication:
+                    case SegmentReplication:
                         replicationStats = indexShard.getReplicationStats();
                         break;
                     default:
