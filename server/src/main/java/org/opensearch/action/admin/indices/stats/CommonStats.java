@@ -241,6 +241,7 @@ public class CommonStats implements Writeable, ToXContentFragment {
                         break;
                     case Replication:
                         replicationStats = indexShard.getReplicationStats();
+                        break;
                     default:
                         throw new IllegalStateException("Unknown Flag: " + flag);
                 }
