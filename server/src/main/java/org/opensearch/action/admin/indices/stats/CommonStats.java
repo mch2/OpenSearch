@@ -120,6 +120,9 @@ public class CommonStats implements Writeable, ToXContentFragment {
     @Nullable
     public RecoveryStats recoveryStats;
 
+    @Nullable
+    public ReplicationStats replicationStats;
+
     public CommonStats() {
         this(CommonStatsFlags.NONE);
     }
@@ -236,6 +239,8 @@ public class CommonStats implements Writeable, ToXContentFragment {
                     case Recovery:
                         recoveryStats = indexShard.recoveryStats();
                         break;
+                    case Replication:
+                        replicationStats = indexShard.getReplicationStats();
                     default:
                         throw new IllegalStateException("Unknown Flag: " + flag);
                 }
@@ -262,6 +267,7 @@ public class CommonStats implements Writeable, ToXContentFragment {
         translog = in.readOptionalWriteable(TranslogStats::new);
         requestCache = in.readOptionalWriteable(RequestCacheStats::new);
         recoveryStats = in.readOptionalWriteable(RecoveryStats::new);
+        replicationStats = in.readOptionalWriteable(ReplicationStats::new);
     }
 
     @Override

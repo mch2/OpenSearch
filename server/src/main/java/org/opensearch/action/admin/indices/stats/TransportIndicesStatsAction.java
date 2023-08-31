@@ -46,6 +46,7 @@ import org.opensearch.common.inject.Inject;
 import org.opensearch.core.action.support.DefaultShardOperationFailedException;
 import org.opensearch.core.common.io.stream.StreamInput;
 import org.opensearch.index.IndexService;
+import org.opensearch.index.SegmentReplicationPerGroupStats;
 import org.opensearch.index.engine.CommitStats;
 import org.opensearch.index.seqno.RetentionLeaseStats;
 import org.opensearch.index.seqno.SeqNoStats;
