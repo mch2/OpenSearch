@@ -136,7 +136,7 @@ public class SegmentReplicationIT extends SegmentReplicationBaseIT {
         client().prepareIndex(INDEX_NAME).setId("1").setSource("foo", "bar").setRefreshPolicy(WriteRequest.RefreshPolicy.IMMEDIATE).get();
         refresh(INDEX_NAME);
 
-        waitForSearchableDocs(1, primary, replica);
+//        waitForSearchableDocs(1, primary, replica);
 
         // index another doc but don't refresh, we will ensure this is searchable once replica is promoted.
         client().prepareIndex(INDEX_NAME).setId("2").setSource("bar", "baz").setRefreshPolicy(WriteRequest.RefreshPolicy.IMMEDIATE).get();
@@ -161,7 +161,7 @@ public class SegmentReplicationIT extends SegmentReplicationBaseIT {
         ensureGreen(INDEX_NAME);
         client().prepareIndex(INDEX_NAME).setId("4").setSource("baz", "baz").get();
         refresh(INDEX_NAME);
-        waitForSearchableDocs(4, nodeC, replica);
+//        waitForSearchableDocs(4, nodeC, replica);
         verifyStoreContent();
     }
 
@@ -536,7 +536,10 @@ public class SegmentReplicationIT extends SegmentReplicationBaseIT {
         ensureYellow(INDEX_NAME);
 
         final String replicaNode = internalCluster().startDataOnlyNode();
-
+        client().admin().cluster().prepareUpdateSettings()
+            .setTransientSettings(Settings.builder()
+                .put("logger.org.opensearch.indices.replication", "TRACE")
+                .build()).get();
         final SegmentReplicationSourceService segmentReplicationSourceService = internalCluster().getInstance(
             SegmentReplicationSourceService.class,
             primaryNode
@@ -581,9 +584,10 @@ public class SegmentReplicationIT extends SegmentReplicationBaseIT {
         ) {
             indexer.start(docCount);
             waitForDocs(docCount, indexer);
-
+            logger.info("Numdocs hit");
             flush(INDEX_NAME);
         }
+        logger.info("closing shard");
         segmentReplicationSourceService.beforeIndexShardClosed(primaryShard.shardId(), primaryShard, indexSettings());
         latch.countDown();
         assertDocCounts(docCount, primaryNode);

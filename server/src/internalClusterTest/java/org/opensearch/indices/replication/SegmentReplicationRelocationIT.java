@@ -61,7 +61,7 @@ public class SegmentReplicationRelocationIT extends SegmentReplicationBaseIT {
         final String replica = internalCluster().startNode();
         ensureGreen(INDEX_NAME);
         final int initialDocCount = scaledRandomIntBetween(10, 100);
-        final WriteRequest.RefreshPolicy refreshPolicy = randomFrom(WriteRequest.RefreshPolicy.values());
+        final WriteRequest.RefreshPolicy refreshPolicy = WriteRequest.RefreshPolicy.IMMEDIATE;
         final List<ActionFuture<IndexResponse>> pendingIndexResponses = new ArrayList<>();
         for (int i = 0; i < initialDocCount; i++) {
             pendingIndexResponses.add(
@@ -138,7 +138,7 @@ public class SegmentReplicationRelocationIT extends SegmentReplicationBaseIT {
         final String replica = internalCluster().startNode();
         ensureGreen(INDEX_NAME);
         final int initialDocCount = scaledRandomIntBetween(10, 100);
-        final WriteRequest.RefreshPolicy refreshPolicy = randomFrom(WriteRequest.RefreshPolicy.values());
+        final WriteRequest.RefreshPolicy refreshPolicy = WriteRequest.RefreshPolicy.IMMEDIATE;
         final List<ActionFuture<IndexResponse>> pendingIndexResponses = new ArrayList<>();
         for (int i = 0; i < initialDocCount; i++) {
             pendingIndexResponses.add(
@@ -222,6 +222,10 @@ public class SegmentReplicationRelocationIT extends SegmentReplicationBaseIT {
         createIndex(1);
         final String replica = internalCluster().startNode();
         ensureGreen(INDEX_NAME);
+//        client().admin().cluster().prepareUpdateSettings()
+//            .setTransientSettings(Settings.builder()
+//                .put("logger.org.opensearch.indices.replication", "TRACE")
+//                .build()).get();
         final int totalDocCount = 1000;
         for (int i = 0; i < 10; i++) {
             client().prepareIndex(INDEX_NAME).setId(Integer.toString(i)).setSource("field", "value" + i).execute().actionGet();
@@ -235,7 +239,7 @@ public class SegmentReplicationRelocationIT extends SegmentReplicationBaseIT {
             pendingIndexResponses.add(
                 client().prepareIndex(INDEX_NAME)
                     .setId(Integer.toString(i))
-                    .setRefreshPolicy(WriteRequest.RefreshPolicy.WAIT_UNTIL)
+                    .setRefreshPolicy(WriteRequest.RefreshPolicy.IMMEDIATE)
                     .setSource("field", "value" + i)
                     .execute()
             );
@@ -261,7 +265,7 @@ public class SegmentReplicationRelocationIT extends SegmentReplicationBaseIT {
             pendingIndexResponses.add(
                 client().prepareIndex(INDEX_NAME)
                     .setId(Integer.toString(i))
-                    .setRefreshPolicy(WriteRequest.RefreshPolicy.WAIT_UNTIL)
+                    .setRefreshPolicy(WriteRequest.RefreshPolicy.IMMEDIATE)
                     .setSource("field", "value" + i)
                     .execute()
             );
@@ -305,7 +309,7 @@ public class SegmentReplicationRelocationIT extends SegmentReplicationBaseIT {
         }
         logger.info("--> flush to have segments on disk");
         client().admin().indices().prepareFlush().execute().actionGet();
-        final WriteRequest.RefreshPolicy refreshPolicy = randomFrom(WriteRequest.RefreshPolicy.values());
+        final WriteRequest.RefreshPolicy refreshPolicy = WriteRequest.RefreshPolicy.IMMEDIATE;
 
         logger.info("--> index more docs so there are ops in the transaction log");
         final List<ActionFuture<IndexResponse>> pendingIndexResponses = new ArrayList<>();
@@ -528,6 +532,7 @@ public class SegmentReplicationRelocationIT extends SegmentReplicationBaseIT {
 
         // Start indexing docs
         final int initialDocCount = scaledRandomIntBetween(2000, 3000);
+        logger.info("INDEXING {} DOCS", initialDocCount);
         for (int i = 0; i < initialDocCount; i++) {
             client().prepareIndex(INDEX_NAME).setId(Integer.toString(i)).setSource("field", "value" + i).execute().actionGet();
         }

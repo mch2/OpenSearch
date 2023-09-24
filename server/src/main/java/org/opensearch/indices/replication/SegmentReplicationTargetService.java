@@ -34,6 +34,7 @@ import org.opensearch.indices.recovery.ForceSyncRequest;
 import org.opensearch.indices.recovery.RecoverySettings;
 import org.opensearch.indices.recovery.RetryableTransportClient;
 import org.opensearch.indices.replication.checkpoint.ReplicationCheckpoint;
+import org.opensearch.indices.replication.checkpoint.SegmentReplicationStateRequest;
 import org.opensearch.indices.replication.common.ReplicationCollection;
 import org.opensearch.indices.replication.common.ReplicationCollection.ReplicationRef;
 import org.opensearch.indices.replication.common.ReplicationFailedException;
@@ -88,6 +89,7 @@ public class SegmentReplicationTargetService implements IndexEventListener {
     public static class Actions {
         public static final String FILE_CHUNK = "internal:index/shard/replication/file_chunk";
         public static final String FORCE_SYNC = "internal:index/shard/replication/segments_sync";
+        public static final String WAIT_FOR_SEQ_NO = "internal:index/shard/replication/segrepstate";
     }
 
     public SegmentReplicationTargetService(
@@ -138,6 +140,12 @@ public class SegmentReplicationTargetService implements IndexEventListener {
             ForceSyncRequest::new,
             new ForceSyncTransportRequestHandler()
         );
+        transportService.registerRequestHandler(
+            Actions.WAIT_FOR_SEQ_NO,
+            ThreadPool.Names.GENERIC,
+            SegmentReplicationStateRequest::new,
+            new SegmentReplicationStateRequestHandler()
+        );
     }
 
     /**
@@ -148,6 +156,7 @@ public class SegmentReplicationTargetService implements IndexEventListener {
         if (indexShard != null && indexShard.indexSettings().isSegRepEnabled()) {
             onGoingReplications.requestCancel(indexShard.shardId(), "Shard closing");
             latestReceivedCheckpoint.remove(shardId);
+            indexShard.clearSyncListeners();
         }
     }
 
@@ -170,6 +179,7 @@ public class SegmentReplicationTargetService implements IndexEventListener {
         if (oldRouting != null && indexShard.indexSettings().isSegRepEnabled() && oldRouting.primary() == false && newRouting.primary()) {
             onGoingReplications.requestCancel(indexShard.shardId(), "Shard has been promoted to primary");
             latestReceivedCheckpoint.remove(indexShard.shardId());
+            indexShard.clearSyncListeners();
         }
     }
 
@@ -621,4 +631,27 @@ public class SegmentReplicationTargetService implements IndexEventListener {
         }
     }
 
+    /**
+     * Force sync transport handler forces round of segment replication. Caller should verify necessary checks before
+     * calling this handler.
+     */
+    private class SegmentReplicationStateRequestHandler implements TransportRequestHandler<SegmentReplicationStateRequest> {
+        @Override
+        public void messageReceived(final SegmentReplicationStateRequest request, TransportChannel channel, Task task) {
+            final ShardId shardId = request.shardId();
+            assert indicesService != null;
+            final IndexShard indexShard = indicesService.getShardOrNull(shardId);
+            final ActionListener<SegmentReplicationStateResponse> listener = new ChannelActionListener<>(channel, Actions.WAIT_FOR_SEQ_NO, request);
+            if (indexShard.routingEntry().primary() == false) {
+                logger.info("Adding listener to wait for {} on {}", request.getWaitForSeqNo(), shardId);
+                indexShard.addSegmentSyncListener(request.getWaitForSeqNo(), (completed -> {
+                    logger.info("Shard {} finished to seqNo {}", shardId, request.getWaitForSeqNo());
+                    listener.onResponse(new SegmentReplicationStateResponse(indexShard.getProcessedLocalCheckpoint()));
+                }));
+            } else {
+                logger.info("Request is hitting primary?");
+                listener.onResponse(new SegmentReplicationStateResponse(indexShard.getProcessedLocalCheckpoint()));
+            }
+        }
+    }
 }

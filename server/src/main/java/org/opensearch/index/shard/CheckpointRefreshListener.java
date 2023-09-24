@@ -44,7 +44,7 @@ public class CheckpointRefreshListener extends CloseableRetryableRefreshListener
             && shard.state() == IndexShardState.STARTED
             && shard.getReplicationTracker().isPrimaryMode()
             && !shard.indexSettings.isSegRepWithRemoteEnabled()) {
-            publisher.publish(shard, shard.getLatestReplicationCheckpoint());
+            shard.getThreadPool().generic().execute(() -> publisher.publish(shard, shard.getLatestReplicationCheckpoint()));
         }
         return true;
     }

@@ -8,8 +8,11 @@
 
 package org.opensearch.index.engine;
 
+import org.apache.lucene.document.LongPoint;
 import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.IndexCommit;
+import org.apache.lucene.index.IndexReader;
+import org.apache.lucene.index.PointValues;
 import org.apache.lucene.index.SegmentInfos;
 import org.apache.lucene.index.SoftDeletesDirectoryReaderWrapper;
 import org.apache.lucene.search.ReferenceManager;
@@ -31,6 +34,7 @@ import org.opensearch.index.translog.TranslogManager;
 import org.opensearch.index.translog.WriteOnlyTranslogManager;
 import org.opensearch.index.translog.listener.TranslogEventListener;
 import org.opensearch.search.suggest.completion.CompletionStats;
+import org.opensearch.index.mapper.SeqNoFieldMapper;
 
 import java.io.Closeable;
 import java.io.IOException;
@@ -44,7 +48,8 @@ import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BiFunction;
 
-import static org.opensearch.index.seqno.SequenceNumbers.MAX_SEQ_NO;
+import static org.opensearch.index.seqno.SequenceNumbers.LOCAL_CHECKPOINT_KEY;
+import static org.opensearch.index.seqno.SequenceNumbers.NO_OPS_PERFORMED;
 
 /**
  * This is an {@link Engine} implementation intended for replica shards when Segment Replication
@@ -161,7 +166,7 @@ public class NRTReplicationEngine extends Engine {
         try (ReleasableLock lock = writeLock.acquire()) {
             // Update the current infos reference on the Engine's reader.
             ensureOpen();
-            final long maxSeqNo = Long.parseLong(infos.userData.get(MAX_SEQ_NO));
+            final long localCheckpoint = Long.parseLong(infos.userData.get(LOCAL_CHECKPOINT_KEY));
             final long incomingGeneration = infos.getGeneration();
             readerManager.updateSegments(infos);
             // Ensure that we commit and clear the local translog if a new commit has been made on the primary.
@@ -170,11 +175,26 @@ public class NRTReplicationEngine extends Engine {
             // In that case we still commit into the next local generation.
             if (incomingGeneration != this.lastReceivedPrimaryGen) {
                 flush(false, true);
-                translogManager.getDeletionPolicy().setLocalCheckpointOfSafeCommit(maxSeqNo);
+                translogManager.getDeletionPolicy().setLocalCheckpointOfSafeCommit(localCheckpoint);
                 translogManager.rollTranslogGeneration();
             }
             this.lastReceivedPrimaryGen = incomingGeneration;
-            localCheckpointTracker.fastForwardProcessedSeqNo(maxSeqNo);
+            long max = Math.max(localCheckpoint, getHighestSeqNo());
+            logger.info("UPDAGTING REPLICA SEQNO TO {}", max);
+            localCheckpointTracker.fastForwardProcessedSeqNo(max);
+        }
+    }
+
+    private Long getHighestSeqNo() throws IOException {
+        try (Searcher searcher = acquireSearcher("internal")) {
+            IndexReader reader = searcher.getIndexReader();
+            final String fieldName = SeqNoFieldMapper.NAME;
+            long size = PointValues.size(reader, fieldName);
+            if (size == 0) {
+                return NO_OPS_PERFORMED;
+            }
+            byte[] max = PointValues.getMaxPackedValue(reader, fieldName);
+            return LongPoint.decodeDimension(max, 0);
         }
     }
 

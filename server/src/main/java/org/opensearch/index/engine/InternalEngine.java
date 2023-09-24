@@ -2833,7 +2833,11 @@ public class InternalEngine extends Engine {
             // This shouldn't be required ideally, but we're also invoking this method from refresh as of now.
             // This change is added as safety check to ensure that our checkpoint values are consistent at all times.
             pendingCheckpoint.updateAndGet(curr -> Math.max(curr, checkpoint));
-
+            SegmentInfos latestSegmentInfos = getLatestSegmentInfos();
+            Map<String, String> userData = latestSegmentInfos.userData;
+//            logger.info("Updating local cp in infos to {}", pendingCheckpoint.get());
+            userData.put(SequenceNumbers.LOCAL_CHECKPOINT_KEY, Long.toString(pendingCheckpoint.get()));
+            userData.put(SequenceNumbers.MAX_SEQ_NO, Long.toString(localCheckpointTracker.getMaxSeqNo()));
         }
     }
 

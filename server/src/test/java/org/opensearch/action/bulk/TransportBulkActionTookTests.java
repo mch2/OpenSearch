@@ -56,6 +56,7 @@ import org.opensearch.core.xcontent.MediaTypeRegistry;
 import org.opensearch.index.IndexNotFoundException;
 import org.opensearch.index.IndexingPressureService;
 import org.opensearch.indices.SystemIndices;
+import org.opensearch.indices.replication.checkpoint.TransportSegmentReplicationStateAction;
 import org.opensearch.tasks.Task;
 import org.opensearch.telemetry.tracing.noop.NoopTracer;
 import org.opensearch.test.OpenSearchTestCase;
@@ -152,6 +153,7 @@ public class TransportBulkActionTookTests extends OpenSearchTestCase {
                 transportService,
                 clusterService,
                 null,
+                null,
                 client,
                 actionFilters,
                 resolver,
@@ -177,6 +179,7 @@ public class TransportBulkActionTookTests extends OpenSearchTestCase {
                 threadPool,
                 transportService,
                 clusterService,
+                null,
                 null,
                 client,
                 actionFilters,
@@ -263,6 +266,7 @@ public class TransportBulkActionTookTests extends OpenSearchTestCase {
             TransportService transportService,
             ClusterService clusterService,
             TransportShardBulkAction shardBulkAction,
+            TransportSegmentReplicationStateAction segmentReplicationStateAction,
             NodeClient client,
             ActionFilters actionFilters,
             IndexNameExpressionResolver indexNameExpressionResolver,
@@ -275,6 +279,7 @@ public class TransportBulkActionTookTests extends OpenSearchTestCase {
                 clusterService,
                 null,
                 shardBulkAction,
+                segmentReplicationStateAction,
                 client,
                 actionFilters,
                 indexNameExpressionResolver,

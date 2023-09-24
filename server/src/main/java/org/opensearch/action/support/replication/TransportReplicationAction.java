@@ -477,7 +477,9 @@ public abstract class TransportReplicationAction<
             acquirePrimaryOperationPermit(
                 indexShard,
                 primaryRequest.getRequest(),
-                ActionListener.wrap(releasable -> runWithPrimaryShardReference(new PrimaryShardReference(indexShard, releasable)), e -> {
+                ActionListener.wrap(releasable -> {
+                    runWithPrimaryShardReference(new PrimaryShardReference(indexShard, releasable));
+                }, e -> {
                     if (e instanceof ShardNotInPrimaryModeException) {
                         onFailure(new ReplicationOperation.RetryOnPrimaryException(shardId, "shard is not in primary mode", e));
                     } else {
@@ -554,7 +556,6 @@ public abstract class TransportReplicationAction<
                                 }
                             }
                         }
-
                         primaryShardReference.close(); // release shard operation lock before responding to caller
                         setPhase(replicationTask, "finished");
                         onCompletionListener.onResponse(response);

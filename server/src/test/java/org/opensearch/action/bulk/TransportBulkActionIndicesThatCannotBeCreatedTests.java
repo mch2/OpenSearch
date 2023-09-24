@@ -147,6 +147,7 @@ public class TransportBulkActionIndicesThatCannotBeCreatedTests extends OpenSear
             null,
             null,
             null,
+            null,
             mock(ActionFilters.class),
             null,
             null,

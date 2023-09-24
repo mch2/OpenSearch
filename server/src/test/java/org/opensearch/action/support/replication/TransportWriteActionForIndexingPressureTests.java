@@ -425,7 +425,7 @@ public class TransportWriteActionForIndexingPressureTests extends OpenSearchTest
 
         @Override
         protected void dispatchedShardOperationOnReplica(TestRequest request, IndexShard replica, ActionListener<ReplicaResult> listener) {
-            ActionListener.completeWith(listener, () -> new WriteReplicaResult<>(request, location, null, replica, logger));
+            ActionListener.completeWith(listener, () -> new WriteReplicaResult<>(request, location, replica.seqNoStats().getMaxSeqNo(), null, replica, logger));
         }
 
     }

@@ -32,6 +32,8 @@
 
 package org.opensearch.index.shard;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.opensearch.ExceptionsHelper;
 import org.opensearch.action.ActionRunnable;
 import org.opensearch.action.support.ContextPreservingActionListener;
@@ -254,7 +256,7 @@ final class IndexShardOperationPermits implements Closeable {
         }
         acquire(onAcquired, executorOnDelay, forceExecution, debugInfo, stackTrace);
     }
-
+public static final Logger logger = LogManager.getLogger(IndexShardOperationPermits.class);
     private void acquire(
         final ActionListener<Releasable> onAcquired,
         final String executorOnDelay,
@@ -296,6 +298,7 @@ final class IndexShardOperationPermits implements Closeable {
                     } else {
                         wrappedListener = new ContextPreservingActionListener<>(contextSupplier, onAcquired);
                     }
+//                    logger.info("Delaying operations {} {}", debugInfo, delayedOperations.size());
                     delayedOperations.add(new DelayedOperation(wrappedListener, debugInfo, stackTrace));
                     return;
                 } else {

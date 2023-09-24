@@ -48,9 +48,8 @@ import org.opensearch.action.admin.indices.create.CreateIndexRequest;
 import org.opensearch.action.admin.indices.create.CreateIndexResponse;
 import org.opensearch.action.index.IndexRequest;
 import org.opensearch.action.ingest.IngestActionForwarder;
-import org.opensearch.action.support.ActionFilters;
-import org.opensearch.action.support.AutoCreateIndex;
-import org.opensearch.action.support.HandledTransportAction;
+import org.opensearch.action.support.*;
+import org.opensearch.action.support.replication.ReplicationResponse;
 import org.opensearch.action.update.TransportUpdateAction;
 import org.opensearch.action.update.UpdateRequest;
 import org.opensearch.action.update.UpdateResponse;
@@ -80,6 +79,8 @@ import org.opensearch.index.VersionType;
 import org.opensearch.index.seqno.SequenceNumbers;
 import org.opensearch.indices.IndexClosedException;
 import org.opensearch.indices.SystemIndices;
+import org.opensearch.indices.replication.checkpoint.SegmentReplicationStateRequest;
+import org.opensearch.indices.replication.checkpoint.TransportSegmentReplicationStateAction;
 import org.opensearch.ingest.IngestService;
 import org.opensearch.node.NodeClosedException;
 import org.opensearch.tasks.Task;
@@ -123,6 +124,7 @@ public class TransportBulkAction extends HandledTransportAction<BulkRequest, Bul
     private final ClusterService clusterService;
     private final IngestService ingestService;
     private final TransportShardBulkAction shardBulkAction;
+    private final TransportSegmentReplicationStateAction segmentReplicationStateAction;
     private final LongSupplier relativeTimeProvider;
     private final IngestActionForwarder ingestForwarder;
     private final NodeClient client;
@@ -138,6 +140,7 @@ public class TransportBulkAction extends HandledTransportAction<BulkRequest, Bul
         ClusterService clusterService,
         IngestService ingestService,
         TransportShardBulkAction shardBulkAction,
+        TransportSegmentReplicationStateAction segmentReplicationStateAction,
         NodeClient client,
         ActionFilters actionFilters,
         IndexNameExpressionResolver indexNameExpressionResolver,
@@ -151,6 +154,7 @@ public class TransportBulkAction extends HandledTransportAction<BulkRequest, Bul
             clusterService,
             ingestService,
             shardBulkAction,
+            segmentReplicationStateAction,
             client,
             actionFilters,
             indexNameExpressionResolver,
@@ -167,6 +171,7 @@ public class TransportBulkAction extends HandledTransportAction<BulkRequest, Bul
         ClusterService clusterService,
         IngestService ingestService,
         TransportShardBulkAction shardBulkAction,
+        TransportSegmentReplicationStateAction segmentReplicationStateAction,
         NodeClient client,
         ActionFilters actionFilters,
         IndexNameExpressionResolver indexNameExpressionResolver,
@@ -181,6 +186,7 @@ public class TransportBulkAction extends HandledTransportAction<BulkRequest, Bul
         this.clusterService = clusterService;
         this.ingestService = ingestService;
         this.shardBulkAction = shardBulkAction;
+        this.segmentReplicationStateAction = segmentReplicationStateAction;
         this.autoCreateIndex = autoCreateIndex;
         this.relativeTimeProvider = relativeTimeProvider;
         this.ingestForwarder = new IngestActionForwarder(transportService);
@@ -627,15 +633,37 @@ public class TransportBulkAction extends HandledTransportAction<BulkRequest, Bul
                 shardBulkAction.execute(bulkShardRequest, ActionListener.runBefore(new ActionListener<BulkShardResponse>() {
                     @Override
                     public void onResponse(BulkShardResponse bulkShardResponse) {
+                        long highestSeqNoWritten = SequenceNumbers.NO_OPS_PERFORMED;
                         for (BulkItemResponse bulkItemResponse : bulkShardResponse.getResponses()) {
                             // we may have no response if item failed
                             if (bulkItemResponse.getResponse() != null) {
                                 bulkItemResponse.getResponse().setShardInfo(bulkShardResponse.getShardInfo());
                             }
+                            highestSeqNoWritten = Math.max(bulkItemResponse.getResponse().getSeqNo(), highestSeqNoWritten);
                             responses.set(bulkItemResponse.getItemId(), bulkItemResponse);
                         }
-                        if (counter.decrementAndGet() == 0) {
-                            finishHim();
+                        if (bulkShardRequest.getRefreshPolicy() == WriteRequest.RefreshPolicy.IMMEDIATE || bulkShardRequest.getRefreshPolicy() == WriteRequest.RefreshPolicy.WAIT_UNTIL) {
+                            logger.info("---> BULK STARTING WAIT FOR {}", highestSeqNoWritten);
+                            SegmentReplicationStateRequest req = new SegmentReplicationStateRequest(bulkShardResponse.getShardId(), highestSeqNoWritten);
+                            segmentReplicationStateAction.execute(req, new ActionListener<>() {
+                                @Override
+                                public void onResponse(Void v) {
+                                    logger.info("---> REPLICATION GROUP COMPLETED WAITING FOR {}", req.getWaitForSeqNo());
+                                    if (counter.decrementAndGet() == 0) {
+                                        finishHim();
+                                    } else {
+                                        logger.info("DIDNT FINISH BULK REQ {}", counter.get());
+                                    }
+                                }
+                                @Override
+                                public void onFailure(Exception e) {
+                                    logger.error("Failed shit", e);
+                                }
+                            });
+                        } else {
+                            if (counter.decrementAndGet() == 0) {
+                                finishHim();
+                            }
                         }
                     }
 

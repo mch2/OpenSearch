@@ -159,6 +159,7 @@ public class TransportBulkActionIngestTests extends OpenSearchTestCase {
                 ingestService,
                 null,
                 null,
+                null,
                 new ActionFilters(Collections.emptySet()),
                 null,
                 new AutoCreateIndex(

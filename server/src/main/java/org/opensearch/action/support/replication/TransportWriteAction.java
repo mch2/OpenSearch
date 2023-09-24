@@ -307,7 +307,7 @@ public abstract class TransportWriteAction<
                  * We call this after replication because this might wait for a refresh and that can take a while.
                  * This way we wait for the refresh in parallel on the primary and on the replica.
                  */
-                new AsyncAfterWriteAction(primary, replicaRequest, location, new RespondingWriteResult() {
+                new AsyncAfterWriteAction(primary, replicaRequest, location, 0L, new RespondingWriteResult() {
                     @Override
                     public void onSuccess(boolean forcedRefresh) {
                         finalResponseIfSuccessful.setForcedRefresh(forcedRefresh);
@@ -330,6 +330,7 @@ public abstract class TransportWriteAction<
      */
     public static class WriteReplicaResult<ReplicaRequest extends ReplicatedWriteRequest<ReplicaRequest>> extends ReplicaResult {
         public final Location location;
+        public final Long lastWrittenSeqNo;
         private final ReplicaRequest request;
         private final IndexShard replica;
         private final Logger logger;
@@ -337,12 +338,14 @@ public abstract class TransportWriteAction<
         public WriteReplicaResult(
             ReplicaRequest request,
             @Nullable Location location,
+            @Nullable Long lastWrittenSeqNo,
             @Nullable Exception operationFailure,
             IndexShard replica,
             Logger logger
         ) {
             super(operationFailure);
             this.location = location;
+            this.lastWrittenSeqNo = lastWrittenSeqNo;
             this.request = request;
             this.replica = replica;
             this.logger = logger;
@@ -353,7 +356,7 @@ public abstract class TransportWriteAction<
             if (finalFailure != null) {
                 listener.onFailure(finalFailure);
             } else {
-                new AsyncAfterWriteAction(replica, request, location, new RespondingWriteResult() {
+                new AsyncAfterWriteAction(replica, request, location, lastWrittenSeqNo, new RespondingWriteResult() {
                     @Override
                     public void onSuccess(boolean forcedRefresh) {
                         listener.onResponse(null);
@@ -405,6 +408,7 @@ public abstract class TransportWriteAction<
     static final class AsyncAfterWriteAction {
         private final Location location;
         private final boolean waitUntilRefresh;
+        private final boolean waitUntilSegmentSync;
         private final boolean sync;
         private final AtomicInteger pendingOps = new AtomicInteger(1);
         private final AtomicBoolean refreshed = new AtomicBoolean(false);
@@ -413,20 +417,31 @@ public abstract class TransportWriteAction<
         private final IndexShard indexShard;
         private final WriteRequest<?> request;
         private final Logger logger;
+        private final Long lastWrittenSeqNo;
 
         AsyncAfterWriteAction(
             final IndexShard indexShard,
             final WriteRequest<?> request,
             @Nullable final Translog.Location location,
+            @Nullable final Long lastWrittenSeqNo,
             final RespondingWriteResult respond,
             final Logger logger
         ) {
             this.indexShard = indexShard;
             this.request = request;
             boolean waitUntilRefresh = false;
+            boolean waitUntilSegmentSync = false;
             switch (request.getRefreshPolicy()) {
                 case IMMEDIATE:
+                    if (indexShard.routingEntry().primary()) {
+                        logger.info("Primary triggering refresh?");
+                    }
                     indexShard.refresh("refresh_flag_index");
+//                    if (indexShard.indexSettings().isSegRepEnabled() && indexShard.routingEntry().primary() == false) {
+//                        logger.info("replica waiting for sync?");
+//                        waitUntilSegmentSync = true;
+//                        pendingOps.incrementAndGet();
+//                    }
                     refreshed.set(true);
                     break;
                 case WAIT_UNTIL:
@@ -441,8 +456,10 @@ public abstract class TransportWriteAction<
                     throw new IllegalArgumentException("unknown refresh policy: " + request.getRefreshPolicy());
             }
             this.waitUntilRefresh = waitUntilRefresh;
+            this.waitUntilSegmentSync = waitUntilSegmentSync;
             this.respond = respond;
             this.location = location;
+            this.lastWrittenSeqNo = lastWrittenSeqNo;
             if ((sync = indexShard.getTranslogDurability() == Translog.Durability.REQUEST && location != null)) {
                 pendingOps.incrementAndGet();
             }
@@ -482,6 +499,15 @@ public abstract class TransportWriteAction<
                     maybeFinish();
                 });
             }
+//            if (waitUntilSegmentSync) {
+//                assert pendingOps.get() > 0;
+//                logger.info("Adding listener for {}", lastWrittenSeqNo);
+//                indexShard.addSegmentSyncListener(lastWrittenSeqNo, ignored -> {
+//                   logger.warn("Block until segment sync ran out of slots and rejected");
+//                   refreshed.set(ignored);
+//                   maybeFinish();
+//                });
+//            }
             if (sync) {
                 assert pendingOps.get() > 0;
                 indexShard.sync(location, (ex) -> {

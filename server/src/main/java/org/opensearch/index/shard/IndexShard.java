@@ -90,11 +90,7 @@ import org.opensearch.common.metrics.MeanMetric;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.common.unit.TimeValue;
 import org.opensearch.common.util.BigArrays;
-import org.opensearch.common.util.concurrent.AbstractRunnable;
-import org.opensearch.common.util.concurrent.AsyncIOProcessor;
-import org.opensearch.common.util.concurrent.BufferedAsyncIOProcessor;
-import org.opensearch.common.util.concurrent.RunOnce;
-import org.opensearch.common.util.concurrent.ThreadContext;
+import org.opensearch.common.util.concurrent.*;
 import org.opensearch.common.util.io.IOUtils;
 import org.opensearch.common.util.set.Sets;
 import org.opensearch.core.Assertions;
@@ -821,7 +817,9 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
     ) throws IllegalIndexShardStateException, IllegalStateException, InterruptedException {
         assert shardRouting.primary() : "only primaries can be marked as relocated: " + shardRouting;
         try (Releasable forceRefreshes = refreshListeners.forceRefreshes()) {
+            logger.info("----> Bloocking operations");
             indexShardOperationPermits.blockOperations(30, TimeUnit.MINUTES, () -> {
+                logger.info("FINISHED Blocking operations ---- > ");
                 forceRefreshes.close();
 
                 boolean syncTranslog = isRemoteTranslogEnabled() && Durability.ASYNC == indexSettings.getTranslogDurability();
@@ -1572,6 +1570,26 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
     public void finalizeReplication(SegmentInfos infos) throws IOException {
         if (getReplicationEngine().isPresent()) {
             getReplicationEngine().get().updateSegments(infos);
+            fireListeners(false);
+        }
+    }
+
+    private void fireListeners(boolean force) {
+        logger.info("Firing listers {}", checkpointListeners.size());
+        List<Tuple> listenersToClear = new ArrayList<>();
+        for (Tuple<Long, Consumer<Boolean>> listener : checkpointListeners) {
+            long processedLocalCheckpoint = getProcessedLocalCheckpoint();
+            logger.info("Processed local cp {}", processedLocalCheckpoint);
+            if (listener.v1() <= processedLocalCheckpoint || force) {
+                logger.info("Firing lister waiting for {}", listener.v1());
+                listener.v2().accept(true);
+                listenersToClear.add(listener);
+            }
+        }
+        checkpointListeners.removeAll(listenersToClear);
+        logger.info("REMAINING LISTENERS {}", checkpointListeners.size());
+        for (Tuple<Long, Consumer<Boolean>> checkpointListener : checkpointListeners) {
+            logger.info("remaining listener waiting for {}", checkpointListener.v1());
         }
     }
 
@@ -1892,6 +1910,20 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
     public void resetToWriteableEngine() throws IOException, InterruptedException, TimeoutException {
         indexShardOperationPermits.blockOperations(30, TimeUnit.MINUTES, () -> { resetEngineToGlobalCheckpoint(); });
     }
+
+    public void addSegmentSyncListener(Long lastWrittenSeqNo, Consumer<Boolean> onSyncCompleted) {
+        if (getProcessedLocalCheckpoint() >= lastWrittenSeqNo || routingEntry().primary()) {
+            onSyncCompleted.accept(true);
+        }
+        checkpointListeners.add(new Tuple<>(lastWrittenSeqNo, onSyncCompleted));
+        logger.info("Added lister to wait for {} - size of listeners {}", lastWrittenSeqNo, checkpointListeners.size());
+    }
+
+    public void clearSyncListeners() {
+        fireListeners(true);
+    }
+
+    final Set<Tuple<Long, Consumer<Boolean>>> checkpointListeners = ConcurrentCollections.newConcurrentSet();
 
     /**
      * Wrapper for a non-closing reader
