@@ -142,9 +142,9 @@ public class SegmentReplicationPressureService implements Closeable {
 
     public void isSegrepLimitBreached(ShardId shardId) {
         final IndexService indexService = indicesService.indexService(shardId.getIndex());
-        if (indexService != null) {
+        if (indexService != null && indexService.getIndexSettings().isSegRepEnabled()) {
             final IndexShard shard = indexService.getShard(shardId.id());
-            if (isSegmentReplicationBackpressureEnabled && shard.indexSettings().isSegRepEnabled() && shard.routingEntry().primary()) {
+            if (isSegmentReplicationBackpressureEnabled && shard.routingEntry().primary()) {
                 validateReplicationGroup(shard);
             }
         }
