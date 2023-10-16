@@ -20,6 +20,7 @@ import org.apache.lucene.store.IndexInput;
 import org.opensearch.action.LatchedActionListener;
 import org.opensearch.action.bulk.BackoffPolicy;
 import org.opensearch.action.support.GroupedActionListener;
+import org.opensearch.common.collect.Tuple;
 import org.opensearch.common.concurrent.GatedCloseable;
 import org.opensearch.common.logging.Loggers;
 import org.opensearch.common.unit.TimeValue;
@@ -181,7 +182,6 @@ public final class RemoteStoreRefreshListener extends CloseableRetryableRefreshL
             // in the remote store.
             return indexShard.state() != IndexShardState.STARTED || !(indexShard.getEngine() instanceof InternalEngine);
         }
-        ReplicationCheckpoint checkpoint = indexShard.getLatestReplicationCheckpoint();
         beforeSegmentsSync();
         long refreshTimeMs = segmentTracker.getLocalRefreshTimeMs(), refreshClockTimeMs = segmentTracker.getLocalRefreshClockTimeMs();
         long refreshSeqNo = segmentTracker.getLocalRefreshSeqNo();
@@ -197,12 +197,11 @@ public final class RemoteStoreRefreshListener extends CloseableRetryableRefreshL
                     remoteDirectory.deleteStaleSegmentsAsync(LAST_N_METADATA_FILES_TO_KEEP);
                 }
 
-                try (GatedCloseable<SegmentInfos> segmentInfosGatedCloseable = indexShard.getSegmentInfosSnapshot()) {
+                final Tuple<GatedCloseable<SegmentInfos>, ReplicationCheckpoint> latestSegmentInfosAndCheckpoint = indexShard
+                    .getLatestSegmentInfosAndCheckpoint();
+                try (GatedCloseable<SegmentInfos> segmentInfosGatedCloseable = latestSegmentInfosAndCheckpoint.v1()) {
                     SegmentInfos segmentInfos = segmentInfosGatedCloseable.get();
-                    assert segmentInfos.getGeneration() == checkpoint.getSegmentsGen() : "SegmentInfos generation: "
-                        + segmentInfos.getGeneration()
-                        + " does not match metadata generation: "
-                        + checkpoint.getSegmentsGen();
+                    final ReplicationCheckpoint checkpoint = latestSegmentInfosAndCheckpoint.v2();
                     // Capture replication checkpoint before uploading the segments as upload can take some time and checkpoint can
                     // move.
                     long lastRefreshedCheckpoint = ((InternalEngine) indexShard.getEngine()).lastRefreshedCheckpoint();
