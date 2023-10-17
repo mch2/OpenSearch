@@ -197,11 +197,9 @@ public final class RemoteStoreRefreshListener extends CloseableRetryableRefreshL
                     remoteDirectory.deleteStaleSegmentsAsync(LAST_N_METADATA_FILES_TO_KEEP);
                 }
 
-                final Tuple<GatedCloseable<SegmentInfos>, ReplicationCheckpoint> latestSegmentInfosAndCheckpoint = indexShard
-                    .getLatestSegmentInfosAndCheckpoint();
-                try (GatedCloseable<SegmentInfos> segmentInfosGatedCloseable = latestSegmentInfosAndCheckpoint.v1()) {
+                try (GatedCloseable<SegmentInfos> segmentInfosGatedCloseable = indexShard.getSegmentInfosSnapshot()) {
                     SegmentInfos segmentInfos = segmentInfosGatedCloseable.get();
-                    final ReplicationCheckpoint checkpoint = latestSegmentInfosAndCheckpoint.v2();
+                    final ReplicationCheckpoint checkpoint = indexShard.computeReplicationCheckpoint(segmentInfos);
                     // Capture replication checkpoint before uploading the segments as upload can take some time and checkpoint can
                     // move.
                     long lastRefreshedCheckpoint = ((InternalEngine) indexShard.getEngine()).lastRefreshedCheckpoint();
