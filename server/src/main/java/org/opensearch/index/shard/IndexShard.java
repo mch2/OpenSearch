@@ -1631,6 +1631,14 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
     public Tuple<GatedCloseable<SegmentInfos>, ReplicationCheckpoint> getLatestSegmentInfosAndCheckpoint() {
         assert indexSettings.isSegRepEnabled();
 
+        Tuple<GatedCloseable<SegmentInfos>, ReplicationCheckpoint> nullSegmentInfosEmptyCheckpoint = new Tuple<>(
+            new GatedCloseable<>(null, () -> {}),
+            getLatestReplicationCheckpoint()
+        );
+
+        if (getEngineOrNull() == null) {
+            return nullSegmentInfosEmptyCheckpoint;
+        }
         // do not close the snapshot - caller will close it.
         GatedCloseable<SegmentInfos> snapshot = null;
         try {
@@ -1647,7 +1655,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
                 }
             }
         }
-        return new Tuple<>(new GatedCloseable<>(null, () -> {}), getLatestReplicationCheckpoint());
+        return nullSegmentInfosEmptyCheckpoint;
     }
 
     /**
