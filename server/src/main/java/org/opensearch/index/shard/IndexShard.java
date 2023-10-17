@@ -1664,7 +1664,8 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
             return ReplicationCheckpoint.empty(shardId);
         }
         final ReplicationCheckpoint latestReplicationCheckpoint = getLatestReplicationCheckpoint();
-        if (latestReplicationCheckpoint.getSegmentInfosVersion() == segmentInfos.getVersion()) {
+        if (latestReplicationCheckpoint.getSegmentInfosVersion() == segmentInfos.getVersion()
+            && latestReplicationCheckpoint.getSegmentsGen() == segmentInfos.getGeneration()) {
             return latestReplicationCheckpoint;
         }
         final Map<String, StoreFileMetadata> metadataMap = store.getSegmentMetadataMap(segmentInfos);
