@@ -79,6 +79,7 @@ import org.opensearch.common.regex.Regex;
 import org.opensearch.common.settings.ClusterSettings;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.common.unit.TimeValue;
+import org.opensearch.common.util.ArrayUtils;
 import org.opensearch.common.util.FeatureFlags;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.index.Index;
@@ -90,6 +91,7 @@ import org.opensearch.index.snapshots.IndexShardSnapshotStatus;
 import org.opensearch.index.store.remote.filecache.FileCacheStats;
 import org.opensearch.indices.IndicesService;
 import org.opensearch.indices.ShardLimitValidator;
+import org.opensearch.node.remotestore.RemoteStoreNodeAttribute;
 import org.opensearch.repositories.IndexId;
 import org.opensearch.repositories.RepositoriesService;
 import org.opensearch.repositories.Repository;
@@ -360,10 +362,32 @@ public class RestoreService implements ClusterStateApplier {
                                 boolean partial = checkPartial(index);
 
                                 IndexId snapshotIndexId = repositoryData.resolveIndexId(index);
+
+                                final Settings.Builder settingsBuilder = Settings.builder().put(request.indexSettings());
+
+                                MetadataCreateIndexService.updateReplicationStrategy(
+                                    settingsBuilder,
+                                    request.indexSettings(),
+                                    clusterService.getSettings()
+                                );
+                                MetadataCreateIndexService.updateRemoteStoreSettings(settingsBuilder, clusterService.getSettings());
+
+                                final Settings updatedRequestSettings = settingsBuilder.build();
+
+                                final String[] ignoredSettings;
+                                if (RemoteStoreNodeAttribute.isRemoteStoreAttributePresent(clusterService.getSettings())) {
+                                    ignoredSettings = ArrayUtils.concat(
+                                        request.ignoreIndexSettings(),
+                                        new String[] { "index.remote_store.*" }
+                                    );
+                                } else {
+                                    ignoredSettings = request.ignoreIndexSettings();
+                                }
+
                                 IndexMetadata snapshotIndexMetadata = updateIndexSettings(
                                     metadata.index(index),
-                                    request.indexSettings(),
-                                    request.ignoreIndexSettings()
+                                    updatedRequestSettings,
+                                    ignoredSettings
                                 );
                                 if (isRemoteSnapshot) {
                                     snapshotIndexMetadata = addSnapshotToIndexSettings(snapshotIndexMetadata, snapshot, snapshotIndexId);

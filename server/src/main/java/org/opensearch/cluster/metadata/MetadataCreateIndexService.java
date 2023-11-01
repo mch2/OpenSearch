@@ -124,7 +124,6 @@ import java.util.stream.IntStream;
 import static java.util.stream.Collectors.toList;
 import static org.opensearch.cluster.metadata.IndexMetadata.INDEX_NUMBER_OF_REPLICAS_SETTING;
 import static org.opensearch.cluster.metadata.IndexMetadata.INDEX_NUMBER_OF_SHARDS_SETTING;
-import static org.opensearch.cluster.metadata.IndexMetadata.INDEX_REPLICATION_TYPE_SETTING;
 import static org.opensearch.cluster.metadata.IndexMetadata.SETTING_AUTO_EXPAND_REPLICAS;
 import static org.opensearch.cluster.metadata.IndexMetadata.SETTING_CREATION_DATE;
 import static org.opensearch.cluster.metadata.IndexMetadata.SETTING_INDEX_UUID;
@@ -935,15 +934,11 @@ public class MetadataCreateIndexService {
      * @param requestSettings settings passed in during index create request
      * @param clusterSettings cluster level settings
      */
-    private static void updateReplicationStrategy(Settings.Builder settingsBuilder, Settings requestSettings, Settings clusterSettings) {
-        if (INDEX_REPLICATION_TYPE_SETTING.exists(requestSettings)) {
-            settingsBuilder.put(SETTING_REPLICATION_TYPE, INDEX_REPLICATION_TYPE_SETTING.get(requestSettings));
-        } else if (CLUSTER_REPLICATION_TYPE_SETTING.exists(clusterSettings)) {
-            settingsBuilder.put(SETTING_REPLICATION_TYPE, CLUSTER_REPLICATION_TYPE_SETTING.get(clusterSettings));
-        } else if (isRemoteStoreAttributePresent(clusterSettings)) {
+    public static void updateReplicationStrategy(Settings.Builder settingsBuilder, Settings requestSettings, Settings clusterSettings) {
+        if (isRemoteStoreAttributePresent(clusterSettings)) {
             settingsBuilder.put(SETTING_REPLICATION_TYPE, ReplicationType.SEGMENT);
         } else {
-            settingsBuilder.put(SETTING_REPLICATION_TYPE, CLUSTER_REPLICATION_TYPE_SETTING.getDefault(clusterSettings));
+            settingsBuilder.put(SETTING_REPLICATION_TYPE, CLUSTER_REPLICATION_TYPE_SETTING.get(clusterSettings));
         }
     }
 
@@ -952,7 +947,7 @@ public class MetadataCreateIndexService {
      * @param settingsBuilder index settings builder to be updated with relevant settings
      * @param clusterSettings cluster level settings
      */
-    private static void updateRemoteStoreSettings(Settings.Builder settingsBuilder, Settings clusterSettings) {
+    public static void updateRemoteStoreSettings(Settings.Builder settingsBuilder, Settings clusterSettings) {
         if (isRemoteStoreAttributePresent(clusterSettings)) {
             settingsBuilder.put(SETTING_REMOTE_STORE_ENABLED, true)
                 .put(
@@ -1252,7 +1247,6 @@ public class MetadataCreateIndexService {
         if (forbidPrivateIndexSettings) {
             validationErrors.addAll(validatePrivateSettingsNotExplicitlySet(settings, indexScopedSettings));
         }
-        validateIndexReplicationTypeSettings(settings, clusterService.getClusterSettings()).ifPresent(validationErrors::add);
         if (indexName.isEmpty() || indexName.get().charAt(0) != '.') {
             // Apply aware replica balance validation only to non system indices
             int replicaCount = settings.getAsInt(
@@ -1305,24 +1299,6 @@ public class MetadataCreateIndexService {
             }
         }
         return validationErrors;
-    }
-
-    /**
-     * Validates {@code index.replication.type} is not set if {@code cluster.restrict.index.replication_type} is set to true.
-     *
-     * @param requestSettings settings passed in during index create request
-     * @param clusterSettings cluster setting
-     */
-    private static Optional<String> validateIndexReplicationTypeSettings(Settings requestSettings, ClusterSettings clusterSettings) {
-        if (requestSettings.hasValue(SETTING_REPLICATION_TYPE)
-            && clusterSettings.get(IndicesService.CLUSTER_RESTRICT_INDEX_REPLICATION_TYPE_SETTING)) {
-            return Optional.of(
-                "index setting [index.replication.type] is not allowed to be set as ["
-                    + IndicesService.CLUSTER_RESTRICT_INDEX_REPLICATION_TYPE_SETTING.getKey()
-                    + "=true]"
-            );
-        }
-        return Optional.empty();
     }
 
     /**
