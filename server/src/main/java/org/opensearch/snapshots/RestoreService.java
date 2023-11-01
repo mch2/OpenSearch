@@ -360,9 +360,18 @@ public class RestoreService implements ClusterStateApplier {
                                 boolean partial = checkPartial(index);
 
                                 IndexId snapshotIndexId = repositoryData.resolveIndexId(index);
+
+                                Settings.Builder settingsBuilder = Settings.
+                                    builder().put(request.indexSettings());
+
+                                MetadataCreateIndexService.updateReplicationStrategy(settingsBuilder, request.indexSettings(), clusterService.getSettings());
+                                MetadataCreateIndexService.updateRemoteStoreSettings(settingsBuilder, clusterService.getSettings());
+
+                                Settings updatedRequestSettings = settingsBuilder.build();
+
                                 IndexMetadata snapshotIndexMetadata = updateIndexSettings(
                                     metadata.index(index),
-                                    request.indexSettings(),
+                                    updatedRequestSettings,
                                     request.ignoreIndexSettings()
                                 );
                                 if (isRemoteSnapshot) {
@@ -754,6 +763,7 @@ public class RestoreService implements ClusterStateApplier {
                                 }
                             }));
                         settingsBuilder.remove(MetadataIndexStateService.VERIFIED_BEFORE_CLOSE_SETTING.getKey());
+                        // check for UW
                         return builder.settings(settingsBuilder).build();
                     }
 
@@ -1021,8 +1031,8 @@ public class RestoreService implements ClusterStateApplier {
 
     static class CleanRestoreStateTaskExecutor
         implements
-            ClusterStateTaskExecutor<CleanRestoreStateTaskExecutor.Task>,
-            ClusterStateTaskListener {
+        ClusterStateTaskExecutor<CleanRestoreStateTaskExecutor.Task>,
+        ClusterStateTaskListener {
 
         static class Task {
             final String uuid;
