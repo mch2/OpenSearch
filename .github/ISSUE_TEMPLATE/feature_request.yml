@@ -18,8 +18,8 @@ body:
       required: true
   - type: dropdown
     attributes:
-      label: Choose the related component
-      description: Choose one specific OpenSearch component your problem belongs to.
+      label: Related component
+      description: Choose one specific OpenSearch component your feature request belongs to.
       multiple: false
       options:
         - Search:Resiliency
