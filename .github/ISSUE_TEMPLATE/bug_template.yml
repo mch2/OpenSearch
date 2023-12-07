@@ -12,31 +12,31 @@ body:
   - type: dropdown
     attributes:
       label: Related component
-      description: Choose one specific OpenSearch component your problem belongs to.
+      description: Choose a specific OpenSearch component your bug belongs to.  If you are unsure which to select or if the component is not present, select "Other".
       multiple: false
       options:
-        - Search:Resiliency
+        - Build Libraries & Interfaces
+        - Cluster Manager
+        - Extensions
+        - Indexing
+        - Indexing:Performance
+        - Indexing:Replication
+        - Other
+        - Plugins
+        - Search
+        - Search:Aggregations
         - Search:Performance
         - Search:Query Capabilities
         - Search:Query Insights
-        - Search:Aggregations
-        - Search:Remote Search
         - Search:Relevance
+        - Search:Remote Search
+        - Search:Resiliency
         - Search:Searchable Snapshots
-        - Search
-        - Indexing:Replication
-        - Indexing:Performance
-        - Indexing
-        - Storage:Snapshots
-        - Storage:Performance
-        - Storage:Durability
-        - Storage:Remote
         - Storage
-        - Cluster Manager
-        - Extensions
-        - Build Libraries & Interfaces
-        - Plugins
-        - Others
+        - Storage:Durability
+        - Storage:Performance
+        - Storage:Remote
+        - Storage:Snapshots
     validations:
       required: true
   - type: textarea
