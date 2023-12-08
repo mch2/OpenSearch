@@ -15,17 +15,16 @@ body:
       description: Choose a specific OpenSearch component your bug belongs to.  If you are unsure which to select or if the component is not present, select "Other".
       multiple: false
       options:
+        - Other
         - Build
         - Clients
         - Cluster Manager
         - Extensions
-        - Indexing
         - Indexing:Performance
         - Indexing:Replication
+        - Indexing
         - Libraries
-        - Other
         - Plugins
-        - Search
         - Search:Aggregations
         - Search:Performance
         - Search:Query Capabilities
@@ -34,11 +33,12 @@ body:
         - Search:Remote Search
         - Search:Resiliency
         - Search:Searchable Snapshots
-        - Storage
+        - Search
         - Storage:Durability
         - Storage:Performance
         - Storage:Remote
         - Storage:Snapshots
+        - Storage
     validations:
       required: true
   - type: textarea
