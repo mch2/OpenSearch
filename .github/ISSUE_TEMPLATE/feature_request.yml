@@ -22,12 +22,14 @@ body:
       description: Choose a specific OpenSearch component your feature request belongs to.  If you are unsure of which component to select or if the component is not present, select "Other".
       multiple: false
       options:
-        - Build Libraries & Interfaces
+        - Build
+        - Clients
         - Cluster Manager
         - Extensions
         - Indexing
         - Indexing:Performance
         - Indexing:Replication
+        - Libraries
         - Other
         - Plugins
         - Search
