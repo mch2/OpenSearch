@@ -6,7 +6,7 @@
  * compatible open source license.
  */
 
-package org.opensearch.plugin.correlation.core.index.codec.correlation950;
+package org.opensearch.plugin.correlation.core.index.codec.correlation990;
 
 import org.apache.lucene.codecs.Codec;
 import org.apache.lucene.codecs.FilterCodec;
@@ -18,14 +18,14 @@ import org.opensearch.plugin.correlation.core.index.codec.CorrelationCodecVersio
  *
  * @opensearch.internal
  */
-public class CorrelationCodec extends FilterCodec {
-    private static final CorrelationCodecVersion VERSION = CorrelationCodecVersion.V_9_5_0;
+public class Correlation99Codec extends FilterCodec {
+    private static final CorrelationCodecVersion VERSION = CorrelationCodecVersion.V_9_9_0;
     private final KnnVectorsFormat perFieldCorrelationVectorsFormat;
 
     /**
      * ctor for CorrelationCodec
      */
-    public CorrelationCodec() {
+    public Correlation99Codec() {
         this(VERSION.getDefaultCodecDelegate(), VERSION.getPerFieldCorrelationVectorsFormat());
     }
 
@@ -34,7 +34,7 @@ public class CorrelationCodec extends FilterCodec {
      * @param delegate codec delegate
      * @param perFieldCorrelationVectorsFormat correlation vectors format
      */
-    public CorrelationCodec(Codec delegate, KnnVectorsFormat perFieldCorrelationVectorsFormat) {
+    public Correlation99Codec(Codec delegate, KnnVectorsFormat perFieldCorrelationVectorsFormat) {
         super(VERSION.getCodecName(), delegate);
         this.perFieldCorrelationVectorsFormat = perFieldCorrelationVectorsFormat;
     }

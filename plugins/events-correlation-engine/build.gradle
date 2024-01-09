@@ -1,3 +1,7 @@
+import org.opensearch.gradle.testclusters.StandaloneRestIntegTestTask
+
+import java.util.concurrent.Callable
+
 /*
  * SPDX-License-Identifier: Apache-2.0
  *
@@ -11,6 +15,7 @@
 
 apply plugin: 'opensearch.java-rest-test'
 apply plugin: 'opensearch.internal-cluster-test'
+apply plugin: 'opensearch.testclusters'
 
 opensearchplugin {
   description 'OpenSearch Events Correlation Engine.'
@@ -18,4 +23,31 @@ opensearchplugin {
 }
 
 dependencies {
+}
+
+testClusters {
+  "mycluster" {
+    versions = ["2.12.0", project.version]
+//    numberOfNodes = 1
+    setting 'path.repo', "${buildDir}/cluster/shared/repo/mycluster"
+  }
+}
+
+tasks.register("mycluster#oldClusterTest", StandaloneRestIntegTestTask) {
+  useCluster testClusters."mycluster"
+  mustRunAfter(precommit)
+  doFirst {
+    delete("${buildDir}/cluster/shared/repo/mycluster")
+  }
+
+  systemProperty 'tests.is_old_cluster', 'true'
+}
+
+tasks.register("mycluster#upgradedClusterTest", StandaloneRestIntegTestTask) {
+  useCluster testClusters."mycluster"
+  dependsOn "mycluster#oldClusterTest"
+  doFirst {
+    testClusters."mycluster".goToNextVersion()
+  }
+  systemProperty 'tests.is_old_cluster', 'false'
 }

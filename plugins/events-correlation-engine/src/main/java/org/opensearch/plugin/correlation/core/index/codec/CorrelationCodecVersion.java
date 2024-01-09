@@ -8,11 +8,15 @@
 
 package org.opensearch.plugin.correlation.core.index.codec;
 
+import org.apache.lucene.backward_codecs.lucene95.Lucene95Codec;
 import org.apache.lucene.codecs.Codec;
+import org.apache.lucene.codecs.KnnVectorsFormat;
 import org.apache.lucene.codecs.lucene99.Lucene99Codec;
 import org.opensearch.index.mapper.MapperService;
 import org.opensearch.plugin.correlation.core.index.codec.correlation950.CorrelationCodec;
-import org.opensearch.plugin.correlation.core.index.codec.correlation950.PerFieldCorrelationVectorsFormat;
+import org.opensearch.plugin.correlation.core.index.codec.correlation950.PerFieldCorrelation95VectorsFormat;
+import org.opensearch.plugin.correlation.core.index.codec.correlation990.Correlation99Codec;
+import org.opensearch.plugin.correlation.core.index.codec.correlation990.PerFieldCorrelation99VectorsFormat;
 
 import java.util.Optional;
 import java.util.function.BiFunction;
@@ -24,25 +28,33 @@ import java.util.function.Supplier;
  * @opensearch.internal
  */
 public enum CorrelationCodecVersion {
-    V_9_9_0(
+
+    V_9_5_0(
         "CorrelationCodec",
-        new Lucene99Codec(),
-        new PerFieldCorrelationVectorsFormat(Optional.empty()),
-        (userCodec, mapperService) -> new CorrelationCodec(userCodec, new PerFieldCorrelationVectorsFormat(Optional.of(mapperService))),
+        new Lucene95Codec(),
+        new PerFieldCorrelation95VectorsFormat(Optional.empty()),
+        (userCodec, mapperService) -> new CorrelationCodec(userCodec, new PerFieldCorrelation95VectorsFormat(Optional.of(mapperService))),
         CorrelationCodec::new
+    ),
+    V_9_9_0(
+        "Correlation99Codec",
+        new Lucene99Codec(),
+        new PerFieldCorrelation95VectorsFormat(Optional.empty()),
+        (userCodec, mapperService) -> new Correlation99Codec(userCodec, new PerFieldCorrelation99VectorsFormat(Optional.of(mapperService))),
+        Correlation99Codec::new
     );
 
     private static final CorrelationCodecVersion CURRENT = V_9_9_0;
     private final String codecName;
     private final Codec defaultCodecDelegate;
-    private final PerFieldCorrelationVectorsFormat perFieldCorrelationVectorsFormat;
+    private final KnnVectorsFormat perFieldCorrelationVectorsFormat;
     private final BiFunction<Codec, MapperService, Codec> correlationCodecSupplier;
     private final Supplier<Codec> defaultCorrelationCodecSupplier;
 
     CorrelationCodecVersion(
         String codecName,
         Codec defaultCodecDelegate,
-        PerFieldCorrelationVectorsFormat perFieldCorrelationVectorsFormat,
+        KnnVectorsFormat perFieldCorrelationVectorsFormat,
         BiFunction<Codec, MapperService, Codec> correlationCodecSupplier,
         Supplier<Codec> defaultCorrelationCodecSupplier
     ) {
@@ -73,7 +85,7 @@ public enum CorrelationCodecVersion {
      * get correlation vectors format
      * @return correlation vectors format
      */
-    public PerFieldCorrelationVectorsFormat getPerFieldCorrelationVectorsFormat() {
+    public KnnVectorsFormat getPerFieldCorrelationVectorsFormat() {
         return perFieldCorrelationVectorsFormat;
     }
 

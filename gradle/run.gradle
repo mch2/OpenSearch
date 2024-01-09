@@ -29,6 +29,8 @@
  */
 import org.opensearch.gradle.testclusters.RunTask
 
+import java.util.concurrent.Callable
+
 apply plugin: 'opensearch.testclusters'
 
 def numNodes = findProperty('numNodes') as Integer ?: 1
