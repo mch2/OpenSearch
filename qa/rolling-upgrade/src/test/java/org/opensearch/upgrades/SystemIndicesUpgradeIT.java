@@ -32,6 +32,7 @@
 
 package org.opensearch.upgrades;
 
+import org.apache.lucene.tests.util.LuceneTestCase;
 import org.hamcrest.MatcherAssert;
 import org.opensearch.client.Request;
 import org.opensearch.client.Response;
@@ -46,6 +47,7 @@ import static org.hamcrest.Matchers.hasKey;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.notNullValue;
 
+//@LuceneTestCase.AwaitsFix(bugUrl = "foo")
 public class SystemIndicesUpgradeIT extends AbstractRollingTestCase {
 
     @SuppressWarnings("unchecked")

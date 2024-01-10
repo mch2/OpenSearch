@@ -8,6 +8,7 @@
 
 package org.opensearch.upgrades;
 
+import org.apache.lucene.tests.util.LuceneTestCase;
 import org.opensearch.Version;
 import org.opensearch.client.Request;
 import org.opensearch.client.Response;
@@ -15,6 +16,7 @@ import org.opensearch.common.io.Streams;
 
 import java.io.IOException;
 
+//@LuceneTestCase.AwaitsFix(bugUrl = "foo")
 public class RefreshVersionInClusterStateIT extends AbstractRollingTestCase {
 
     /*

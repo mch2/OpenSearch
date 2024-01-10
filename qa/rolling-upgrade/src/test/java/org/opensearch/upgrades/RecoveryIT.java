@@ -31,6 +31,7 @@
 
 package org.opensearch.upgrades;
 
+import org.apache.lucene.tests.util.LuceneTestCase;
 import org.opensearch.Version;
 import org.opensearch.action.support.PlainActionFuture;
 import org.opensearch.client.Request;
@@ -80,6 +81,7 @@ import static org.hamcrest.Matchers.oneOf;
 /**
  * In depth testing of the recovery mechanism during a rolling restart.
  */
+//@LuceneTestCase.AwaitsFix(bugUrl = "foo")
 public class RecoveryIT extends AbstractRollingTestCase {
 
     private static String CLUSTER_NAME = System.getProperty("tests.clustername");

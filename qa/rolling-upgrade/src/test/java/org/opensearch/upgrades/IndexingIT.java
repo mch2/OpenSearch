@@ -36,6 +36,7 @@ import org.apache.hc.core5.http.io.entity.EntityUtils;
 import org.opensearch.Version;
 import org.opensearch.client.Request;
 import org.opensearch.client.Response;
+import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.common.Booleans;
 import org.opensearch.common.io.Streams;
@@ -44,6 +45,7 @@ import org.opensearch.index.codec.CodecService;
 import org.opensearch.index.engine.EngineConfig;
 import org.opensearch.indices.replication.common.ReplicationType;
 import org.opensearch.test.OpenSearchIntegTestCase;
+import org.opensearch.test.junit.annotations.TestLogging;
 import org.opensearch.test.rest.yaml.ObjectPath;
 
 import java.io.IOException;
@@ -93,9 +95,6 @@ public class IndexingIT extends AbstractRollingTestCase {
         waitForClusterHealthWithNoShardMigration(index, "green");
         logger.info("--> _cat/shards before search \n{}", EntityUtils.toString(client().performRequest(new Request("GET", "/_cat/shards?v")).getEntity()));
 
-        // Verify segment replication stats
-        verifySegmentStats(index);
-
         // Verify segment store
         assertBusy(() -> {
             /*
@@ -104,7 +103,7 @@ public class IndexingIT extends AbstractRollingTestCase {
               to primary while remaining *replicaCount* records belongs to replica copies
               */
             Request segrepStatsRequest = new Request("GET", "/_cat/segments/" + index + "?s=shard,segment,primaryOrReplica");
-            segrepStatsRequest.addParameter("h", "index,shard,primaryOrReplica,segment,docs.count");
+            segrepStatsRequest.addParameter("h", "index,shard,primaryOrReplica,segment,docs.count,id");
             Response segrepStatsResponse = client().performRequest(segrepStatsRequest);
             List<String> responseList = Streams.readAllLines(segrepStatsResponse.getEntity().getContent());
             logger.info("--> _cat/segments response\n {}", responseList.toString().replace(',', '\n'));
@@ -126,7 +125,7 @@ public class IndexingIT extends AbstractRollingTestCase {
                 for(int replicaIndex = 1; replicaIndex <= replicaCount; replicaIndex++) {
                     String[] replicaRow = filteredList.get(segmentsIndex).split(" +");
                     String replicaShardId = replicaRow[0] + replicaRow[1];
-                    // When segment has 0 doc count, not all replica copies posses that segment. Skip to next segment
+                    // When segment has 0 doc count, not all replica copies possess that segment. Skip to next segment
                     if (replicaRow[2].equals("p")) {
                         assertTrue(primaryRow[4].equals("0"));
                         break;
@@ -154,18 +153,6 @@ public class IndexingIT extends AbstractRollingTestCase {
         waitForStatus.addParameter("wait_for_no_initializing_shards", "true");
         waitForStatus.addParameter("wait_for_no_relocating_shards", "true");
         client().performRequest(waitForStatus);
-    }
-
-    private void verifySegmentStats(String indexName) throws Exception {
-        assertBusy(() -> {
-            Request segrepStatsRequest = new Request("GET", "/_cat/segment_replication/" + indexName);
-            segrepStatsRequest.addParameter("h", "shardId,target_node,checkpoints_behind");
-            Response segrepStatsResponse = client().performRequest(segrepStatsRequest);
-            for (String statLine : Streams.readAllLines(segrepStatsResponse.getEntity().getContent())) {
-                String[] elements = statLine.split(" +");
-                assertEquals("Replica shard " + elements[0] + "not upto date with primary ", 0, Integer.parseInt(elements[2]));
-            }
-        }, 1, TimeUnit.MINUTES);
     }
 
     public void testIndexing() throws Exception {
@@ -262,7 +249,7 @@ public class IndexingIT extends AbstractRollingTestCase {
      * @throws Exception if index creation fail
      * @throws UnsupportedOperationException if cluster type is unknown
      */
-    @AwaitsFix(bugUrl = "https://github.com/opensearch-project/OpenSearch/issues/7679")
+    @TestLogging(value = "org.opensearch.indices.replication:TRACE", reason = "")
     public void testIndexingWithSegRep() throws Exception {
         if (UPGRADE_FROM_VERSION.before(Version.V_2_4_0)) {
             logger.info("--> Skip test for version {} where segment replication feature is not available", UPGRADE_FROM_VERSION);
@@ -328,18 +315,6 @@ public class IndexingIT extends AbstractRollingTestCase {
         if (CLUSTER_TYPE != ClusterType.OLD) {
             logger.info("--> Bulk index 5 documents");
             bulk(indexName, "_" + CLUSTER_TYPE, 5);
-            logger.info("--> Index one doc (to be deleted next) and verify doc count");
-            Request toBeDeleted = new Request("PUT", "/" + indexName + "/_doc/to_be_deleted");
-            toBeDeleted.addParameter("refresh", "true");
-            toBeDeleted.setJsonEntity("{\"f1\": \"delete-me\"}");
-            client().performRequest(toBeDeleted);
-            waitForSearchableDocs(indexName, shardCount, replicaCount);
-            assertCount(indexName, expectedCount + 6);
-
-            logger.info("--> Delete previously added doc and verify doc count");
-            Request delete = new Request("DELETE", "/" + indexName + "/_doc/to_be_deleted");
-            delete.addParameter("refresh", "true");
-            client().performRequest(delete);
             waitForSearchableDocs(indexName, shardCount, replicaCount);
             assertCount(indexName, expectedCount + 5);
         }

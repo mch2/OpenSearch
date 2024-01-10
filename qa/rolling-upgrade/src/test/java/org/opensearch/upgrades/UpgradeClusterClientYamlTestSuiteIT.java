@@ -34,6 +34,7 @@ package org.opensearch.upgrades;
 
 import com.carrotsearch.randomizedtesting.annotations.ParametersFactory;
 import com.carrotsearch.randomizedtesting.annotations.TimeoutSuite;
+import org.apache.lucene.tests.util.LuceneTestCase;
 import org.apache.lucene.tests.util.TimeUnits;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.test.rest.OpenSearchRestTestCase;
@@ -41,6 +42,7 @@ import org.opensearch.test.rest.yaml.ClientYamlTestCandidate;
 import org.opensearch.test.rest.yaml.OpenSearchClientYamlSuiteTestCase;
 
 @TimeoutSuite(millis = 5 * TimeUnits.MINUTE) // to account for slow as hell VMs
+//@LuceneTestCase.AwaitsFix(bugUrl = "foo")
 public class UpgradeClusterClientYamlTestSuiteIT extends OpenSearchClientYamlSuiteTestCase {
 
     @Override
