@@ -56,14 +56,14 @@ class SegmentReplicationSourceHandler {
     private final AtomicBoolean isReplicating = new AtomicBoolean();
     private final DiscoveryNode targetNode;
     private final String allocationId;
-
     private final FileChunkWriter writer;
 
     /**
      * Constructor.
      *
-     * @param targetNode              - {@link DiscoveryNode} target node where files should be sent.
+     * @param targetNode              {@link DiscoveryNode} target node where files should be sent.
      * @param writer                  {@link FileChunkWriter} implementation that sends file chunks over the transport layer.
+     * @param shard                   {@link IndexShard} The primary shard local to this node.
      * @param fileChunkSizeInBytes    {@link Integer}
      * @param maxConcurrentFileChunks {@link Integer}
      */

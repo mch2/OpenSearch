@@ -21,7 +21,6 @@ import org.opensearch.index.shard.IndexShard;
 import org.opensearch.indices.IndicesService;
 import org.opensearch.indices.recovery.FileChunkWriter;
 import org.opensearch.indices.recovery.RecoverySettings;
-import org.opensearch.indices.replication.common.CopyState;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -35,7 +34,6 @@ import java.util.stream.Collectors;
 /**
  * Manages references to ongoing segrep events on a node.
  * Each replica will have a new {@link SegmentReplicationSourceHandler} created when starting replication.
- * CopyStates will be cached for reuse between replicas and only released when all replicas have finished copying segments.
  *
  * @opensearch.internal
  */
@@ -86,14 +84,12 @@ class OngoingSegmentReplications {
     }
 
     /**
-     * Prepare for a Replication event. This method constructs a {@link CopyState} holding files to be sent off of the current
-     * node's store.  This state is intended to be sent back to Replicas before copy is initiated so the replica can perform a diff against its
-     * local store.  It will then build a handler to orchestrate the segment copy that will be stored locally and started on a subsequent request from replicas
-     * with the list of required files.
+     * Prepare for a Replication event. This method constructs a {@link SegmentReplicationSourceHandler} that orchestrates segment copy and
+     * will internally incref files for copy.
      *
      * @param request         {@link CheckpointInfoRequest}
      * @param fileChunkWriter {@link FileChunkWriter} writer to handle sending files over the transport layer.
-     * @return {@link CopyState} the built CopyState for this replication event.
+     * @return {@link SegmentReplicationSourceHandler} the built CopyState for this replication event.
      */
     SegmentReplicationSourceHandler prepareForReplication(CheckpointInfoRequest request, FileChunkWriter fileChunkWriter) {
         // From the checkpoint's shard ID, fetch the IndexShard
@@ -167,8 +163,19 @@ class OngoingSegmentReplications {
     }
 
     /**
+     * Clear handlers for any allocationIds not in sync.
+     * @param shardId {@link ShardId}
+     * @param inSyncAllocationIds {@link List} of in-sync allocation Ids.
+     */
+    void clearOutOfSyncIds(ShardId shardId, Set<String> inSyncAllocationIds) {
+        cancelHandlers(
+            (handler) -> handler.shardId().equals(shardId) && inSyncAllocationIds.contains(handler.getAllocationId()) == false,
+            "Shard is no longer in-sync with the primary"
+        );
+    }
+
+    /**
      * Remove handlers from allocationIdToHandlers map based on a filter predicate.
-     * This will also decref the handler's CopyState reference.
      */
     private void cancelHandlers(Predicate<? super SegmentReplicationSourceHandler> predicate, String reason) {
         final List<String> allocationIds = allocationIdToHandlers.values()
@@ -183,17 +190,5 @@ class OngoingSegmentReplications {
         for (String allocationId : allocationIds) {
             cancel(allocationId, reason);
         }
-    }
-
-    /**
-     * Clear copystate and target handlers for any non insync allocationIds.
-     * @param shardId {@link ShardId}
-     * @param inSyncAllocationIds {@link List} of in-sync allocation Ids.
-     */
-    public void clearOutOfSyncIds(ShardId shardId, Set<String> inSyncAllocationIds) {
-        cancelHandlers(
-            (handler) -> handler.shardId().equals(shardId) && inSyncAllocationIds.contains(handler.getAllocationId()) == false,
-            "Shard is no longer in-sync with the primary"
-        );
     }
 }

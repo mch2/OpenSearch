@@ -29,7 +29,6 @@ import org.opensearch.index.shard.IndexShard;
 import org.opensearch.indices.IndicesService;
 import org.opensearch.indices.recovery.RecoverySettings;
 import org.opensearch.indices.recovery.RetryableTransportClient;
-import org.opensearch.indices.replication.checkpoint.ReplicationCheckpoint;
 import org.opensearch.indices.replication.common.ReplicationTimer;
 import org.opensearch.tasks.Task;
 import org.opensearch.threadpool.ThreadPool;
@@ -130,9 +129,7 @@ public class SegmentReplicationSourceService extends AbstractLifecycleComponent 
                 request,
                 segmentSegmentFileChunkWriter
             );
-            channel.sendResponse(
-                new CheckpointInfoResponse(handler.getCheckpoint(), handler.getInfosBytes())
-            );
+            channel.sendResponse(new CheckpointInfoResponse(handler.getCheckpoint(), handler.getInfosBytes()));
             timer.stop();
             logger.trace(
                 new ParameterizedMessage(
