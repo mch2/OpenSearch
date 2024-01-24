@@ -25,7 +25,6 @@ import org.opensearch.indices.IndicesService;
 import org.opensearch.indices.recovery.FileChunkWriter;
 import org.opensearch.indices.recovery.RecoverySettings;
 import org.opensearch.indices.replication.checkpoint.ReplicationCheckpoint;
-import org.opensearch.indices.replication.common.CopyState;
 import org.opensearch.indices.replication.common.ReplicationType;
 import org.opensearch.transport.TransportService;
 import org.junit.Assert;
@@ -320,7 +319,7 @@ public class OngoingSegmentReplicationsTests extends IndexShardTestCase {
             testCheckpoint
         );
 
-        final SegmentReplicationSourceHandler handler = replications.prepareForReplication(request,  mock(FileChunkWriter.class));
+        final SegmentReplicationSourceHandler handler = replications.prepareForReplication(request, mock(FileChunkWriter.class));
 
         final CheckpointInfoRequest secondRequest = new CheckpointInfoRequest(
             1L,
@@ -347,7 +346,7 @@ public class OngoingSegmentReplicationsTests extends IndexShardTestCase {
         final String replicaAllocationId = replica.routingEntry().allocationId().getId();
         final CheckpointInfoRequest request = new CheckpointInfoRequest(1L, replicaAllocationId, primaryDiscoveryNode, testCheckpoint);
 
-        final SegmentReplicationSourceHandler handler = replications.prepareForReplication(request,  mock(FileChunkWriter.class));
+        final SegmentReplicationSourceHandler handler = replications.prepareForReplication(request, mock(FileChunkWriter.class));
 
         final String replica_2AllocationId = replica_2.routingEntry().allocationId().getId();
         final CheckpointInfoRequest secondRequest = new CheckpointInfoRequest(
@@ -377,7 +376,7 @@ public class OngoingSegmentReplicationsTests extends IndexShardTestCase {
         final String replicaAllocationId = replica.routingEntry().allocationId().getId();
         final CheckpointInfoRequest request = new CheckpointInfoRequest(1L, replicaAllocationId, primaryDiscoveryNode, testCheckpoint);
 
-        final SegmentReplicationSourceHandler handler = replications.prepareForReplication(request,  mock(FileChunkWriter.class));
+        final SegmentReplicationSourceHandler handler = replications.prepareForReplication(request, mock(FileChunkWriter.class));
         assertEquals(handler, replications.getHandlers().get(replicaAllocationId));
 
         ReplicationCheckpoint secondCheckpoint = new ReplicationCheckpoint(
@@ -395,7 +394,10 @@ public class OngoingSegmentReplicationsTests extends IndexShardTestCase {
             secondCheckpoint
         );
 
-        final SegmentReplicationSourceHandler secondHandler = replications.prepareForReplication(secondRequest,  mock(FileChunkWriter.class));
+        final SegmentReplicationSourceHandler secondHandler = replications.prepareForReplication(
+            secondRequest,
+            mock(FileChunkWriter.class)
+        );
         assertEquals(secondHandler, replications.getHandlers().get(replicaAllocationId));
     }
 }

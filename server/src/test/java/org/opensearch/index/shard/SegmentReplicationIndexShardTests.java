@@ -1021,9 +1021,7 @@ public class SegmentReplicationIndexShardTests extends OpenSearchIndexLevelRepli
     protected void resolveCheckpointInfoResponseListener(ActionListener<CheckpointInfoResponse> listener, IndexShard primary) {
         final CopyState copyState;
         try {
-            copyState = new CopyState(
-                primary
-            );
+            copyState = new CopyState(primary);
         } catch (IOException e) {
             logger.error("Unexpected error computing CopyState", e);
             Assert.fail("Failed to compute copyState");

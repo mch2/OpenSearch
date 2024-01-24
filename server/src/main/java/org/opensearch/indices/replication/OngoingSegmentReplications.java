@@ -21,13 +21,11 @@ import org.opensearch.index.shard.IndexShard;
 import org.opensearch.indices.IndicesService;
 import org.opensearch.indices.recovery.FileChunkWriter;
 import org.opensearch.indices.recovery.RecoverySettings;
-import org.opensearch.indices.replication.checkpoint.ReplicationCheckpoint;
 import org.opensearch.indices.replication.common.CopyState;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -77,7 +75,10 @@ class OngoingSegmentReplications {
                 );
             }
             // update the given listener to release the CopyState before it resolves.
-            final ActionListener<GetSegmentFilesResponse> wrappedListener = ActionListener.runBefore(listener, () -> allocationIdToHandlers.remove(request.getTargetAllocationId()));
+            final ActionListener<GetSegmentFilesResponse> wrappedListener = ActionListener.runBefore(
+                listener,
+                () -> allocationIdToHandlers.remove(request.getTargetAllocationId())
+            );
             handler.sendFiles(request, wrappedListener);
         } else {
             listener.onResponse(new GetSegmentFilesResponse(Collections.emptyList()));
@@ -94,33 +95,18 @@ class OngoingSegmentReplications {
      * @param fileChunkWriter {@link FileChunkWriter} writer to handle sending files over the transport layer.
      * @return {@link CopyState} the built CopyState for this replication event.
      */
-     SegmentReplicationSourceHandler prepareForReplication(CheckpointInfoRequest request, FileChunkWriter fileChunkWriter) {
+    SegmentReplicationSourceHandler prepareForReplication(CheckpointInfoRequest request, FileChunkWriter fileChunkWriter) {
         // From the checkpoint's shard ID, fetch the IndexShard
-        final ReplicationCheckpoint checkpoint = request.getCheckpoint();
-        final ShardId shardId = checkpoint.getShardId();
+        final ShardId shardId = request.getCheckpoint().getShardId();
         final IndexService indexService = indicesService.indexServiceSafe(shardId.getIndex());
         final IndexShard indexShard = indexService.getShard(shardId.id());
-
-         SegmentReplicationSourceHandler removed = allocationIdToHandlers.remove(request.getTargetAllocationId());
-         if (removed != null) {
-             logger.warn("Override handler for allocation id {}", request.getTargetAllocationId());
-             cancelHandlers(handler -> handler.getAllocationId().equals(request.getTargetAllocationId()), "cancel due to retry");
-             assert allocationIdToHandlers.containsKey(request.getTargetAllocationId()) == false;
-         }
-         final SegmentReplicationSourceHandler handler = allocationIdToHandlers.computeIfAbsent(request.getTargetAllocationId(), aId -> {
-             try {
-                 return createTargetHandler(
-                     request.getTargetNode(),
-                     indexShard,
-                     request.getTargetAllocationId(),
-                     fileChunkWriter
-                 );
-             } catch (IOException e) {
-                 throw new UncheckedIOException("Error creating replication handler", e);
-             }
-         });
-        assert allocationIdToHandlers.containsKey(request.getTargetAllocationId());
-        return handler;
+        return allocationIdToHandlers.computeIfAbsent(request.getTargetAllocationId(), aId -> {
+            try {
+                return createTargetHandler(request.getTargetNode(), indexShard, request.getTargetAllocationId(), fileChunkWriter);
+            } catch (IOException e) {
+                throw new UncheckedIOException("Error creating replication handler", e);
+            }
+        });
     }
 
     /**
@@ -206,8 +192,7 @@ class OngoingSegmentReplications {
      */
     public void clearOutOfSyncIds(ShardId shardId, Set<String> inSyncAllocationIds) {
         cancelHandlers(
-            (handler) -> handler.shardId().equals(shardId)
-                && inSyncAllocationIds.contains(handler.getAllocationId()) == false,
+            (handler) -> handler.shardId().equals(shardId) && inSyncAllocationIds.contains(handler.getAllocationId()) == false,
             "Shard is no longer in-sync with the primary"
         );
     }
