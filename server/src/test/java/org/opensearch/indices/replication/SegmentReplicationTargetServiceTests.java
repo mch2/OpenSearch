@@ -274,7 +274,6 @@ public class SegmentReplicationTargetServiceTests extends IndexShardTestCase {
                 try {
                     blockGetCheckpointMetadata.await();
                     final CopyState copyState = new CopyState(
-                        ReplicationCheckpoint.empty(primaryShard.shardId(), primaryShard.getLatestReplicationCheckpoint().getCodec()),
                         primaryShard
                     );
                     listener.onResponse(

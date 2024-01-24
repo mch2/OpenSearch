@@ -25,6 +25,7 @@ import org.opensearch.indices.replication.checkpoint.ReplicationCheckpoint;
 import org.opensearch.indices.replication.common.CopyState;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -45,7 +46,6 @@ class OngoingSegmentReplications {
     private static final Logger logger = LogManager.getLogger(OngoingSegmentReplications.class);
     private final RecoverySettings recoverySettings;
     private final IndicesService indicesService;
-    private final Map<ReplicationCheckpoint, CopyState> copyStateMap;
     private final Map<String, SegmentReplicationSourceHandler> allocationIdToHandlers;
 
     /**
@@ -57,44 +57,7 @@ class OngoingSegmentReplications {
     OngoingSegmentReplications(IndicesService indicesService, RecoverySettings recoverySettings) {
         this.indicesService = indicesService;
         this.recoverySettings = recoverySettings;
-        this.copyStateMap = Collections.synchronizedMap(new HashMap<>());
         this.allocationIdToHandlers = ConcurrentCollections.newConcurrentMap();
-    }
-
-    /*
-      Operations on the {@link #copyStateMap} member.
-     */
-
-    /**
-     * A synchronized method that checks {@link #copyStateMap} for the given {@link ReplicationCheckpoint} key
-     * and returns the cached value if one is present. If the key is not present, a {@link CopyState}
-     * object is constructed and stored in the map before being returned.
-     */
-    synchronized CopyState getCachedCopyState(ReplicationCheckpoint checkpoint) throws IOException {
-        if (isInCopyStateMap(checkpoint)) {
-            final CopyState copyState = fetchFromCopyStateMap(checkpoint);
-            // we incref the copyState for every replica that is using this checkpoint.
-            // decref will happen when copy completes.
-            copyState.incRef();
-            return copyState;
-        } else {
-            // From the checkpoint's shard ID, fetch the IndexShard
-            ShardId shardId = checkpoint.getShardId();
-            final IndexService indexService = indicesService.indexServiceSafe(shardId.getIndex());
-            final IndexShard indexShard = indexService.getShard(shardId.id());
-            // build the CopyState object and cache it before returning
-            final CopyState copyState = new CopyState(checkpoint, indexShard);
-
-            /*
-              Use the checkpoint from the request as the key in the map, rather than
-              the checkpoint from the created CopyState. This maximizes cache hits
-              if replication targets make a request with an older checkpoint.
-              Replication targets are expected to fetch the checkpoint in the response
-              CopyState to bring themselves up to date.
-             */
-            addToCopyStateMap(checkpoint, copyState);
-            return copyState;
-        }
     }
 
     /**
@@ -114,12 +77,7 @@ class OngoingSegmentReplications {
                 );
             }
             // update the given listener to release the CopyState before it resolves.
-            final ActionListener<GetSegmentFilesResponse> wrappedListener = ActionListener.runBefore(listener, () -> {
-                final SegmentReplicationSourceHandler sourceHandler = allocationIdToHandlers.remove(request.getTargetAllocationId());
-                if (sourceHandler != null) {
-                    removeCopyState(sourceHandler.getCopyState());
-                }
-            });
+            final ActionListener<GetSegmentFilesResponse> wrappedListener = ActionListener.runBefore(listener, () -> allocationIdToHandlers.remove(request.getTargetAllocationId()));
             handler.sendFiles(request, wrappedListener);
         } else {
             listener.onResponse(new GetSegmentFilesResponse(Collections.emptyList()));
@@ -135,30 +93,34 @@ class OngoingSegmentReplications {
      * @param request         {@link CheckpointInfoRequest}
      * @param fileChunkWriter {@link FileChunkWriter} writer to handle sending files over the transport layer.
      * @return {@link CopyState} the built CopyState for this replication event.
-     * @throws IOException - When there is an IO error building CopyState.
      */
-    synchronized CopyState prepareForReplication(CheckpointInfoRequest request, FileChunkWriter fileChunkWriter) throws IOException {
-        final CopyState copyState = getCachedCopyState(request.getCheckpoint());
-        final SegmentReplicationSourceHandler newHandler = createTargetHandler(
-            request.getTargetNode(),
-            copyState,
-            request.getTargetAllocationId(),
-            fileChunkWriter
-        );
-        final SegmentReplicationSourceHandler existingHandler = allocationIdToHandlers.putIfAbsent(
-            request.getTargetAllocationId(),
-            newHandler
-        );
-        // If we are already replicating to this allocation Id, cancel the old and replace with a new execution.
-        // This will clear the old handler & referenced copy state holding an incref'd indexCommit.
-        if (existingHandler != null) {
-            logger.warn("Override handler for allocation id {}", request.getTargetAllocationId());
-            cancelHandlers(handler -> handler.getAllocationId().equals(request.getTargetAllocationId()), "cancel due to retry");
-            assert allocationIdToHandlers.containsKey(request.getTargetAllocationId()) == false;
-            allocationIdToHandlers.put(request.getTargetAllocationId(), newHandler);
-        }
+     SegmentReplicationSourceHandler prepareForReplication(CheckpointInfoRequest request, FileChunkWriter fileChunkWriter) {
+        // From the checkpoint's shard ID, fetch the IndexShard
+        final ReplicationCheckpoint checkpoint = request.getCheckpoint();
+        final ShardId shardId = checkpoint.getShardId();
+        final IndexService indexService = indicesService.indexServiceSafe(shardId.getIndex());
+        final IndexShard indexShard = indexService.getShard(shardId.id());
+
+         SegmentReplicationSourceHandler removed = allocationIdToHandlers.remove(request.getTargetAllocationId());
+         if (removed != null) {
+             logger.warn("Override handler for allocation id {}", request.getTargetAllocationId());
+             cancelHandlers(handler -> handler.getAllocationId().equals(request.getTargetAllocationId()), "cancel due to retry");
+             assert allocationIdToHandlers.containsKey(request.getTargetAllocationId()) == false;
+         }
+         final SegmentReplicationSourceHandler handler = allocationIdToHandlers.computeIfAbsent(request.getTargetAllocationId(), aId -> {
+             try {
+                 return createTargetHandler(
+                     request.getTargetNode(),
+                     indexShard,
+                     request.getTargetAllocationId(),
+                     fileChunkWriter
+                 );
+             } catch (IOException e) {
+                 throw new UncheckedIOException("Error creating replication handler", e);
+             }
+         });
         assert allocationIdToHandlers.containsKey(request.getTargetAllocationId());
-        return copyState;
+        return handler;
     }
 
     /**
@@ -167,8 +129,8 @@ class OngoingSegmentReplications {
      * @param shard  {@link IndexShard}
      * @param reason {@link String} - Reason for the cancel
      */
-    synchronized void cancel(IndexShard shard, String reason) {
-        cancelHandlers(handler -> handler.getCopyState().getShard().shardId().equals(shard.shardId()), reason);
+    void cancel(IndexShard shard, String reason) {
+        cancelHandlers(handler -> handler.shardId().equals(shard.shardId()), reason);
     }
 
     /**
@@ -177,11 +139,10 @@ class OngoingSegmentReplications {
      * @param allocationId {@link String} - Allocation ID.
      * @param reason       {@link String} - Reason for the cancel
      */
-    synchronized void cancel(String allocationId, String reason) {
+    void cancel(String allocationId, String reason) {
         final SegmentReplicationSourceHandler handler = allocationIdToHandlers.remove(allocationId);
         if (handler != null) {
             handler.cancel(reason);
-            removeCopyState(handler.getCopyState());
         }
     }
 
@@ -194,14 +155,6 @@ class OngoingSegmentReplications {
         cancelHandlers(handler -> handler.getTargetNode().equals(node), "Node left");
     }
 
-    /**
-     * Checks if the {@link #copyStateMap} has the input {@link ReplicationCheckpoint}
-     * as a key by invoking {@link Map#containsKey(Object)}.
-     */
-    boolean isInCopyStateMap(ReplicationCheckpoint replicationCheckpoint) {
-        return copyStateMap.containsKey(replicationCheckpoint);
-    }
-
     int size() {
         return allocationIdToHandlers.size();
     }
@@ -211,53 +164,20 @@ class OngoingSegmentReplications {
         return allocationIdToHandlers;
     }
 
-    int cachedCopyStateSize() {
-        return copyStateMap.size();
-    }
-
     private SegmentReplicationSourceHandler createTargetHandler(
         DiscoveryNode node,
-        CopyState copyState,
+        IndexShard shard,
         String allocationId,
         FileChunkWriter fileChunkWriter
-    ) {
+    ) throws IOException {
         return new SegmentReplicationSourceHandler(
             node,
             fileChunkWriter,
-            copyState.getShard().getThreadPool(),
-            copyState,
+            shard,
             allocationId,
             Math.toIntExact(recoverySettings.getChunkSize().getBytes()),
             recoverySettings.getMaxConcurrentFileChunks()
         );
-    }
-
-    /**
-     * Adds the input {@link CopyState} object to {@link #copyStateMap}.
-     * The key is the CopyState's {@link ReplicationCheckpoint} object.
-     */
-    private void addToCopyStateMap(ReplicationCheckpoint checkpoint, CopyState copyState) {
-        copyStateMap.putIfAbsent(checkpoint, copyState);
-    }
-
-    /**
-     * Given a {@link ReplicationCheckpoint}, return the corresponding
-     * {@link CopyState} object, if any, from {@link #copyStateMap}.
-     */
-    private CopyState fetchFromCopyStateMap(ReplicationCheckpoint replicationCheckpoint) {
-        return copyStateMap.get(replicationCheckpoint);
-    }
-
-    /**
-     * Remove a CopyState. Intended to be called after a replication event completes.
-     * This method will remove a copyState from the copyStateMap only if its refCount hits 0.
-     *
-     * @param copyState {@link CopyState}
-     */
-    private synchronized void removeCopyState(CopyState copyState) {
-        if (copyState.decRef() == true) {
-            copyStateMap.remove(copyState.getRequestedReplicationCheckpoint());
-        }
     }
 
     /**
@@ -286,7 +206,7 @@ class OngoingSegmentReplications {
      */
     public void clearOutOfSyncIds(ShardId shardId, Set<String> inSyncAllocationIds) {
         cancelHandlers(
-            (handler) -> handler.getCopyState().getShard().shardId().equals(shardId)
+            (handler) -> handler.shardId().equals(shardId)
                 && inSyncAllocationIds.contains(handler.getAllocationId()) == false,
             "Shard is no longer in-sync with the primary"
         );

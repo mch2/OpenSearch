@@ -1022,7 +1022,6 @@ public class SegmentReplicationIndexShardTests extends OpenSearchIndexLevelRepli
         final CopyState copyState;
         try {
             copyState = new CopyState(
-                ReplicationCheckpoint.empty(primary.shardId, primary.getLatestReplicationCheckpoint().getCodec()),
                 primary
             );
         } catch (IOException e) {
@@ -1036,7 +1035,11 @@ public class SegmentReplicationIndexShardTests extends OpenSearchIndexLevelRepli
                 new CheckpointInfoResponse(copyState.getCheckpoint(), copyState.getMetadataMap(), copyState.getInfosBytes())
             );
         } finally {
-            copyState.decRef();
+            try {
+                copyState.close();
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
         }
     }
 
