@@ -130,16 +130,15 @@ public class SegmentReplicationSourceService extends AbstractLifecycleComponent 
                 request,
                 segmentSegmentFileChunkWriter
             );
-            final ReplicationCheckpoint checkpoint = handler.getCheckpoint();
             channel.sendResponse(
-                new CheckpointInfoResponse(checkpoint, checkpoint.getMetadataMap(), handler.getCopyState().getInfosBytes())
+                new CheckpointInfoResponse(handler.getCheckpoint(), handler.getInfosBytes())
             );
             timer.stop();
             logger.trace(
                 new ParameterizedMessage(
                     "[replication id {}] Source node sent checkpoint info [{}] to target node [{}], timing: {}",
                     request.getReplicationId(),
-                    checkpoint,
+                    handler.getCheckpoint(),
                     request.getTargetNode().getId(),
                     timer.time()
                 )

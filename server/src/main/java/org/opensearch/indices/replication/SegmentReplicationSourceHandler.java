@@ -203,11 +203,11 @@ class SegmentReplicationSourceHandler {
         return copyState.getCheckpoint();
     }
 
-    public ShardId shardId() {
-        return shard.shardId();
+    public byte[] getInfosBytes() {
+        return copyState.getInfosBytes();
     }
 
-    public CopyState getCopyState() {
-        return copyState;
+    public ShardId shardId() {
+        return shard.shardId();
     }
 }
