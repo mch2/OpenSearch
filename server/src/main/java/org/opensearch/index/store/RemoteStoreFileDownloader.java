@@ -144,8 +144,8 @@ public final class RemoteStoreFileDownloader {
             // Queue is empty, so notify listener we are done
             listener.onResponse(null);
         } else {
-            threadPool.executor(ThreadPool.Names.REMOTE_RECOVERY).submit(() -> {
-                logger.trace("Downloading file {}", file);
+            threadPool.virtual().submit(() -> {
+                logger.info("Downloading file {} {}", file, Thread.currentThread());
                 try {
                     cancellableThreads.executeIO(() -> {
                         destination.copyFrom(source, file, file, IOContext.DEFAULT);

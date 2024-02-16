@@ -35,6 +35,7 @@ package org.opensearch.threadpool;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.message.ParameterizedMessage;
+import org.opensearch.ExceptionsHelper;
 import org.opensearch.Version;
 import org.opensearch.common.Nullable;
 import org.opensearch.common.annotation.PublicApi;
@@ -64,6 +65,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.ScheduledExecutorService;
@@ -92,6 +94,8 @@ public class ThreadPool implements ReportingService<ThreadPoolInfo>, Scheduler {
      */
     public static class Names {
         public static final String SAME = "same";
+        public static final String VIRTUAL = "virtual";
+
         public static final String GENERIC = "generic";
         @Deprecated
         public static final String LISTENER = "listener";
@@ -126,6 +130,7 @@ public class ThreadPool implements ReportingService<ThreadPoolInfo>, Scheduler {
     @PublicApi(since = "1.0.0")
     public enum ThreadPoolType {
         DIRECT("direct"),
+        VIRTUAL("virtual"),
         FIXED("fixed"),
         RESIZABLE("resizable"),
         SCALING("scaling");
@@ -187,6 +192,7 @@ public class ThreadPool implements ReportingService<ThreadPoolInfo>, Scheduler {
         map.put(Names.REMOTE_REFRESH_RETRY, ThreadPoolType.SCALING);
         map.put(Names.REMOTE_RECOVERY, ThreadPoolType.SCALING);
         map.put(Names.INDEX_SEARCHER, ThreadPoolType.RESIZABLE);
+        map.put(Names.VIRTUAL, ThreadPoolType.VIRTUAL);
         THREAD_POOL_TYPES = Collections.unmodifiableMap(map);
     }
 
@@ -197,6 +203,8 @@ public class ThreadPool implements ReportingService<ThreadPoolInfo>, Scheduler {
     private final CachedTimeThread cachedTimeThread;
 
     static final ExecutorService DIRECT_EXECUTOR = OpenSearchExecutors.newDirectExecutorService();
+
+    private final ExecutorService virtualExecutor;
 
     private final ThreadContext threadContext;
 
@@ -311,7 +319,10 @@ public class ThreadPool implements ReportingService<ThreadPoolInfo>, Scheduler {
             executors.put(entry.getKey(), executorHolder);
         }
 
+        this.virtualExecutor = Executors.newVirtualThreadPerTaskExecutor();
         executors.put(Names.SAME, new ExecutorHolder(DIRECT_EXECUTOR, new Info(Names.SAME, ThreadPoolType.DIRECT)));
+        executors.put(Names.VIRTUAL, new ExecutorHolder(virtualExecutor, new Info(Names.VIRTUAL, ThreadPoolType.VIRTUAL)));
+
         this.executors = unmodifiableMap(executors);
 
         final List<Info> infos = executors.values()
@@ -428,6 +439,8 @@ public class ThreadPool implements ReportingService<ThreadPoolInfo>, Scheduler {
         return executor(Names.GENERIC);
     }
 
+    public ExecutorService virtual() { return executor(Names.VIRTUAL); }
+
     /**
      * Get the {@link ExecutorService} with the given name. This executor service's
      * {@link Executor#execute(Runnable)} method will run the {@link Runnable} it is given in the
@@ -516,6 +529,8 @@ public class ThreadPool implements ReportingService<ThreadPoolInfo>, Scheduler {
                 executor.executor().shutdown();
             }
         }
+        logger.info("Shutting down virtual executor {}", ExceptionsHelper.formatStackTrace(Thread.currentThread().getStackTrace()));
+        virtualExecutor.shutdown();
     }
 
     public void shutdownNow() {
@@ -526,6 +541,8 @@ public class ThreadPool implements ReportingService<ThreadPoolInfo>, Scheduler {
                 executor.executor().shutdownNow();
             }
         }
+        logger.info("Shutting down virtual executor now {}", ExceptionsHelper.formatStackTrace(Thread.currentThread().getStackTrace()));
+        virtualExecutor.shutdownNow();
     }
 
     public boolean awaitTermination(long timeout, TimeUnit unit) throws InterruptedException {
@@ -728,7 +745,7 @@ public class ThreadPool implements ReportingService<ThreadPoolInfo>, Scheduler {
         public final Info info;
 
         ExecutorHolder(ExecutorService executor, Info info) {
-            assert executor instanceof OpenSearchThreadPoolExecutor || executor == DIRECT_EXECUTOR;
+            assert executor instanceof OpenSearchThreadPoolExecutor || executor == DIRECT_EXECUTOR || info.name.equals(Names.VIRTUAL);
             this.executor = executor;
             this.info = info;
         }
