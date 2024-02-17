@@ -14,7 +14,6 @@ import org.apache.lucene.store.IOContext;
 import org.opensearch.action.support.GroupedActionListener;
 import org.opensearch.action.support.PlainActionFuture;
 import org.opensearch.common.Nullable;
-import org.opensearch.common.SuppressForbidden;
 import org.opensearch.common.annotation.PublicApi;
 import org.opensearch.common.logging.Loggers;
 import org.opensearch.common.util.CancellableThreads;
@@ -24,8 +23,6 @@ import org.opensearch.indices.recovery.RecoverySettings;
 import org.opensearch.threadpool.ThreadPool;
 
 import java.io.IOException;
-import java.security.AccessController;
-import java.security.PrivilegedAction;
 import java.util.Collection;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -134,8 +131,6 @@ public final class RemoteStoreFileDownloader {
         }
     }
 
-    @SuppressWarnings("removal")
-    @SuppressForbidden(reason = "We call connect in doPrivileged and provide SocketPermission")
     private void copyOneFile(
         CancellableThreads cancellableThreads,
         Directory source,
@@ -150,48 +145,30 @@ public final class RemoteStoreFileDownloader {
             // Queue is empty, so notify listener we are done
             listener.onResponse(null);
         } else {
+            final ExecutorService executor;
             if (recoverySettings.getUseVirtualThreads()) {
-                threadPool.virtual().submit(() -> {
-                    logger.info("Downloading file {} {}", file, Thread.currentThread());
-                    AccessController.doPrivileged((PrivilegedAction<Void>) () -> {
-                        try {
-                            cancellableThreads.executeIO(() -> {
-                                destination.copyFrom(source, file, file, IOContext.DEFAULT);
-                                onFileCompletion.run();
-                                if (secondDestination != null) {
-                                    secondDestination.copyFrom(destination, file, file, IOContext.DEFAULT);
-                                }
-                            });
-                        } catch (Exception e) {
-                            // Clear the queue to stop any future processing, report the failure, then return
-                            queue.clear();
-                            listener.onFailure(e);
-                            return null;
-                        }
-                        return null;
-                    });
-                    copyOneFile(cancellableThreads, source, destination, secondDestination, queue, onFileCompletion, listener);
-                });
+                executor = threadPool.virtual();
             } else {
-                threadPool.executor(ThreadPool.Names.REMOTE_RECOVERY).submit(() -> {
-                    logger.info("Downloading file {} {}", file, Thread.currentThread());
-                    try {
-                        cancellableThreads.executeIO(() -> {
-                            destination.copyFrom(source, file, file, IOContext.DEFAULT);
-                            onFileCompletion.run();
-                            if (secondDestination != null) {
-                                secondDestination.copyFrom(destination, file, file, IOContext.DEFAULT);
-                            }
-                        });
-                    } catch (Exception e) {
-                        // Clear the queue to stop any future processing, report the failure, then return
-                        queue.clear();
-                        listener.onFailure(e);
-                        return;
-                    }
-                    copyOneFile(cancellableThreads, source, destination, secondDestination, queue, onFileCompletion, listener);
-                });
+                executor = threadPool.executor(ThreadPool.Names.REMOTE_RECOVERY);
             }
+            executor.submit(() -> {
+                logger.info("Downloading file {} {}", file, Thread.currentThread());
+                try {
+                    cancellableThreads.executeIO(() -> {
+                        destination.copyFrom(source, file, file, IOContext.DEFAULT);
+                        onFileCompletion.run();
+                        if (secondDestination != null) {
+                            secondDestination.copyFrom(destination, file, file, IOContext.DEFAULT);
+                        }
+                    });
+                } catch (Exception e) {
+                    // Clear the queue to stop any future processing, report the failure, then return
+                    queue.clear();
+                    listener.onFailure(e);
+                    return;
+                }
+                copyOneFile(cancellableThreads, source, destination, secondDestination, queue, onFileCompletion, listener);
+            });
         }
     }
 }
