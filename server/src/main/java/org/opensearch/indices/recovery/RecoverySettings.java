@@ -110,6 +110,13 @@ public class RecoverySettings {
         Property.NodeScope
     );
 
+    public static final Setting<Boolean> INDICES_RECOVERY_LIMIT_REMOTE_STREAMS_SETTING = Setting.boolSetting(
+        "indices.recovery.limit_remote_streams",
+        true,
+        Property.Dynamic,
+        Property.NodeScope
+    );
+
     /**
      * how long to wait before retrying after issues cause by cluster state syncing between nodes
      * i.e., local node is not yet known on remote node, remote shard not yet started etc.
@@ -203,6 +210,8 @@ public class RecoverySettings {
     private volatile int maxConcurrentOperations;
     private volatile int maxConcurrentRemoteStoreStreams;
     private volatile boolean useVirtualThreads;
+
+    private volatile boolean limitRemoteStreams;
     private volatile SimpleRateLimiter rateLimiter;
     private volatile TimeValue retryDelayStateSync;
     private volatile TimeValue retryDelayNetwork;
@@ -221,6 +230,7 @@ public class RecoverySettings {
         this.maxConcurrentOperations = INDICES_RECOVERY_MAX_CONCURRENT_OPERATIONS_SETTING.get(settings);
         this.maxConcurrentRemoteStoreStreams = INDICES_RECOVERY_MAX_CONCURRENT_REMOTE_STORE_STREAMS_SETTING.get(settings);
         this.useVirtualThreads = INDICES_RECOVERY_USE_VIRTUAL_THREADS_SETTING.get(settings);
+        this.limitRemoteStreams = INDICES_RECOVERY_LIMIT_REMOTE_STREAMS_SETTING.get(settings);
 
         // doesn't have to be fast as nodes are reconnected every 10s by default (see InternalClusterService.ReconnectToNodes)
         // and we want to give the cluster-manager time to remove a faulty node
@@ -252,6 +262,10 @@ public class RecoverySettings {
             INDICES_RECOVERY_USE_VIRTUAL_THREADS_SETTING,
             this::setVirtualThreads
         );
+        clusterSettings.addSettingsUpdateConsumer(
+            INDICES_RECOVERY_LIMIT_REMOTE_STREAMS_SETTING,
+            this::setLimitRemoteStreams
+        );
         clusterSettings.addSettingsUpdateConsumer(INDICES_RECOVERY_RETRY_DELAY_STATE_SYNC_SETTING, this::setRetryDelayStateSync);
         clusterSettings.addSettingsUpdateConsumer(INDICES_RECOVERY_RETRY_DELAY_NETWORK_SETTING, this::setRetryDelayNetwork);
         clusterSettings.addSettingsUpdateConsumer(INDICES_RECOVERY_INTERNAL_ACTION_TIMEOUT_SETTING, this::setInternalActionTimeout);
@@ -271,6 +285,10 @@ public class RecoverySettings {
 
     private void setVirtualThreads(Boolean aBoolean) {
         this.useVirtualThreads = aBoolean;
+    }
+
+    private void setLimitRemoteStreams(Boolean aBoolean) {
+        this.limitRemoteStreams = aBoolean;
     }
 
     public RateLimiter rateLimiter() {
@@ -373,6 +391,10 @@ public class RecoverySettings {
 
     public boolean getUseVirtualThreads() {
         return this.useVirtualThreads;
+    }
+
+    public boolean getLimitRemoteStreams() {
+        return this.limitRemoteStreams;
     }
 
     private void setMaxConcurrentRemoteStoreStreams(int maxConcurrentRemoteStoreStreams) {

@@ -123,10 +123,10 @@ public final class RemoteStoreFileDownloader {
         // - number of files to download
         // - max thread pool size
         // - "indices.recovery.max_concurrent_remote_store_streams" setting
-        final int threads = Math.min(
+        final int threads = recoverySettings.getLimitRemoteStreams() ? Math.min(
             toDownloadSegments.size(),
-            Math.min(threadPool.info(ThreadPool.Names.REMOTE_RECOVERY).getMax(), recoverySettings.getMaxConcurrentRemoteStoreStreams())
-        );
+            Math.min(threadPool.info(ThreadPool.Names.REMOTE_RECOVERY).getMax(), recoverySettings.getMaxConcurrentRemoteStoreStreams())) :
+            toDownloadSegments.size();
         logger.info("Starting download of {} files with {} threads", queue.size(), threads);
         final ActionListener<Void> allFilesListener = new GroupedActionListener<>(ActionListener.map(listener, r -> null), threads);
         for (int i = 0; i < threads; i++) {
