@@ -91,7 +91,6 @@ class OpenSearch extends EnvironmentAwareCommand {
          * presence of a security manager or lack thereof act as if there is a security manager present (e.g., DNS cache policy). This
          * forces such policies to take effect immediately.
          */
-        System.setSecurityManager(null);
         LogConfigurator.registerErrorListener();
         final OpenSearch opensearch = new OpenSearch();
         int status = main(args, opensearch, Terminal.DEFAULT);

@@ -38,6 +38,7 @@ import java.io.IOException;
 import java.net.SocketPermission;
 import java.security.AccessController;
 import java.security.PrivilegedAction;
+import java.security.PrivilegedActionException;
 import java.security.PrivilegedExceptionAction;
 
 /**
