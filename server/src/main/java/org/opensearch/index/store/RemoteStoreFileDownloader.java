@@ -14,6 +14,7 @@ import org.apache.lucene.store.IOContext;
 import org.opensearch.action.support.GroupedActionListener;
 import org.opensearch.action.support.PlainActionFuture;
 import org.opensearch.common.Nullable;
+import org.opensearch.common.SuppressForbidden;
 import org.opensearch.common.annotation.PublicApi;
 import org.opensearch.common.logging.Loggers;
 import org.opensearch.common.util.CancellableThreads;
@@ -23,10 +24,13 @@ import org.opensearch.indices.recovery.RecoverySettings;
 import org.opensearch.threadpool.ThreadPool;
 
 import java.io.IOException;
+import java.security.AccessController;
+import java.security.PrivilegedAction;
 import java.util.Collection;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
 
 /**
  * Helper class to downloads files from a {@link RemoteSegmentStoreDirectory}
@@ -123,13 +127,15 @@ public final class RemoteStoreFileDownloader {
             toDownloadSegments.size(),
             Math.min(threadPool.info(ThreadPool.Names.REMOTE_RECOVERY).getMax(), recoverySettings.getMaxConcurrentRemoteStoreStreams())
         );
-        logger.trace("Starting download of {} files with {} threads", queue.size(), threads);
+        logger.info("Starting download of {} files with {} threads", queue.size(), threads);
         final ActionListener<Void> allFilesListener = new GroupedActionListener<>(ActionListener.map(listener, r -> null), threads);
         for (int i = 0; i < threads; i++) {
             copyOneFile(cancellableThreads, source, destination, secondDestination, queue, onFileCompletion, allFilesListener);
         }
     }
 
+    @SuppressWarnings("removal")
+    @SuppressForbidden(reason = "We call connect in doPrivileged and provide SocketPermission")
     private void copyOneFile(
         CancellableThreads cancellableThreads,
         Directory source,
@@ -144,24 +150,48 @@ public final class RemoteStoreFileDownloader {
             // Queue is empty, so notify listener we are done
             listener.onResponse(null);
         } else {
-            threadPool.virtual().submit(() -> {
-                logger.info("Downloading file {} {}", file, Thread.currentThread());
-                try {
-                    cancellableThreads.executeIO(() -> {
-                        destination.copyFrom(source, file, file, IOContext.DEFAULT);
-                        onFileCompletion.run();
-                        if (secondDestination != null) {
-                            secondDestination.copyFrom(destination, file, file, IOContext.DEFAULT);
+            if (recoverySettings.getUseVirtualThreads()) {
+                threadPool.virtual().submit(() -> {
+                    logger.info("Downloading file {} {}", file, Thread.currentThread());
+                    AccessController.doPrivileged((PrivilegedAction<Void>) () -> {
+                        try {
+                            cancellableThreads.executeIO(() -> {
+                                destination.copyFrom(source, file, file, IOContext.DEFAULT);
+                                onFileCompletion.run();
+                                if (secondDestination != null) {
+                                    secondDestination.copyFrom(destination, file, file, IOContext.DEFAULT);
+                                }
+                            });
+                        } catch (Exception e) {
+                            // Clear the queue to stop any future processing, report the failure, then return
+                            queue.clear();
+                            listener.onFailure(e);
+                            return null;
                         }
+                        return null;
                     });
-                } catch (Exception e) {
-                    // Clear the queue to stop any future processing, report the failure, then return
-                    queue.clear();
-                    listener.onFailure(e);
-                    return;
-                }
-                copyOneFile(cancellableThreads, source, destination, secondDestination, queue, onFileCompletion, listener);
-            });
+                    copyOneFile(cancellableThreads, source, destination, secondDestination, queue, onFileCompletion, listener);
+                });
+            } else {
+                threadPool.executor(ThreadPool.Names.REMOTE_RECOVERY).submit(() -> {
+                    logger.info("Downloading file {} {}", file, Thread.currentThread());
+                    try {
+                        cancellableThreads.executeIO(() -> {
+                            destination.copyFrom(source, file, file, IOContext.DEFAULT);
+                            onFileCompletion.run();
+                            if (secondDestination != null) {
+                                secondDestination.copyFrom(destination, file, file, IOContext.DEFAULT);
+                            }
+                        });
+                    } catch (Exception e) {
+                        // Clear the queue to stop any future processing, report the failure, then return
+                        queue.clear();
+                        listener.onFailure(e);
+                        return;
+                    }
+                    copyOneFile(cancellableThreads, source, destination, secondDestination, queue, onFileCompletion, listener);
+                });
+            }
         }
     }
 }

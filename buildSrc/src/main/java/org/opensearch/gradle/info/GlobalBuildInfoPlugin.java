@@ -101,7 +101,9 @@ public class GlobalBuildInfoPlugin implements Plugin<Project> {
         }
 
         JavaVersion minimumCompilerVersion = JavaVersion.toVersion(Util.getResourceContents("/minimumCompilerVersion"));
-        JavaVersion minimumRuntimeVersion = JavaVersion.toVersion(Util.getResourceContents("/minimumRuntimeVersion"));
+        JavaVersion minimumRuntimeVersion = JavaVersion.VERSION_21;
+        System.out.println("JAVA VERSION IS " + minimumCompilerVersion);
+        System.out.println("JAVA VERSION IS " + minimumRuntimeVersion);
 
         Optional<File> runtimeJavaHomeOpt = findRuntimeJavaHome();
         File runtimeJavaHome = runtimeJavaHomeOpt.orElse(Jvm.current().getJavaHome());
@@ -115,7 +117,9 @@ public class GlobalBuildInfoPlugin implements Plugin<Project> {
 
             params.reset();
             params.setRuntimeJavaHome(runtimeJavaHome);
-            params.setRuntimeJavaVersion(determineJavaVersion("runtime java.home", runtimeJavaHome, minimumRuntimeVersion));
+            JavaVersion runtimeJavaVersion = determineJavaVersion("runtime java.home", runtimeJavaHome, minimumRuntimeVersion);
+            System.out.println("JAVA VERSION IS " + runtimeJavaVersion);
+            params.setRuntimeJavaVersion(runtimeJavaVersion);
             params.setIsRuntimeJavaHomeSet(runtimeJavaHomeOpt.isPresent());
             params.setRuntimeJavaDetails(getJavaInstallation(runtimeJavaHome).getDisplayName());
             params.setJavaVersions(getAvailableJavaVersions(minimumCompilerVersion));

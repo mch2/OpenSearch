@@ -209,7 +209,7 @@ public class RemoteDirectory extends Directory {
                     e.addSuppressed(closeEx);
                 }
             }
-            logger.error("Exception while reading blob for file: " + name + " for path " + blobContainer.path());
+            logger.error("Exception while reading blob for file: " + name + " for path " + blobContainer.path(), e);
             throw e;
         }
     }
