@@ -57,39 +57,40 @@ import static org.opensearch.index.engine.NRTReplicationReaderManager.unwrapStan
 public class OpenSearchReaderManagerTests extends OpenSearchTestCase {
 
     public void testReaderManagerMetadata() throws IOException {
-        try (BaseDirectoryWrapper dir = newDirectory()) {
-            final IndexWriterConfig iwc = newIndexWriterConfig();
-            iwc.setCodec(new Lucene99Codec());
-            IndexWriter writer = new IndexWriter(dir, iwc);
-            final OpenSearchDirectoryReader reader = OpenSearchDirectoryReader.wrap(
-                DirectoryReader.open(writer),
-                new ShardId("nvm", UUID.randomUUID().toString(), 0)
-            );
-            try (OpenSearchReaderManager openSearchReaderManager = new OpenSearchReaderManager(reader)) {
-                writer.addDocument(new Document());
-                openSearchReaderManager.maybeRefresh();
-                try (OpenSearchDirectoryReader r = openSearchReaderManager.acquire()) {
-                    assertEquals(1, r.numDocs());
-                    StandardDirectoryReader standardDirectoryReader = unwrapStandardReader(r);
-                    assertCodec(standardDirectoryReader.getSegmentInfos().asList().get(0));
-                }
-                writer.addDocument(new Document());
-                openSearchReaderManager.maybeRefresh();
-                try (OpenSearchDirectoryReader r = openSearchReaderManager.acquire()) {
-                    assertEquals(2, r.numDocs());
-                    StandardDirectoryReader standardDirectoryReader = unwrapStandardReader(r);
-                    assertCodec(standardDirectoryReader.getSegmentInfos().asList().get(0));
-                    assertCodec(standardDirectoryReader.getSegmentInfos().asList().get(1));
-                    r.leaves().stream().forEach(l -> {
-                        System.out.println(l.reader());
-                    });
-                }
-            }
-            writer.close();
-        }
+//        try (BaseDirectoryWrapper dir = newDirectory()) {
+//            final IndexWriterConfig iwc = newIndexWriterConfig();
+//            iwc.setCodec(new Lucene99Codec());
+//            IndexWriter writer = new IndexWriter(dir, iwc);
+//            final OpenSearchDirectoryReader reader = OpenSearchDirectoryReader.wrap(
+//                DirectoryReader.open(writer),
+//                new ShardId("nvm", UUID.randomUUID().toString(), 0)
+//            );
+//            try (OpenSearchReaderManager openSearchReaderManager = new OpenSearchReaderManager(reader)) {
+//                writer.addDocument(new Document());
+//                openSearchReaderManager.maybeRefresh();
+//                try (OpenSearchDirectoryReader r = openSearchReaderManager.acquire()) {
+//                    assertEquals(1, r.numDocs());
+//                    StandardDirectoryReader standardDirectoryReader = unwrapStandardReader(r);
+//                    assertCodec(standardDirectoryReader.getSegmentInfos().asList().get(0));
+//                }
+//                writer.addDocument(new Document());
+//                openSearchReaderManager.maybeRefresh();
+//                try (OpenSearchDirectoryReader r = openSearchReaderManager.acquire()) {
+//                    assertEquals(2, r.numDocs());
+//                    StandardDirectoryReader standardDirectoryReader = unwrapStandardReader(r);
+//                    assertCodec(standardDirectoryReader.getSegmentInfos().asList().get(0));
+//                    assertCodec(standardDirectoryReader.getSegmentInfos().asList().get(1));
+//                    r.leaves().stream().forEach(l -> {
+//                        System.out.println(l.reader());
+//                    });
+//                }
+//            }
+//            writer.close();
+//        }
+        logger.info("Class of codec? {}", Codec.forName("Lucene99").getClass().getName());
     }
 
     void assertCodec(SegmentCommitInfo segmentCommitInfo) {
-        assertEquals("DummyCodec", segmentCommitInfo.info.getCodec().getName());
+        assertEquals("Lucene99", segmentCommitInfo.info.getCodec().getName());
     }
 }

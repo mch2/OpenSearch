@@ -134,6 +134,7 @@ public class FileCachedIndexInput extends IndexInput implements RandomAccessInpu
     @Override
     public IndexInput slice(String sliceDescription, long offset, long length) throws IOException {
         // never reach here!
+//        return luceneIndexInput.slice(sliceDescription, offset, length);
         throw new UnsupportedOperationException("FileCachedIndexInput couldn't be sliced.");
     }
 

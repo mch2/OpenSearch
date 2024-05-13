@@ -6,5 +6,4 @@
 # compatible open source license.
 #
 
-org.apache.lucene.codecs.lucene99.Lucene99Codec
-org.opensearch.index.codec.DummyCodec
+#org.opensearch.index.codec.DummyCodec
