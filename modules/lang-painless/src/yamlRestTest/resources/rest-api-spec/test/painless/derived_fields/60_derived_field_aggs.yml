@@ -1,249 +1,368 @@
 ---
 setup:
+  - skip:
+      version: " - 2.3.99"
+      reason: "Derived fields are only available in OpenSearch 2.4+"
+
   - do:
       indices.create:
-        index: test_derived_aggregations
+        index: test
         body:
           mappings:
             properties:
-              age:
-                type: integer
-              salary:
+              text:
+                type: text
+              keyword:
+                type: keyword
+              long:
+                type: long
+              float:
                 type: float
-              gender:
-                type: keyword
-              department:
-                type: keyword
-              hire_date:
+              double:
+                type: double
+              date:
                 type: date
-          runtime:
-            age_group:
-              type: keyword
-              script:
-                source: "if (doc['age'].value < 30) { emit('young') } else if (doc['age'].value < 50) { emit('middle-aged') } else { emit('senior') }"
-            salary_category:
-              type: keyword
-              script:
-                source: "if (doc['salary'].value < 50000) { emit('low') } else if (doc['salary'].value < 75000) { emit('medium') } else { emit('high') }"
-            years_to_retirement:
-              type: long
-              script:
-                source: "emit(65 - doc['age'].value)"
-            years_of_service:
-              type: long
-              script:
-                source: "emit(((doc['hire_date'].value.toInstant().toEpochMilli() - new Date().getTime()) / (1000 * 60 * 60 * 24 * 365.25) * -1).longValue())"
+              geo:
+                type: geo_point
+              ip:
+                type: ip
+              boolean:
+                type: boolean
+              array_of_long:
+                type: long
+              json_field:
+                type: text
+            derived:
+              derived_text:
+                type: text
+                script: "emit(params._source[\"text\"])"
+              derived_text_prefilter_field:
+                type: text
+                script: "emit(params._source[\"text\"])"
+                prefilter_field: "text"
+              derived_keyword:
+                type: keyword
+                script: "emit(params._source[\"keyword\"])"
+              derived_long:
+                type: long
+                script: "emit(params._source[\"long\"])"
+              derived_float:
+                type: float
+                script: "emit(params._source[\"float\"])"
+              derived_double:
+                type: double
+                script: "emit(params._source[\"double\"])"
+              derived_date:
+                type: date
+                script: "emit(ZonedDateTime.parse(params._source[\"date\"]).toInstant().toEpochMilli())"
+              derived_geo:
+                type: geo_point
+                script: "emit(params._source[\"geo\"][0], params._source[\"geo\"][1])"
+              derived_ip:
+                type: ip
+                script: "emit(params._source[\"ip\"])"
+              derived_boolean:
+                type: boolean
+                script: "emit(params._source[\"boolean\"])"
+              derived_array_of_long:
+                type: long
+                script: "emit(params._source[\"array_of_long\"][0]);emit(params._source[\"array_of_long\"][1]);"
+              derived_object:
+                type: object
+                properties:
+                  keyword: keyword
+                script: "emit(params._source[\"json_field\"])"
+                prefilter_field: "json_field"
 
   - do:
       bulk:
         refresh: true
         body:
           - index:
-              _index: test_derived_aggregations
-          - age: 25
-            salary: 50000
-            gender: male
-            department: IT
-            hire_date: "2020-01-15"
+              _index: test
+              _id: 1
+          - text: "peter piper"
+            keyword: "foo"
+            long: 1
+            float: 1.0
+            double: 1.0
+            date: "2017-01-01T00:00:00Z"
+            geo: [0.0, 20.0]
+            ip: "192.168.0.1"
+            boolean: true
+            array_of_long: [1, 2]
+            json_field: "{\"keyword\":\"json_keyword1\",\"long\":10,\"float\":10.0,\"double\":10.0,\"date\":\"2021-01-01T00:00:00Z\",\"ip\":\"10.0.0.1\",\"boolean\":true, \"array_of_long\": [1, 2]}"
           - index:
-              _index: test_derived_aggregations
-          - age: 35
-            salary: 70000
-            gender: female
-            department: HR
-            hire_date: "2018-05-20"
+              _index: test
+              _id: 2
+          - text: "piper picked a peck"
+            keyword: "bar"
+            long: 2
+            float: 2.0
+            double: 2.0
+            date: "2017-01-02T00:00:00Z"
+            geo: [10.0, 30.0]
+            ip: "192.168.0.2"
+            boolean: false
+            array_of_long: [2, 3]
+            json_field: "{\"keyword\":\"json_keyword2\",\"long\":20,\"float\":20.0,\"double\":20.0,\"date\":\"2021-02-01T00:00:00Z\",\"ip\":\"10.0.0.2\",\"boolean\":false, \"array_of_long\": [2, 3]}"
           - index:
-              _index: test_derived_aggregations
-          - age: 45
-            salary: 90000
-            gender: male
-            department: Finance
-            hire_date: "2015-11-10"
+              _index: test
+              _id: 3
+          - text: "peck of pickled peppers"
+            keyword: "baz"
+            long: -3
+            float: -3.0
+            double: -3.0
+            date: "2017-01-03T00:00:00Z"
+            geo: [20.0, 40.0]
+            ip: "192.168.0.3"
+            boolean: true
+            array_of_long: [3, 4]
+            json_field: "{\"keyword\":\"json_keyword3\",\"long\":30,\"float\":30.0,\"double\":30.0,\"date\":\"2021-03-01T00:00:00Z\",\"ip\":\"10.0.0.3\",\"boolean\":true, \"array_of_long\": [3, 4]}"
           - index:
-              _index: test_derived_aggregations
-          - age: 55
-            salary: 110000
-            gender: female
-            department: IT
-            hire_date: "2010-03-01"
+              _index: test
+              _id: 4
+          - text: "pickled peppers"
+            keyword: "qux"
+            long: 4
+            float: 4.0
+            double: 4.0
+            date: "2017-01-04T00:00:00Z"
+            geo: [30.0, 50.0]
+            ip: "192.168.0.4"
+            boolean: false
+            array_of_long: [4, 5]
+            json_field: "{\"keyword\":\"json_keyword4\",\"long\":40,\"float\":40.0,\"double\":40.0,\"date\":\"2021-04-01T00:00:00Z\",\"ip\":\"10.0.0.4\",\"boolean\":false, \"array_of_long\": [4, 5]}"
+          - index:
+              _index: test
+              _id: 5
+          - text: "peppers"
+            keyword: "quux"
+            long: 5
+            float: 5.0
+            double: 5.0
+            date: "2017-01-05T00:00:00Z"
+            geo: [40.0, 60.0]
+            ip: "192.168.0.5"
+            boolean: true
+            array_of_long: [5, 6]
+            json_field: "{\"keyword\":\"json_keyword5\",\"long\":50,\"float\":50.0,\"double\":50.0,\"date\":\"2021-05-01T00:00:00Z\",\"ip\":\"10.0.0.5\",\"boolean\":true, \"array_of_long\": [5, 6]}"
 
 ---
-"Test Terms Aggregation on Derived Field":
+"Test terms aggregation on derived_keyword":
   - do:
       search:
-        index: test_derived_aggregations
+        index: test
         body:
           size: 0
           aggs:
-            age_groups:
+            keywords:
               terms:
-                field: age_group
+                field: derived_keyword
 
-  - match: { hits.total.value: 4 }
-  - length: { aggregations.age_groups.buckets: 3 }
-  - match: { aggregations.age_groups.buckets.0.key: middle-aged }
-  - match: { aggregations.age_groups.buckets.0.doc_count: 2 }
-  - match: { aggregations.age_groups.buckets.1.key: young }
-  - match: { aggregations.age_groups.buckets.1.doc_count: 1 }
-  - match: { aggregations.age_groups.buckets.2.key: senior }
-  - match: { aggregations.age_groups.buckets.2.doc_count: 1 }
+  - match: { hits.total.value: 5 }
+  - length: { aggregations.keywords.buckets: 5 }
+  - match: { aggregations.keywords.buckets.0.key: "bar" }
+  - match: { aggregations.keywords.buckets.0.doc_count: 1 }
 
 ---
-"Test Range Aggregation on Derived Field":
+"Test range aggregation on derived_long":
   - do:
       search:
-        index: test_derived_aggregations
+        index: test
         body:
           size: 0
           aggs:
-            retirement_ranges:
+            long_ranges:
               range:
-                field: years_to_retirement
+                field: derived_long
                 ranges:
-                  - to: 10
-                  - from: 10
-                    to: 20
-                  - from: 20
+                  - to: 0
+                  - from: 0
+                    to: 3
+                  - from: 3
 
-  - match: { hits.total.value: 4 }
-  - length: { aggregations.retirement_ranges.buckets: 3 }
-  - match: { aggregations.retirement_ranges.buckets.0.doc_count: 1 }
-  - match: { aggregations.retirement_ranges.buckets.1.doc_count: 1 }
-  - match: { aggregations.retirement_ranges.buckets.2.doc_count: 2 }
+  - match: { hits.total.value: 5 }
+  - length: { aggregations.long_ranges.buckets: 3 }
+  - match: { aggregations.long_ranges.buckets.0.doc_count: 1 }
+  - match: { aggregations.long_ranges.buckets.1.doc_count: 2 }
+  - match: { aggregations.long_ranges.buckets.2.doc_count: 2 }
 
 ---
-"Test Histogram Aggregation on Derived Field":
+"Test histogram aggregation on derived_float":
   - do:
       search:
-        index: test_derived_aggregations
+        index: test
         body:
           size: 0
           aggs:
-            retirement_histogram:
+            float_histogram:
               histogram:
-                field: years_to_retirement
-                interval: 10
+                field: derived_float
+                interval: 2
 
-  - match: { hits.total.value: 4 }
-  - length: { aggregations.retirement_histogram.buckets: 4 }
-  - match: { aggregations.retirement_histogram.buckets.0.key: 10.0 }
-  - match: { aggregations.retirement_histogram.buckets.0.doc_count: 1 }
-  - match: { aggregations.retirement_histogram.buckets.1.key: 20.0 }
-  - match: { aggregations.retirement_histogram.buckets.1.doc_count: 1 }
-  - match: { aggregations.retirement_histogram.buckets.2.key: 30.0 }
-  - match: { aggregations.retirement_histogram.buckets.2.doc_count: 1 }
-  - match: { aggregations.retirement_histogram.buckets.3.key: 40.0 }
-  - match: { aggregations.retirement_histogram.buckets.3.doc_count: 1 }
+  - match: { hits.total.value: 5 }
+  - length: { aggregations.float_histogram.buckets: 5 }
+  - match: { aggregations.float_histogram.buckets.0.key: -4.0 }
+  - match: { aggregations.float_histogram.buckets.0.doc_count: 1 }
 
 ---
-"Test Date Histogram Aggregation on Derived Field":
+"Test date_histogram aggregation on derived_date":
   - do:
       search:
-        index: test_derived_aggregations
+        index: test
         body:
           size: 0
           aggs:
-            service_years:
+            date_histogram:
               date_histogram:
-                field: hire_date
-                calendar_interval: year
-              aggs:
-                avg_years_of_service:
-                  avg:
-                    field: years_of_service
+                field: derived_date
+                calendar_interval: day
 
-  - match: { hits.total.value: 4 }
-  - length: { aggregations.service_years.buckets: 4 }
-  - match: { aggregations.service_years.buckets.0.key_as_string: "2010-01-01T00:00:00.000Z" }
-  - match: { aggregations.service_years.buckets.0.doc_count: 1 }
-  - match: { aggregations.service_years.buckets.0.avg_years_of_service.value: 14 }
-  - match: { aggregations.service_years.buckets.1.key_as_string: "2015-01-01T00:00:00.000Z" }
-  - match: { aggregations.service_years.buckets.1.doc_count: 1 }
-  - match: { aggregations.service_years.buckets.1.avg_years_of_service.value: 9 }
-  - match: { aggregations.service_years.buckets.2.key_as_string: "2018-01-01T00:00:00.000Z" }
-  - match: { aggregations.service_years.buckets.2.doc_count: 1 }
-  - match: { aggregations.service_years.buckets.2.avg_years_of_service.value: 6 }
-  - match: { aggregations.service_years.buckets.3.key_as_string: "2020-01-01T00:00:00.000Z" }
-  - match: { aggregations.service_years.buckets.3.doc_count: 1 }
-  - match: { aggregations.service_years.buckets.3.avg_years_of_service.value: 4 }
+  - match: { hits.total.value: 5 }
+  - length: { aggregations.date_histogram.buckets: 5 }
+  - match: { aggregations.date_histogram.buckets.0.key_as_string: "2017-01-01T00:00:00.000Z" }
+  - match: { aggregations.date_histogram.buckets.0.doc_count: 1 }
 
 ---
-"Test Nested Aggregations with Derived Fields":
+"Test geo_distance aggregation on derived_geo":
   - do:
       search:
-        index: test_derived_aggregations
+        index: test
         body:
           size: 0
           aggs:
-            salary_categories:
-              terms:
-                field: salary_category
+            geo_distances:
+              geo_distance:
+                field: derived_geo
+                origin: "0, 0"
+                ranges:
+                  - to: 2000km
+                  - from: 2000km
+                    to: 4000km
+                  - from: 4000km
+
+  - match: { hits.total.value: 5 }
+  - length: { aggregations.geo_distances.buckets: 3 }
+  - match: { aggregations.geo_distances.buckets.0.doc_count: 1 }
+  - match: { aggregations.geo_distances.buckets.1.doc_count: 2 }
+  - match: { aggregations.geo_distances.buckets.2.doc_count: 2 }
+
+---
+"Test ip_range aggregation on derived_ip":
+  - do:
+      search:
+        index: test
+        body:
+          size: 0
+          aggs:
+            ip_ranges:
+              ip_range:
+                field: derived_ip
+                ranges:
+                  - to: "192.168.0.2"
+                  - from: "192.168.0.2"
+                    to: "192.168.0.4"
+                  - from: "192.168.0.4"
+
+  - match: { hits.total.value: 5 }
+  - length: { aggregations.ip_ranges.buckets: 3 }
+  - match: { aggregations.ip_ranges.buckets.0.doc_count: 1 }
+  - match: { aggregations.ip_ranges.buckets.1.doc_count: 2 }
+  - match: { aggregations.ip_ranges.buckets.2.doc_count: 2 }
+
+---
+"Test filters aggregation on derived_boolean":
+  - do:
+      search:
+        index: test
+        body:
+          size: 0
+          aggs:
+            boolean_filters:
+              filters:
+                filters:
+                  true_values:
+                    term:
+                      derived_boolean: true
+                  false_values:
+                    term:
+                      derived_boolean: false
+
+  - match: { hits.total.value: 5 }
+  - match: { aggregations.boolean_filters.buckets.true_values.doc_count: 3 }
+  - match: { aggregations.boolean_filters.buckets.false_values.doc_count: 2 }
+
+---
+"Test stats aggregation on derived_array_of_long":
+  - do:
+      search:
+        index: test
+        body:
+          size: 0
+          aggs:
+            long_array_stats:
+              stats:
+                field: derived_array_of_long
+
+  - match: { hits.total.value: 5 }
+  - match: { aggregations.long_array_stats.count: 10 }
+  - match: { aggregations.long_array_stats.min: 1 }
+  - match: { aggregations.long_array_stats.max: 6 }
+  - match: { aggregations.long_array_stats.avg: 3.5 }
+  - match: { aggregations.long_array_stats.sum: 35 }
+
+---
+"Test nested aggregation on derived_object":
+  - do:
+      search:
+        index: test
+        body:
+          size: 0
+          aggs:
+            nested_object:
+              nested:
+                path: derived_object
               aggs:
-                age_groups:
+                keywords:
                   terms:
-                    field: age_group
+                    field: derived_object.keyword
 
-  - match: { hits.total.value: 4 }
-  - length: { aggregations.salary_categories.buckets: 3 }
-  - match: { aggregations.salary_categories.buckets.0.key: high }
-  - match: { aggregations.salary_categories.buckets.0.doc_count: 2 }
-  - length: { aggregations.salary_categories.buckets.0.age_groups.buckets: 2 }
-  - match: { aggregations.salary_categories.buckets.1.key: medium }
-  - match: { aggregations.salary_categories.buckets.1.doc_count: 1 }
-  - length: { aggregations.salary_categories.buckets.1.age_groups.buckets: 1 }
+  - match: { hits.total.value: 5 }
+  - length: { aggregations.nested_object.keywords.buckets: 5 }
+  - match: { aggregations.nested_object.keywords.buckets.0.key: "json_keyword1" }
+  - match: { aggregations.nested_object.keywords.buckets.0.doc_count: 1 }
 
 ---
-"Test Metric Aggregations on Derived Field":
+"Test cardinality aggregation on derived_text":
   - do:
       search:
-        index: test_derived_aggregations
+        index: test
         body:
           size: 0
           aggs:
-            avg_years_to_retirement:
-              avg:
-                field: years_to_retirement
-            min_years_to_retirement:
-              min:
-                field: years_to_retirement
-            max_years_to_retirement:
-              max:
-                field: years_to_retirement
-
-  - match: { hits.total.value: 4 }
-  - match: { aggregations.avg_years_to_retirement.value: 27.5 }
-  - match: { aggregations.min_years_to_retirement.value: 10.0 }
-  - match: { aggregations.max_years_to_retirement.value: 40.0 }
-
----
-"Test Cardinality Aggregation on Derived Field":
-  - do:
-      search:
-        index: test_derived_aggregations
-        body:
-          size: 0
-          aggs:
-            unique_age_groups:
+            unique_texts:
               cardinality:
-                field: age_group
+                field: derived_text
 
-  - match: { hits.total.value: 4 }
-  - match: { aggregations.unique_age_groups.value: 3 }
+  - match: { hits.total.value: 5 }
+  - match: { aggregations.unique_texts.value: 5 }
 
 ---
-"Test Percentiles Aggregation on Derived Field":
+"Test percentiles aggregation on derived_double":
   - do:
       search:
-        index: test_derived_aggregations
+        index: test
         body:
           size: 0
           aggs:
-            retirement_percentiles:
+            double_percentiles:
               percentiles:
-                field: years_to_retirement
+                field: derived_double
                 percents: [25, 50, 75]
 
-  - match: { hits.total.value: 4 }
-  - match: { aggregations.retirement_percentiles.values.25.0: 20.0 }
-  - match: { aggregations.retirement_percentiles.values.50.0: 30.0 }
-  - match: { aggregations.retirement_percentiles.values.75.0: 37.5 }
+  - match: { hits.total.value: 5 }
+  - match: { aggregations.double_percentiles.values.25\.0: 1.0 }
+  - match: { aggregations.double_percentiles.values.50\.0: 2.0 }
+  - match: { aggregations.double_percentiles.values.75\.0: 4.0 }
