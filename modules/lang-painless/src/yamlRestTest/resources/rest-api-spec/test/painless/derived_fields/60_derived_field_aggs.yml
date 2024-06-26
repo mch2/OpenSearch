@@ -1,0 +1,249 @@
+---
+setup:
+  - do:
+      indices.create:
+        index: test_derived_aggregations
+        body:
+          mappings:
+            properties:
+              age:
+                type: integer
+              salary:
+                type: float
+              gender:
+                type: keyword
+              department:
+                type: keyword
+              hire_date:
+                type: date
+          runtime:
+            age_group:
+              type: keyword
+              script:
+                source: "if (doc['age'].value < 30) { emit('young') } else if (doc['age'].value < 50) { emit('middle-aged') } else { emit('senior') }"
+            salary_category:
+              type: keyword
+              script:
+                source: "if (doc['salary'].value < 50000) { emit('low') } else if (doc['salary'].value < 75000) { emit('medium') } else { emit('high') }"
+            years_to_retirement:
+              type: long
+              script:
+                source: "emit(65 - doc['age'].value)"
+            years_of_service:
+              type: long
+              script:
+                source: "emit(((doc['hire_date'].value.toInstant().toEpochMilli() - new Date().getTime()) / (1000 * 60 * 60 * 24 * 365.25) * -1).longValue())"
+
+  - do:
+      bulk:
+        refresh: true
+        body:
+          - index:
+              _index: test_derived_aggregations
+          - age: 25
+            salary: 50000
+            gender: male
+            department: IT
+            hire_date: "2020-01-15"
+          - index:
+              _index: test_derived_aggregations
+          - age: 35
+            salary: 70000
+            gender: female
+            department: HR
+            hire_date: "2018-05-20"
+          - index:
+              _index: test_derived_aggregations
+          - age: 45
+            salary: 90000
+            gender: male
+            department: Finance
+            hire_date: "2015-11-10"
+          - index:
+              _index: test_derived_aggregations
+          - age: 55
+            salary: 110000
+            gender: female
+            department: IT
+            hire_date: "2010-03-01"
+
+---
+"Test Terms Aggregation on Derived Field":
+  - do:
+      search:
+        index: test_derived_aggregations
+        body:
+          size: 0
+          aggs:
+            age_groups:
+              terms:
+                field: age_group
+
+  - match: { hits.total.value: 4 }
+  - length: { aggregations.age_groups.buckets: 3 }
+  - match: { aggregations.age_groups.buckets.0.key: middle-aged }
+  - match: { aggregations.age_groups.buckets.0.doc_count: 2 }
+  - match: { aggregations.age_groups.buckets.1.key: young }
+  - match: { aggregations.age_groups.buckets.1.doc_count: 1 }
+  - match: { aggregations.age_groups.buckets.2.key: senior }
+  - match: { aggregations.age_groups.buckets.2.doc_count: 1 }
+
+---
+"Test Range Aggregation on Derived Field":
+  - do:
+      search:
+        index: test_derived_aggregations
+        body:
+          size: 0
+          aggs:
+            retirement_ranges:
+              range:
+                field: years_to_retirement
+                ranges:
+                  - to: 10
+                  - from: 10
+                    to: 20
+                  - from: 20
+
+  - match: { hits.total.value: 4 }
+  - length: { aggregations.retirement_ranges.buckets: 3 }
+  - match: { aggregations.retirement_ranges.buckets.0.doc_count: 1 }
+  - match: { aggregations.retirement_ranges.buckets.1.doc_count: 1 }
+  - match: { aggregations.retirement_ranges.buckets.2.doc_count: 2 }
+
+---
+"Test Histogram Aggregation on Derived Field":
+  - do:
+      search:
+        index: test_derived_aggregations
+        body:
+          size: 0
+          aggs:
+            retirement_histogram:
+              histogram:
+                field: years_to_retirement
+                interval: 10
+
+  - match: { hits.total.value: 4 }
+  - length: { aggregations.retirement_histogram.buckets: 4 }
+  - match: { aggregations.retirement_histogram.buckets.0.key: 10.0 }
+  - match: { aggregations.retirement_histogram.buckets.0.doc_count: 1 }
+  - match: { aggregations.retirement_histogram.buckets.1.key: 20.0 }
+  - match: { aggregations.retirement_histogram.buckets.1.doc_count: 1 }
+  - match: { aggregations.retirement_histogram.buckets.2.key: 30.0 }
+  - match: { aggregations.retirement_histogram.buckets.2.doc_count: 1 }
+  - match: { aggregations.retirement_histogram.buckets.3.key: 40.0 }
+  - match: { aggregations.retirement_histogram.buckets.3.doc_count: 1 }
+
+---
+"Test Date Histogram Aggregation on Derived Field":
+  - do:
+      search:
+        index: test_derived_aggregations
+        body:
+          size: 0
+          aggs:
+            service_years:
+              date_histogram:
+                field: hire_date
+                calendar_interval: year
+              aggs:
+                avg_years_of_service:
+                  avg:
+                    field: years_of_service
+
+  - match: { hits.total.value: 4 }
+  - length: { aggregations.service_years.buckets: 4 }
+  - match: { aggregations.service_years.buckets.0.key_as_string: "2010-01-01T00:00:00.000Z" }
+  - match: { aggregations.service_years.buckets.0.doc_count: 1 }
+  - match: { aggregations.service_years.buckets.0.avg_years_of_service.value: 14 }
+  - match: { aggregations.service_years.buckets.1.key_as_string: "2015-01-01T00:00:00.000Z" }
+  - match: { aggregations.service_years.buckets.1.doc_count: 1 }
+  - match: { aggregations.service_years.buckets.1.avg_years_of_service.value: 9 }
+  - match: { aggregations.service_years.buckets.2.key_as_string: "2018-01-01T00:00:00.000Z" }
+  - match: { aggregations.service_years.buckets.2.doc_count: 1 }
+  - match: { aggregations.service_years.buckets.2.avg_years_of_service.value: 6 }
+  - match: { aggregations.service_years.buckets.3.key_as_string: "2020-01-01T00:00:00.000Z" }
+  - match: { aggregations.service_years.buckets.3.doc_count: 1 }
+  - match: { aggregations.service_years.buckets.3.avg_years_of_service.value: 4 }
+
+---
+"Test Nested Aggregations with Derived Fields":
+  - do:
+      search:
+        index: test_derived_aggregations
+        body:
+          size: 0
+          aggs:
+            salary_categories:
+              terms:
+                field: salary_category
+              aggs:
+                age_groups:
+                  terms:
+                    field: age_group
+
+  - match: { hits.total.value: 4 }
+  - length: { aggregations.salary_categories.buckets: 3 }
+  - match: { aggregations.salary_categories.buckets.0.key: high }
+  - match: { aggregations.salary_categories.buckets.0.doc_count: 2 }
+  - length: { aggregations.salary_categories.buckets.0.age_groups.buckets: 2 }
+  - match: { aggregations.salary_categories.buckets.1.key: medium }
+  - match: { aggregations.salary_categories.buckets.1.doc_count: 1 }
+  - length: { aggregations.salary_categories.buckets.1.age_groups.buckets: 1 }
+
+---
+"Test Metric Aggregations on Derived Field":
+  - do:
+      search:
+        index: test_derived_aggregations
+        body:
+          size: 0
+          aggs:
+            avg_years_to_retirement:
+              avg:
+                field: years_to_retirement
+            min_years_to_retirement:
+              min:
+                field: years_to_retirement
+            max_years_to_retirement:
+              max:
+                field: years_to_retirement
+
+  - match: { hits.total.value: 4 }
+  - match: { aggregations.avg_years_to_retirement.value: 27.5 }
+  - match: { aggregations.min_years_to_retirement.value: 10.0 }
+  - match: { aggregations.max_years_to_retirement.value: 40.0 }
+
+---
+"Test Cardinality Aggregation on Derived Field":
+  - do:
+      search:
+        index: test_derived_aggregations
+        body:
+          size: 0
+          aggs:
+            unique_age_groups:
+              cardinality:
+                field: age_group
+
+  - match: { hits.total.value: 4 }
+  - match: { aggregations.unique_age_groups.value: 3 }
+
+---
+"Test Percentiles Aggregation on Derived Field":
+  - do:
+      search:
+        index: test_derived_aggregations
+        body:
+          size: 0
+          aggs:
+            retirement_percentiles:
+              percentiles:
+                field: years_to_retirement
+                percents: [25, 50, 75]
+
+  - match: { hits.total.value: 4 }
+  - match: { aggregations.retirement_percentiles.values.25.0: 20.0 }
+  - match: { aggregations.retirement_percentiles.values.50.0: 30.0 }
+  - match: { aggregations.retirement_percentiles.values.75.0: 37.5 }
