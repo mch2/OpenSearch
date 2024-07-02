@@ -196,6 +196,7 @@ public class OperationRouting {
         @Nullable String routing,
         @Nullable String preference
     ) {
+        preference = Preference.REPLICA.toString();
         return preferenceActiveShardIterator(
             shards(clusterState, index, id, routing),
             clusterState.nodes().getLocalNodeId(),

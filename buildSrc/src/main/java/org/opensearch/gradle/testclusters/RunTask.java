@@ -174,6 +174,8 @@ public class RunTask extends DefaultTestClustersTask {
                     node.setTransportPort(String.valueOf(transportPort));
                     transportPort++;
                     node.setting("discovery.seed_hosts", LOCALHOST_ADDRESS_PREFIX + DEFAULT_TRANSPORT_PORT);
+                    node.setting("node.roles", "[search, cluster_manager]");
+                    node.setting("node.search.cache.size", "1mb");
                 }
                 additionalSettings.forEach(node::setting);
                 if (dataDir != null) {
