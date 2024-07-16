@@ -32,6 +32,8 @@
 
 package org.opensearch.cluster.routing;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.metadata.WeightedRoutingMetadata;
@@ -112,6 +114,13 @@ public class OperationRouting {
         Preference.PREFER_NODES
     );
 
+    public static final Setting<String> DEFAULT_ROUTING_PREFERENCE = Setting.simpleString(
+        "cluster.routing.default.preference",
+        "",
+        Setting.Property.Dynamic,
+        Setting.Property.NodeScope
+    );
+
     private volatile List<String> awarenessAttributes;
     private volatile boolean useAdaptiveReplicaSelection;
     private volatile boolean ignoreAwarenessAttr;
@@ -119,6 +128,7 @@ public class OperationRouting {
     private volatile boolean isFailOpenEnabled;
     private volatile boolean isStrictWeightedShardRouting;
     private volatile boolean ignoreWeightedRouting;
+    private String hardCodedPreference;
 
     public OperationRouting(Settings settings, ClusterSettings clusterSettings) {
         // whether to ignore awareness attributes when routing requests
@@ -133,12 +143,22 @@ public class OperationRouting {
         this.isFailOpenEnabled = WEIGHTED_ROUTING_FAILOPEN_ENABLED.get(settings);
         this.isStrictWeightedShardRouting = STRICT_WEIGHTED_SHARD_ROUTING_ENABLED.get(settings);
         this.ignoreWeightedRouting = IGNORE_WEIGHTED_SHARD_ROUTING.get(settings);
+        this.hardCodedPreference = DEFAULT_ROUTING_PREFERENCE.get(settings);
         clusterSettings.addSettingsUpdateConsumer(USE_ADAPTIVE_REPLICA_SELECTION_SETTING, this::setUseAdaptiveReplicaSelection);
         clusterSettings.addSettingsUpdateConsumer(IGNORE_AWARENESS_ATTRIBUTES_SETTING, this::setIgnoreAwarenessAttributes);
         clusterSettings.addSettingsUpdateConsumer(WEIGHTED_ROUTING_DEFAULT_WEIGHT, this::setWeightedRoutingDefaultWeight);
         clusterSettings.addSettingsUpdateConsumer(WEIGHTED_ROUTING_FAILOPEN_ENABLED, this::setFailOpenEnabled);
         clusterSettings.addSettingsUpdateConsumer(STRICT_WEIGHTED_SHARD_ROUTING_ENABLED, this::setStrictWeightedShardRouting);
         clusterSettings.addSettingsUpdateConsumer(IGNORE_WEIGHTED_SHARD_ROUTING, this::setIgnoreWeightedRouting);
+        clusterSettings.addSettingsUpdateConsumer(DEFAULT_ROUTING_PREFERENCE, this::setHardCodedRoutingPreference);
+    }
+
+    private void setHardCodedRoutingPreference(String s) {
+        this.hardCodedPreference = s;
+    }
+
+    private String getHardcodedPreference() {
+        return hardCodedPreference;
     }
 
     void setUseAdaptiveReplicaSelection(boolean useAdaptiveReplicaSelection) {
@@ -229,6 +249,8 @@ public class OperationRouting {
         return searchShards(clusterState, concreteIndices, routing, preference, null, null);
     }
 
+    public static Logger logger = LogManager.getLogger(OperationRouting.class);
+
     public GroupShardsIterator<ShardIterator> searchShards(
         ClusterState clusterState,
         String[] concreteIndices,
@@ -237,6 +259,11 @@ public class OperationRouting {
         @Nullable ResponseCollectorService collectorService,
         @Nullable Map<String, Long> nodeCounts
     ) {
+        logger.trace("Received search req with preference {}", preference);
+        if (preference == null || preference.isEmpty()) {
+            preference = hardCodedPreference;
+            logger.trace("setting routing preference to {}", preference);
+        }
         final Set<IndexShardRoutingTable> shards = computeTargetedShards(clusterState, concreteIndices, routing);
         final Set<ShardIterator> set = new HashSet<>(shards.size());
         for (IndexShardRoutingTable shard : shards) {

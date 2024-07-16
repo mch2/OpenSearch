@@ -234,6 +234,7 @@ public final class IndexScopedSettings extends AbstractScopedSettings {
 
                 IndexSettings.INDEX_DOC_ID_FUZZY_SET_ENABLED_SETTING,
                 IndexSettings.INDEX_DOC_ID_FUZZY_SET_FALSE_POSITIVE_PROBABILITY_SETTING,
+                IndexSettings.INDEX_PRIMARY_TERM_CHECK_ON_WRITE,
 
                 // Settings for concurrent segment search
                 IndexSettings.INDEX_CONCURRENT_SEGMENT_SEARCH_SETTING,
@@ -250,7 +251,6 @@ public final class IndexScopedSettings extends AbstractScopedSettings {
                     }
                 }, Property.IndexScope), // this allows similarity settings to be passed
                 Setting.groupSetting("index.analysis.", Property.IndexScope) // this allows analysis settings to be passed
-
             )
         )
     );

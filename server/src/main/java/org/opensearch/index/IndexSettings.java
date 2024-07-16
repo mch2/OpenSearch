@@ -726,6 +726,13 @@ public final class IndexSettings {
         Property.IndexScope
     );
 
+    public static final Setting<Boolean> INDEX_PRIMARY_TERM_CHECK_ON_WRITE = Setting.boolSetting(
+        "index.pterm.check.enabled",
+        true,
+        Property.IndexScope,
+        Property.Dynamic
+    );
+
     private final Index index;
     private final Version version;
     private final Logger logger;
@@ -772,6 +779,12 @@ public final class IndexSettings {
     private final RemoteStorePathStrategy remoteStorePathStrategy;
     private final boolean isTranslogMetadataEnabled;
     private volatile boolean allowDerivedField;
+
+    public boolean isPtermCheckEnabled() {
+        return ptermCheckEnabled;
+    }
+
+    private volatile boolean ptermCheckEnabled;
 
     /**
      * The maximum age of a retention lease before it is considered expired.
@@ -938,7 +951,7 @@ public final class IndexSettings {
         remoteTranslogUploadBufferInterval = INDEX_REMOTE_TRANSLOG_BUFFER_INTERVAL_SETTING.get(settings);
         remoteStoreRepository = settings.get(IndexMetadata.SETTING_REMOTE_SEGMENT_STORE_REPOSITORY);
         this.remoteTranslogKeepExtraGen = INDEX_REMOTE_TRANSLOG_KEEP_EXTRA_GEN_SETTING.get(settings);
-
+        this.ptermCheckEnabled = INDEX_PRIMARY_TERM_CHECK_ON_WRITE.get(settings);
         if (isRemoteSnapshot() && FeatureFlags.isEnabled(SEARCHABLE_SNAPSHOT_EXTENDED_COMPATIBILITY)) {
             extendedCompatibilitySnapshotVersion = SEARCHABLE_SNAPSHOT_EXTENDED_COMPATIBILITY_MINIMUM_VERSION;
         } else {
@@ -1126,6 +1139,7 @@ public final class IndexSettings {
             this::setDocIdFuzzySetFalsePositiveProbability
         );
         scopedSettings.addSettingsUpdateConsumer(ALLOW_DERIVED_FIELDS, this::setAllowDerivedField);
+        scopedSettings.addSettingsUpdateConsumer(INDEX_PRIMARY_TERM_CHECK_ON_WRITE, (b) -> this.ptermCheckEnabled = b);
     }
 
     private void setSearchIdleAfter(TimeValue searchIdleAfter) {

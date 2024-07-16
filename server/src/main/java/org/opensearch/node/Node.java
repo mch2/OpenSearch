@@ -2004,6 +2004,7 @@ public class Node implements Closeable {
             long capacity = NODE_SEARCH_CACHE_SIZE_SETTING.get(settings).getBytes();
             FsInfo.Path info = ExceptionsHelper.catchAsRuntimeException(() -> FsProbe.getFSInfo(fileCacheNodePath));
             long availableCapacity = info.getAvailable().getBytes();
+            logger.info("Available capacity is {}", availableCapacity);
 
             // Initialize default values for cache if NODE_SEARCH_CACHE_SIZE_SETTING is not set.
             if (capacity == 0) {
@@ -2019,6 +2020,7 @@ public class Node implements Closeable {
                     );
                 } else {
                     capacity = 80 * availableCapacity / 100;
+                    logger.info("Set cache capacity to {}", capacity);
                 }
             }
             capacity = Math.min(capacity, availableCapacity);

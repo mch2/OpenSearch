@@ -33,6 +33,16 @@ public class TargetPoolAllocationDecider extends AllocationDecider {
     public Decision canAllocate(ShardRouting shardRouting, RoutingNode node, RoutingAllocation allocation) {
         RoutingPool shardPool = RoutingPool.getShardPool(shardRouting, allocation);
         RoutingPool targetNodePool = RoutingPool.getNodePool(node);
+        // if we have search nodes move replicas there too...
+        if (shardRouting.primary() == false && RoutingPool.REMOTE_CAPABLE.equals(targetNodePool)) {
+            return allocation.decision(
+                Decision.YES,
+                NAME,
+                "Routing pools are compatible. Shard pool: [%s], node pool: [%s]",
+                shardPool,
+                targetNodePool
+            );
+        }
         if (RoutingPool.REMOTE_CAPABLE.equals(shardPool) && RoutingPool.LOCAL_ONLY.equals(targetNodePool)) {
             logger.debug(
                 "Shard: [{}] has target pool: [{}]. Cannot allocate on node: [{}] with target pool: [{}]",
