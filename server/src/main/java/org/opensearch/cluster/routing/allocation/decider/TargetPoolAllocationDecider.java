@@ -43,6 +43,16 @@ public class TargetPoolAllocationDecider extends AllocationDecider {
                 targetNodePool
             );
         }
+        // doh...
+        if (shardRouting.primary() == false && RoutingPool.REMOTE_CAPABLE.equals(targetNodePool) == false) {
+            return allocation.decision(
+                Decision.NO,
+                NAME,
+                "Routing pools are not compatible. Shard pool: [%s], node pool: [%s]",
+                shardPool,
+                targetNodePool
+            );
+        }
         if (RoutingPool.REMOTE_CAPABLE.equals(shardPool) && RoutingPool.LOCAL_ONLY.equals(targetNodePool)) {
             logger.debug(
                 "Shard: [{}] has target pool: [{}]. Cannot allocate on node: [{}] with target pool: [{}]",
