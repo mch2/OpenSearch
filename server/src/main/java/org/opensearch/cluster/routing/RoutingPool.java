@@ -49,6 +49,9 @@ public enum RoutingPool {
      */
     public static RoutingPool getShardPool(ShardRouting shard, RoutingAllocation allocation) {
         IndexMetadata indexMetadata = allocation.metadata().getIndexSafe(shard.index());
+        if (shard.primary() == false) {
+            return REMOTE_CAPABLE;
+        }
         return getIndexPool(indexMetadata);
     }
 
