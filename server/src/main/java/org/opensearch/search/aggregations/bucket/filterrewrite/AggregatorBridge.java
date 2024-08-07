@@ -14,6 +14,7 @@ import org.opensearch.index.mapper.MappedFieldType;
 
 import java.io.IOException;
 import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 
 /**
  * This interface provides a bridge between an aggregator and the optimization context, allowing
@@ -32,17 +33,16 @@ import java.util.function.BiConsumer;
 public abstract class AggregatorBridge {
 
     /**
-     * The optimization context associated with this aggregator bridge.
-     */
-    FilterRewriteOptimizationContext filterRewriteOptimizationContext;
-
-    /**
      * The field type associated with this aggregator bridge.
      */
     MappedFieldType fieldType;
 
-    void setOptimizationContext(FilterRewriteOptimizationContext context) {
-        this.filterRewriteOptimizationContext = context;
+    Consumer<Ranges> setRanges;
+    BiConsumer<Integer, Ranges> setRangesFromSegment;
+
+    void setRangesConsumer(Consumer<Ranges> setRanges, BiConsumer<Integer, Ranges> setRangesFromSegment) {
+        this.setRanges = setRanges;
+        this.setRangesFromSegment = setRangesFromSegment;
     }
 
     /**
@@ -72,7 +72,13 @@ public abstract class AggregatorBridge {
      *
      * @param values            the point values (index structure for numeric values) for a segment
      * @param incrementDocCount a consumer to increment the document count for a range bucket. The First parameter is document count, the second is the key of the bucket
-     * @param leafOrd
+     * @param consumeDebugInfo
+     * @param ranges
      */
-    protected abstract void tryOptimize(PointValues values, BiConsumer<Long, Long> incrementDocCount, int leafOrd) throws IOException;
+    abstract void tryOptimize(
+        PointValues values,
+        BiConsumer<Long, Long> incrementDocCount,
+        Consumer<FilterRewriteOptimizationContext.DebugInfo> consumeDebugInfo,
+        Ranges ranges
+    ) throws IOException;
 }
