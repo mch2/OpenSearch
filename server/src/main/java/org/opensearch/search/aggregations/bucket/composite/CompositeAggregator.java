@@ -167,7 +167,7 @@ public final class CompositeAggregator extends BucketsAggregator {
         this.queue = new CompositeValuesCollectorQueue(context.bigArrays(), sources, size, rawAfterKey);
         this.rawAfterKey = rawAfterKey;
 
-        CompositeAggregatorBridge bridge = new CompositeAggregatorBridge() {
+        CompositeAggregatorBridge bridge = new CompositeAggregatorBridge(context) {
             private RoundingValuesSource valuesSource;
             private long afterKey = -1L;
 
@@ -187,11 +187,6 @@ public final class CompositeAggregator extends BucketsAggregator {
                     return true;
                 }
                 return false;
-            }
-
-            @Override
-            protected void prepare() throws IOException {
-                buildRanges(context);
             }
 
             protected Rounding getRounding(final long low, final long high) {

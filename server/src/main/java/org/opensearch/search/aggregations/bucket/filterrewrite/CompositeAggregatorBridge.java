@@ -12,11 +12,16 @@ import org.opensearch.index.mapper.DateFieldMapper;
 import org.opensearch.index.mapper.MappedFieldType;
 import org.opensearch.search.aggregations.bucket.composite.CompositeValuesSourceConfig;
 import org.opensearch.search.aggregations.bucket.composite.RoundingValuesSource;
+import org.opensearch.search.internal.SearchContext;
 
 /**
  * For composite aggregation to do optimization when it only has a single date histogram source
  */
 public abstract class CompositeAggregatorBridge extends DateHistogramAggregatorBridge {
+    public CompositeAggregatorBridge(SearchContext context) {
+        super(context);
+    }
+
     protected boolean canOptimize(CompositeValuesSourceConfig[] sourceConfigs) {
         if (sourceConfigs.length != 1 || !(sourceConfigs[0].valuesSource() instanceof RoundingValuesSource)) return false;
         return canOptimize(sourceConfigs[0].missingBucket(), sourceConfigs[0].hasScript(), sourceConfigs[0].fieldType());

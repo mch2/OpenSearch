@@ -119,15 +119,10 @@ class DateHistogramAggregator extends BucketsAggregator implements SizedBucketAg
 
         bucketOrds = LongKeyedBucketOrds.build(context.bigArrays(), cardinality);
 
-        DateHistogramAggregatorBridge bridge = new DateHistogramAggregatorBridge() {
+        DateHistogramAggregatorBridge bridge = new DateHistogramAggregatorBridge(context) {
             @Override
             protected boolean canOptimize() {
                 return canOptimize(valuesSourceConfig);
-            }
-
-            @Override
-            protected void prepare() throws IOException {
-                buildRanges(context);
             }
 
             @Override

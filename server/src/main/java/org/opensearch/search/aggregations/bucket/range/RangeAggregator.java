@@ -281,15 +281,10 @@ public class RangeAggregator extends BucketsAggregator {
             maxTo[i] = Math.max(this.ranges[i].to, maxTo[i - 1]);
         }
 
-        RangeAggregatorBridge bridge = new RangeAggregatorBridge() {
+        RangeAggregatorBridge bridge = new RangeAggregatorBridge(ranges) {
             @Override
             protected boolean canOptimize() {
                 return canOptimize(config, ranges);
-            }
-
-            @Override
-            protected void prepare() {
-                buildRanges(ranges);
             }
 
             @Override

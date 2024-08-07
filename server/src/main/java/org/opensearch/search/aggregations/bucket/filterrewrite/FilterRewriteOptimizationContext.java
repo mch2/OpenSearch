@@ -42,7 +42,6 @@ public final class FilterRewriteOptimizationContext {
     private String shardId;
 
     private Ranges ranges;
-    private final Map<Integer, Ranges> rangesFromSegment = new HashMap<>(); // map of segment ordinal to its ranges
 
     // debug info related fields
     private int leafNodeVisited;
@@ -71,12 +70,11 @@ public final class FilterRewriteOptimizationContext {
 
         boolean canOptimize = aggregatorBridge.canOptimize();
         if (canOptimize) {
-            aggregatorBridge.setRangesConsumer(this::setRanges, this::setRangesFromSegment);
 
             this.shardId = context.indexShard().shardId().toString();
 
             assert ranges == null : "Ranges should only be built once at shard level, but they are already built";
-            aggregatorBridge.prepare();
+            this.ranges = aggregatorBridge.getRanges();
             if (ranges != null) {
                 preparedAtShardLevel = true;
             }
@@ -84,23 +82,6 @@ public final class FilterRewriteOptimizationContext {
         logger.debug("Fast filter rewriteable: {} for shard {}", canOptimize, shardId);
 
         return canOptimize;
-    }
-
-    void setRanges(Ranges ranges) {
-        this.ranges = ranges;
-    }
-
-    void setRangesFromSegment(int leafOrd, Ranges ranges) {
-        this.rangesFromSegment.put(leafOrd, ranges);
-    }
-
-    void clearRangesFromSegment(int leafOrd) {
-        this.rangesFromSegment.remove(leafOrd);
-    }
-
-    Ranges getRanges(int leafOrd) {
-        if (!preparedAtShardLevel) return rangesFromSegment.get(leafOrd);
-        return ranges;
     }
 
     /**
@@ -135,17 +116,24 @@ public final class FilterRewriteOptimizationContext {
             return false;
         }
 
-        Ranges ranges = tryBuildRangesFromSegment(leafCtx, segmentMatchAll);
-        if (ranges == null) return false;
-
-        aggregatorBridge.tryOptimize(values, incrementDocCount, this::consumeDebugInfo, getRanges(leafCtx.ord));
+        aggregatorBridge.tryOptimize(values, incrementDocCount, this::consumeDebugInfo, getRanges(leafCtx, segmentMatchAll));
 
         optimizedSegments++;
         logger.debug("Fast filter optimization applied to shard {} segment {}", shardId, leafCtx.ord);
         logger.debug("Crossed leaf nodes: {}, inner nodes: {}", leafNodeVisited, innerNodeVisited);
 
-        clearRangesFromSegment(leafCtx.ord);
         return true;
+    }
+
+    private Ranges getRanges(LeafReaderContext leafCtx, boolean segmentMatchAll) {
+        if (ranges != null) {
+            return ranges;
+        }
+        try {
+            return tryBuildRangesFromSegment(leafCtx, segmentMatchAll);
+        } catch (IOException e) {
+            return null;
+        }
     }
 
     /**
@@ -159,9 +147,9 @@ public final class FilterRewriteOptimizationContext {
 
         if (!preparedAtShardLevel) { // not built at shard level but segment match all
             logger.debug("Shard {} segment {} functionally match all documents. Build the fast filter", shardId, leafCtx.ord);
-            aggregatorBridge.prepareFromSegment(leafCtx);
+            return aggregatorBridge.getRangesFromSegment(leafCtx);
         }
-        return getRanges(leafCtx.ord);
+        return null;
     }
 
     /**

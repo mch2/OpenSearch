@@ -30,20 +30,12 @@ import java.util.function.Consumer;
  *
  * @opensearch.internal
  */
-public abstract class AggregatorBridge {
+abstract class AggregatorBridge {
 
     /**
      * The field type associated with this aggregator bridge.
      */
     MappedFieldType fieldType;
-
-    Consumer<Ranges> setRanges;
-    BiConsumer<Integer, Ranges> setRangesFromSegment;
-
-    void setRangesConsumer(Consumer<Ranges> setRanges, BiConsumer<Integer, Ranges> setRangesFromSegment) {
-        this.setRanges = setRanges;
-        this.setRangesFromSegment = setRangesFromSegment;
-    }
 
     /**
      * Checks whether the aggregator can be optimized.
@@ -54,18 +46,14 @@ public abstract class AggregatorBridge {
     protected abstract boolean canOptimize();
 
     /**
-     * Prepares the optimization at shard level after checking aggregator is optimizable.
-     * <p>
-     * For example, figure out what are the ranges from the aggregation to do the optimization later
-     */
-    protected abstract void prepare() throws IOException;
-
-    /**
      * Prepares the optimization for a specific segment when the segment is functionally matching all docs
      *
      * @param leaf the leaf reader context for the segment
+     * @return
      */
-    protected abstract void prepareFromSegment(LeafReaderContext leaf) throws IOException;
+    Ranges getRangesFromSegment(LeafReaderContext leaf) throws IOException {
+        return null;
+    }
 
     /**
      * Attempts to build aggregation results for a segment
@@ -81,4 +69,6 @@ public abstract class AggregatorBridge {
         Consumer<FilterRewriteOptimizationContext.DebugInfo> consumeDebugInfo,
         Ranges ranges
     ) throws IOException;
+
+    abstract Ranges getRanges() throws IOException;
 }

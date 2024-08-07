@@ -28,6 +28,13 @@ import static org.opensearch.search.aggregations.bucket.filterrewrite.PointTreeT
  */
 public abstract class RangeAggregatorBridge extends AggregatorBridge {
 
+    private final RangeAggregator.Range[] ranges;
+
+    public RangeAggregatorBridge(RangeAggregator.Range[] ranges) {
+        super();
+        this.ranges = ranges;
+    }
+
     protected boolean canOptimize(ValuesSourceConfig config, RangeAggregator.Range[] ranges) {
         if (config.fieldType() == null) return false;
         MappedFieldType fieldType = config.fieldType();
@@ -52,7 +59,12 @@ public abstract class RangeAggregatorBridge extends AggregatorBridge {
         return false;
     }
 
-    protected void buildRanges(RangeAggregator.Range[] ranges) {
+    @Override
+    Ranges getRanges() throws IOException {
+        return buildRanges(ranges);
+    }
+
+    Ranges buildRanges(RangeAggregator.Range[] ranges) {
         assert fieldType instanceof NumericPointEncoder;
         NumericPointEncoder numericPointEncoder = (NumericPointEncoder) fieldType;
         byte[][] lowers = new byte[ranges.length][];
@@ -66,12 +78,7 @@ public abstract class RangeAggregatorBridge extends AggregatorBridge {
             uppers[i] = upper;
         }
 
-        setRanges.accept(new Ranges(lowers, uppers));
-    }
-
-    @Override
-    public void prepareFromSegment(LeafReaderContext leaf) {
-        throw new UnsupportedOperationException("Range aggregation should not build ranges at segment level");
+        return new Ranges(lowers, uppers);
     }
 
     @Override

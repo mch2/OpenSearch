@@ -34,6 +34,12 @@ import static org.opensearch.search.aggregations.bucket.filterrewrite.PointTreeT
 public abstract class DateHistogramAggregatorBridge extends AggregatorBridge {
 
     int maxRewriteFilters;
+    final SearchContext context;
+
+    public DateHistogramAggregatorBridge(SearchContext context) {
+        super();
+        this.context = context;
+    }
 
     protected boolean canOptimize(ValuesSourceConfig config) {
         if (config.script() == null && config.missing() == null) {
@@ -48,16 +54,20 @@ public abstract class DateHistogramAggregatorBridge extends AggregatorBridge {
         return false;
     }
 
-    protected void buildRanges(SearchContext context) throws IOException {
+    Ranges getRanges() throws IOException {
+        return buildRanges(context);
+    }
+
+    Ranges buildRanges(SearchContext context) throws IOException {
         long[] bounds = Helper.getDateHistoAggBounds(context, fieldType.name());
         this.maxRewriteFilters = context.maxAggRewriteFilters();
-        setRanges.accept(buildRanges(bounds, maxRewriteFilters));
+        return buildRanges(bounds, maxRewriteFilters);
     }
 
     @Override
-    protected void prepareFromSegment(LeafReaderContext leaf) throws IOException {
+    Ranges getRangesFromSegment(LeafReaderContext leaf) throws IOException {
         long[] bounds = Helper.getSegmentBounds(leaf, fieldType.name());
-        setRangesFromSegment.accept(leaf.ord, buildRanges(bounds, maxRewriteFilters));
+        return buildRanges(bounds, maxRewriteFilters);
     }
 
     private Ranges buildRanges(long[] bounds, int maxRewriteFilters) {

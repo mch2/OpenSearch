@@ -159,15 +159,10 @@ abstract class AutoDateHistogramAggregator extends DeferableBucketAggregator {
         this.roundingPreparer = roundingPreparer;
         this.preparedRounding = prepareRounding(0);
 
-        DateHistogramAggregatorBridge bridge = new DateHistogramAggregatorBridge() {
+        DateHistogramAggregatorBridge bridge = new DateHistogramAggregatorBridge(context) {
             @Override
             protected boolean canOptimize() {
                 return canOptimize(valuesSourceConfig);
-            }
-
-            @Override
-            protected void prepare() throws IOException {
-                buildRanges(context);
             }
 
             @Override
