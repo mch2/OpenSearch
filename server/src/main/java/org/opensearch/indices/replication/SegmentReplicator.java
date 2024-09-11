@@ -57,7 +57,7 @@ public class SegmentReplicator {
      * Starts a replication event for the given shard.
      * @param shard - {@link IndexShard} replica shard
      */
-    public void startReplication(IndexShard shard) {
+    public void startReplication(IndexShard shard, Runnable runnable) {
         if (sourceFactory.get() == null) return;
         startReplication(
             shard,
@@ -67,6 +67,7 @@ public class SegmentReplicator {
                 @Override
                 public void onReplicationDone(SegmentReplicationState state) {
                     logger.trace("Completed replication for {}", shard.shardId());
+                    runnable.run();
                 }
 
                 @Override
@@ -75,6 +76,7 @@ public class SegmentReplicator {
                     if (sendShardFailure) {
                         shard.failShard("unrecoverable replication failure", e);
                     }
+                    runnable.run();
                 }
             }
         );

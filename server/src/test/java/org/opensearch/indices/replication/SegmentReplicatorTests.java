@@ -52,7 +52,7 @@ public class SegmentReplicatorTests extends IndexShardTestCase {
         SegmentReplicator segmentReplicator = new SegmentReplicator(threadpool);
 
         IndexShard shard = mock(IndexShard.class);
-        segmentReplicator.startReplication(shard);
+        segmentReplicator.startReplication(shard, () -> {});
         Mockito.verifyNoInteractions(mock);
     }
 
@@ -101,7 +101,7 @@ public class SegmentReplicatorTests extends IndexShardTestCase {
             }
         });
         segmentReplicator.setSourceFactory(factory);
-        segmentReplicator.startReplication(replica);
+        segmentReplicator.startReplication(replica, () -> {});
         assertBusy(() -> assertDocCount(replica, numDocs));
         closeShards(primary, replica);
     }
@@ -145,7 +145,7 @@ public class SegmentReplicatorTests extends IndexShardTestCase {
         AtomicBoolean failureCallbackTriggered = new AtomicBoolean(false);
         replica.addShardFailureCallback((ig) -> failureCallbackTriggered.set(true));
         segmentReplicator.setSourceFactory(factory);
-        segmentReplicator.startReplication(replica);
+        segmentReplicator.startReplication(replica, () -> {});
         assertBusy(() -> assertTrue(failureCallbackTriggered.get()));
         closeShards(primary, replica);
     }

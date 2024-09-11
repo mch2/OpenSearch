@@ -131,13 +131,15 @@ public class IndexShardRoutingTable extends AbstractDiffable<IndexShardRoutingTa
             if (shard.active()) {
                 activeShards.add(shard);
             }
-            if (shard.initializing()) {
+            if (shard.initializing())  {
                 allInitializingShards.add(shard);
             }
             if (shard.relocating()) {
                 // create the target initializing shard routing on the node the shard is relocating to
                 allInitializingShards.add(shard.getTargetRelocatingShard());
-                allAllocationIds.add(shard.getTargetRelocatingShard().allocationId().getId());
+                if (shard.isSearchOnly() == false) {
+                    allAllocationIds.add(shard.getTargetRelocatingShard().allocationId().getId());
+                }
 
                 assert shard.assignedToNode() : "relocating from unassigned " + shard;
                 assert shard.getTargetRelocatingShard().assignedToNode() : "relocating to unassigned " + shard.getTargetRelocatingShard();
@@ -145,7 +147,9 @@ public class IndexShardRoutingTable extends AbstractDiffable<IndexShardRoutingTa
             }
             if (shard.assignedToNode()) {
                 assignedShards.add(shard);
-                allAllocationIds.add(shard.allocationId().getId());
+                if (shard.isSearchOnly() == false) {
+                  allAllocationIds.add(shard.allocationId().getId());
+                }
             }
             if (shard.state() != ShardRoutingState.STARTED) {
                 allShardsStarted = false;

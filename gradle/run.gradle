@@ -45,6 +45,7 @@ testClusters {
         plugin('plugins:'.concat(p))
       }
     }
+    systemProperty("opensearch.experimental.feature.read.write.split.enabled", "true")
   }
 }
 

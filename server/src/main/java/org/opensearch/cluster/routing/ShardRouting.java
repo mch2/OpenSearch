@@ -115,8 +115,10 @@ public class ShardRouting implements Writeable, ToXContentObject {
         assert !(state == ShardRoutingState.UNASSIGNED && unassignedInfo == null) : "unassigned shard must be created with meta";
         assert (state == ShardRoutingState.UNASSIGNED || state == ShardRoutingState.INITIALIZING) == (recoverySource != null)
             : "recovery source only available on unassigned or initializing shard but was " + state;
-        assert recoverySource == null || recoverySource == PeerRecoverySource.INSTANCE || primary
+        assert recoverySource == null || recoverySource == PeerRecoverySource.INSTANCE || primary || searchOnly
             : "replica shards always recover from primary";
+        assert searchOnly == false || recoverySource ==  null || recoverySource == RecoverySource.EmptyStoreRecoverySource.INSTANCE
+            : "search replicas always recover as empty store";
         assert (currentNodeId == null) == (state == ShardRoutingState.UNASSIGNED) : "unassigned shard must not be assigned to a node "
             + this;
     }

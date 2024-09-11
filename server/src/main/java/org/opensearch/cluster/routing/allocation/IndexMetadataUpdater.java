@@ -38,6 +38,7 @@ import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.metadata.Metadata;
 import org.opensearch.cluster.node.DiscoveryNodes;
+import org.opensearch.cluster.routing.AllocationId;
 import org.opensearch.cluster.routing.IndexShardRoutingTable;
 import org.opensearch.cluster.routing.RecoverySource;
 import org.opensearch.cluster.routing.RoutingChangesObserver;
@@ -263,6 +264,7 @@ public class IndexMetadataUpdater extends RoutingChangesObserver.AbstractRouting
                                                                                                                                  // the
                                                                                                                                  // primary
             IndexShardRoutingTable newShardRoutingTable = newRoutingTable.shardRoutingTable(shardId);
+
             assert newShardRoutingTable.assignedShards()
                 .stream()
                 .filter(ShardRouting::isRelocationTarget)
@@ -282,6 +284,19 @@ public class IndexMetadataUpdater extends RoutingChangesObserver.AbstractRouting
                 inSyncAllocationIds = inSyncAllocationIds.stream()
                     .sorted(Comparator.comparing(assignedAllocations::contains).reversed()) // values with routing entries first
                     .limit(maxActiveShards)
+                    .collect(Collectors.toSet());
+            }
+
+            // Filter any search Replicas out of inSync IDs.  We don't care if they are in sync and won't tell the
+            // primary about them.
+            final Set<String> searchOnlyAllocationIds = newShardRoutingTable.searchOnlyReplicas().stream()
+                .map(ShardRouting::allocationId)
+                .filter(Objects::nonNull)
+                .map(AllocationId::getId)
+                .collect(Collectors.toSet());
+            if (searchOnlyAllocationIds.isEmpty() == false) {
+                inSyncAllocationIds = inSyncAllocationIds.stream()
+                    .filter(id -> searchOnlyAllocationIds.contains(id) == false)
                     .collect(Collectors.toSet());
             }
 

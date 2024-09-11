@@ -717,8 +717,8 @@ public abstract class IndexShardTestCase extends OpenSearchTestCase {
                 DefaultRecoverySettings.INSTANCE,
                 DefaultRemoteStoreSettings.INSTANCE,
                 false,
-                discoveryNodes
-            );
+                discoveryNodes,
+                (s, r) -> {});
             indexShard.addShardFailureCallback(DEFAULT_SHARD_FAILURE_HANDLER);
             if (remoteStoreStatsTrackerFactory != null) {
                 remoteStoreStatsTrackerFactory.afterIndexShardCreated(indexShard);

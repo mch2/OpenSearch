@@ -188,6 +188,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -359,7 +360,7 @@ public class IndicesService extends AbstractLifecycleComponent
     private final SearchRequestStats searchRequestStats;
     private final FileCache fileCache;
     private final CompositeIndexSettings compositeIndexSettings;
-    private final Consumer<IndexShard> replicator;
+    private final BiConsumer<IndexShard, Runnable> replicator;
 
     @Override
     protected void doStart() {
@@ -397,7 +398,7 @@ public class IndicesService extends AbstractLifecycleComponent
         RemoteStoreSettings remoteStoreSettings,
         FileCache fileCache,
         CompositeIndexSettings compositeIndexSettings,
-        Consumer<IndexShard> replicator
+        BiConsumer<IndexShard, Runnable> replicator
     ) {
         this.settings = settings;
         this.threadPool = threadPool;

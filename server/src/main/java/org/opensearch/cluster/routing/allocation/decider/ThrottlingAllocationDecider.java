@@ -190,6 +190,17 @@ public class ThrottlingAllocationDecider extends AllocationDecider {
                 return allocation.decision(YES, NAME, "below primary recovery limit of [%d]", primariesInitialRecoveries);
             }
         } else {
+            if (shardRouting.isSearchOnly()) {
+                // search replicas recover from store and trigger a round of segRep before being marked active.
+                // the replication source can be either be another node for node-node replication or remote store.
+                // rely on replication throttling mechanisms instead.
+                assert initializingShard(shardRouting, node.nodeId()).recoverySource().getType() == RecoverySource.Type.EMPTY_STORE;
+                return allocation.decision(
+                    YES,
+                    NAME,
+                    "Do not throttle search replica recovery"
+                );
+            }
             // Peer recovery
             assert initializingShard(shardRouting, node.nodeId()).recoverySource().getType() == RecoverySource.Type.PEER;
 

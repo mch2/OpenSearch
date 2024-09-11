@@ -104,6 +104,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
@@ -653,7 +654,7 @@ public final class IndexModule {
             clusterDefaultRefreshIntervalSupplier,
             recoverySettings,
             remoteStoreSettings,
-            (s) -> {}
+            (s, r) -> {}
         );
     }
 
@@ -679,7 +680,7 @@ public final class IndexModule {
         Supplier<TimeValue> clusterDefaultRefreshIntervalSupplier,
         RecoverySettings recoverySettings,
         RemoteStoreSettings remoteStoreSettings,
-        Consumer<IndexShard> replicator
+        BiConsumer<IndexShard, Runnable> replicator
     ) throws IOException {
         final IndexEventListener eventListener = freeze();
         Function<IndexService, CheckedFunction<DirectoryReader, DirectoryReader, IOException>> readerWrapperFactory = indexReaderWrapper

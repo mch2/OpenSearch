@@ -126,6 +126,7 @@ import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
@@ -196,7 +197,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
     private final RemoteStoreSettings remoteStoreSettings;
     private final FileCache fileCache;
     private final CompositeIndexSettings compositeIndexSettings;
-    private final Consumer<IndexShard> replicator;
+    private final BiConsumer<IndexShard, Runnable> replicator;
 
     public IndexService(
         IndexSettings indexSettings,
@@ -235,7 +236,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
         RemoteStoreSettings remoteStoreSettings,
         FileCache fileCache,
         CompositeIndexSettings compositeIndexSettings,
-        Consumer<IndexShard> replicator
+        BiConsumer<IndexShard, Runnable> replicator
     ) {
         super(indexSettings);
         this.allowExpensiveQueries = allowExpensiveQueries;
@@ -395,7 +396,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
             remoteStoreSettings,
             null,
             null,
-            s -> {}
+            (s, r) -> {}
         );
     }
 
@@ -691,7 +692,8 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
                 recoverySettings,
                 remoteStoreSettings,
                 seedRemote,
-                discoveryNodes
+                discoveryNodes,
+                replicator
             );
             eventListener.indexShardStateChanged(indexShard, null, indexShard.state(), "shard created");
             eventListener.afterIndexShardCreated(indexShard);
@@ -1408,8 +1410,9 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
         if (getRefreshInterval().millis() > 0 || force) {
             for (IndexShard shard : this.shards.values()) {
                 try {
+                    logger.info("Is shard active {} {}", shard.routingEntry().isSearchOnly(), shard.routingEntry().active());
                     if (shard.routingEntry().isSearchOnly() && shard.routingEntry().active()) {
-                        replicator.accept(shard);
+                        shard.syncSegments();
                     }
                 } catch (IndexShardClosedException | AlreadyClosedException ex) {
                     // do nothing

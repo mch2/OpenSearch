@@ -617,7 +617,7 @@ public class IndexRoutingTable extends AbstractDiffable<IndexRoutingTable>
                             shardId,
                             false,
                             true,
-                            PeerRecoverySource.INSTANCE, // TODO: Update to remote store if enabled
+                            EmptyStoreRecoverySource.INSTANCE,
                             unassignedInfo
                         )
                     );

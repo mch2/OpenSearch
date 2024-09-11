@@ -281,6 +281,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
     private final PendingReplicationActions pendingReplicationActions;
     private final ReplicationTracker replicationTracker;
     private final SegmentReplicationCheckpointPublisher checkpointPublisher;
+    private final BiConsumer<IndexShard, Runnable> replicator;
 
     protected volatile ShardRouting shardRouting;
     protected volatile IndexShardState state;
@@ -391,8 +392,8 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         final RecoverySettings recoverySettings,
         final RemoteStoreSettings remoteStoreSettings,
         boolean seedRemote,
-        final DiscoveryNodes discoveryNodes
-    ) throws IOException {
+        final DiscoveryNodes discoveryNodes,
+        final BiConsumer<IndexShard, Runnable> replicator) throws IOException {
         super(shardRouting.shardId(), indexSettings);
         assert shardRouting.initializing();
         this.shardRouting = shardRouting;
@@ -493,6 +494,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         this.fileDownloader = new RemoteStoreFileDownloader(shardRouting.shardId(), threadPool, recoverySettings);
         this.shardMigrationState = getShardMigrationState(indexSettings, seedRemote);
         this.discoveryNodes = discoveryNodes;
+        this.replicator = replicator;
     }
 
     public ThreadPool getThreadPool() {
@@ -2010,6 +2012,10 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         indexShardOperationPermits.blockOperations(30, TimeUnit.MINUTES, () -> { resetEngineToGlobalCheckpoint(); });
     }
 
+    public void syncSegments() {
+        replicator.accept(this, () -> {});
+    }
+
     /**
      * Wrapper for a non-closing reader
      *
@@ -2514,8 +2520,10 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
             translogConfig.setDownloadRemoteTranslogOnInit(true);
         }
 
-        getEngine().translogManager()
-            .recoverFromTranslog(translogRecoveryRunner, getEngine().getProcessedLocalCheckpoint(), Long.MAX_VALUE);
+        if (routingEntry().isSearchOnly() == false) {
+            getEngine().translogManager()
+                .recoverFromTranslog(translogRecoveryRunner, getEngine().getProcessedLocalCheckpoint(), Long.MAX_VALUE);
+        }
     }
 
     /**
@@ -2889,10 +2897,28 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
     public void recoverFromStore(ActionListener<Boolean> listener) {
         // we are the first primary, recover from the gateway
         // if its post api allocation, the index should exists
-        assert shardRouting.primary() : "recover from store only makes sense if the shard is a primary shard";
+        assert shardRouting.primary() || shardRouting.isSearchOnly() : "recover from store only makes sense if the shard is a primary shard";
         assert shardRouting.initializing() : "can only start recovery on initializing shard";
         StoreRecovery storeRecovery = new StoreRecovery(shardId, logger);
-        storeRecovery.recoverFromStore(this, listener);
+        ActionListener<Boolean> wrappedListener = ActionListener.wrap(
+            success -> {
+                if (success) {
+                    if (routingEntry().isSearchOnly()) {
+                        replicator.accept(this, () -> {
+                            logger.info("Finished replication as part of recovery");
+                            listener.onResponse(true);
+                        });
+                    } else {
+                        listener.onResponse(true);
+                    }
+                } else {
+                    listener.onResponse(false);
+                }
+            },
+            listener::onFailure
+        );
+
+        storeRecovery.recoverFromStore(this, wrappedListener);
     }
 
     public void restoreFromRemoteStore(ActionListener<Boolean> listener) {
@@ -3873,7 +3899,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         markAsRecovering(reason, recoveryState); // mark the shard as recovering on the cluster state thread
         threadPool.generic().execute(ActionRunnable.wrap(ActionListener.wrap(r -> {
             if (r) {
-                recoveryListener.onDone(recoveryState);
+                    recoveryListener.onDone(recoveryState);
             }
         }, e -> recoveryListener.onFailure(recoveryState, new RecoveryFailedException(recoveryState, null, e), true)), action));
     }
