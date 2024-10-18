@@ -45,6 +45,7 @@ import org.opensearch.core.common.transport.TransportAddress;
 import org.opensearch.core.xcontent.ToXContentFragment;
 import org.opensearch.core.xcontent.XContentBuilder;
 import org.opensearch.node.Node;
+import org.opensearch.transport.TransportSettings;
 import org.opensearch.node.remotestore.RemoteStoreNodeAttribute;
 
 import java.io.IOException;
