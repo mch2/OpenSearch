@@ -10,7 +10,9 @@ package org.opensearch.search.query;
 
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.FieldVector;
+import org.apache.arrow.vector.Float4Vector;
 import org.apache.arrow.vector.IntVector;
+import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -122,7 +124,7 @@ public class StreamSearchPhase extends QueryPhase {
                         public void run(VectorSchemaRoot root, StreamProducer.FlushSignal flushSignal) {
                             try {
                                 Collector collector = QueryCollectorContext.createQueryCollector(collectors);
-                                final ArrowDocIdCollector arrowDocIdCollector = new ArrowDocIdCollector(collector, root, flushSignal, 1000);
+                                final ArrowDocIdCollector arrowDocIdCollector = new ArrowDocIdCollector(collector, root, flushSignal, 1000, searchContext.shardTarget());
                                 try {
                                     searcher.search(query, arrowDocIdCollector);
                                 } catch (EarlyTerminatingCollector.EarlyTerminationException e) {
@@ -160,8 +162,14 @@ public class StreamSearchPhase extends QueryPhase {
                 @Override
                 public VectorSchemaRoot createRoot(BufferAllocator allocator) {
                     IntVector docIDVector = new IntVector("docID", allocator);
+                    Float4Vector scoreVector = new Float4Vector("score", allocator);
+                    VarCharVector shardIdVector = new VarCharVector("shardID", allocator);
+                    VarCharVector nodeIDVector = new VarCharVector("nodeID", allocator);
                     FieldVector[] vectors = new FieldVector[]{
-                        docIDVector
+                        docIDVector,
+                        scoreVector,
+                        shardIdVector,
+                        nodeIDVector
                     };
                     return new VectorSchemaRoot(Arrays.asList(vectors));
                 }

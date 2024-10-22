@@ -32,6 +32,16 @@
 
 package org.opensearch.action.search;
 
+import org.apache.arrow.memory.RootAllocator;
+import org.apache.arrow.vector.BigIntVector;
+import org.apache.arrow.vector.BitVector;
+import org.apache.arrow.vector.FieldVector;
+import org.apache.arrow.vector.Float4Vector;
+import org.apache.arrow.vector.Float8Vector;
+import org.apache.arrow.vector.IntVector;
+import org.apache.arrow.vector.VarCharVector;
+import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.ipc.ArrowReader;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.search.CollectionStatistics;
 import org.apache.lucene.search.FieldDoc;
@@ -45,9 +55,14 @@ import org.apache.lucene.search.TopFieldDocs;
 import org.apache.lucene.search.TotalHits;
 import org.apache.lucene.search.TotalHits.Relation;
 import org.apache.lucene.search.grouping.CollapseTopFieldDocs;
+import org.opensearch.arrow.StreamTicket;
 import org.opensearch.common.lucene.search.TopDocsAndMaxScore;
 import org.opensearch.core.common.breaker.CircuitBreaker;
 import org.opensearch.core.common.io.stream.NamedWriteableRegistry;
+import org.opensearch.core.index.shard.ShardId;
+import org.opensearch.datafusion.DataFrame;
+import org.opensearch.datafusion.DataFusion;
+import org.opensearch.datafusion.SessionContext;
 import org.opensearch.search.DocValueFormat;
 import org.opensearch.search.SearchHit;
 import org.opensearch.search.SearchHits;
@@ -72,12 +87,15 @@ import org.opensearch.search.suggest.Suggest;
 import org.opensearch.search.suggest.Suggest.Suggestion;
 import org.opensearch.search.suggest.completion.CompletionSuggestion;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -170,9 +188,9 @@ public final class SearchPhaseController {
      *
      * @param ignoreFrom Whether to ignore the from and sort all hits in each shard result.
      *                   Enabled only for scroll search, because that only retrieves hits of length 'size' in the query phase.
-     * @param topDocs the buffered top docs
-     * @param from the offset into the search results top docs
-     * @param size the number of hits to return from the merged top docs
+     * @param topDocs    the buffered top docs
+     * @param from       the offset into the search results top docs
+     * @param size       the number of hits to return from the merged top docs
      */
     static SortedTopDocs sortDocs(
         boolean ignoreFrom,
@@ -405,6 +423,7 @@ public final class SearchPhaseController {
 
     /**
      * Reduces the given query results and consumes all aggregations and profile results.
+     *
      * @param queryResults a list of non-null query shard results
      */
     ReducedQueryPhase reducedScrollQueryPhase(Collection<? extends SearchPhaseResult> queryResults) {
@@ -437,8 +456,9 @@ public final class SearchPhaseController {
 
     /**
      * Reduces the given query results and consumes all aggregations and profile results.
-     * @param queryResults a list of non-null query shard results
-     * @param bufferedAggs a list of pre-collected aggregations.
+     *
+     * @param queryResults    a list of non-null query shard results
+     * @param bufferedAggs    a list of pre-collected aggregations.
      * @param bufferedTopDocs a list of pre-collected top docs.
      * @param numReducePhases the number of non-final reduce phases applied to the query results.
      * @see QuerySearchResult#consumeAggs()
@@ -499,7 +519,7 @@ public final class SearchPhaseController {
         for (SearchPhaseResult entry : queryResults) {
             QuerySearchResult result = entry.queryResult();
             if (entry instanceof StreamSearchResult) {
-                tickets.addAll(((StreamSearchResult)entry).getFlightTickets());
+                tickets.addAll(((StreamSearchResult) entry).getFlightTickets());
             }
             from = result.from();
             // sorted queries can set the size to 0 if they have enough competitive hits.
@@ -563,9 +583,9 @@ public final class SearchPhaseController {
         return toReduce.isEmpty()
             ? null
             : InternalAggregations.topLevelReduce(
-                toReduce,
-                performFinalReduce ? aggReduceContextBuilder.forFinalReduction() : aggReduceContextBuilder.forPartialReduction()
-            );
+            toReduce,
+            performFinalReduce ? aggReduceContextBuilder.forFinalReduction() : aggReduceContextBuilder.forPartialReduction()
+        );
     }
 
     /**
@@ -657,6 +677,102 @@ public final class SearchPhaseController {
             : source.from());
     }
 
+    public ReducedQueryPhase reducedFromStream(List<StreamSearchResult> list) {
+        try (SessionContext context = new SessionContext()) {
+
+            List<byte[]> tickets = list.stream().flatMap(r -> r.getFlightTickets().stream())
+                .map(OSTicket::getBytes)
+                .collect(Collectors.toList());
+
+            CompletableFuture<DataFrame> frame = DataFusion.doQuery(context, tickets);
+
+            DataFrame dataFrame = null;
+            ArrowReader arrowReader = null;
+            try {
+                dataFrame = frame.get();
+                arrowReader = dataFrame.collect(context, new RootAllocator()).get();
+            } catch (InterruptedException | ExecutionException e) {
+                throw new RuntimeException(e);
+            }
+
+            int totalRows = 0;
+            List<ScoreDoc> scoreDocs = new ArrayList<>();
+            try {
+                while (arrowReader.loadNextBatch()) {
+                    VectorSchemaRoot root = arrowReader.getVectorSchemaRoot();
+                    int rowCount = root.getRowCount();
+                    totalRows+= rowCount;
+                    System.out.println("Record Batch with " + rowCount + " rows:");
+
+                    // Iterate through rows
+                    for (int row = 0; row < rowCount; row++) {
+                        FieldVector docID = root.getVector("docID");
+                        Float4Vector score = (Float4Vector) root.getVector("score");
+                        FieldVector shardID = root.getVector("shardID");
+                        FieldVector nodeID = root.getVector("nodeID");
+
+                        ShardId sid = ShardId.fromString((String) getValue(shardID, row));
+                        int value = (int) getValue(docID, row);
+                        System.out.println("DocID: " + value + " ShardID" + sid + "NodeID: " + getValue(nodeID, row));
+                        scoreDocs.add(new ScoreDoc(value, score.get(row), sid.id()));
+                    }
+                }
+
+                TotalHits totalHits = new TotalHits(totalRows, Relation.EQUAL_TO);
+                return new ReducedQueryPhase(
+                    totalHits,
+                    totalRows,
+                    1.0f,
+                    false,
+                    false,
+                    null,
+                    null,
+                    null,
+                    new SortedTopDocs(scoreDocs.toArray(ScoreDoc[]::new), false, null, null, null),
+                    null,
+                    1,
+                    totalRows,
+                    0,
+                    totalRows == 0,
+                    list.stream().flatMap(ssr -> ssr.getFlightTickets().stream()).collect(Collectors.toList())
+                );
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            } finally {
+                try {
+                    arrowReader.close();
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            }
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private static Object getValue(FieldVector vector, int index) {
+        if (vector.isNull(index)) {
+            return "null";
+        }
+
+        if (vector instanceof IntVector) {
+            return ((IntVector) vector).get(index);
+        } else if (vector instanceof BigIntVector) {
+            return ((BigIntVector) vector).get(index);
+        } else if (vector instanceof Float4Vector) {
+            return ((Float4Vector) vector).get(index);
+        } else if (vector instanceof Float8Vector) {
+            return ((Float8Vector) vector).get(index);
+        } else if (vector instanceof VarCharVector) {
+            return new String(((VarCharVector) vector).get(index));
+        } else if (vector instanceof BitVector) {
+            return ((BitVector) vector).get(index) != 0;
+        }
+        // Add more types as needed
+
+        return "Unsupported type: " + vector.getClass().getSimpleName();
+    }
+
     /**
      * The reduced query phase
      *
@@ -728,11 +844,12 @@ public final class SearchPhaseController {
             this.from = from;
             this.isEmptyResult = isEmptyResult;
             this.sortValueFormats = sortValueFormats;
-            this.osTickets  = osTickets;
+            this.osTickets = osTickets;
         }
 
         /**
          * Creates a new search response from the given merged hits.
+         *
          * @see #merge(boolean, ReducedQueryPhase, Collection, IntFunction)
          */
         public InternalSearchResponse buildResponse(SearchHits hits) {
@@ -845,6 +962,7 @@ public final class SearchPhaseController {
         static final SortedTopDocs EMPTY = new SortedTopDocs(EMPTY_DOCS, false, null, null, null);
         // the searches merged top docs
         final ScoreDoc[] scoreDocs;
+
         // <code>true</code> iff the result score docs is sorted by a field (not score), this implies that <code>sortField</code> is set.
         final boolean isSortedByField;
         // the top docs sort fields used to sort the score docs, <code>null</code> if the results are not sorted

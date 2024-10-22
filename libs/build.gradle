@@ -45,7 +45,8 @@ subprojects {
         Project depProject = dep.dependencyProject
         if (depProject != null
           && (false == depProject.path.equals(':libs:opensearch-core') &&
-              false == depProject.path.equals(':libs:opensearch-common'))
+              false == depProject.path.equals(':libs:opensearch-common') &&
+              false == depProject.path.equals(':libs:opensearch-arrow'))
           && depProject.path.startsWith(':libs')) {
           throw new InvalidUserDataException("projects in :libs "
             + "may not depend on other projects libs except "

@@ -802,7 +802,7 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
             try (SearchOperationListenerExecutor executor = new SearchOperationListenerExecutor(context)) {
                 loadOrExecuteStreamPhase(request, context);
                 if (context.queryResult().hasSearchContext() == false && readerContext.singleSession()) {
-                    freeReaderContext(readerContext.id());
+//                    freeReaderContext(readerContext.id());
                 }
             }
             return context.streamSearchResult();

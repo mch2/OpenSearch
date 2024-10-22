@@ -70,7 +70,7 @@ dependencies {
   api project(":libs:opensearch-telemetry")
   api project(":libs:opensearch-task-commons")
   api project(':libs:opensearch-arrow')
-
+  api project(':libs:opensearch-datafusion')
 
   compileOnly project(':libs:opensearch-plugin-classloader')
   testRuntimeOnly project(':libs:opensearch-plugin-classloader')

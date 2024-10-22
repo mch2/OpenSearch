@@ -76,10 +76,10 @@ class StreamAsyncAction extends SearchQueryThenFetchAsyncAction {
         super(logger, searchTransportService, nodeIdToConnection, aliasFilter, concreteIndexBoosts, indexRoutings, searchPhaseController, executor, resultConsumer, request, listener, shardsIts, timeProvider, clusterState, task, clusters, searchRequestContext, tracer);
     }
 
-    @Override
-    protected SearchPhase getNextPhase(final SearchPhaseResults<SearchPhaseResult> results, SearchPhaseContext context) {
-        return new StreamSearchReducePhase("stream_reduce", context);
-    }
+//    @Override
+//    protected SearchPhase getNextPhase(final SearchPhaseResults<SearchPhaseResult> results, SearchPhaseContext context) {
+//        return new StreamSearchReducePhase("stream_reduce", context);
+//    }
 
     class StreamSearchReducePhase extends SearchPhase {
         private SearchPhaseContext context;
@@ -111,6 +111,9 @@ class StreamAsyncAction extends SearchQueryThenFetchAsyncAction {
             }
             InternalSearchResponse internalSearchResponse = new InternalSearchResponse(SearchHits.empty(),null,  null, null, false, false, 1, Collections.emptyList(), tickets);
             context.sendSearchResponse(internalSearchResponse, results.getAtomicArray());
+//            context.executeNextPhase(this, new FetchSearchPhase(results, null, null, context));
+//            context.executeNextPhase(this, nextPhaseFactory.apply(internalSearchResponse, results));
+
         }
 
         @Override
