@@ -7,7 +7,11 @@
  */
 
 package org.opensearch.arrow.query;
-import org.apache.arrow.vector .*;
+import org.apache.arrow.vector.Float4Vector;
+import org.apache.arrow.vector.IntVector;
+import org.apache.arrow.vector.VarCharVector;
+import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.holders.VarCharHolder;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.search.Collector;
 import org.apache.lucene.search.FilterCollector;
@@ -16,6 +20,7 @@ import org.apache.lucene.search.Scorable;
 import org.apache.lucene.search.ScoreMode;
 import org.apache.lucene.search.Weight;
 import org.opensearch.arrow.StreamProducer;
+import org.opensearch.search.SearchShardTarget;
 
 import java.io.IOException;
 
@@ -24,15 +29,25 @@ public class ArrowDocIdCollector extends FilterCollector {
     private final StreamProducer.FlushSignal flushSignal;
     private final int batchSize;
     private final IntVector docIDVector;
-    private int currentRow;
+    private final Float4Vector scoreVector;
+    private final VarCharVector nodeIDVector;
+    private final VarCharVector shardIDVector;
 
-    public ArrowDocIdCollector(Collector in, VectorSchemaRoot root, StreamProducer.FlushSignal flushSignal, int batchSize) {
+
+    private int currentRow;
+    private SearchShardTarget target;
+
+    public ArrowDocIdCollector(Collector in, VectorSchemaRoot root, StreamProducer.FlushSignal flushSignal, int batchSize, SearchShardTarget target) {
         super(in);
         this.root = root;
         this.docIDVector = (IntVector) root.getVector("docID");
+        this.scoreVector = (Float4Vector) root.getVector("score");
+        this.nodeIDVector = (VarCharVector) root.getVector("nodeID");
+        this.shardIDVector = (VarCharVector) root.getVector("shardID");
         this.flushSignal = flushSignal;
         this.batchSize = batchSize;
         this.currentRow = 0;
+        this.target = target;
     }
 
     @Override
@@ -52,11 +67,15 @@ public class ArrowDocIdCollector extends FilterCollector {
     public LeafCollector getLeafCollector(LeafReaderContext context) throws IOException {
         LeafCollector inner = (this.in == null ? null: super.getLeafCollector(context));
         return new LeafCollector() {
+
+            private Scorable scorer;
+
             @Override
             public void setScorer(Scorable scorer) throws IOException {
                 if (inner != null) {
                     inner.setScorer(scorer);
                 }
+                this.scorer = scorer;
             }
 
             @Override
@@ -65,6 +84,10 @@ public class ArrowDocIdCollector extends FilterCollector {
                     inner.collect(doc);
                 }
                 docIDVector.setSafe(currentRow, doc);
+                scoreVector.setSafe(currentRow, scorer.score());
+                shardIDVector.setSafe(currentRow, target.getShardId().toString().getBytes());
+                nodeIDVector.setSafe(currentRow, target.getNodeId().getBytes());
+
                 currentRow++;
                 if (currentRow >= batchSize) {
                     root.setRowCount(batchSize);

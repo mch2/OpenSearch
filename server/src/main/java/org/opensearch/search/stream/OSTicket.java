@@ -33,6 +33,10 @@ public class OSTicket implements Writeable, ToXContentFragment {
         this.streamTicket = StreamTicket.fromBytes(bytes);
     }
 
+    public byte[] getBytes() {
+        return streamTicket.toBytes();
+    }
+
     @Override
     public XContentBuilder toXContent(XContentBuilder builder, Params params) throws IOException {
         byte[] bytes = streamTicket.toBytes();
