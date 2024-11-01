@@ -1396,6 +1396,7 @@ public class Node implements Closeable {
                     logger.info("StreamManager initialized");
                 }
             }
+            final StreamManager manager = streamManager;
             final SearchService searchService = newSearchService(
                 clusterService,
                 indicesService,
@@ -1410,7 +1411,7 @@ public class Node implements Closeable {
                 searchModule.getIndexSearcherExecutor(threadPool),
                 taskResourceTrackingService,
                 searchModule.getConcurrentSearchRequestDeciderFactories(),
-                streamManager
+                manager
             );
 
             final List<PersistentTasksExecutor<?>> tasksExecutors = pluginsService.filterPlugins(PersistentTaskPlugin.class)
@@ -1484,7 +1485,7 @@ public class Node implements Closeable {
                 b.bind(SearchService.class).toInstance(searchService);
                 b.bind(SearchTransportService.class).toInstance(searchTransportService);
                 b.bind(SearchPhaseController.class)
-                    .toInstance(new SearchPhaseController(namedWriteableRegistry, searchService::aggReduceContextBuilder));
+                    .toInstance(new SearchPhaseController(namedWriteableRegistry, searchService::aggReduceContextBuilder, searchService.getStreamManager()));
                 b.bind(Transport.class).toInstance(transport);
                 b.bind(TransportService.class).toInstance(transportService);
                 b.bind(NetworkService.class).toInstance(networkService);
@@ -1495,6 +1496,7 @@ public class Node implements Closeable {
                 b.bind(GatewayMetaState.class).toInstance(gatewayMetaState);
                 b.bind(Discovery.class).toInstance(discoveryModule.getDiscovery());
                 b.bind(RemoteStoreSettings.class).toInstance(remoteStoreSettings);
+                b.bind(StreamManager.class).toInstance(manager);
                 {
                     b.bind(PeerRecoverySourceService.class)
                         .toInstance(new PeerRecoverySourceService(transportService, indicesService, recoverySettings));

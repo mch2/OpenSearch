@@ -1941,6 +1941,10 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
         };
     }
 
+    public StreamManager getStreamManager() {
+        return streamManager;
+    }
+
     private static PipelineTree requestToPipelineTree(SearchSourceBuilder searchSourceBuilder) {
         if (searchSourceBuilder == null || searchSourceBuilder.aggregations() == null) {
             return PipelineTree.EMPTY;

@@ -100,11 +100,14 @@ public class BaseFlightProducer extends NoOpFlightProducer {
                     throw new RuntimeException("Error while waiting for client: " + result);
                 }
             };
+
             try (VectorSchemaRoot root = streamHolder.getRoot()) {
                 listener.start(root);
                 batchedJob.run(root, flushSignal);
             }
         } catch (Exception e) {
+            e.printStackTrace();
+            System.out.println("Somethign broke " + e.getMessage());
             listener.error(CallStatus.INTERNAL.withDescription(e.getMessage()).withCause(e).cause());
             throw e;
         } finally {

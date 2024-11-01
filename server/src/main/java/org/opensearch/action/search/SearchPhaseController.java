@@ -55,7 +55,7 @@ import org.apache.lucene.search.TopFieldDocs;
 import org.apache.lucene.search.TotalHits;
 import org.apache.lucene.search.TotalHits.Relation;
 import org.apache.lucene.search.grouping.CollapseTopFieldDocs;
-import org.opensearch.arrow.StreamTicket;
+import org.opensearch.arrow.StreamManager;
 import org.opensearch.common.lucene.search.TopDocsAndMaxScore;
 import org.opensearch.core.common.breaker.CircuitBreaker;
 import org.opensearch.core.common.io.stream.NamedWriteableRegistry;
@@ -113,13 +113,25 @@ public final class SearchPhaseController {
 
     private final NamedWriteableRegistry namedWriteableRegistry;
     private final Function<SearchSourceBuilder, InternalAggregation.ReduceContextBuilder> requestToAggReduceContextBuilder;
+    private final StreamManager streamManager;
 
     public SearchPhaseController(
         NamedWriteableRegistry namedWriteableRegistry,
-        Function<SearchSourceBuilder, InternalAggregation.ReduceContextBuilder> requestToAggReduceContextBuilder
-    ) {
+        Function<SearchSourceBuilder, InternalAggregation.ReduceContextBuilder> requestToAggReduceContextBuilder,
+        StreamManager streamManager) {
         this.namedWriteableRegistry = namedWriteableRegistry;
         this.requestToAggReduceContextBuilder = requestToAggReduceContextBuilder;
+        this.streamManager = streamManager;
+    }
+
+    public SearchPhaseController(
+        NamedWriteableRegistry namedWriteableRegistry,
+        Function<SearchSourceBuilder, InternalAggregation.ReduceContextBuilder> requestToAggReduceContextBuilder) {
+        this(namedWriteableRegistry, requestToAggReduceContextBuilder, null);
+    }
+
+    public StreamManager getStreamManager() {
+        return streamManager;
     }
 
     public AggregatedDfs aggregateDfs(Collection<DfsSearchResult> results) {
@@ -694,19 +706,22 @@ public final class SearchPhaseController {
     }
 
     public ReducedQueryPhase reducedFromStream(List<StreamSearchResult> list) {
+
+
         try (SessionContext context = new SessionContext()) {
 
             List<byte[]> tickets = list.stream().flatMap(r -> r.getFlightTickets().stream())
                 .map(OSTicket::getBytes)
                 .collect(Collectors.toList());
 
-            CompletableFuture<DataFrame> frame = DataFusion.doQuery(context, tickets);
+            // execute the query and get a dataframe
+            CompletableFuture<DataFrame> frame = DataFusion.query(tickets);
 
             DataFrame dataFrame = null;
             ArrowReader arrowReader = null;
             try {
                 dataFrame = frame.get();
-                arrowReader = dataFrame.collect(context, new RootAllocator()).get();
+                arrowReader = dataFrame.collect(new RootAllocator()).get();
             } catch (InterruptedException | ExecutionException e) {
                 throw new RuntimeException(e);
             }

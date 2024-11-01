@@ -1,83 +1,119 @@
-use std::io::{Cursor};
+use arrow_flight::{flight_service_client::FlightServiceClient, FlightDescriptor, FlightInfo};
+use bytes::Bytes;
+use datafusion::catalog::TableProvider;
+use datafusion::common::JoinType;
+use datafusion::common::Result;
+use datafusion::error::DataFusionError;
+use futures::TryFutureExt;
 use std::{collections::HashMap, sync::Arc};
 
-use arrow::record_batch::RecordBatch;
-use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
-use arrow::error::ArrowError;
-use arrow::ipc::reader::StreamReader;
-use arrow_flight::FlightData;
-use datafusion::logical_expr::expr;
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
-use datafusion::prelude::{col, lit, DataFrame};
-use datafusion::{error::DataFusionError, prelude::SessionContext};
-use datafusion_table_providers::flight::{FlightDriver, FlightMetadata, FlightTableFactory};
-use futures::{StreamExt, TryStreamExt};
-use tonic::{async_trait, transport::Channel, Request};
-use arrow_flight::{error::Result, flight_service_client::FlightServiceClient, FlightDescriptor, FlightEndpoint, FlightInfo, Ticket};
-use arrow_flight::utils::flight_data_to_arrow_batch;
-use bytes::Bytes;
+use datafusion::prelude::SessionContext;
+use datafusion::prelude::{col, DataFrame};
+use datafusion_table_providers::flight::{
+    FlightDriver, FlightMetadata, FlightProperties, FlightTableFactory,
+};
+use futures::future::try_join_all;
+use tonic::async_trait;
+use tonic::transport::Channel;
 
-pub async fn collect(ctx: SessionContext, tickets: Vec<Bytes>) -> datafusion::common::Result<DataFrame> {
+// Returns a DataFrame that represents a query on a single index.
+// Each ticket should correlate to a single shard so that this executes shard fan-out
+pub async fn query(
+    ctx: SessionContext,
+    tickets: Vec<Bytes>,
+) -> datafusion::common::Result<DataFrame> {
+    let df = dataframe_for_index(&ctx, "theIndex".to_owned(), tickets).await?;
 
-    // register "tables" for all of the given tickets
-    let driver: TicketedFlightDriver = TicketedFlightDriver {
-        tickets
-    };
-    let table_factory: FlightTableFactory = FlightTableFactory::new(Arc::new(driver));
-    let table = table_factory
-        .open_table(
-            format!("http://localhost:{}", "8815"),
-            HashMap::new(),
-        ).await?;
-
-    ctx.register_table("theIndex",  Arc::new(table))?;  
-    let plan = ctx.state().create_logical_plan("Select * FROM theIndex ORDER BY score desc").await?;
-    let data = ctx.execute_logical_plan(plan).await?;
-    // execute the query producing the final stream
-
-    // query a single table on the fly, no registration
-    // let data = ctx.read_table(Arc::new(table))?;
-
-    // return the docId set
-    Ok(data)
+    df.sort(vec![col("score").sort(false, true)])
+        .map_err(|e| DataFusionError::Execution(format!("Failed to sort DataFrame: {}", e)))
 }
 
+// inner join two tables together, returning a single DataFrame that can be consumed
+// represents a join query against two indices
+pub async fn join(
+    ctx: SessionContext,
+    left: Vec<Bytes>,
+    right: Vec<Bytes>,
+    join_field: String,
+) -> datafusion::common::Result<DataFrame> {
+    let left_df = dataframe_for_index(&ctx, "left".to_owned(), left).await?;
+    let right_df = dataframe_for_index(&ctx, "right".to_owned(), right).await?;
 
-#[derive(Clone, Debug, Default)]
-pub struct OpenSearchFlightDriver {}
+    left_df
+        .join(
+            right_df,
+            JoinType::Inner,
+            &[&join_field],
+            &[&join_field],
+            None,
+        )
+        .map_err(|e| DataFusionError::Execution(format!("Join operation failed: {}", e)))
+}
 
-#[async_trait]
-impl FlightDriver for OpenSearchFlightDriver {
-    async fn metadata(
-        &self,
-        channel: Channel,
-        options: &HashMap<String, String>,
-    ) -> Result<FlightMetadata> {
-        let mut client: FlightServiceClient<Channel> = FlightServiceClient::new(channel);
+// Return a single dataframe for an entire index.
+// Each ticket in tickets represents a single shard.
+async fn dataframe_for_index(
+    ctx: &SessionContext,
+    prefix: String,
+    tickets: Vec<Bytes>,
+) -> Result<DataFrame> {
+    let inner_futures = tickets
+        .into_iter()
+        .enumerate()
+        .map(|(j, bytes)| {
+            let table_name = format!("{}-s-{}", prefix, j);
+            get_dataframe_for_tickets(ctx, table_name, vec![bytes.clone()])
+        })
+        .collect::<Vec<_>>();
 
-        // let descriptor = FlightDescriptor::new_cmd(options["flight.command"].clone());
+    let frames = try_join_all(inner_futures)
+        .await
+        .map_err(|e| DataFusionError::Execution(format!("Failed to join futures: {}", e)))?;
 
-        // let descriptor: FlightDescriptor = FlightDescriptor::new_path(vec!["get_table_data".to_string()]);
-        let cmd = FlightDescriptor::new_cmd("wtf".as_bytes());
+    union_df(frames)
+}
 
-        let response: std::result::Result<tonic::Response<FlightInfo>, tonic::Status> = client.get_flight_info(tonic::Request::new(cmd)).await;
-        match response {
-            Ok(info) => {
-                println!("Received info: {:?}", info);      
-                let info: arrow_flight::FlightInfo = info.into_inner();
-                FlightMetadata::try_new(info, HashMap::default())
-            }
-            Err(status) => {
-                println!("Error details: {:?}", status);
-                return Err(status.into());
-            }
-        }
-    }
+// Union a list of DataFrames
+fn union_df(frames: Vec<DataFrame>) -> Result<DataFrame> {
+    Ok(frames
+        .into_iter()
+        .reduce(|acc, df| match acc.union(df) {
+            Ok(unioned_df) => unioned_df,
+            Err(e) => panic!("Failed to union DataFrames: {}", e),
+        })
+        .ok_or_else(|| DataFusionError::Execution("No frames to union".to_string()))?)
+}
+
+// registers a single table from the list of given tickets, then reads it immediately returning a dataframe.
+// intended to be used to register and get a df for a single shard.
+async fn get_dataframe_for_tickets(
+    ctx: &SessionContext,
+    name: String,
+    tickets: Vec<Bytes>,
+) -> Result<DataFrame> {
+    register_table(ctx, name.clone(), tickets)
+        .and_then(|_| ctx.table(&name))
+        .await
+}
+// registers a single table with datafusion using DataFusion TableProviders.
+// Uses a TicketedFlightDriver to register the table with the list of given tickets.
+async fn register_table(ctx: &SessionContext, name: String, tickets: Vec<Bytes>) -> Result<()> {
+    let driver: TicketedFlightDriver = TicketedFlightDriver { tickets };
+    let table_factory: FlightTableFactory = FlightTableFactory::new(Arc::new(driver));
+    let table = table_factory
+        .open_table(format!("http://localhost:{}", "8815"), HashMap::new())
+        .await
+        .map_err(|e| DataFusionError::Execution(format!("Error creating table: {}", e)))?;
+    println!("Registering table {}", name);
+    println!("Registering table {:?}", table);
+    ctx.register_table(name, Arc::new(table))
+        .map_err(|e| DataFusionError::Execution(format!("Error registering table: {}", e)))?;
+    Ok(())
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct TicketedFlightDriver {
-    tickets: Vec<Bytes>
+    tickets: Vec<Bytes>,
 }
 
 #[async_trait]
@@ -85,64 +121,26 @@ impl FlightDriver for TicketedFlightDriver {
     // this doesn't work - we don't have schema data...
     async fn metadata(
         &self,
-        _channel: Channel,
+        channel: Channel,
         _options: &HashMap<String, String>,
-    ) -> Result<FlightMetadata> {
+    ) -> arrow_flight::error::Result<FlightMetadata> {
+        let mut client: FlightServiceClient<Channel> = FlightServiceClient::new(channel.clone());
 
+        // TODO: validate tickets vec on way in
 
-        let schema = Schema::new(vec![
-            Field::new("docID", DataType::Int32, false),
-            Field::new("score", DataType::Float32, false),
-            Field::new("shardID", DataType::Utf8, false),
-            Field::new("nodeID", DataType::Utf8, false)
-          ]);
-
-       let mut info: FlightInfo = FlightInfo::new();
-
-       for entry in &self.tickets {
-        println!("Processing ticket: {:?}", entry);
-        let endpoint: FlightEndpoint = FlightEndpoint::new()
-        .with_ticket(Ticket::new(entry.clone()))
-        .with_location("http://localhost:8815");
-        info = info.with_endpoint(endpoint);
-       }
-       let info = info.try_with_schema(&schema)
-           .expect("encoding failed");
-      return FlightMetadata::try_new(info, HashMap::default());
-
-      // this shit doesn't work bc the stream gets consumed.. if we read the schema here we have to pass the stream down
-      // to the table impl so it can be read only once.
-
-        // // with this driver, we are supplied the ticket Id already, so we'll construct the
-        // // FlightInfo manually... might be better to just have the server return the entire info and push the query here?
-        // let mut client: FlightServiceClient<Channel> = FlightServiceClient::new(channel);
-        // let ticket: Ticket = Ticket::new("77e745bd-af92-42cf-b30e-2247b8bbf71a");
-        // let response = client.do_get(ticket).await;
-
-        // match response {
-        //     Ok(s) => {
-        //         let mut stream = s.into_inner();
-        //         let flight_data = stream.message().await?.unwrap();
-        //         // convert FlightData to a stream
-        //         let schema = Arc::new(Schema::try_from(&flight_data)?);
-        //         println!("Schema: {schema:?}");
-        //         let endpoint = FlightEndpoint::new()
-        //         .with_ticket(Ticket::new("77e745bd-af92-42cf-b30e-2247b8bbf71a"))
-        //         .with_location("http://localhost:8815");
-                        
-        //         let info = FlightInfo::new()
-        //             .with_endpoint(endpoint)
-        //             .try_with_schema(&schema)
-        //             .expect("encoding failed");
-        //        return FlightMetadata::try_new(info, HashMap::default());
-        //     }
-        //     Err(status) => {
-        //         println!("Error details: {:?}", status);
-        //         return Err(status.into());
-        //     }
-        // }
-    
+        let cmd = FlightDescriptor::new_cmd(self.tickets.get(0).expect("No ticket found").clone());
+        let response: std::result::Result<tonic::Response<FlightInfo>, tonic::Status> =
+            client.get_flight_info(tonic::Request::new(cmd)).await;
+        match response {
+            Ok(info) => {
+                println!("Received info: {:?}", info);
+                let info: arrow_flight::FlightInfo = info.into_inner();
+                return FlightMetadata::try_new(info, FlightProperties::default());
+            }
+            Err(status) => {
+                println!("Error details: {:?}", status);
+                return Err(status.into());
+            }
+        }
     }
-
-    
 }
