@@ -21,17 +21,21 @@ import java.util.concurrent.CompletableFuture;
  * Represents a DataFrame, which is a result of a query.
  * This class provides methods to collect the DataFrame from the DataFusion runtime.
  */
-public class DataFrame {
+public class DataFrame implements AutoCloseable {
 
     public static Logger logger = LogManager.getLogger(DataFrame.class);
+    private final SessionContext ctx;
 
     long ptr;
 
-    public DataFrame(long ptr) {
+    static native void destroyDataFrame(long pointer);
+
+    public DataFrame(SessionContext ctx, long ptr) {
+        this.ctx = ctx;
         this.ptr = ptr;
     }
 
-    public CompletableFuture<ArrowReader> collect(SessionContext ctx, BufferAllocator allocator) {
+    public CompletableFuture<ArrowReader> collect(BufferAllocator allocator) {
         CompletableFuture<ArrowReader> result = new CompletableFuture<>();
         DataFusion.collect(ctx.getRuntime(), ptr, (err, obj) -> {
             if (err != null && err.isEmpty() == false) {
@@ -41,5 +45,32 @@ public class DataFrame {
             }
         });
         return result;
+    }
+
+    // return a stream over the dataframe
+    public CompletableFuture<RecordBatchStream> getStream(BufferAllocator allocator) {
+        CompletableFuture<RecordBatchStream> result = new CompletableFuture<>();
+        long runtimePointer = ctx.getRuntime();
+        DataFusion.executeStream(
+            runtimePointer,
+            ptr,
+            (String errString, long streamId) -> {
+                if (errString != null && errString.isEmpty() == false) {
+                    result.completeExceptionally(new RuntimeException(errString));
+                } else {
+                    result.complete(new RecordBatchStream(ctx, streamId, allocator));
+                }
+            });
+        return result;
+    }
+
+    public SessionContext context() {
+        return ctx;
+    }
+
+    @Override
+    public void close() throws Exception {
+        destroyDataFrame(ptr);
+        ctx.close();
     }
 }

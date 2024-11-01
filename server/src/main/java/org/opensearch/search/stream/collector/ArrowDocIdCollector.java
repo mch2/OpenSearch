@@ -6,7 +6,7 @@
  * compatible open source license.
  */
 
-package org.opensearch.arrow.query;
+package org.opensearch.search.stream.collector;
 import org.apache.arrow.vector.Float4Vector;
 import org.apache.arrow.vector.IntVector;
 import org.apache.arrow.vector.VarCharVector;
@@ -30,9 +30,7 @@ public class ArrowDocIdCollector extends FilterCollector {
     private final int batchSize;
     private final IntVector docIDVector;
     private final Float4Vector scoreVector;
-    private final VarCharVector nodeIDVector;
     private final VarCharVector shardIDVector;
-
 
     private int currentRow;
     private SearchShardTarget target;
@@ -42,8 +40,7 @@ public class ArrowDocIdCollector extends FilterCollector {
         this.root = root;
         this.docIDVector = (IntVector) root.getVector("docID");
         this.scoreVector = (Float4Vector) root.getVector("score");
-        this.nodeIDVector = (VarCharVector) root.getVector("nodeID");
-        this.shardIDVector = (VarCharVector) root.getVector("shardID");
+        this.shardIDVector = (VarCharVector) root.getVector("shardId");
         this.flushSignal = flushSignal;
         this.batchSize = batchSize;
         this.currentRow = 0;
@@ -86,7 +83,6 @@ public class ArrowDocIdCollector extends FilterCollector {
                 docIDVector.setSafe(currentRow, doc);
                 scoreVector.setSafe(currentRow, scorer.score());
                 shardIDVector.setSafe(currentRow, target.getShardId().toString().getBytes());
-                nodeIDVector.setSafe(currentRow, target.getNodeId().getBytes());
 
                 currentRow++;
                 if (currentRow >= batchSize) {
