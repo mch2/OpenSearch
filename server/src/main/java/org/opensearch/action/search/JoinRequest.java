@@ -27,40 +27,35 @@ import java.util.List;
 import static org.opensearch.action.ValidateActions.addValidationError;
 
 /**
- * Request to delete one or more PIT search contexts based on IDs.
+ * Join Request
  *
- * @opensearch.api
+ * @opensearch.experimental
  */
 @ExperimentalApi()
 public class JoinRequest extends ActionRequest {
 
-    public SearchRequest getLeftIndex() {
-        return leftIndex;
-    }
-
-    public SearchRequest getRightIndex() {
-        return rightIndex;
-    }
-
-    public String getJoinField() {
-        return joinField;
-    }
-
     private final SearchRequest leftIndex;
     private final SearchRequest rightIndex;
     private final String joinField;
+    private final boolean getHits;
 
     public JoinRequest(StreamInput in) throws IOException {
         super(in);
         leftIndex = new SearchRequest(in);
         rightIndex = new SearchRequest(in);
         joinField = in.readString();
+        this.getHits = in.readBoolean();
     }
 
     public JoinRequest(SearchRequest left, SearchRequest right, String joinField) {
+        this(left, right, joinField, false);
+    }
+
+    public JoinRequest(SearchRequest left, SearchRequest right, String joinField, boolean getHits) {
         this.leftIndex = left;
         this.rightIndex = right;
         this.joinField = joinField;
+        this.getHits = getHits;
     }
 
     @Override
@@ -78,5 +73,18 @@ public class JoinRequest extends ActionRequest {
         leftIndex.writeTo(out);
         rightIndex.writeTo(out);
         out.writeString(joinField);
+        out.writeBoolean(getHits);
+    }
+
+    public SearchRequest getLeftIndex() {
+        return leftIndex;
+    }
+
+    public SearchRequest getRightIndex() {
+        return rightIndex;
+    }
+
+    public String getJoinField() {
+        return joinField;
     }
 }
