@@ -184,9 +184,75 @@ pub extern "system" fn Java_org_opensearch_datafusion_SessionContext_destroyRunt
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
 
-    #[test]
-    fn test_unwrap_tickets() {
+    use arrow::{array::{Int32Array, RecordBatch, StringArray}, datatypes::{DataType, Field, Schema}};
+    use datafusion::{common::JoinType, prelude::{col, SessionContext}};
+
+
+    #[tokio::test]
+    async fn test_unwrap_tickets() {
+        let ctx = SessionContext::new();
+
+    // Define schemas
+    let employee_schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int32, false),
+        Field::new("name", DataType::Utf8, false),
+        Field::new("age", DataType::Int32, false),
+    ]));
+
+    let department_schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int32, false),
+        Field::new("department_name", DataType::Utf8, false),
+    ]));
+
+    // Create employee RecordBatch
+    let employee_batch = RecordBatch::try_new(
+        employee_schema.clone(),
+        vec![
+            Arc::new(Int32Array::from(vec![1, 2, 3])),
+            Arc::new(StringArray::from(vec!["John", "Jane", "Bob"])),
+            Arc::new(Int32Array::from(vec![30, 25, 35])),
+        ],
+    ).unwrap();
+
+    // Create department RecordBatch
+    let department_batch = RecordBatch::try_new(
+        department_schema.clone(),
+        vec![
+            Arc::new(Int32Array::from(vec![1, 2, 3])),
+            Arc::new(StringArray::from(vec!["Engineering", "Marketing", "Sales"])),
+        ],
+    ).unwrap();
+
+    // Create DataFrames from RecordBatches
+    let employee_df = ctx.read_batch(employee_batch).unwrap();
+    let department_df = ctx.read_batch(department_batch).unwrap().select(vec![
+        col("id").alias("dept_id"),
+        col("department_name")
+    ]).unwrap();
+
+    // Perform join using DataFrame API
+    let joined_df = employee_df
+        .join(
+            department_df,
+            JoinType::Inner,
+            &["id"],  // join columns from left DataFrame
+            &["id"],  // join columns from right DataFrame
+            None,     // additional join filter
+        ).unwrap().select(vec![col("id"), col("name"), col("age"), col("department_name")]).unwrap();
+
+        joined_df.show().await;
+    // Execute and collect results
+    // let results = joined_df.collect().await.unwrap();
+
+    // // Print results
+    // println!("Join Results:");
+    // for batch in results {
+    //     println!("{:?}", batch);
+    // }
+
+    
     }
 }
 

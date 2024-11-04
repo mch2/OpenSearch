@@ -8,34 +8,28 @@
 
 package org.opensearch.action.search;
 
+import org.apache.lucene.search.TotalHits;
+import org.opensearch.common.annotation.ExperimentalApi;
 import org.opensearch.common.annotation.PublicApi;
-import org.opensearch.common.xcontent.StatusToXContentObject;
-import org.opensearch.core.ParseField;
 import org.opensearch.core.action.ActionResponse;
 import org.opensearch.core.common.io.stream.StreamInput;
 import org.opensearch.core.common.io.stream.StreamOutput;
-import org.opensearch.core.rest.RestStatus;
-import org.opensearch.core.xcontent.ConstructingObjectParser;
-import org.opensearch.core.xcontent.XContentBuilder;
-import org.opensearch.core.xcontent.XContentParser;
+import org.opensearch.search.SearchHit;
+import org.opensearch.search.SearchHits;
 import org.opensearch.search.stream.OSTicket;
 
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.List;
-
-import static org.opensearch.core.rest.RestStatus.OK;
-import static org.opensearch.core.xcontent.ConstructingObjectParser.constructorArg;
 
 /**
- * Response class for delete pits flow which clears the point in time search contexts
+ * Join Response
  *
- * @opensearch.api
+ * @opensearch.experimental
  */
-@PublicApi(since = "2.3.0")
+@ExperimentalApi
 public class JoinResponse extends ActionResponse {
 
     private final OSTicket ticket;
+    private final SearchHits hits;
 
     public OSTicket getTicket() {
         return ticket;
@@ -43,16 +37,24 @@ public class JoinResponse extends ActionResponse {
 
     public JoinResponse(OSTicket ticket) {
         this.ticket = ticket;
+        this.hits = new SearchHits(new SearchHit[]{}, new TotalHits(0, TotalHits.Relation.EQUAL_TO), 0f);
+    }
+
+    public JoinResponse(SearchHits hits) {
+        this.ticket = new OSTicket("", "");
+        this.hits = hits;
     }
 
     public JoinResponse(StreamInput in) throws IOException {
         super(in);
         this.ticket = new OSTicket(in);
+        this.hits = new SearchHits(in);
     }
 
     @Override
     public void writeTo(StreamOutput out) throws IOException {
        ticket.writeTo(out);
+       hits.writeTo(out);
     }
 
     @Override
