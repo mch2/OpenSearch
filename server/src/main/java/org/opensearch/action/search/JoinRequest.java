@@ -87,4 +87,8 @@ public class JoinRequest extends ActionRequest {
     public String getJoinField() {
         return joinField;
     }
+
+    public boolean isGetHits() {
+        return getHits;
+    }
 }

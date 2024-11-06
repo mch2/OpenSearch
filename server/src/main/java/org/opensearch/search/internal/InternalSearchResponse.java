@@ -34,6 +34,7 @@ package org.opensearch.search.internal;
 
 import org.opensearch.Version;
 import org.opensearch.action.search.SearchResponseSections;
+import org.opensearch.action.search.StreamTargetResponse;
 import org.opensearch.common.annotation.PublicApi;
 import org.opensearch.core.common.io.stream.StreamInput;
 import org.opensearch.core.common.io.stream.StreamOutput;
@@ -41,6 +42,7 @@ import org.opensearch.core.common.io.stream.Writeable;
 import org.opensearch.core.xcontent.ToXContentFragment;
 import org.opensearch.search.SearchExtBuilder;
 import org.opensearch.search.SearchHits;
+import org.opensearch.search.SearchPhaseResult;
 import org.opensearch.search.aggregations.InternalAggregations;
 import org.opensearch.search.profile.SearchProfileShardResults;
 import org.opensearch.search.stream.OSTicket;
@@ -87,7 +89,7 @@ public class InternalSearchResponse extends SearchResponseSections implements Wr
         int numReducePhases,
         List<SearchExtBuilder> searchExtBuilderList
     ) {
-        this(hits, aggregations, suggest, profileResults, timedOut, terminatedEarly, numReducePhases, searchExtBuilderList, null);
+        this(hits, aggregations, suggest, profileResults, timedOut, terminatedEarly, numReducePhases, searchExtBuilderList, null, null);
     }
 
     public InternalSearchResponse(
@@ -99,9 +101,10 @@ public class InternalSearchResponse extends SearchResponseSections implements Wr
         Boolean terminatedEarly,
         int numReducePhases,
         List<SearchExtBuilder> searchExtBuilderList,
-        List<OSTicket> tickets
+        List<OSTicket> tickets,
+        List<StreamTargetResponse> result
     ) {
-        super(hits, aggregations, suggest, timedOut, terminatedEarly, profileResults, numReducePhases, searchExtBuilderList, tickets);
+        super(hits, aggregations, suggest, timedOut, terminatedEarly, profileResults, numReducePhases, searchExtBuilderList, tickets, result);
     }
 
     public InternalSearchResponse(StreamInput in) throws IOException {
@@ -114,7 +117,8 @@ public class InternalSearchResponse extends SearchResponseSections implements Wr
             in.readOptionalWriteable(SearchProfileShardResults::new),
             in.readVInt(),
             readSearchExtBuildersOnOrAfter(in),
-            (in.readBoolean()? in.readList(OSTicket::new): null)
+            (in.readBoolean()? in.readList(OSTicket::new): null),
+            (in.readBoolean()? in.readList(StreamTargetResponse::new): null)
         );
     }
 
@@ -131,6 +135,10 @@ public class InternalSearchResponse extends SearchResponseSections implements Wr
         if (tickets != null && !tickets.isEmpty()) {
             out.writeBoolean(true);
             out.writeList(tickets);
+        }
+        if (shardResults != null && !shardResults.isEmpty()) {
+            out.writeBoolean(true);
+            out.writeList(shardResults);
         }
     }
 

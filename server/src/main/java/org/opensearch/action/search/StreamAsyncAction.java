@@ -42,6 +42,7 @@ import org.opensearch.arrow.StreamTicket;
 import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.routing.GroupShardsIterator;
 import org.opensearch.common.util.concurrent.AbstractRunnable;
+import org.opensearch.common.util.concurrent.AtomicArray;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.datafusion.DataFrame;
 import org.opensearch.datafusion.DataFrameStreamProducer;
@@ -50,8 +51,11 @@ import org.opensearch.datafusion.RecordBatchStream;
 import org.opensearch.datafusion.SessionContext;
 import org.opensearch.search.SearchHits;
 import org.opensearch.search.SearchPhaseResult;
+import org.opensearch.search.SearchShardTarget;
 import org.opensearch.search.internal.AliasFilter;
 import org.opensearch.search.internal.InternalSearchResponse;
+import org.opensearch.search.internal.ShardSearchContextId;
+import org.opensearch.search.internal.ShardStreamQueryResult;
 import org.opensearch.search.stream.OSTicket;
 import org.opensearch.search.stream.StreamSearchResult;
 import org.opensearch.telemetry.tracing.Tracer;
@@ -110,13 +114,19 @@ class StreamAsyncAction extends SearchQueryThenFetchAsyncAction {
         @Override
         protected void doRun() throws Exception {
             try {
-                List<byte[]> tickets = results.getAtomicArray().asList().stream().flatMap(r -> ((StreamSearchResult) r).getFlightTickets().stream())
+                List<SearchPhaseResult> results = StreamAsyncAction.this.results.getAtomicArray().asList();
+                List<byte[]> tickets = results.stream().flatMap(r -> ((StreamSearchResult) r).getFlightTickets().stream())
                     .map(OSTicket::getBytes)
                     .collect(Collectors.toList());
+                List<StreamTargetResponse> targets = StreamAsyncAction.this.results.getAtomicArray().asList()
+                    .stream()
+                    .map(r -> new StreamTargetResponse(r.queryResult(), r.getSearchShardTarget()))
+                    .collect(Collectors.toList());
+                System.out.println(targets);
                 StreamManager streamManager = searchPhaseController.getStreamManager();
                 StreamTicket streamTicket = streamManager.registerStream(DataFrameStreamProducer.query(tickets));
-                InternalSearchResponse internalSearchResponse = new InternalSearchResponse(SearchHits.empty(), null, null, null, false, false, 1, Collections.emptyList(), List.of(new OSTicket(streamTicket.getTicketID(), streamTicket.getNodeID())));
-                context.sendSearchResponse(internalSearchResponse, results.getAtomicArray());
+                InternalSearchResponse internalSearchResponse = new InternalSearchResponse(SearchHits.empty(), null, null, null, false, false, 1, Collections.emptyList(), List.of(new OSTicket(streamTicket.getTicketID(), streamTicket.getNodeID())), targets);
+                context.sendSearchResponse(internalSearchResponse, StreamAsyncAction.this.results.getAtomicArray());
             } catch (Exception e) {
                 logger.error("broken", e);
                 throw e;

@@ -228,7 +228,7 @@ mod tests {
     // Create DataFrames from RecordBatches
     let employee_df = ctx.read_batch(employee_batch).unwrap();
     let department_df = ctx.read_batch(department_batch).unwrap().select(vec![
-        col("id").alias("dept_id"),
+        col("id").alias("dept_Id"),
         col("department_name")
     ]).unwrap();
 
@@ -238,9 +238,9 @@ mod tests {
             department_df,
             JoinType::Inner,
             &["id"],  // join columns from left DataFrame
-            &["id"],  // join columns from right DataFrame
+            &[r#""dept_Id""#],  // join columns from right DataFrame
             None,     // additional join filter
-        ).unwrap().select(vec![col("id"), col("name"), col("age"), col("department_name")]).unwrap();
+        ).unwrap();
 
         joined_df.show().await;
     // Execute and collect results

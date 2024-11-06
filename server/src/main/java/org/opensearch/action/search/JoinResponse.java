@@ -29,6 +29,11 @@ import java.io.IOException;
 public class JoinResponse extends ActionResponse {
 
     private final OSTicket ticket;
+
+    public SearchHits getHits() {
+        return hits;
+    }
+
     private final SearchHits hits;
 
     public OSTicket getTicket() {

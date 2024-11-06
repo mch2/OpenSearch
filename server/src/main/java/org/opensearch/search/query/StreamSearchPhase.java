@@ -131,6 +131,7 @@ public class StreamSearchPhase extends QueryPhase {
             // map from OpenSearch field to Arrow Field type
             List<ArrowFieldAdaptor> arrowFieldAdaptors = new ArrayList<>();
             fields.forEach(field -> {
+                System.out.println("field: " + field.field);
                 QueryShardContext shardContext = searchContext.getQueryShardContext();
                 MappedFieldType fieldType = shardContext.fieldMapper(field.field);
                 ArrowType arrowType = getArrowType(fieldType.typeName());
@@ -153,6 +154,7 @@ public class StreamSearchPhase extends QueryPhase {
                         public void run(VectorSchemaRoot root, StreamProducer.FlushSignal flushSignal) {
                             try {
                                 Collector collector = QueryCollectorContext.createQueryCollector(collectors);
+                                System.out.println("COLLECTOR IS WTF " + collector);
                                 final ArrowCollector arrowDocIdCollector = new ArrowCollector(collector, arrowFieldAdaptors, root,  2, flushSignal, searchContext.shardTarget().getShardId());
                                 try {
                                     searcher.search(query, arrowDocIdCollector);

@@ -4,6 +4,7 @@ use datafusion::catalog::TableProvider;
 use datafusion::common::JoinType;
 use datafusion::common::Result;
 use datafusion::error::DataFusionError;
+use datafusion::prelude::Expr;
 use futures::TryFutureExt;
 use std::{collections::HashMap, sync::Arc};
 
@@ -12,6 +13,7 @@ use datafusion::prelude::{col, DataFrame};
 use datafusion_table_providers::flight::{
     FlightDriver, FlightMetadata, FlightProperties, FlightTableFactory,
 };
+use datafusion::logical_expr::test::function_stub::count;
 use futures::future::try_join_all;
 use tonic::async_trait;
 use tonic::transport::Channel;
@@ -36,18 +38,55 @@ pub async fn join(
     right: Vec<Bytes>,
     join_field: String,
 ) -> datafusion::common::Result<DataFrame> {
-    let left_df = dataframe_for_index(&ctx, "left".to_owned(), left).await?;
-    let right_df = dataframe_for_index(&ctx, "right".to_owned(), right).await?;
 
-    left_df
+    let select_cols = vec![col(r#""docId""#), col(r#""shardId""#), col(&join_field)];
+
+    let left_df = dataframe_for_index(&ctx, "left".to_owned(), left).await?.select( select_cols.clone())?;
+
+    let alias = format!("right.{}", &join_field);
+    let right_df = dataframe_for_index(&ctx, "right".to_owned(), right).await?.select(
+        vec![col(r#""docId""#).alias("right_docId"), col(r#""shardId""#).alias("right_shardId"), col("instance_id").alias("right_instance_id")]
+    )?;
+
+    println!("LEFT FRAME:");
+    // left_df.clone().show().await;
+    println!("RIGHT FRAME:");
+    // right_df.clone().show().await;
+
+    // // select all the cols returned by right but alias the join field
+    // let select_cols: Vec<Expr> = right_df.schema()
+    // .fields()
+    // .iter()
+    // .map(|field| {
+    //     if field.name() == &join_field {
+    //         col(&join_field).alias("right.join_field")
+    //     } else {
+    //         col(field.name())
+    //     }
+    // })
+    // .collect();
+
+    return left_df
         .join(
             right_df,
             JoinType::Inner,
             &[&join_field],
-            &[&join_field],
+            &["right_instance_id"],
             None,
         )
-        .map_err(|e| DataFusionError::Execution(format!("Join operation failed: {}", e)))
+        .map_err(|e| DataFusionError::Execution(format!("Join operation failed: {}", e)));
+
+    // let df2 = frame.as_ref().unwrap().clone().show().await;
+    // return frame;
+}
+
+pub async fn aggregate(
+    ctx: SessionContext,
+    tickets: Vec<Bytes>,
+) -> datafusion::common::Result<DataFrame> {
+    let df = dataframe_for_index(&ctx, "theIndex".to_owned(), tickets).await?;
+    df.aggregate(vec![col("")], vec![count(col("a"))])
+     .map_err(|e| DataFusionError::Execution(format!("Failed to sort DataFrame: {}", e)))
 }
 
 // Return a single dataframe for an entire index.

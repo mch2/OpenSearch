@@ -233,7 +233,8 @@ final class SearchResponseMerger {
             topDocsStats.terminatedEarly,
             numReducePhases,
             Collections.emptyList(),
-            (tickets.isEmpty() ? null : tickets)
+            (tickets.isEmpty() ? null : tickets),
+            null
         );
         long tookInMillis = searchTimeProvider.buildTookInMillis();
         return new SearchResponse(

@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 jni = "0.21.1"
-datafusion = "42.1.0"
+datafusion = "42.2.0"
 datafusion-table-providers = { version = "0.2.3", features = ["flight"] }
 tokio = { version = "1.41.0", features = ["full"] }
 arrow = { version = "53.2.0", features = ["ffi" ] }

@@ -63,7 +63,7 @@ public class ArrowCollector extends FilterCollector {
 
     @Override
     public LeafCollector getLeafCollector(LeafReaderContext context) throws IOException {
-
+        final int docBase = context.docBase;
         Map<String, ArrowFieldAdaptor.DocValuesType> docValueIterators = new HashMap<>();
         Map<String, FieldVector> vectors = new HashMap<>();
         // TODO bowen the vector we get from root may not work with concurrent segment search?
@@ -81,21 +81,36 @@ public class ArrowCollector extends FilterCollector {
             }
         });
 
-        final int[] currentRow = { 0 };
+        final int[] currentRow = {0};
         return new LeafCollector() {
+            private final int[] docIds = new int[batchSize];
+            private final float[] scores = new float[batchSize];
 
             private Scorable scorer;
 
             @Override
             public void collect(int docId) throws IOException {
-                FieldVector docIDVector = vectors.get("docId");
-                ((IntVector) docIDVector).setSafe(currentRow[0], docId);
 
-                FieldVector scoreVector = vectors.get("score");
-                ((Float4Vector) scoreVector).setSafe(currentRow[0], scorer.score());
+                docIds[currentRow[0]] = docId;
+                scores[currentRow[0]] = scorer.score();
 
-                VarCharVector shardIdVector = (VarCharVector) vectors.get("shardId");
-                shardIdVector.setSafe(currentRow[0], shardId.toString().getBytes());
+                currentRow[0]++;
+                if (currentRow[0] == batchSize) {
+                    flushDocs();
+                }
+            }
+
+            private void flushDocs() throws IOException {
+                for (int i = 0; i < currentRow[0]; i++) {
+                    FieldVector docIDVector = vectors.get("docId");
+                    ((IntVector) docIDVector).setSafe(i, docIds[i] + docBase);
+
+                    FieldVector scoreVector = vectors.get("score");
+                    ((Float4Vector) scoreVector).setSafe(i, scores[i]);
+
+                    VarCharVector shardIdVector = (VarCharVector) vectors.get("shardId");
+                    shardIdVector.setSafe(i, shardId.toString().getBytes());
+                }
 
                 // read from the lucene field values
                 for (Map.Entry<String, ArrowFieldAdaptor.DocValuesType> entry : docValueIterators.entrySet()) {
@@ -114,35 +129,30 @@ public class ArrowCollector extends FilterCollector {
                     }
 
                     FieldVector vector = vectors.get(field);
-
-                    if (numeric) {
-                        if (numericDocValues.advanceExact(docId)) {
-                            long value = numericDocValues.nextValue();
-                            ((BigIntVector) vector).setSafe(currentRow[0], value);
-                        }
-                    } else {
-                        if (sortedDocValues.advanceExact(docId)) {
-                            long ord = sortedDocValues.nextOrd();
-                            BytesRef keyword = sortedDocValues.lookupOrd(ord);
-                            ((VarCharVector) vector).setSafe(currentRow[0], keyword.utf8ToString().getBytes());
+                    for (int i = 0; i < currentRow[0]; i++) {
+                        if (numeric) {
+                            if (numericDocValues.advanceExact(docIds[i])) {
+                                long value = numericDocValues.nextValue();
+                                ((BigIntVector) vector).setSafe(i, value);
+                            }
+                        } else {
+                            if (sortedDocValues.advanceExact(docIds[i])) {
+                                long ord = sortedDocValues.nextOrd();
+                                BytesRef keyword = sortedDocValues.lookupOrd(ord);
+                                ((VarCharVector) vector).setSafe(i, keyword.utf8ToString().getBytes());
+                            }
                         }
                     }
                 }
-
-                currentRow[0]++;
-                if (currentRow[0] >= batchSize) {
-                    root.setRowCount(batchSize);
-                    flushSignal.awaitConsumption(1000);
-                    currentRow[0] = 0;
-                }
+                root.setRowCount(currentRow[0]);
+                flushSignal.awaitConsumption(1000);
+                currentRow[0] = 0;
             }
 
             @Override
             public void finish() throws IOException {
                 if (currentRow[0] > 0) {
-                    root.setRowCount(currentRow[0]);
-                    flushSignal.awaitConsumption(1000);
-                    currentRow[0] = 0;
+                    flushDocs();
                 }
             }
 
@@ -151,7 +161,9 @@ public class ArrowCollector extends FilterCollector {
                 // innerLeafCollector.setScorer(scorable);
                 this.scorer = scorable;
             }
-        };
+        }
+
+            ;
     }
 
     @Override
