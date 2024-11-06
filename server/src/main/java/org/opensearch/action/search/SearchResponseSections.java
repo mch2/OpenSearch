@@ -39,7 +39,10 @@ import org.opensearch.core.xcontent.ToXContentFragment;
 import org.opensearch.core.xcontent.XContentBuilder;
 import org.opensearch.search.SearchExtBuilder;
 import org.opensearch.search.SearchHits;
+import org.opensearch.search.SearchPhaseResult;
 import org.opensearch.search.aggregations.Aggregations;
+import org.opensearch.search.aggregations.InternalAggregations;
+import org.opensearch.search.internal.ShardStreamQueryResult;
 import org.opensearch.search.profile.ProfileShardResult;
 import org.opensearch.search.profile.SearchProfileShardResults;
 import org.opensearch.search.stream.OSTicket;
@@ -78,6 +81,12 @@ public class SearchResponseSections implements ToXContentFragment {
     protected final int numReducePhases;
     protected final List<SearchExtBuilder> searchExtBuilders = new ArrayList<>();
 
+    public List<StreamTargetResponse> getShardResults() {
+        return shardResults;
+    }
+
+    protected final List<StreamTargetResponse> shardResults;
+
     public SearchResponseSections(
         SearchHits hits,
         Aggregations aggregations,
@@ -100,7 +109,7 @@ public class SearchResponseSections implements ToXContentFragment {
         int numReducePhases,
         List<SearchExtBuilder> searchExtBuilders
     ) {
-        this(hits, aggregations, suggest, timedOut, terminatedEarly, profileResults, numReducePhases, searchExtBuilders, null);
+        this(hits, aggregations, suggest, timedOut, terminatedEarly, profileResults, numReducePhases, searchExtBuilders, null, null);
     }
 
     public SearchResponseSections(
@@ -112,7 +121,8 @@ public class SearchResponseSections implements ToXContentFragment {
         SearchProfileShardResults profileResults,
         int numReducePhases,
         List<SearchExtBuilder> searchExtBuilders,
-        List<OSTicket> tickets
+        List<OSTicket> tickets,
+        List<StreamTargetResponse> shardResults
     ) {
         this.hits = hits;
         this.aggregations = aggregations;
@@ -123,6 +133,7 @@ public class SearchResponseSections implements ToXContentFragment {
         this.numReducePhases = numReducePhases;
         this.searchExtBuilders.addAll(Objects.requireNonNull(searchExtBuilders, "searchExtBuilders must not be null"));
         this.tickets = tickets;
+        this.shardResults = shardResults;
     }
 
     public final boolean timedOut() {

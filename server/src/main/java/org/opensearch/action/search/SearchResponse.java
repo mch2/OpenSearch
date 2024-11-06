@@ -56,9 +56,11 @@ import org.opensearch.search.GenericSearchExtBuilder;
 import org.opensearch.search.SearchExtBuilder;
 import org.opensearch.search.SearchHit;
 import org.opensearch.search.SearchHits;
+import org.opensearch.search.SearchPhaseResult;
 import org.opensearch.search.aggregations.Aggregations;
 import org.opensearch.search.aggregations.InternalAggregations;
 import org.opensearch.search.internal.InternalSearchResponse;
+import org.opensearch.search.internal.ShardStreamQueryResult;
 import org.opensearch.search.profile.ProfileShardResult;
 import org.opensearch.search.profile.SearchProfileShardResults;
 import org.opensearch.search.stream.OSTicket;
@@ -389,6 +391,7 @@ public class SearchResponse extends ActionResponse implements StatusToXContentOb
         Suggest suggest = null;
         SearchProfileShardResults profile = null;
         List<OSTicket> tickets = null;
+        List<StreamTargetResponse> shardStreamQueryResults = null;
         boolean timedOut = false;
         Boolean terminatedEarly = null;
         int numReducePhases = 1;
@@ -541,7 +544,8 @@ public class SearchResponse extends ActionResponse implements StatusToXContentOb
             profile,
             numReducePhases,
             extBuilders,
-            tickets
+            tickets,
+            shardStreamQueryResults
         );
         return new SearchResponse(
             searchResponseSections,
