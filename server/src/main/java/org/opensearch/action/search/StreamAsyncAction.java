@@ -114,15 +114,21 @@ class StreamAsyncAction extends SearchQueryThenFetchAsyncAction {
         @Override
         protected void doRun() throws Exception {
             try {
+                // fetch all the tickets (one byte[] per shard) and hand that off to Datafusion.Query
+                // this creates a single stream that we'll register with the streammanager on this coordinator.
                 List<SearchPhaseResult> results = StreamAsyncAction.this.results.getAtomicArray().asList();
                 List<byte[]> tickets = results.stream().flatMap(r -> ((StreamSearchResult) r).getFlightTickets().stream())
                     .map(OSTicket::getBytes)
                     .collect(Collectors.toList());
+
+                // This is additional metadata for the fetch phase that will be conducted on the coordinator
+                // StreamTargetResponse is a wrapper for an individual shard that contains the contextId and ShardTarget that served the original
+                // query phase so we can fetch from it.
                 List<StreamTargetResponse> targets = StreamAsyncAction.this.results.getAtomicArray().asList()
                     .stream()
                     .map(r -> new StreamTargetResponse(r.queryResult(), r.getSearchShardTarget()))
                     .collect(Collectors.toList());
-                System.out.println(targets);
+
                 StreamManager streamManager = searchPhaseController.getStreamManager();
                 StreamTicket streamTicket = streamManager.registerStream(DataFrameStreamProducer.query(tickets));
                 InternalSearchResponse internalSearchResponse = new InternalSearchResponse(SearchHits.empty(), null, null, null, false, false, 1, Collections.emptyList(), List.of(new OSTicket(streamTicket.getTicketID(), streamTicket.getNodeID())), targets);
