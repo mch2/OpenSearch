@@ -37,6 +37,8 @@ public class JoinRequest extends ActionRequest {
     private final SearchRequest leftIndex;
     private final SearchRequest rightIndex;
     private final String joinField;
+    private final String leftAlias;
+    private final String rightAlias;
     private final boolean getHits;
 
     public JoinRequest(StreamInput in) throws IOException {
@@ -44,17 +46,21 @@ public class JoinRequest extends ActionRequest {
         leftIndex = new SearchRequest(in);
         rightIndex = new SearchRequest(in);
         joinField = in.readString();
+        leftAlias = in.readString();
+        rightAlias = in.readString();
         this.getHits = in.readBoolean();
     }
 
-    public JoinRequest(SearchRequest left, SearchRequest right, String joinField) {
-        this(left, right, joinField, false);
+    public JoinRequest(SearchRequest left, SearchRequest right, String joinField, String leftAlias, String rightAlias) {
+        this(left, right, joinField, rightAlias, leftAlias, false);
     }
 
-    public JoinRequest(SearchRequest left, SearchRequest right, String joinField, boolean getHits) {
+    public JoinRequest(SearchRequest left, SearchRequest right, String joinField, String leftAlias, String rightAlias, boolean getHits) {
         this.leftIndex = left;
         this.rightIndex = right;
         this.joinField = joinField;
+        this.leftAlias = leftAlias;
+        this.rightAlias = rightAlias;
         this.getHits = getHits;
     }
 
@@ -73,6 +79,8 @@ public class JoinRequest extends ActionRequest {
         leftIndex.writeTo(out);
         rightIndex.writeTo(out);
         out.writeString(joinField);
+        out.writeString(leftAlias);
+        out.writeString(rightAlias);
         out.writeBoolean(getHits);
     }
 
@@ -86,6 +94,14 @@ public class JoinRequest extends ActionRequest {
 
     public String getJoinField() {
         return joinField;
+    }
+
+    public String getLeftAlias() {
+        return leftAlias;
+    }
+
+    public String getRightAlias() {
+        return rightAlias;
     }
 
     public boolean isGetHits() {

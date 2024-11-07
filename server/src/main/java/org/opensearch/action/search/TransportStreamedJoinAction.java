@@ -120,8 +120,8 @@ public class TransportStreamedJoinAction extends HandledTransportAction<JoinRequ
             },
             2
         );
-        searchShard(task, request.getLeftIndex(), groupedListener);
-        searchShard(task, request.getRightIndex(), groupedListener);
+        searchIndex(task, request.getLeftIndex(), groupedListener);
+        searchIndex(task, request.getRightIndex(), groupedListener);
     }
 
     private void getHits(Task task, JoinRequest request, List<SearchResponse> responses, StreamTicket ticket, ActionListener<JoinResponse> listener) {
@@ -142,6 +142,8 @@ public class TransportStreamedJoinAction extends HandledTransportAction<JoinRequ
         targets = MapBuilder.newMapBuilder(targets).immutableMap();
 
         StreamIterator streamIterator = streamManager.getStreamIterator(ticket);
+        // read a stream of query results.
+
         // just collect everything
         List<Hit> hits = new ArrayList<>();
         while (streamIterator.next()) {
@@ -174,7 +176,7 @@ public class TransportStreamedJoinAction extends HandledTransportAction<JoinRequ
                     Map<Object, List<SearchHit>> left = getHitsForIndex(leftIndex, maps);
                     Map<Object, List<SearchHit>> right = getHitsForIndex(rightIndex, maps);
                     SearchHit[] searchHits = hits.stream()
-                        .map(hit -> mergeSource(left.get(hit.joinValue), right.get(hit.joinValue)))
+                        .map(hit -> mergeSource(left.get(hit.joinValue), right.get(hit.joinValue), request.getLeftAlias(), request.getRightAlias()))
                         .toArray(SearchHit[]::new);
                     listener.onResponse(new JoinResponse(new SearchHits(searchHits, new TotalHits(searchHits.length, TotalHits.Relation.EQUAL_TO), 1.0f)));
                 }
@@ -196,10 +198,12 @@ public class TransportStreamedJoinAction extends HandledTransportAction<JoinRequ
         return maps.stream().filter(m -> m.indexName.equals(indexName)).findFirst().map(m -> m.hitsByJoinField).get();
     }
 
-    private SearchHit mergeSource(List<SearchHit> l, List<SearchHit> r) {
+    private SearchHit mergeSource(List<SearchHit> l, List<SearchHit> r, String leftAlias, String rightAlias) {
         // join field isn't unique in my test data... just get the first one out
         SearchHit left = l.get(0);
         SearchHit right = r.get(0);
+        leftAlias = leftAlias == null || leftAlias.isEmpty() ? "" : leftAlias.concat(".");
+        rightAlias = rightAlias == null || rightAlias.isEmpty() ? "" : rightAlias.concat(".");
 
         if (l.size() > 1) {
             System.out.println("L SIZE MORE THAN ONE?: " + l);
@@ -222,8 +226,8 @@ public class TransportStreamedJoinAction extends HandledTransportAction<JoinRequ
         SearchHit searchHit = new SearchHit(left.docId(), combinedId, documentFields, metaFields);
         searchHit.sourceRef(left.getSourceRef());
         searchHit.getSourceAsMap().clear();
-        searchHit.getSourceAsMap().putAll(prefixColNames("l.", left));
-        searchHit.getSourceAsMap().putAll(prefixColNames("r.", right));
+        searchHit.getSourceAsMap().putAll(prefixColNames(leftAlias, left));
+        searchHit.getSourceAsMap().putAll(prefixColNames(rightAlias, right));
         return searchHit;
     }
 
@@ -401,7 +405,7 @@ public class TransportStreamedJoinAction extends HandledTransportAction<JoinRequ
         return "Unsupported type: " + vector.getClass().getSimpleName();
     }
 
-    private void searchShard(Task task, SearchRequest request, GroupedActionListener<SearchResponse> groupedListener) {
+    private void searchIndex(Task task, SearchRequest request, GroupedActionListener<SearchResponse> groupedListener) {
         SearchRequest leftRequest = request.searchType(SearchType.STREAM);
         SearchTask leftTask = createSearchTask(task, leftRequest);
         transportSearchAction.doExecute(
