@@ -160,7 +160,8 @@ public class AwarenessAllocationDecider extends AllocationDecider {
         }
 
         IndexMetadata indexMetadata = allocation.metadata().getIndexSafe(shardRouting.index());
-        int shardCount = indexMetadata.getNumberOfReplicas() + 1; // 1 for primary
+        // if a search only shard, check if we have dedicated hardware, otherwise all shard types are considered equal.
+        int shardCount = shardRouting.isSearchOnly() ? indexMetadata.getNumberOfSearchOnlyReplicas() : indexMetadata.getNumberOfReplicas() + 1; // 1 for primary
         for (String awarenessAttribute : awarenessAttributes) {
             // the node the shard exists on must be associated with an awareness attribute.
             if (isAwarenessAttributeAssociatedWithNode(node, awarenessAttribute) == false) {
