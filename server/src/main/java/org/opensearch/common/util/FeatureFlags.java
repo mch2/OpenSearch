@@ -91,7 +91,7 @@ public class FeatureFlags {
 
     public static final Setting<Boolean> READER_WRITER_SPLIT_EXPERIMENTAL_SETTING = Setting.boolSetting(
         READER_WRITER_SPLIT_EXPERIMENTAL,
-        false,
+        true,
         Property.NodeScope
     );
 

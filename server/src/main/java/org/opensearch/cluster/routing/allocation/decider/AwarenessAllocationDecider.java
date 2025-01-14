@@ -48,6 +48,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
+import java.util.stream.Collectors;
 
 import static java.util.Collections.emptyList;
 
@@ -160,7 +161,6 @@ public class AwarenessAllocationDecider extends AllocationDecider {
         }
 
         IndexMetadata indexMetadata = allocation.metadata().getIndexSafe(shardRouting.index());
-        // if a search only shard, check if we have dedicated hardware, otherwise all shard types are considered equal.
         int shardCount = shardRouting.isSearchOnly() ? indexMetadata.getNumberOfSearchOnlyReplicas() : indexMetadata.getNumberOfReplicas() + 1; // 1 for primary
         for (String awarenessAttribute : awarenessAttributes) {
             // the node the shard exists on must be associated with an awareness attribute.
@@ -176,10 +176,10 @@ public class AwarenessAllocationDecider extends AllocationDecider {
             }
 
             int currentNodeCount = getCurrentNodeCountForAttribute(shardRouting, node, allocation, moveToNode, awarenessAttribute);
-
             // build attr_value -> nodes map
-            Set<String> nodesPerAttribute = allocation.routingNodes().nodesPerAttributesCounts(awarenessAttribute);
-            int numberOfAttributes = nodesPerAttribute.size();
+
+            Set<String> nodesPerAttribute = getNodesPerAttributeSet(shardRouting, allocation, awarenessAttribute);
+            int numberOfAttributes = nodesPerAttribute.size(); // number of nodes that contain the "zone" attr
             List<String> fullValues = forcedAwarenessAttributes.get(awarenessAttribute);
 
             if (fullValues != null) {
@@ -212,6 +212,13 @@ public class AwarenessAllocationDecider extends AllocationDecider {
         return allocation.decision(Decision.YES, NAME, "node meets all awareness attribute requirements");
     }
 
+    private static Set<String> getNodesPerAttributeSet(ShardRouting shardRouting, RoutingAllocation allocation, String awarenessAttribute) {
+        if (shardRouting.isSearchOnly()) {
+            return allocation.routingNodes().searchNodesPerAttributesCounts(awarenessAttribute);
+        }
+        return allocation.routingNodes().nodesPerAttributesCounts(awarenessAttribute);
+    }
+
     private int getCurrentNodeCountForAttribute(
         ShardRouting shardRouting,
         RoutingNode node,
@@ -222,7 +229,10 @@ public class AwarenessAllocationDecider extends AllocationDecider {
         // build the count of shards per attribute value
         final String shardAttributeForNode = getAttributeValueForNode(node, awarenessAttribute);
         int currentNodeCount = 0;
-        final List<ShardRouting> assignedShards = allocation.routingNodes().assignedShards(shardRouting.shardId());
+        // only consider assigned shards of the same type (search vs write)
+        final List<ShardRouting> shardRoutings = allocation.routingNodes().assignedShards(shardRouting.shardId());
+        final List<ShardRouting> assignedShards = shardRouting.isSearchOnly() ? shardRoutings.stream().filter(ShardRouting::isSearchOnly).collect(Collectors.toList()) :
+            shardRoutings.stream().filter(s -> s.isSearchOnly() == false).collect(Collectors.toList());
 
         for (ShardRouting assignedShard : assignedShards) {
             if (assignedShard.started() || assignedShard.initializing()) {
@@ -249,10 +259,11 @@ public class AwarenessAllocationDecider extends AllocationDecider {
                     ++currentNodeCount;
                 }
             } else {
-                ++currentNodeCount;
+                if (shardRouting.isSearchOnly() == SearchReplicaAllocationDecider.isSearchOnlyNode(node.node())) {
+                    ++currentNodeCount;
+                }
             }
         }
-
         return currentNodeCount;
     }
 

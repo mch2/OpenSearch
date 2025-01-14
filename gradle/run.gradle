@@ -36,6 +36,16 @@ def numZones = findProperty('numZones') as Integer ?: 1
 
 testClusters {
   runTask {
+    // Add following lines to enable remote store
+    setting 'node.attr.remote_store.segment.repository', 'my-repository'
+    setting 'node.attr.remote_store.translog.repository', 'my-repository'
+    setting 'node.attr.remote_store.state.repository', 'my-repository'
+    setting 'node.attr.remote_store.repository.my-repository.type', 'fs'
+    setting 'path.repo', '/tmp/fsdir'
+    setting 'node.attr.remote_store.repository.my-repository.settings.location', '/tmp/fsdir'
+//    setting 'node.attr.remote_store.repository.my-repository.settings.base_path', '/tmp/fsdir'
+//    setting 'node.attr.remote_store.repository.my-repository.settings.region', 'us-west-2'
+
     testDistribution = 'archive'
     if (numZones > 1) numberOfZones = numZones
     if (numNodes > 1) numberOfNodes = numNodes

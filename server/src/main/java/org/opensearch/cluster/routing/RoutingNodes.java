@@ -40,6 +40,7 @@ import org.opensearch.cluster.metadata.Metadata;
 import org.opensearch.cluster.node.DiscoveryNode;
 import org.opensearch.cluster.routing.UnassignedInfo.AllocationStatus;
 import org.opensearch.cluster.routing.allocation.ExistingShardsAllocator;
+import org.opensearch.cluster.routing.allocation.decider.SearchReplicaAllocationDecider;
 import org.opensearch.common.Nullable;
 import org.opensearch.common.Randomness;
 import org.opensearch.common.annotation.PublicApi;
@@ -103,6 +104,8 @@ public class RoutingNodes implements Iterable<RoutingNode> {
     private int relocatingShards = 0;
 
     private final Map<String, Set<String>> nodesPerAttributeNames;
+    private final Map<String, Set<String>> searchNodesPerAttributeNames;
+
     private final Map<String, Recoveries> recoveriesPerNode = new HashMap<>();
     private final Map<String, Recoveries> initialReplicaRecoveries = new HashMap<>();
     private final Map<String, Recoveries> initialPrimaryRecoveries = new HashMap<>();
@@ -116,6 +119,7 @@ public class RoutingNodes implements Iterable<RoutingNode> {
         this.readOnly = readOnly;
         final RoutingTable routingTable = clusterState.routingTable();
         this.nodesPerAttributeNames = Collections.synchronizedMap(new HashMap<>());
+        this.searchNodesPerAttributeNames = Collections.synchronizedMap(new HashMap<>());
 
         // fill in the nodeToShards with the "live" nodes
         for (final DiscoveryNode cursor : clusterState.nodes().getDataNodes().values()) {
@@ -300,7 +304,19 @@ public class RoutingNodes implements Iterable<RoutingNode> {
     public Set<String> nodesPerAttributesCounts(String attributeName) {
         return nodesPerAttributeNames.computeIfAbsent(
             attributeName,
-            ignored -> stream().map(r -> r.node().getAttributes().get(attributeName)).filter(Objects::nonNull).collect(Collectors.toSet())
+            ignored -> stream()
+                // by default filter out search only nodes
+                .filter(r -> SearchReplicaAllocationDecider.isSearchOnlyNode(r.node()) == false)
+                .map(r -> r.node().getAttributes().get(attributeName)).filter(Objects::nonNull).collect(Collectors.toSet())
+        );
+    }
+
+    public Set<String> searchNodesPerAttributesCounts(String attributeName) {
+        return searchNodesPerAttributeNames.computeIfAbsent(
+            attributeName,
+            ignored -> stream()
+                .filter(r -> SearchReplicaAllocationDecider.isSearchOnlyNode(r.node()))
+                .map(r -> r.node().getAttributes().get(attributeName)).filter(Objects::nonNull).collect(Collectors.toSet())
         );
     }
 
