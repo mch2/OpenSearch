@@ -469,6 +469,8 @@ public class GlobalOrdinalsStringTermsAggregator extends AbstractStringTermsAggr
                         }
                         int ord = singleValues.ordValue();
                         long docCount = docCountProvider.getDocCount(doc);
+                        BytesRef bytesRef = singleValues.lookupOrd(ord);
+                        String s = bytesRef.utf8ToString();
                         segmentDocCounts.increment(ord + 1, docCount);
                     }
                 });

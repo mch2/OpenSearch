@@ -705,6 +705,82 @@ public final class SearchPhaseController {
             : source.from());
     }
 
+    public ReducedQueryPhase reducedAggsFromStream(List<StreamSearchResult> list) {
+
+
+        try (SessionContext context = new SessionContext()) {
+
+            List<byte[]> tickets = list.stream().flatMap(r -> r.getFlightTickets().stream())
+                .map(OSTicket::getBytes)
+                .collect(Collectors.toList());
+
+            // execute the query and get a dataframe
+            CompletableFuture<DataFrame> frame = DataFusion.query(tickets);
+
+            DataFrame dataFrame = null;
+            ArrowReader arrowReader = null;
+            try {
+                dataFrame = frame.get();
+                arrowReader = dataFrame.collect(new RootAllocator()).get();
+            } catch (InterruptedException | ExecutionException e) {
+                throw new RuntimeException(e);
+            }
+
+            int totalRows = 0;
+            List<ScoreDoc> scoreDocs = new ArrayList<>();
+            try {
+                while (arrowReader.loadNextBatch()) {
+                    VectorSchemaRoot root = arrowReader.getVectorSchemaRoot();
+                    int rowCount = root.getRowCount();
+                    totalRows+= rowCount;
+                    System.out.println("Record Batch with " + rowCount + " rows:");
+
+                    // Iterate through rows
+                    for (int row = 0; row < rowCount; row++) {
+                        FieldVector docID = root.getVector("docID");
+                        Float4Vector score = (Float4Vector) root.getVector("score");
+                        FieldVector shardID = root.getVector("shardID");
+                        FieldVector nodeID = root.getVector("nodeID");
+
+                        ShardId sid = ShardId.fromString((String) getValue(shardID, row));
+                        int value = (int) getValue(docID, row);
+                        System.out.println("DocID: " + value + " ShardID" + sid + "NodeID: " + getValue(nodeID, row));
+                        scoreDocs.add(new ScoreDoc(value, score.get(row), sid.id()));
+                    }
+                }
+
+                TotalHits totalHits = new TotalHits(totalRows, Relation.EQUAL_TO);
+                return new ReducedQueryPhase(
+                    totalHits,
+                    totalRows,
+                    1.0f,
+                    false,
+                    false,
+                    null,
+                    null,
+                    null,
+                    new SortedTopDocs(scoreDocs.toArray(ScoreDoc[]::new), false, null, null, null),
+                    null,
+                    1,
+                    totalRows,
+                    0,
+                    totalRows == 0,
+                    list.stream().flatMap(ssr -> ssr.getFlightTickets().stream()).collect(Collectors.toList())
+                );
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            } finally {
+                try {
+                    arrowReader.close();
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            }
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
     public ReducedQueryPhase reducedFromStream(List<StreamSearchResult> list) {
 
 
