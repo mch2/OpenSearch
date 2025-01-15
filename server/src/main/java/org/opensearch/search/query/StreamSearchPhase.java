@@ -26,6 +26,8 @@ import org.opensearch.index.mapper.MappedFieldType;
 import org.opensearch.index.query.QueryShardContext;
 import org.opensearch.search.SearchContextSourcePrinter;
 import org.opensearch.search.aggregations.AggregationProcessor;
+import org.opensearch.search.aggregations.Aggregator;
+import org.opensearch.search.aggregations.support.StreamingAggregator;
 import org.opensearch.search.fetch.subphase.FieldAndFormat;
 import org.opensearch.search.internal.ContextIndexSearcher;
 import org.opensearch.search.internal.SearchContext;
@@ -44,6 +46,7 @@ import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Supplier;
 
 import static org.opensearch.search.stream.collector.ArrowFieldAdaptor.getArrowType;
 
@@ -65,7 +68,12 @@ public class StreamSearchPhase extends QueryPhase {
         if (LOGGER.isTraceEnabled()) {
             LOGGER.trace("{}", new SearchContextSourcePrinter(searchContext));
         }
+        final AggregationProcessor aggregationProcessor = this.getQueryPhaseSearcher().aggregationProcessor(searchContext);
+        aggregationProcessor.preProcess(searchContext);
         executeInternal(searchContext, this.getQueryPhaseSearcher());
+
+//        aggregationProcessor.postProcess(searchContext);
+
         if (searchContext.getProfilers() != null) {
             ProfileShardResult shardResults = SearchProfileShardResults.buildShardResults(
                 searchContext.getProfilers(),
@@ -92,20 +100,20 @@ public class StreamSearchPhase extends QueryPhase {
             return searchWithCollector(searchContext, searcher, query, collectors, hasFilterCollector, hasTimeout);
         }
 
-        @Override
-        public AggregationProcessor aggregationProcessor(SearchContext searchContext) {
-            return new AggregationProcessor() {
-                @Override
-                public void preProcess(SearchContext context) {
-
-                }
-
-                @Override
-                public void postProcess(SearchContext context) {
-
-                }
-            };
-        }
+//        @Override
+//        public AggregationProcessor aggregationProcessor(SearchContext searchContext) {
+//            return new AggregationProcessor() {
+//                @Override
+//                public void preProcess(SearchContext context) {
+//
+//                }
+//
+//                @Override
+//                public void postProcess(SearchContext context) {
+//
+//                }
+//            };
+//        }
 
         protected boolean searchWithCollector(
             SearchContext searchContext,
@@ -126,19 +134,25 @@ public class StreamSearchPhase extends QueryPhase {
             boolean timeoutSet
         ) {
 
-            List<FieldAndFormat> fields = searchContext.fetchFieldsContext().fields();
-
-            // map from OpenSearch field to Arrow Field type
-            List<ArrowFieldAdaptor> arrowFieldAdaptors = new ArrayList<>();
-            fields.forEach(field -> {
-                System.out.println("field: " + field.field);
-                QueryShardContext shardContext = searchContext.getQueryShardContext();
-                MappedFieldType fieldType = shardContext.fieldMapper(field.field);
-                ArrowType arrowType = getArrowType(fieldType.typeName());
-                arrowFieldAdaptors.add(new ArrowFieldAdaptor(field.field, arrowType, fieldType.typeName()));
-            });
+//            List<FieldAndFormat> fields = searchContext.fetchFieldsContext().fields();
+//
+//            // map from OpenSearch field to Arrow Field type
+//            List<ArrowFieldAdaptor> arrowFieldAdaptors = new ArrayList<>();
+//            fields.forEach(field -> {
+//                System.out.println("field: " + field.field);
+//                QueryShardContext shardContext = searchContext.getQueryShardContext();
+//                MappedFieldType fieldType = shardContext.fieldMapper(field.field);
+//                ArrowType arrowType = getArrowType(fieldType.typeName());
+//                arrowFieldAdaptors.add(new ArrowFieldAdaptor(field.field, arrowType, fieldType.typeName()));
+//            });
 
             QuerySearchResult queryResult = searchContext.queryResult();
+//            try {
+//                Collector collector = QueryCollectorContext.createQueryCollector(collectors);
+//                System.out.println(collector);
+//            } catch (IOException e) {
+//                throw new RuntimeException(e);
+//            }
 
             StreamManager streamManager = searchContext.streamManager();
             if (streamManager == null) {
@@ -153,9 +167,7 @@ public class StreamSearchPhase extends QueryPhase {
                         @Override
                         public void run(VectorSchemaRoot root, StreamProducer.FlushSignal flushSignal) {
                             try {
-                                Collector collector = QueryCollectorContext.createQueryCollector(collectors);
-                                System.out.println("COLLECTOR IS WTF " + collector);
-                                final ArrowCollector arrowDocIdCollector = new ArrowCollector(collector, arrowFieldAdaptors, root,  2, flushSignal, searchContext.shardTarget().getShardId());
+                                final StreamingAggregator arrowDocIdCollector = new StreamingAggregator((Aggregator) QueryCollectorContext.createQueryCollector(collectors), searchContext, root,  1, flushSignal, searchContext.shardTarget().getShardId());
                                 try {
                                     searcher.search(query, arrowDocIdCollector);
                                 } catch (EarlyTerminatingCollector.EarlyTerminationException e) {
@@ -194,20 +206,20 @@ public class StreamSearchPhase extends QueryPhase {
                 public VectorSchemaRoot createRoot(BufferAllocator allocator) {
                     Map<String, Field> arrowFields = new HashMap<>();
 
-                    Field docIdField = new Field("docId", FieldType.notNullable(new ArrowType.Int(32, true)), null);
-                    arrowFields.put("docId", docIdField);
+//                    Field docIdField = new Field("ord", FieldType.notNullable(new ArrowType.Int(32, true)), null);
+//                    arrowFields.put("ord", docIdField);
                     Field scoreField = new Field(
-                        "score",
+                        "count",
                         FieldType.nullable(new ArrowType.FloatingPoint(FloatingPointPrecision.SINGLE)),
                         null
                     );
-                    arrowFields.put("score", scoreField);
+                    arrowFields.put("count", scoreField);
 
-                    arrowFieldAdaptors.forEach(field -> {
-                        Field arrowField = new Field(field.getFieldName(), FieldType.nullable(field.getArrowType()), null);
-                        arrowFields.put(field.getFieldName(), arrowField);
-                    });
-                    arrowFields.put("shardId", new Field("shardId", FieldType.notNullable(new ArrowType.Utf8()), null));
+//                    arrowFieldAdaptors.forEach(field -> {
+//                        Field arrowField = new Field(field.getFieldName(), FieldType.nullable(field.getArrowType()), null);
+//                        arrowFields.put(field.getFieldName(), arrowField);
+//                    });
+                    arrowFields.put("ord", new Field("ord", FieldType.notNullable(new ArrowType.Utf8()), null));
                     Schema schema = new Schema(arrowFields.values());
                     return VectorSchemaRoot.create(schema, allocator);
                 }
