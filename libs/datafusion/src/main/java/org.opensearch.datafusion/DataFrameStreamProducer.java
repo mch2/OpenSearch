@@ -79,7 +79,8 @@ public class DataFrameStreamProducer {
                 void close() throws Exception {
                     if (recordBatchStream != null) {
                         recordBatchStream.close();
-                    };
+                    }
+                    ;
                     df.close();
                 }
             };

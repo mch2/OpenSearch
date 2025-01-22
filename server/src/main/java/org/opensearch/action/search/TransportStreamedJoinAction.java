@@ -96,35 +96,36 @@ public class TransportStreamedJoinAction extends HandledTransportAction<JoinRequ
      */
     @Override
     protected void doExecute(Task task, JoinRequest request, ActionListener<JoinResponse> listener) {
-        GroupedActionListener<SearchResponse> groupedListener = new GroupedActionListener<>(
-            new ActionListener<>() {
-                @Override
-                public void onResponse(Collection<SearchResponse> collection) {
-                    List<SearchResponse> responses = new ArrayList<>(collection);
-                    StreamTicket streamTicket = streamManager.registerStream(DataFrameStreamProducer.join(
-                        tickets(responses.get(0)),
-                        tickets(responses.get(1)),
-                        request.getJoinField()
-                    ));
-                    if (request.isGetHits()) {
-                        getHits(task, request, responses, streamTicket, listener);
-                    } else {
-                        listener.onResponse(new JoinResponse(new OSTicket(streamTicket.getTicketID(), streamTicket.getNodeID())));
-                    }
+        GroupedActionListener<SearchResponse> groupedListener = new GroupedActionListener<>(new ActionListener<>() {
+            @Override
+            public void onResponse(Collection<SearchResponse> collection) {
+                List<SearchResponse> responses = new ArrayList<>(collection);
+                StreamTicket streamTicket = streamManager.registerStream(
+                    DataFrameStreamProducer.join(tickets(responses.get(0)), tickets(responses.get(1)), request.getJoinField())
+                );
+                if (request.isGetHits()) {
+                    getHits(task, request, responses, streamTicket, listener);
+                } else {
+                    listener.onResponse(new JoinResponse(new OSTicket(streamTicket.getTicketID(), streamTicket.getNodeID())));
                 }
+            }
 
-                @Override
-                public void onFailure(Exception e) {
-                    listener.onFailure(new RuntimeException(e));
-                }
-            },
-            2
-        );
+            @Override
+            public void onFailure(Exception e) {
+                listener.onFailure(new RuntimeException(e));
+            }
+        }, 2);
         searchIndex(task, request.getLeftIndex(), groupedListener);
         searchIndex(task, request.getRightIndex(), groupedListener);
     }
 
-    private void getHits(Task task, JoinRequest request, List<SearchResponse> responses, StreamTicket ticket, ActionListener<JoinResponse> listener) {
+    private void getHits(
+        Task task,
+        JoinRequest request,
+        List<SearchResponse> responses,
+        StreamTicket ticket,
+        ActionListener<JoinResponse> listener
+    ) {
         String leftIndex = request.getLeftIndex().indices()[0];
         String rightIndex = request.getRightIndex().indices()[0];
 
@@ -168,29 +169,51 @@ public class TransportStreamedJoinAction extends HandledTransportAction<JoinRequ
         // for each hit split by index
         Map<String, Map<ShardId, List<Hit>>> hitsByIndex = organizeHitsByIndexAndShard(hits);
 
-        GroupedActionListener<HitsPerIndex> groupedListener = new GroupedActionListener<>(
-            new ActionListener<>() {
-                @Override
-                public void onResponse(Collection<HitsPerIndex> maps) {
+        GroupedActionListener<HitsPerIndex> groupedListener = new GroupedActionListener<>(new ActionListener<>() {
+            @Override
+            public void onResponse(Collection<HitsPerIndex> maps) {
 
-                    Map<Object, List<SearchHit>> left = getHitsForIndex(leftIndex, maps);
-                    Map<Object, List<SearchHit>> right = getHitsForIndex(rightIndex, maps);
-                    SearchHit[] searchHits = hits.stream()
-                        .map(hit -> mergeSource(left.get(hit.joinValue), right.get(hit.joinValue), request.getLeftAlias(), request.getRightAlias()))
-                        .toArray(SearchHit[]::new);
-                    listener.onResponse(new JoinResponse(new SearchHits(searchHits, new TotalHits(searchHits.length, TotalHits.Relation.EQUAL_TO), 1.0f)));
-                }
+                Map<Object, List<SearchHit>> left = getHitsForIndex(leftIndex, maps);
+                Map<Object, List<SearchHit>> right = getHitsForIndex(rightIndex, maps);
+                SearchHit[] searchHits = hits.stream()
+                    .map(
+                        hit -> mergeSource(
+                            left.get(hit.joinValue),
+                            right.get(hit.joinValue),
+                            request.getLeftAlias(),
+                            request.getRightAlias()
+                        )
+                    )
+                    .toArray(SearchHit[]::new);
+                listener.onResponse(
+                    new JoinResponse(new SearchHits(searchHits, new TotalHits(searchHits.length, TotalHits.Relation.EQUAL_TO), 1.0f))
+                );
+            }
 
-                @Override
-                public void onFailure(Exception e) {
-                    listener.onFailure(new RuntimeException(e));
-                }
-            },
-            2
-        );
+            @Override
+            public void onFailure(Exception e) {
+                listener.onFailure(new RuntimeException(e));
+            }
+        }, 2);
         assert hitsByIndex.size() == 2;
-        getIndexResults(hitsByIndex.get(leftIndex), targets, task, request.getLeftIndex(), request.getJoinField(), leftIndex, groupedListener);
-        getIndexResults(hitsByIndex.get(rightIndex), targets, task, request.getRightIndex(), request.getJoinField(), rightIndex, groupedListener);
+        getIndexResults(
+            hitsByIndex.get(leftIndex),
+            targets,
+            task,
+            request.getLeftIndex(),
+            request.getJoinField(),
+            leftIndex,
+            groupedListener
+        );
+        getIndexResults(
+            hitsByIndex.get(rightIndex),
+            targets,
+            task,
+            request.getRightIndex(),
+            request.getJoinField(),
+            rightIndex,
+            groupedListener
+        );
 
     }
 
@@ -214,14 +237,13 @@ public class TransportStreamedJoinAction extends HandledTransportAction<JoinRequ
 
         Map<String, DocumentField> documentFields = new HashMap<>();
         Map<String, DocumentField> metaFields = new HashMap<>();
-        left
-            .getFields()
+        left.getFields()
             .forEach(
-                (fieldName, docField) ->
-                    (MapperService.META_FIELDS_BEFORE_7DOT8.contains(fieldName)
-                        ? metaFields
-                        : documentFields)
-                        .put(fieldName, docField));
+                (fieldName, docField) -> (MapperService.META_FIELDS_BEFORE_7DOT8.contains(fieldName) ? metaFields : documentFields).put(
+                    fieldName,
+                    docField
+                )
+            );
         String combinedId = left.getId() + "|" + right.getId();
         SearchHit searchHit = new SearchHit(left.docId(), combinedId, documentFields, metaFields);
         searchHit.sourceRef(left.getSourceRef());
@@ -232,22 +254,28 @@ public class TransportStreamedJoinAction extends HandledTransportAction<JoinRequ
     }
 
     private static Map<String, Object> prefixColNames(String prefix, SearchHit hit) {
-        return hit.getSourceAsMap().entrySet().stream()
-            .collect(Collectors.toMap(
-                entry -> prefix.concat(entry.getKey()),
-                Map.Entry::getValue,
-                (v1, v2) -> v2,  // In case of duplicate keys, keep the last value
-                HashMap::new      // Use HashMap as the map implementation
-            ));
+        return hit.getSourceAsMap()
+            .entrySet()
+            .stream()
+            .collect(
+                Collectors.toMap(
+                    entry -> prefix.concat(entry.getKey()),
+                    Map.Entry::getValue,
+                    (v1, v2) -> v2,  // In case of duplicate keys, keep the last value
+                    HashMap::new      // Use HashMap as the map implementation
+                )
+            );
     }
 
-    private void getIndexResults(Map<ShardId, List<Hit>> hitsPerShard,
-                                 Map<String, StreamTargetResponse> targets,
-                                 Task task,
-                                 SearchRequest req,
-                                 String joinField,
-                                 String indexName,
-                                 ActionListener<HitsPerIndex> listener) {
+    private void getIndexResults(
+        Map<ShardId, List<Hit>> hitsPerShard,
+        Map<String, StreamTargetResponse> targets,
+        Task task,
+        SearchRequest req,
+        String joinField,
+        String indexName,
+        ActionListener<HitsPerIndex> listener
+    ) {
         int count = (int) hitsPerShard.values().stream().mapToInt(List::size).count();
         GroupedActionListener<FetchSearchResult> l = new GroupedActionListener<>(new ActionListener<>() {
             @Override
@@ -269,22 +297,30 @@ public class TransportStreamedJoinAction extends HandledTransportAction<JoinRequ
             Transport.Connection connection = transportService.getConnection(node);
             ShardFetchSearchRequest fetchRequest = createFetchRequest(
                 searchPhaseResult.getQuerySearchResult().getContextId(),
-                entry.getValue().stream().map(h -> h.leftShardId.getIndexName().equals(shardId.getIndexName()) ? h.leftDocId : h.rightDocId).collect(Collectors.toList()),
+                entry.getValue()
+                    .stream()
+                    .map(h -> h.leftShardId.getIndexName().equals(shardId.getIndexName()) ? h.leftDocId : h.rightDocId)
+                    .collect(Collectors.toList()),
                 searchShardTarget.getOriginalIndices(),
                 searchPhaseResult.getQuerySearchResult().getShardSearchRequest(),
                 searchPhaseResult.getQuerySearchResult().getRescoreDocIds()
             );
-            searchTransportService.sendExecuteFetch(connection, fetchRequest, createSearchTask(task, req), new SearchActionListener<>(searchShardTarget, shardId.id()) {
-                @Override
-                protected void innerOnResponse(FetchSearchResult result) {
-                    l.onResponse(result);
-                }
+            searchTransportService.sendExecuteFetch(
+                connection,
+                fetchRequest,
+                createSearchTask(task, req),
+                new SearchActionListener<>(searchShardTarget, shardId.id()) {
+                    @Override
+                    protected void innerOnResponse(FetchSearchResult result) {
+                        l.onResponse(result);
+                    }
 
-                @Override
-                public void onFailure(Exception e) {
-                    l.onFailure(e);
+                    @Override
+                    public void onFailure(Exception e) {
+                        l.onFailure(e);
+                    }
                 }
-            });
+            );
         }
     }
 
@@ -298,9 +334,7 @@ public class TransportStreamedJoinAction extends HandledTransportAction<JoinRequ
             Map<Object, List<SearchHit>> hitsByJoinField = fetchResults.stream()
                 .filter(result -> result.hits() != null)
                 .flatMap(result -> Arrays.stream(result.hits().getHits()))
-                .collect(Collectors.groupingBy(
-                    hit -> hit.getSourceAsMap().get(joinField)
-                ));
+                .collect(Collectors.groupingBy(hit -> hit.getSourceAsMap().get(joinField)));
             listener.onResponse(new HitsPerIndex(indexName, hitsByJoinField));
         } catch (Exception e) {
             listener.onFailure(e);
@@ -324,15 +358,7 @@ public class TransportStreamedJoinAction extends HandledTransportAction<JoinRequ
         ShardSearchRequest shardSearchRequest,
         RescoreDocIds rescoreDocIds
     ) {
-        return new ShardFetchSearchRequest(
-            originalIndices,
-            contextId,
-            shardSearchRequest,
-            entry,
-            null,
-            rescoreDocIds,
-            null
-        );
+        return new ShardFetchSearchRequest(originalIndices, contextId, shardSearchRequest, entry, null, rescoreDocIds, null);
     }
 
     static class Hit {
@@ -356,23 +382,21 @@ public class TransportStreamedJoinAction extends HandledTransportAction<JoinRequ
 
         // Group hits by left index and shards
         Map<String, Map<ShardId, List<Hit>>> leftGroups = hits.stream()
-            .collect(Collectors.groupingBy(
-                hit -> hit.leftShardId.getIndex().getName(),
+            .collect(
                 Collectors.groupingBy(
-                    hit -> hit.leftShardId,
-                    Collectors.toList()
+                    hit -> hit.leftShardId.getIndex().getName(),
+                    Collectors.groupingBy(hit -> hit.leftShardId, Collectors.toList())
                 )
-            ));
+            );
 
         // Group hits by right index and shards
         Map<String, Map<ShardId, List<Hit>>> rightGroups = hits.stream()
-            .collect(Collectors.groupingBy(
-                hit -> hit.rightShardId.getIndex().getName(),
+            .collect(
                 Collectors.groupingBy(
-                    hit -> hit.rightShardId,
-                    Collectors.toList()
+                    hit -> hit.rightShardId.getIndex().getName(),
+                    Collectors.groupingBy(hit -> hit.rightShardId, Collectors.toList())
                 )
-            ));
+            );
 
         // Combine both maps
         result.putAll(leftGroups);
@@ -380,7 +404,6 @@ public class TransportStreamedJoinAction extends HandledTransportAction<JoinRequ
 
         return result;
     }
-
 
     private static Object getValue(FieldVector vector, int index) {
         if (vector == null || vector.isNull(index)) {
@@ -408,25 +431,14 @@ public class TransportStreamedJoinAction extends HandledTransportAction<JoinRequ
     private void searchIndex(Task task, SearchRequest request, GroupedActionListener<SearchResponse> groupedListener) {
         SearchRequest leftRequest = request.searchType(SearchType.STREAM);
         SearchTask leftTask = createSearchTask(task, leftRequest);
-        transportSearchAction.doExecute(
-            leftTask,
-            leftRequest,
-            groupedListener
-        );
+        transportSearchAction.doExecute(leftTask, leftRequest, groupedListener);
     }
 
     private static SearchTask createSearchTask(Task task, SearchRequest request) {
-        return request.createTask(
-            task.getId(),
-            task.getType(),
-            task.getAction(),
-            task.getParentTaskId(),
-            Collections.emptyMap()
-        );
+        return request.createTask(task.getId(), task.getType(), task.getAction(), task.getParentTaskId(), Collections.emptyMap());
     }
 
     List<byte[]> tickets(SearchResponse response) {
-        return Objects.requireNonNull(response.getTickets()).stream()
-            .map(OSTicket::getBytes).collect(Collectors.toList());
+        return Objects.requireNonNull(response.getTickets()).stream().map(OSTicket::getBytes).collect(Collectors.toList());
     }
 }

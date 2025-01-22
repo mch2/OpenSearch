@@ -588,7 +588,7 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
     }
 
     @Override
-    protected void doStart() { }
+    protected void doStart() {}
 
     @Override
     protected void doStop() {
@@ -806,7 +806,7 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
             try (SearchOperationListenerExecutor executor = new SearchOperationListenerExecutor(context)) {
                 loadOrExecuteStreamPhase(request, context);
                 if (context.queryResult().hasSearchContext() == false && readerContext.singleSession()) {
-//                    freeReaderContext(readerContext.id());
+                    // freeReaderContext(readerContext.id());
                 }
             }
             return context.streamSearchResult();
@@ -872,7 +872,6 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
             }
         }, wrapFailureListener(listener, readerContext, markAsUsed));
     }
-
 
     public void executeStreamPhase(QuerySearchRequest request, SearchShardTask task, ActionListener<StreamSearchResult> listener) {
         final ReaderContext readerContext = findReaderContext(request.contextId(), request.shardSearchRequest());

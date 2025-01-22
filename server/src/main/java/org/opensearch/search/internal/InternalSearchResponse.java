@@ -42,7 +42,6 @@ import org.opensearch.core.common.io.stream.Writeable;
 import org.opensearch.core.xcontent.ToXContentFragment;
 import org.opensearch.search.SearchExtBuilder;
 import org.opensearch.search.SearchHits;
-import org.opensearch.search.SearchPhaseResult;
 import org.opensearch.search.aggregations.InternalAggregations;
 import org.opensearch.search.profile.SearchProfileShardResults;
 import org.opensearch.search.stream.OSTicket;
@@ -104,7 +103,18 @@ public class InternalSearchResponse extends SearchResponseSections implements Wr
         List<OSTicket> tickets,
         List<StreamTargetResponse> result
     ) {
-        super(hits, aggregations, suggest, timedOut, terminatedEarly, profileResults, numReducePhases, searchExtBuilderList, tickets, result);
+        super(
+            hits,
+            aggregations,
+            suggest,
+            timedOut,
+            terminatedEarly,
+            profileResults,
+            numReducePhases,
+            searchExtBuilderList,
+            tickets,
+            result
+        );
     }
 
     public InternalSearchResponse(StreamInput in) throws IOException {
@@ -117,8 +127,8 @@ public class InternalSearchResponse extends SearchResponseSections implements Wr
             in.readOptionalWriteable(SearchProfileShardResults::new),
             in.readVInt(),
             readSearchExtBuildersOnOrAfter(in),
-            (in.readBoolean()? in.readList(OSTicket::new): null),
-            (in.readBoolean()? in.readList(StreamTargetResponse::new): null)
+            (in.readBoolean() ? in.readList(OSTicket::new) : null),
+            (in.readBoolean() ? in.readList(StreamTargetResponse::new) : null)
         );
     }
 

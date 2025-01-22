@@ -10,7 +10,6 @@ package org.opensearch.action.search;
 
 import org.apache.lucene.search.TotalHits;
 import org.opensearch.common.annotation.ExperimentalApi;
-import org.opensearch.common.annotation.PublicApi;
 import org.opensearch.core.action.ActionResponse;
 import org.opensearch.core.common.io.stream.StreamInput;
 import org.opensearch.core.common.io.stream.StreamOutput;
@@ -42,7 +41,7 @@ public class JoinResponse extends ActionResponse {
 
     public JoinResponse(OSTicket ticket) {
         this.ticket = ticket;
-        this.hits = new SearchHits(new SearchHit[]{}, new TotalHits(0, TotalHits.Relation.EQUAL_TO), 0f);
+        this.hits = new SearchHits(new SearchHit[] {}, new TotalHits(0, TotalHits.Relation.EQUAL_TO), 0f);
     }
 
     public JoinResponse(SearchHits hits) {
@@ -58,14 +57,12 @@ public class JoinResponse extends ActionResponse {
 
     @Override
     public void writeTo(StreamOutput out) throws IOException {
-       ticket.writeTo(out);
-       hits.writeTo(out);
+        ticket.writeTo(out);
+        hits.writeTo(out);
     }
 
     @Override
     public String toString() {
-        return "JoinResponse{" +
-            "ticket=" + ticket +
-            '}';
+        return "JoinResponse{" + "ticket=" + ticket + '}';
     }
 }

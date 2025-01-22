@@ -128,9 +128,13 @@ public class QueryPhaseResultConsumer extends ArraySearchPhaseResults<SearchPhas
     @Override
     public void consumeResult(SearchPhaseResult result, Runnable next) {
         super.consumeResult(result, () -> {});
-        QuerySearchResult querySearchResult = result.queryResult();
-        progressListener.notifyQueryResult(querySearchResult.getShardIndex());
-        pendingMerges.consume(querySearchResult, next);
+        if (result instanceof StreamSearchResult) {
+            next.run();
+        } else {
+            QuerySearchResult querySearchResult = result.queryResult();
+            progressListener.notifyQueryResult(querySearchResult.getShardIndex());
+            pendingMerges.consume(querySearchResult, next);
+        }
     }
 
     @Override
@@ -146,8 +150,12 @@ public class QueryPhaseResultConsumer extends ArraySearchPhaseResults<SearchPhas
 
         SearchPhaseController.ReducedQueryPhase reducePhase = null;
         if (results.get(0) instanceof StreamSearchResult) {
-           reducePhase = controller.reducedFromStream(results.asList()
-                .stream().map(r -> (StreamSearchResult) r).collect(Collectors.toList()));
+            reducePhase = controller.reducedFromStream(
+                results.asList().stream().map(r -> (StreamSearchResult) r).collect(Collectors.toList()),
+                aggReduceContextBuilder,
+                performFinalReduce
+            );
+            logger.info("Will reduce results for {}", results.get(0));
         } else {
             final SearchPhaseController.TopDocsStats topDocsStats = pendingMerges.consumeTopDocsStats();
             final List<TopDocs> topDocsList = pendingMerges.consumeTopDocs();
@@ -171,7 +179,11 @@ public class QueryPhaseResultConsumer extends ArraySearchPhaseResults<SearchPhas
                 // Update the circuit breaker to replace the estimation with the serialized size of the newly reduced result
                 long finalSize = reducePhase.aggregations.getSerializedSize() - breakerSize;
                 pendingMerges.addWithoutBreaking(finalSize);
-                logger.trace("aggs final reduction [{}] max [{}]", pendingMerges.aggsCurrentBufferSize, pendingMerges.maxAggsCurrentBufferSize);
+                logger.trace(
+                    "aggs final reduction [{}] max [{}]",
+                    pendingMerges.aggsCurrentBufferSize,
+                    pendingMerges.maxAggsCurrentBufferSize
+                );
             }
         }
         progressListener.notifyFinalReduce(

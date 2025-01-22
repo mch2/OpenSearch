@@ -230,18 +230,18 @@ public class GlobalOrdinalsStringTermsAggregator extends AbstractStringTermsAggr
         SortedSetDocValues globalOrds = valuesSource.globalOrdinalsValues(ctx);
         collectionStrategy.globalOrdsReady(globalOrds);
 
-        if (collectionStrategy instanceof DenseGlobalOrds
-            && this.resultStrategy instanceof StandardTermsResults
-            && sub == LeafBucketCollector.NO_OP_COLLECTOR) {
-            LeafBucketCollector termDocFreqCollector = termDocFreqCollector(
-                ctx,
-                globalOrds,
-                (ord, docCount) -> incrementBucketDocCount(collectionStrategy.globalOrdToBucketOrd(0, ord), docCount)
-            );
-            if (termDocFreqCollector != null) {
-                return termDocFreqCollector;
-            }
-        }
+        // if (collectionStrategy instanceof DenseGlobalOrds
+        // && this.resultStrategy instanceof StandardTermsResults
+        // && sub == LeafBucketCollector.NO_OP_COLLECTOR) {
+        // LeafBucketCollector termDocFreqCollector = termDocFreqCollector(
+        // ctx,
+        // globalOrds,
+        // (ord, docCount) -> incrementBucketDocCount(collectionStrategy.globalOrdToBucketOrd(0, ord), docCount)
+        // );
+        // if (termDocFreqCollector != null) {
+        // return termDocFreqCollector;
+        // }
+        // }
 
         SortedDocValues singleValues = DocValues.unwrapSingleton(globalOrds);
         if (singleValues != null) {

@@ -209,7 +209,8 @@ public class SearchQueryThenFetchAsyncActionTests extends OpenSearchTestCase {
         SearchPhaseController controller = new SearchPhaseController(
             writableRegistry(),
             r -> InternalAggregationTestCase.emptyReduceContextBuilder(),
-                searchService.getStreamManager());
+            searchService.getStreamManager()
+        );
         SearchTask task = new SearchTask(0, "n/a", "n/a", () -> "test", null, Collections.emptyMap());
         QueryPhaseResultConsumer resultConsumer = new QueryPhaseResultConsumer(
             searchRequest,

@@ -315,7 +315,9 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static java.util.stream.Collectors.toList;
-import static org.opensearch.common.util.FeatureFlags.*;
+import static org.opensearch.common.util.FeatureFlags.ARROW_STREAMS_SETTING;
+import static org.opensearch.common.util.FeatureFlags.BACKGROUND_TASK_EXECUTION_EXPERIMENTAL;
+import static org.opensearch.common.util.FeatureFlags.TELEMETRY;
 import static org.opensearch.env.NodeEnvironment.collectFileCacheDataPath;
 import static org.opensearch.index.ShardIndexingPressureSettings.SHARD_INDEXING_PRESSURE_ENABLED_ATTRIBUTE_KEY;
 import static org.opensearch.indices.RemoteStoreSettings.CLUSTER_REMOTE_STORE_PINNED_TIMESTAMP_ENABLED;
@@ -1386,12 +1388,13 @@ public class Node implements Closeable {
                     throw new IllegalStateException(
                         String.format(
                             Locale.ROOT,
-                            "Only one StreamManagerPlugin can be installed. Found: %d", streamManagerPlugins.size()
+                            "Only one StreamManagerPlugin can be installed. Found: %d",
+                            streamManagerPlugins.size()
 
                         )
                     );
                 }
-                if(!streamManagerPlugins.isEmpty()) {
+                if (!streamManagerPlugins.isEmpty()) {
                     streamManager = streamManagerPlugins.get(0).getStreamManager();
                     logger.info("StreamManager initialized");
                 }
@@ -1485,7 +1488,13 @@ public class Node implements Closeable {
                 b.bind(SearchService.class).toInstance(searchService);
                 b.bind(SearchTransportService.class).toInstance(searchTransportService);
                 b.bind(SearchPhaseController.class)
-                    .toInstance(new SearchPhaseController(namedWriteableRegistry, searchService::aggReduceContextBuilder, searchService.getStreamManager()));
+                    .toInstance(
+                        new SearchPhaseController(
+                            namedWriteableRegistry,
+                            searchService::aggReduceContextBuilder,
+                            searchService.getStreamManager()
+                        )
+                    );
                 b.bind(Transport.class).toInstance(transport);
                 b.bind(TransportService.class).toInstance(transportService);
                 b.bind(NetworkService.class).toInstance(networkService);

@@ -81,7 +81,7 @@ public class ArrowCollector extends FilterCollector {
             }
         });
 
-        final int[] currentRow = {0};
+        final int[] currentRow = { 0 };
         return new LeafCollector() {
             private final int[] docIds = new int[batchSize];
             private final float[] scores = new float[batchSize];
@@ -163,7 +163,7 @@ public class ArrowCollector extends FilterCollector {
             }
         }
 
-            ;
+        ;
     }
 
     @Override

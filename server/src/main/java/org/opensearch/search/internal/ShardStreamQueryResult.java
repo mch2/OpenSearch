@@ -8,7 +8,6 @@
 
 package org.opensearch.search.internal;
 
-import org.opensearch.action.search.SearchContextId;
 import org.opensearch.core.common.io.stream.StreamInput;
 import org.opensearch.core.common.io.stream.StreamOutput;
 import org.opensearch.core.common.io.stream.Writeable;

@@ -117,7 +117,8 @@ public class TermsReduceBenchmark {
                     PipelineAggregator.PipelineTree.EMPTY
                 );
             }
-        });
+        }
+    );
 
     @State(Scope.Benchmark)
     public static class TermsList extends AbstractList<InternalAggregations> {

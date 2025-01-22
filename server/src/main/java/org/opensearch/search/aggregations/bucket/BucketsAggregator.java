@@ -109,7 +109,11 @@ public abstract class BucketsAggregator extends AggregatorBase {
 
     @Override
     public void reset() {
-        docCounts = bigArrays.newLongArray(1, true);
+        try (LongArray oldArray = docCounts) {
+            // Create new array after releasing the old one
+            docCounts.fill(0, docCounts.size(), 0);
+            // docCounts = bigArrays.newLongArray(1, true);
+        }
     }
 
     /**

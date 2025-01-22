@@ -17,8 +17,8 @@ import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.dictionary.DictionaryProvider;
 import org.apache.arrow.vector.ipc.message.IpcOption;
-import org.opensearch.arrow.StreamProducer;
 import org.opensearch.arrow.StreamManager;
+import org.opensearch.arrow.StreamProducer;
 import org.opensearch.arrow.StreamTicket;
 import org.opensearch.test.OpenSearchTestCase;
 
@@ -92,8 +92,7 @@ public class BaseFlightProducerTests extends OpenSearchTestCase {
         }
 
         @Override
-        public void start(VectorSchemaRoot root, DictionaryProvider dictionaries, IpcOption option) {
-        }
+        public void start(VectorSchemaRoot root, DictionaryProvider dictionaries, IpcOption option) {}
 
         @Override
         public void putNext(ArrowBuf metadata) {

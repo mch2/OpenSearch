@@ -49,9 +49,6 @@ public class StreamTargetResponse implements Writeable {
 
     @Override
     public String toString() {
-        return "StreamTargetResponse{" +
-            "querySearchResult=" + querySearchResult +
-            ", searchShardTarget=" + searchShardTarget +
-            '}';
+        return "StreamTargetResponse{" + "querySearchResult=" + querySearchResult + ", searchShardTarget=" + searchShardTarget + '}';
     }
 }

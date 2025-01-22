@@ -2345,7 +2345,8 @@ public class SnapshotResiliencyTests extends OpenSearchTestCase {
                 SearchPhaseController searchPhaseController = new SearchPhaseController(
                     writableRegistry(),
                     searchService::aggReduceContextBuilder,
-                        searchService.getStreamManager());
+                    searchService.getStreamManager()
+                );
                 SearchRequestOperationsCompositeListenerFactory searchRequestOperationsCompositeListenerFactory =
                     new SearchRequestOperationsCompositeListenerFactory();
                 actions.put(

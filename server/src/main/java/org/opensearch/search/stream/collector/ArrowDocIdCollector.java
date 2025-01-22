@@ -7,11 +7,11 @@
  */
 
 package org.opensearch.search.stream.collector;
+
 import org.apache.arrow.vector.Float4Vector;
 import org.apache.arrow.vector.IntVector;
 import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
-import org.apache.arrow.vector.holders.VarCharHolder;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.search.Collector;
 import org.apache.lucene.search.FilterCollector;
@@ -35,7 +35,13 @@ public class ArrowDocIdCollector extends FilterCollector {
     private int currentRow;
     private SearchShardTarget target;
 
-    public ArrowDocIdCollector(Collector in, VectorSchemaRoot root, StreamProducer.FlushSignal flushSignal, int batchSize, SearchShardTarget target) {
+    public ArrowDocIdCollector(
+        Collector in,
+        VectorSchemaRoot root,
+        StreamProducer.FlushSignal flushSignal,
+        int batchSize,
+        SearchShardTarget target
+    ) {
         super(in);
         this.root = root;
         this.docIDVector = (IntVector) root.getVector("docID");
@@ -59,10 +65,9 @@ public class ArrowDocIdCollector extends FilterCollector {
         return ScoreMode.TOP_DOCS;
     }
 
-
     @Override
     public LeafCollector getLeafCollector(LeafReaderContext context) throws IOException {
-        LeafCollector inner = (this.in == null ? null: super.getLeafCollector(context));
+        LeafCollector inner = (this.in == null ? null : super.getLeafCollector(context));
         return new LeafCollector() {
 
             private Scorable scorer;

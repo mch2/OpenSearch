@@ -20,7 +20,9 @@ import org.opensearch.test.OpenSearchTestCase;
 
 import java.util.Collections;
 
-import static org.mockito.Mockito.*;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 public class FlightStreamManagerTests extends OpenSearchTestCase {
 
@@ -36,7 +38,7 @@ public class FlightStreamManagerTests extends OpenSearchTestCase {
         FlightService flightService = mock(FlightService.class);
         when(flightService.getFlightClient(NODE_ID)).thenReturn(flightClient);
         BufferAllocator allocator = mock(BufferAllocator.class);
-        flightStreamManager = new FlightStreamManager(()->allocator, flightService);
+        flightStreamManager = new FlightStreamManager(() -> allocator, flightService);
     }
 
     public void testGetStreamIterator() {

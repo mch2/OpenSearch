@@ -665,7 +665,8 @@ public class CanMatchPreFilterSearchPhaseTests extends OpenSearchTestCase {
         SearchPhaseController controller = new SearchPhaseController(
             writableRegistry(),
             r -> InternalAggregationTestCase.emptyReduceContextBuilder(),
-                searchService.getStreamManager());
+            searchService.getStreamManager()
+        );
 
         QueryPhaseResultConsumer resultConsumer = new QueryPhaseResultConsumer(
             searchRequest,

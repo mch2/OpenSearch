@@ -742,7 +742,8 @@ public class SearchPipelineServiceTests extends OpenSearchTestCase {
         SearchPhaseController controller = new SearchPhaseController(
             writableRegistry(),
             s -> InternalAggregationTestCase.emptyReduceContextBuilder(),
-                searchService.getStreamManager());
+            searchService.getStreamManager()
+        );
         SearchPhaseContext searchPhaseContext = new MockSearchPhaseContext(10);
         QueryPhaseResultConsumer searchPhaseResults = new QueryPhaseResultConsumer(
             searchPhaseContext.getRequest(),

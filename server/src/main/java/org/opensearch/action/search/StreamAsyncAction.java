@@ -32,7 +32,6 @@
 
 package org.opensearch.action.search;
 
-import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.IntVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
@@ -40,26 +39,15 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.arrow.StreamIterator;
 import org.opensearch.arrow.StreamManager;
-import org.opensearch.arrow.StreamProducer;
 import org.opensearch.arrow.StreamTicket;
 import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.routing.GroupShardsIterator;
 import org.opensearch.common.util.concurrent.AbstractRunnable;
-import org.opensearch.common.util.concurrent.AtomicArray;
 import org.opensearch.core.action.ActionListener;
-import org.opensearch.core.index.shard.ShardId;
-import org.opensearch.datafusion.DataFrame;
-import org.opensearch.datafusion.DataFrameStreamProducer;
-import org.opensearch.datafusion.DataFusion;
-import org.opensearch.datafusion.RecordBatchStream;
-import org.opensearch.datafusion.SessionContext;
 import org.opensearch.search.SearchHits;
 import org.opensearch.search.SearchPhaseResult;
-import org.opensearch.search.SearchShardTarget;
 import org.opensearch.search.internal.AliasFilter;
 import org.opensearch.search.internal.InternalSearchResponse;
-import org.opensearch.search.internal.ShardSearchContextId;
-import org.opensearch.search.internal.ShardStreamQueryResult;
 import org.opensearch.search.stream.OSTicket;
 import org.opensearch.search.stream.StreamSearchResult;
 import org.opensearch.telemetry.tracing.Tracer;
@@ -84,15 +72,53 @@ class StreamAsyncAction extends SearchQueryThenFetchAsyncAction {
     public static Logger logger = LogManager.getLogger(StreamAsyncAction.class);
     private final SearchPhaseController searchPhaseController;
 
-    public StreamAsyncAction(Logger logger, SearchTransportService searchTransportService, BiFunction<String, String, Transport.Connection> nodeIdToConnection, Map<String, AliasFilter> aliasFilter, Map<String, Float> concreteIndexBoosts, Map<String, Set<String>> indexRoutings, SearchPhaseController searchPhaseController, Executor executor, QueryPhaseResultConsumer resultConsumer, SearchRequest request, ActionListener<SearchResponse> listener, GroupShardsIterator<SearchShardIterator> shardsIts, TransportSearchAction.SearchTimeProvider timeProvider, ClusterState clusterState, SearchTask task, SearchResponse.Clusters clusters, SearchRequestContext searchRequestContext, Tracer tracer) {
-        super(logger, searchTransportService, nodeIdToConnection, aliasFilter, concreteIndexBoosts, indexRoutings, searchPhaseController, executor, resultConsumer, request, listener, shardsIts, timeProvider, clusterState, task, clusters, searchRequestContext, tracer);
+    public StreamAsyncAction(
+        Logger logger,
+        SearchTransportService searchTransportService,
+        BiFunction<String, String, Transport.Connection> nodeIdToConnection,
+        Map<String, AliasFilter> aliasFilter,
+        Map<String, Float> concreteIndexBoosts,
+        Map<String, Set<String>> indexRoutings,
+        SearchPhaseController searchPhaseController,
+        Executor executor,
+        QueryPhaseResultConsumer resultConsumer,
+        SearchRequest request,
+        ActionListener<SearchResponse> listener,
+        GroupShardsIterator<SearchShardIterator> shardsIts,
+        TransportSearchAction.SearchTimeProvider timeProvider,
+        ClusterState clusterState,
+        SearchTask task,
+        SearchResponse.Clusters clusters,
+        SearchRequestContext searchRequestContext,
+        Tracer tracer
+    ) {
+        super(
+            logger,
+            searchTransportService,
+            nodeIdToConnection,
+            aliasFilter,
+            concreteIndexBoosts,
+            indexRoutings,
+            searchPhaseController,
+            executor,
+            resultConsumer,
+            request,
+            listener,
+            shardsIts,
+            timeProvider,
+            clusterState,
+            task,
+            clusters,
+            searchRequestContext,
+            tracer
+        );
         this.searchPhaseController = searchPhaseController;
     }
 
-//    @Override
-//    protected SearchPhase getNextPhase(final SearchPhaseResults<SearchPhaseResult> results, SearchPhaseContext context) {
-//        return new StreamSearchReducePhase("stream_reduce", context);
-//    }
+    // @Override
+    // protected SearchPhase getNextPhase(final SearchPhaseResults<SearchPhaseResult> results, SearchPhaseContext context) {
+    // return new StreamSearchReducePhase("stream_reduce", context);
+    // }
 
     class StreamSearchReducePhase extends SearchPhase {
         private SearchPhaseContext context;
@@ -122,40 +148,54 @@ class StreamAsyncAction extends SearchQueryThenFetchAsyncAction {
                 // fetch all the tickets (one byte[] per shard) and hand that off to Datafusion.Query
                 // this creates a single stream that we'll register with the streammanager on this coordinator.
                 List<SearchPhaseResult> results = StreamAsyncAction.this.results.getAtomicArray().asList();
-//                List<byte[]> tickets = results.stream().flatMap(r -> ((StreamSearchResult) r).getFlightTickets().stream())
-//                    .map(OSTicket::getBytes)
-//                    .collect(Collectors.toList());
+                // List<byte[]> tickets = results.stream().flatMap(r -> ((StreamSearchResult) r).getFlightTickets().stream())
+                // .map(OSTicket::getBytes)
+                // .collect(Collectors.toList());
 
-                List<OSTicket> tickets = results.stream().flatMap(r -> ((StreamSearchResult) r).getFlightTickets().stream())
+                List<OSTicket> tickets = results.stream()
+                    .flatMap(r -> ((StreamSearchResult) r).getFlightTickets().stream())
                     .collect(Collectors.toList());
 
                 // This is additional metadata for the fetch phase that will be conducted on the coordinator
-                // StreamTargetResponse is a wrapper for an individual shard that contains the contextId and ShardTarget that served the original
+                // StreamTargetResponse is a wrapper for an individual shard that contains the contextId and ShardTarget that served the
+                // original
                 // query phase so we can fetch from it.
-                List<StreamTargetResponse> targets = StreamAsyncAction.this.results.getAtomicArray().asList()
+                List<StreamTargetResponse> targets = StreamAsyncAction.this.results.getAtomicArray()
+                    .asList()
                     .stream()
                     .map(r -> new StreamTargetResponse(r.queryResult(), r.getSearchShardTarget()))
                     .collect(Collectors.toList());
 
-//                StreamManager streamManager = searchPhaseController.getStreamManager();
-//                StreamIterator streamIterator = streamManager.getStreamIterator(StreamTicket.fromBytes(tickets.get(0)));
-//                List<TransportStreamedJoinAction.Hit> hits = new ArrayList<>();
-//                while (streamIterator.next()) {
-//                    VectorSchemaRoot root = streamIterator.getRoot();
-//                    int rowCount = root.getRowCount();
-//                    // Iterate through rows
-//                    for (int row = 0; row < rowCount; row++) {
-//                        FieldVector ord = root.getVector("ord");
-//                        FieldVector count = root.getVector("count");;
-//
-//
-//                        int ordVal = (int) getValue(ord, row);
-//                        int countVal = (int) getValue(count, row);
-//                        logger.info("ORD {} COUNT {}", ordVal, countVal);
-//                    }
-//                }
-//                StreamTicket streamTicket = streamManager.registerStream(DataFrameStreamProducer.query(tickets));
-                InternalSearchResponse internalSearchResponse = new InternalSearchResponse(SearchHits.empty(), null, null, null, false, false, 1, Collections.emptyList(), List.of(tickets.get(0)), targets);
+                StreamManager streamManager = searchPhaseController.getStreamManager();
+                StreamIterator streamIterator = streamManager.getStreamIterator(StreamTicket.fromBytes(tickets.get(0).getBytes()));
+                List<TransportStreamedJoinAction.Hit> hits = new ArrayList<>();
+                while (streamIterator.next()) {
+                    VectorSchemaRoot root = streamIterator.getRoot();
+                    int rowCount = root.getRowCount();
+                    // Iterate through rows
+                    for (int row = 0; row < rowCount; row++) {
+                        FieldVector ord = root.getVector("ord");
+                        FieldVector count = root.getVector("count");
+                        ;
+
+                        int ordVal = (int) getValue(ord, row);
+                        int countVal = (int) getValue(count, row);
+                        logger.info("ORD {} COUNT {}", ordVal, countVal);
+                    }
+                }
+                // StreamTicket streamTicket = streamManager.registerStream(DataFrameStreamProducer.query(tickets));
+                InternalSearchResponse internalSearchResponse = new InternalSearchResponse(
+                    SearchHits.empty(),
+                    null,
+                    null,
+                    null,
+                    false,
+                    false,
+                    1,
+                    Collections.emptyList(),
+                    List.of(tickets.get(0)),
+                    targets
+                );
                 context.sendSearchResponse(internalSearchResponse, StreamAsyncAction.this.results.getAtomicArray());
             } catch (Exception e) {
                 logger.error("broken", e);
