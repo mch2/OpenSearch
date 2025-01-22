@@ -10,6 +10,8 @@ package org.opensearch.datafusion;
 
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.opensearch.arrow.StreamProducer;
 
 import java.util.List;
@@ -21,11 +23,15 @@ import java.util.function.Supplier;
  */
 public class DataFrameStreamProducer {
 
-    public static StreamProducer query(List<byte[]> tickets) {
-        return new DataFrameFlightProducer(() -> DataFusion.query(tickets));
+    public static StreamProducer query(byte[] ticket) {
+        return new DataFrameFlightProducer(() -> DataFusion.query(ticket));
     }
 
-    public static StreamProducer join(List<byte[]> left, List<byte[]> right, String joinField) {
+    public static StreamProducer agg(byte[] ticket) {
+        return new DataFrameFlightProducer(() -> DataFusion.agg(ticket));
+    }
+
+    public static StreamProducer join(byte[] left, byte[] right, String joinField) {
         return new DataFrameFlightProducer(() -> DataFusion.join(left, right, joinField));
     }
 
@@ -36,30 +42,36 @@ public class DataFrameStreamProducer {
 
         public DataFrameFlightProducer(Supplier<CompletableFuture<DataFrame>> frameSupplier) {
             this.df = frameSupplier.get().join();
+            logger.info("Constructed DataFrameFlightProducer");
         }
 
         @Override
         public VectorSchemaRoot createRoot(BufferAllocator allocator) {
-            System.out.println("Fetching the record batch");
+            logger.info("Fetching the record batch");
             recordBatchStream = df.getStream(allocator).join();
+            logger.info("Finished fetching the record batch");
             VectorSchemaRoot vectorSchemaRoot = recordBatchStream.getVectorSchemaRoot();
-            System.out.println(vectorSchemaRoot);
+            logger.info("Returning VectorSchemaRoot");
             return vectorSchemaRoot;
         }
+        public static Logger logger = LogManager.getLogger(DataFrameStreamProducer.class);
 
         @Override
         public BatchedJob createJob(BufferAllocator allocator) {
-            System.out.println("Creating batch job for the stream");
+            logger.info("createJob");
             assert recordBatchStream != null;
             return new BatchedJob() {
 
                 @Override
                 public void run(VectorSchemaRoot root, FlushSignal flushSignal) {
                     try {
+                        logger.info("Loading next batch");
                         while (recordBatchStream.loadNextBatch().join()) {
-                            System.out.println(recordBatchStream.getVectorSchemaRoot().getRowCount());
+                            logger.info(recordBatchStream.getVectorSchemaRoot().getRowCount());
                             // wait for a signal to load the next batch
+                            logger.info("Awaiting consumption at coordinator");
                             flushSignal.awaitConsumption(1000);
+                            logger.info("Consumed batch at coord");
                         }
                         close();
                     } catch (Exception e) {

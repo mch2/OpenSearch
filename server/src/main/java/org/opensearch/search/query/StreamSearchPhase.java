@@ -27,6 +27,7 @@ import org.opensearch.index.query.QueryShardContext;
 import org.opensearch.search.SearchContextSourcePrinter;
 import org.opensearch.search.aggregations.AggregationProcessor;
 import org.opensearch.search.aggregations.Aggregator;
+import org.opensearch.search.aggregations.SearchContextAggregations;
 import org.opensearch.search.aggregations.support.StreamingAggregator;
 import org.opensearch.search.fetch.subphase.FieldAndFormat;
 import org.opensearch.search.internal.ContextIndexSearcher;
@@ -100,20 +101,7 @@ public class StreamSearchPhase extends QueryPhase {
             return searchWithCollector(searchContext, searcher, query, collectors, hasFilterCollector, hasTimeout);
         }
 
-//        @Override
-//        public AggregationProcessor aggregationProcessor(SearchContext searchContext) {
-//            return new AggregationProcessor() {
-//                @Override
-//                public void preProcess(SearchContext context) {
-//
-//                }
-//
-//                @Override
-//                public void postProcess(SearchContext context) {
-//
-//                }
-//            };
-//        }
+public static Logger logger = LogManager.getLogger(StreamSearchPhase.class);
 
         protected boolean searchWithCollector(
             SearchContext searchContext,
@@ -133,26 +121,7 @@ public class StreamSearchPhase extends QueryPhase {
             LinkedList<QueryCollectorContext> collectors,
             boolean timeoutSet
         ) {
-
-//            List<FieldAndFormat> fields = searchContext.fetchFieldsContext().fields();
-//
-//            // map from OpenSearch field to Arrow Field type
-//            List<ArrowFieldAdaptor> arrowFieldAdaptors = new ArrayList<>();
-//            fields.forEach(field -> {
-//                System.out.println("field: " + field.field);
-//                QueryShardContext shardContext = searchContext.getQueryShardContext();
-//                MappedFieldType fieldType = shardContext.fieldMapper(field.field);
-//                ArrowType arrowType = getArrowType(fieldType.typeName());
-//                arrowFieldAdaptors.add(new ArrowFieldAdaptor(field.field, arrowType, fieldType.typeName()));
-//            });
-
             QuerySearchResult queryResult = searchContext.queryResult();
-//            try {
-//                Collector collector = QueryCollectorContext.createQueryCollector(collectors);
-//                System.out.println(collector);
-//            } catch (IOException e) {
-//                throw new RuntimeException(e);
-//            }
 
             StreamManager streamManager = searchContext.streamManager();
             if (streamManager == null) {
@@ -167,7 +136,8 @@ public class StreamSearchPhase extends QueryPhase {
                         @Override
                         public void run(VectorSchemaRoot root, StreamProducer.FlushSignal flushSignal) {
                             try {
-                                final StreamingAggregator arrowDocIdCollector = new StreamingAggregator((Aggregator) QueryCollectorContext.createQueryCollector(collectors), searchContext, root,  1, flushSignal, searchContext.shardTarget().getShardId());
+                                int batchSize = 100_000;
+                                final StreamingAggregator arrowDocIdCollector = new StreamingAggregator((Aggregator) QueryCollectorContext.createQueryCollector(collectors), searchContext, root,  batchSize, flushSignal, searchContext.shardTarget().getShardId());
                                 try {
                                     searcher.search(query, arrowDocIdCollector);
                                 } catch (EarlyTerminatingCollector.EarlyTerminationException e) {
@@ -197,7 +167,7 @@ public class StreamSearchPhase extends QueryPhase {
 
                         @Override
                         public void onCancel() {
-
+                            logger.warn("Cancel job");
                         }
                     };
                 }
@@ -205,22 +175,16 @@ public class StreamSearchPhase extends QueryPhase {
                 @Override
                 public VectorSchemaRoot createRoot(BufferAllocator allocator) {
                     Map<String, Field> arrowFields = new HashMap<>();
-
-//                    Field docIdField = new Field("ord", FieldType.notNullable(new ArrowType.Int(32, true)), null);
-//                    arrowFields.put("ord", docIdField);
                     Field scoreField = new Field(
                         "count",
-                        FieldType.nullable(new ArrowType.FloatingPoint(FloatingPointPrecision.SINGLE)),
+                        FieldType.nullable(new ArrowType.Int(64, false)),
                         null
                     );
                     arrowFields.put("count", scoreField);
-
-//                    arrowFieldAdaptors.forEach(field -> {
-//                        Field arrowField = new Field(field.getFieldName(), FieldType.nullable(field.getArrowType()), null);
-//                        arrowFields.put(field.getFieldName(), arrowField);
-//                    });
                     arrowFields.put("ord", new Field("ord", FieldType.notNullable(new ArrowType.Utf8()), null));
-                    Schema schema = new Schema(arrowFields.values());
+                    HashMap<String, String> metadata = new HashMap<>();
+                    metadata.put("name", "categories");
+                    Schema schema = new Schema(arrowFields.values(), metadata);
                     return VectorSchemaRoot.create(schema, allocator);
                 }
 

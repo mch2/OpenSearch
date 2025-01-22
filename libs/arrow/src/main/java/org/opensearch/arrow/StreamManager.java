@@ -10,8 +10,11 @@ package org.opensearch.arrow;
 
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.opensearch.common.annotation.ExperimentalApi;
 
+import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
 
@@ -23,6 +26,7 @@ import java.util.function.Supplier;
 @ExperimentalApi
 public abstract class StreamManager implements AutoCloseable {
     private final ConcurrentHashMap<String, StreamHolder> streamProviders;
+    private final ConcurrentHashMap<String, LocalStreamHolder> localStreamProviders;
     private final Supplier<BufferAllocator> allocatorSupplier;
 
     /**
@@ -31,6 +35,7 @@ public abstract class StreamManager implements AutoCloseable {
     public StreamManager(Supplier<BufferAllocator> allocatorSupplier) {
         this.allocatorSupplier = allocatorSupplier;
         this.streamProviders = new ConcurrentHashMap<>();
+        this.localStreamProviders = new ConcurrentHashMap<>();
     }
 
     /**
@@ -54,6 +59,16 @@ public abstract class StreamManager implements AutoCloseable {
      */
     public StreamHolder getStreamProvider(StreamTicket ticket) {
         return streamProviders.get(ticket.getTicketID());
+    }
+
+    public LocalStreamHolder getLocalStream(StreamTicket ticket) {
+        return localStreamProviders.get(ticket.getTicketID());
+    }
+
+    public StreamTicket registerLocalStream(Schema schema, List<StreamTicket> tickets) {
+        String ticket = generateUniqueTicket();
+        localStreamProviders.put(ticket, new LocalStreamHolder(schema, tickets));
+        return new StreamTicket(ticket, getLocalNodeId());
     }
 
     /**
@@ -104,6 +119,8 @@ public abstract class StreamManager implements AutoCloseable {
         private final StreamProducer provider;
         private final VectorSchemaRoot root;
 
+
+
         public StreamHolder(StreamProducer provider, VectorSchemaRoot root) {
             this.provider = provider;
             this.root = root;
@@ -115,6 +132,24 @@ public abstract class StreamManager implements AutoCloseable {
 
         public VectorSchemaRoot getRoot() {
             return root;
+        }
+    }
+
+    public static class LocalStreamHolder {
+        private final Schema schema;
+        private final List<StreamTicket> tickets;
+
+        public LocalStreamHolder(Schema schema, List<StreamTicket> tickets) {
+            this.schema = schema;
+            this.tickets = tickets;
+        }
+
+        public List<StreamTicket> getTickets() {
+            return tickets;
+        }
+
+        public Schema getSchema() {
+            return schema;
         }
     }
 }

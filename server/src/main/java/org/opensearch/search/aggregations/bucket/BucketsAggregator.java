@@ -85,7 +85,8 @@ public abstract class BucketsAggregator extends AggregatorBase {
         super(name, factories, context, parent, bucketCardinality, metadata);
         bigArrays = context.bigArrays();
         if (context.aggregations() != null) {
-            multiBucketConsumer = context.aggregations().multiBucketConsumer();
+//            multiBucketConsumer = context.aggregations().multiBucketConsumer();
+            multiBucketConsumer = (count) -> {};
         } else {
             multiBucketConsumer = (count) -> {};
         }
@@ -109,7 +110,11 @@ public abstract class BucketsAggregator extends AggregatorBase {
 
     @Override
     public void reset() {
-        docCounts = bigArrays.newLongArray(1, true);
+//        try (LongArray oldArray = docCounts) {
+//            // Create new array after releasing the old one
+//            docCounts = bigArrays.newLongArray(1, true);
+//        }
+        docCounts.fill(0, docCounts.size(), 0);
     }
 
     /**

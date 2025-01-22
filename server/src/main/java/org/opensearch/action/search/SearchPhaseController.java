@@ -32,6 +32,7 @@
 
 package org.opensearch.action.search;
 
+import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.BigIntVector;
 import org.apache.arrow.vector.BitVector;
@@ -39,9 +40,16 @@ import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.Float4Vector;
 import org.apache.arrow.vector.Float8Vector;
 import org.apache.arrow.vector.IntVector;
+import org.apache.arrow.vector.UInt8Vector;
 import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.ipc.ArrowReader;
+import org.apache.arrow.vector.types.pojo.ArrowType;
+import org.apache.arrow.vector.types.pojo.Field;
+import org.apache.arrow.vector.types.pojo.FieldType;
+import org.apache.arrow.vector.types.pojo.Schema;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.search.CollectionStatistics;
 import org.apache.lucene.search.FieldDoc;
@@ -55,13 +63,21 @@ import org.apache.lucene.search.TopFieldDocs;
 import org.apache.lucene.search.TotalHits;
 import org.apache.lucene.search.TotalHits.Relation;
 import org.apache.lucene.search.grouping.CollapseTopFieldDocs;
+import org.apache.lucene.util.BytesRef;
+import org.opensearch.arrow.StreamIterator;
 import org.opensearch.arrow.StreamManager;
+import org.opensearch.arrow.StreamProducer;
+import org.opensearch.arrow.StreamTicket;
 import org.opensearch.common.lucene.search.TopDocsAndMaxScore;
 import org.opensearch.core.common.breaker.CircuitBreaker;
 import org.opensearch.core.common.io.stream.NamedWriteableRegistry;
+import org.opensearch.core.common.io.stream.StreamOutput;
 import org.opensearch.core.index.shard.ShardId;
+import org.opensearch.core.xcontent.XContentBuilder;
 import org.opensearch.datafusion.DataFrame;
+import org.opensearch.datafusion.DataFrameStreamProducer;
 import org.opensearch.datafusion.DataFusion;
+import org.opensearch.datafusion.RecordBatchStream;
 import org.opensearch.datafusion.SessionContext;
 import org.opensearch.search.DocValueFormat;
 import org.opensearch.search.SearchHit;
@@ -71,6 +87,9 @@ import org.opensearch.search.SearchService;
 import org.opensearch.search.aggregations.InternalAggregation;
 import org.opensearch.search.aggregations.InternalAggregation.ReduceContext;
 import org.opensearch.search.aggregations.InternalAggregations;
+import org.opensearch.search.aggregations.InternalOrder;
+import org.opensearch.search.aggregations.bucket.terms.StringTerms;
+import org.opensearch.search.aggregations.bucket.terms.TermsAggregator;
 import org.opensearch.search.builder.SearchSourceBuilder;
 import org.opensearch.search.dfs.AggregatedDfs;
 import org.opensearch.search.dfs.DfsSearchResult;
@@ -89,6 +108,7 @@ import org.opensearch.search.suggest.completion.CompletionSuggestion;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
@@ -384,7 +404,9 @@ public final class SearchPhaseController {
         }
         // clean the fetch counter
         for (SearchPhaseResult entry : fetchResults) {
-            entry.fetchResult().initCounter();
+            if (entry.fetchResult() != null) {
+                entry.fetchResult().initCounter();
+            }
         }
         int from = ignoreFrom ? 0 : reducedQueryPhase.from;
         int numSearchHits = (int) Math.min(reducedQueryPhase.fetchHits - from, reducedQueryPhase.size);
@@ -689,49 +711,91 @@ public final class SearchPhaseController {
             : source.from());
     }
 
-    public ReducedQueryPhase reducedAggsFromStream(List<StreamSearchResult> list) {
+    public static Logger logger = LogManager.getLogger(SearchPhaseController.class);
 
+    public ReducedQueryPhase reducedAggsFromStream(List<StreamSearchResult> list) throws Exception {
 
-        try (SessionContext context = new SessionContext()) {
+        List<byte[]> tickets = list.stream().flatMap(r -> r.getFlightTickets().stream())
+            .map(OSTicket::getBytes)
+            .collect(Collectors.toList());
 
-            List<byte[]> tickets = list.stream().flatMap(r -> r.getFlightTickets().stream())
-                .map(OSTicket::getBytes)
-                .collect(Collectors.toList());
+        Map<String, Field> arrowFields = new HashMap<>();
+        Field scoreField = new Field(
+            "count",
+            FieldType.nullable(new ArrowType.Int(64, false)),
+            null
+        );
+        arrowFields.put("count", scoreField);
+        arrowFields.put("ord", new Field("ord", FieldType.notNullable(new ArrowType.Utf8()), null));
+        HashMap<String, String> metadata = new HashMap<>();
+        metadata.put("name", "categories");
+        Schema schema = new Schema(arrowFields.values(), metadata);
+        logger.info("TICKETS {}", tickets);
+        StreamTicket ticket = streamManager.registerLocalStream(schema, tickets.stream().map(StreamTicket::fromBytes).collect(Collectors.toList()));
 
-            // execute the query and get a dataframe
-            CompletableFuture<DataFrame> frame = DataFusion.query(tickets);
+        logger.info("Register stream at coordinator");
+//        StreamIterator streamIterator = streamManager.getStreamIterator(streamManager.registerStream(DataFrameStreamProducer.agg(tickets)));
+        logger.info("Finished register stream at coordinator");
 
-            DataFrame dataFrame = null;
-            ArrowReader arrowReader = null;
-            try {
-                dataFrame = frame.get();
-                arrowReader = dataFrame.collect(new RootAllocator()).get();
-            } catch (InterruptedException | ExecutionException e) {
-                throw new RuntimeException(e);
+        CompletableFuture<DataFrame> agg = DataFusion.agg(ticket.toBytes());
+        DataFrame dataFrame = agg.get();
+        RecordBatchStream recordBatchStream = dataFrame.getStream(new RootAllocator()).join();
+        int totalRows = 0;
+        List<ScoreDoc> scoreDocs = new ArrayList<>();
+        List<InternalAggregation> aggs = new ArrayList<>();
+        VectorSchemaRoot root = recordBatchStream.getVectorSchemaRoot();
+        List<StringTerms.Bucket> buckets = new ArrayList<>();
+        logger.info("Starting iteration at coordinator");
+        while (recordBatchStream.loadNextBatch().join()) {
+            logger.info(recordBatchStream.getVectorSchemaRoot().getRowCount());
+            int rowCount = root.getRowCount();
+            totalRows+= rowCount;
+            logger.info("AT COORD Record Batch with " + rowCount + " rows: total {}", totalRows);
+
+            // Iterate through rows
+            for (int row = 0; row < rowCount; row++) {
+                FieldVector ordKey = root.getVector("ord");
+                String ordName = (String) getValue(ordKey, row);
+                UInt8Vector count = (UInt8Vector) root.getVector("count");
+
+                Long bucketCount = (Long) getValue(count, row);
+                buckets.add(new StringTerms.Bucket(new BytesRef(ordName.getBytes()), bucketCount.longValue(), new InternalAggregations(List.of()), false, 0, DocValueFormat.RAW));
             }
+        }
+        recordBatchStream.close();
+        dataFrame.close();
+//        while (streamIterator.next()) {
+//                    int rowCount = root.getRowCount();
+//                    totalRows+= rowCount;
+//                    logger.info("AT COORD Record Batch with " + rowCount + " rows:");
+//
+//                    // Iterate through rows
+//                    for (int row = 0; row < rowCount; row++) {
+//                        FieldVector ordKey = root.getVector("ord");
+//                        String ordName = (String) getValue(ordKey, row);
+//                        Float8Vector count = (Float8Vector) root.getVector("count");
+//
+//                        Double bucketCount = (Double) getValue(count, row);
+//                        logger.info("Ord: " + ordName + " Bucket Count" + bucketCount + "NodeID: ");
+//                        buckets.add(new StringTerms.Bucket(new BytesRef(ordName.getBytes()), bucketCount.longValue(), new InternalAggregations(List.of()), false, 0, DocValueFormat.RAW));
+//                    }
+//                }
+        aggs.add(new StringTerms(
+            root.getSchema().getCustomMetadata().get("name"),
+            InternalOrder.key(true),
+            InternalOrder.key(true),
+            null,
+            DocValueFormat.RAW,
+            1,
+            false,
+            0L,
+             buckets,
+            0,
+            new TermsAggregator.BucketCountThresholds(0, 0, 0, 0)
+        ));
+                logger.info("End stream iterations?");
 
-            int totalRows = 0;
-            List<ScoreDoc> scoreDocs = new ArrayList<>();
-            try {
-                while (arrowReader.loadNextBatch()) {
-                    VectorSchemaRoot root = arrowReader.getVectorSchemaRoot();
-                    int rowCount = root.getRowCount();
-                    totalRows+= rowCount;
-                    System.out.println("Record Batch with " + rowCount + " rows:");
-
-                    // Iterate through rows
-                    for (int row = 0; row < rowCount; row++) {
-                        FieldVector docID = root.getVector("docID");
-                        Float4Vector score = (Float4Vector) root.getVector("score");
-                        FieldVector shardID = root.getVector("shardID");
-                        FieldVector nodeID = root.getVector("nodeID");
-
-                        ShardId sid = ShardId.fromString((String) getValue(shardID, row));
-                        int value = (int) getValue(docID, row);
-                        System.out.println("DocID: " + value + " ShardID" + sid + "NodeID: " + getValue(nodeID, row));
-                        scoreDocs.add(new ScoreDoc(value, score.get(row), sid.id()));
-                    }
-                }
+                InternalAggregations aggregations = new InternalAggregations(aggs);
 
                 TotalHits totalHits = new TotalHits(totalRows, Relation.EQUAL_TO);
                 return new ReducedQueryPhase(
@@ -741,7 +805,7 @@ public final class SearchPhaseController {
                     false,
                     false,
                     null,
-                    null,
+                    aggregations,
                     null,
                     new SortedTopDocs(scoreDocs.toArray(ScoreDoc[]::new), false, null, null, null),
                     null,
@@ -751,18 +815,6 @@ public final class SearchPhaseController {
                     totalRows == 0,
                     list.stream().flatMap(ssr -> ssr.getFlightTickets().stream()).collect(Collectors.toList())
                 );
-            } catch (IOException e) {
-                throw new RuntimeException(e);
-            } finally {
-                try {
-                    arrowReader.close();
-                } catch (IOException e) {
-                    throw new RuntimeException(e);
-                }
-            }
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
     }
 
     public ReducedQueryPhase reducedFromStream(List<StreamSearchResult> list) {
@@ -775,7 +827,7 @@ public final class SearchPhaseController {
                 .collect(Collectors.toList());
 
             // execute the query and get a dataframe
-            CompletableFuture<DataFrame> frame = DataFusion.query(tickets);
+            CompletableFuture<DataFrame> frame = DataFusion.query(tickets.get(0));
 
             DataFrame dataFrame = null;
             ArrowReader arrowReader = null;
@@ -846,6 +898,9 @@ public final class SearchPhaseController {
             return "null";
         }
 
+        if (vector instanceof UInt8Vector) {
+            return ((UInt8Vector) vector).get(index);
+        } else
         if (vector instanceof IntVector) {
             return ((IntVector) vector).get(index);
         } else if (vector instanceof BigIntVector) {

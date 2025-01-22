@@ -7,11 +7,11 @@ use arrow::array::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
 use arrow::array::{Array, StructArray};
 use arrow::ipc::writer::FileWriter;
 use bytes::Bytes;
-use datafusion::execution::{SendableRecordBatchStream, SessionStateBuilder};
+use datafusion::execution::SendableRecordBatchStream;
 use datafusion::prelude::{DataFrame, SessionConfig, SessionContext};
 use futures::stream::TryStreamExt;
-use jni::objects::{JByteArray, JClass, JList, JObject, JObjectArray, JString};
-use jni::sys::{jbyteArray, jlong, jobject};
+use jni::objects::{JByteArray, JClass, JObject, JString};
+use jni::sys::jlong;
 use jni::JNIEnv;
 use std::io::BufWriter;
 use tokio::runtime::Runtime;
@@ -23,25 +23,35 @@ pub extern "system" fn Java_org_opensearch_datafusion_DataFusion_query(
     _class: JClass,
     runtime: jlong,
     ctx: jlong,
-    byte_array_list: JObject,
+    ticket: JByteArray,
     callback: JObject,
 ) {
-    let list: JList<'_, '_, '_> = env.get_list(&byte_array_list).unwrap();
-
-    let size: usize = list.size(&mut env).unwrap() as usize;
-    let mut tickets: Vec<Bytes> = Vec::with_capacity(size);
-
-    for i in 0..size {
-        let byte_array: JByteArray = list.get(&mut env, i as i32).unwrap().unwrap().into();
-        let input = env.convert_byte_array(&byte_array).unwrap();
-        let ticket = Bytes::from(input);
-        tickets.push(ticket);
-    }
+    let input = env.convert_byte_array(&ticket).unwrap();
     let context = unsafe { &mut *(ctx as *mut SessionContext) };
     let runtime = unsafe { &mut *(runtime as *mut Runtime) };
 
     runtime.block_on(async {
-        let result = provider::query(context.clone(), tickets).await;
+        let result = provider::read_aggs(context.clone(), Bytes::from(input)).await;
+        let addr = result.map(|df| Box::into_raw(Box::new(df)));
+        set_object_result(&mut env, callback, addr);
+    });
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_opensearch_datafusion_DataFusion_agg(
+    mut env: JNIEnv,
+    _class: JClass,
+    runtime: jlong,
+    ctx: jlong,
+    ticket: JByteArray,
+    callback: JObject,
+) {
+    let input = env.convert_byte_array(&ticket).unwrap();
+    let context = unsafe { &mut *(ctx as *mut SessionContext) };
+    let runtime = unsafe { &mut *(runtime as *mut Runtime) };
+
+    runtime.block_on(async {
+        let result = provider::read_aggs(context.clone(), Bytes::from(input)).await;
         let addr = result.map(|df| Box::into_raw(Box::new(df)));
         set_object_result(&mut env, callback, addr);
     });
@@ -54,12 +64,13 @@ pub extern "system" fn Java_org_opensearch_datafusion_DataFusion_join(
     runtime: jlong,
     ctx: jlong,
     join_field: JString,
-    left_tickets: JObject,
-    right_tickets: JObject,
+    left_ticket: JByteArray,
+    right_ticket: JByteArray,
     callback: JObject,
 ) {
-    let left = unwrap_tickets(&mut env, left_tickets);
-    let right = unwrap_tickets(&mut env, right_tickets);
+    let left = Bytes::from(env.convert_byte_array(&left_ticket).unwrap());
+    let right = Bytes::from(env.convert_byte_array(&right_ticket).unwrap());
+
     let field = env
         .get_string(&join_field)
         .expect("Error fetching join field")
@@ -75,20 +86,20 @@ pub extern "system" fn Java_org_opensearch_datafusion_DataFusion_join(
     });
 }
 
-fn unwrap_tickets<'local>(env: &mut JNIEnv, tickets: JObject) -> Vec<Bytes> {
-    let list: JList<'_, '_, '_> = env.get_list(&tickets).unwrap();
+// fn unwrap_tickets<'local>(env: &mut JNIEnv, tickets: JObject) -> Vec<Bytes> {
+//     let list: JList<'_, '_, '_> = env.get_list(&tickets).unwrap();
 
-    let size: usize = list.size(env).unwrap() as usize;
-    let mut tickets: Vec<Bytes> = Vec::with_capacity(size);
+//     let size: usize = list.size(env).unwrap() as usize;
+//     let mut tickets: Vec<Bytes> = Vec::with_capacity(size);
 
-    for i in 0..size {
-        let byte_array: JByteArray = list.get(env, i as i32).unwrap().unwrap().into();
-        let input = env.convert_byte_array(&byte_array).unwrap();
-        let ticket = Bytes::from(input);
-        tickets.push(ticket);
-    }
-    tickets
-}
+//     for i in 0..size {
+//         let byte_array: JByteArray = list.get(env, i as i32).unwrap().unwrap().into();
+//         let input = env.convert_byte_array(&byte_array).unwrap();
+//         let ticket = Bytes::from(input);
+//         tickets.push(ticket);
+//     }
+//     tickets
+// }
 
 #[no_mangle]
 pub extern "system" fn Java_org_opensearch_datafusion_DataFusion_collect(
@@ -152,7 +163,7 @@ pub extern "system" fn Java_org_opensearch_datafusion_SessionContext_createSessi
     _env: JNIEnv,
     _class: JClass,
 ) -> jlong {
-    let config = SessionConfig::new().with_batch_size(512);
+    let config = SessionConfig::new();
     let context = SessionContext::new_with_config(config);
     Box::into_raw(Box::new(context)) as jlong
 }
@@ -327,7 +338,7 @@ pub extern "system" fn Java_org_opensearch_datafusion_RecordBatchStream_next(
     let runtime = unsafe { &mut *(runtime as *mut Runtime) };
     let stream = unsafe { &mut *(stream as *mut SendableRecordBatchStream) };
     runtime.block_on(async {
-        let next = stream.try_next().await;
+        let next: Result<Option<arrow::array::RecordBatch>, datafusion::error::DataFusionError> = stream.try_next().await;
         match next {
             Ok(Some(batch)) => {
                 // Convert to struct array for compatibility with FFI

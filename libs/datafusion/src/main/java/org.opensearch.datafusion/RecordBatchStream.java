@@ -15,6 +15,8 @@ import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.types.pojo.Schema;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.util.concurrent.CompletableFuture;
 
@@ -45,6 +47,7 @@ public class RecordBatchStream implements AutoCloseable {
     }
 
     private static native void next(long runtime, long pointer, ObjectResultCallback callback);
+    public static Logger logger = LogManager.getLogger(RecordBatchStream.class);
 
     public CompletableFuture<Boolean> loadNextBatch() {
         ensureInitialized();
@@ -55,17 +58,21 @@ public class RecordBatchStream implements AutoCloseable {
             ptr,
             (String errString, long arrowArrayAddress) -> {
                 if (errString != null && errString.isEmpty() == false) {
+                    logger.error("ERROR IS ", errString);
                     result.completeExceptionally(new RuntimeException(errString));
                 } else if (arrowArrayAddress == 0) {
                     // Reached end of stream
+                    logger.info("Reached end of stream");
                     result.complete(false);
                 } else {
                     try {
                         ArrowArray arrowArray = ArrowArray.wrap(arrowArrayAddress);
                         Data.importIntoVectorSchemaRoot(
                             allocator, arrowArray, vectorSchemaRoot, dictionaryProvider);
+                        logger.info("Sending batch of stream");
                         result.complete(true);
                     } catch (Exception e) {
+                        logger.error("lol wtf", e);
                         result.completeExceptionally(e);
                     }
                 }

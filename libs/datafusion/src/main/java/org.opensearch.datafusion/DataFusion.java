@@ -8,6 +8,9 @@
 
 package org.opensearch.datafusion;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -23,19 +26,21 @@ public class DataFusion {
     }
 
     // create a DataFrame from a list of tickets.
-    static native void query(long runtime, long ctx, List<byte[]> tickets, ObjectResultCallback callback);
+    static native void query(long runtime, long ctx, byte[] ticket, ObjectResultCallback callback);
 
-    static native void join(long runtime, long ctx, String joinField, List<byte[]> left, List<byte[]> right, ObjectResultCallback callback);
+    static native void agg(long runtime, long ctx, byte[] ticket, ObjectResultCallback callback);
+
+    static native void join(long runtime, long ctx, String joinField, byte[] left, byte[] right, ObjectResultCallback callback);
 
     // collect the DataFrame
     static native void collect(long runtime, long df, BiConsumer<String, byte[]> callback);
 
     static native void executeStream(long runtime, long dataframe, ObjectResultCallback callback);
 
-    public static CompletableFuture<DataFrame> query(List<byte[]> tickets) {
+    public static CompletableFuture<DataFrame> query(byte[] ticket) {
         SessionContext ctx = new SessionContext();
         CompletableFuture<DataFrame> future = new CompletableFuture<>();
-        DataFusion.query(ctx.getRuntime(), ctx.getPointer(), tickets, (err, ptr) -> {
+        DataFusion.query(ctx.getRuntime(), ctx.getPointer(), ticket, (err, ptr) -> {
             if (err != null) {
                 future.completeExceptionally(new RuntimeException(err));
             } else {
@@ -45,8 +50,24 @@ public class DataFusion {
         });
         return future;
     }
+    public static Logger logger = LogManager.getLogger(DataFusion.class);
 
-    public static CompletableFuture<DataFrame> join(List<byte[]> left, List<byte[]> right, String joinField) {
+    public static CompletableFuture<DataFrame> agg(byte[] ticket) {
+        SessionContext ctx = new SessionContext();
+        CompletableFuture<DataFrame> future = new CompletableFuture<>();
+        DataFusion.agg(ctx.getRuntime(), ctx.getPointer(), ticket, (err, ptr) -> {
+            if (err != null) {
+                future.completeExceptionally(new RuntimeException(err));
+            } else {
+                DataFrame df = new DataFrame(ctx, ptr);
+                logger.info("Returning DataFrame ref from jni");
+                future.complete(df);
+            }
+        });
+        return future;
+    }
+
+    public static CompletableFuture<DataFrame> join(byte[] left, byte[] right, String joinField) {
         SessionContext ctx = new SessionContext();
         CompletableFuture<DataFrame> future = new CompletableFuture<>();
         DataFusion.join(ctx.getRuntime(), ctx.getPointer(), joinField, left, right, (err, ptr) -> {

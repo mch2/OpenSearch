@@ -146,7 +146,7 @@ public class QueryPhaseResultConsumer extends ArraySearchPhaseResults<SearchPhas
 
         SearchPhaseController.ReducedQueryPhase reducePhase = null;
         if (results.get(0) instanceof StreamSearchResult) {
-           reducePhase = controller.reducedFromStream(results.asList()
+           reducePhase = controller.reducedAggsFromStream(results.asList()
                 .stream().map(r -> (StreamSearchResult) r).collect(Collectors.toList()));
         } else {
             final SearchPhaseController.TopDocsStats topDocsStats = pendingMerges.consumeTopDocsStats();
@@ -331,7 +331,8 @@ public class QueryPhaseResultConsumer extends ArraySearchPhaseResults<SearchPhas
             if (hasAggs == false) {
                 return 0;
             }
-            return result.aggregations().asSerialized(InternalAggregations::readFrom, namedWriteableRegistry).ramBytesUsed();
+            return 0;
+//            return result.aggregations().asSerialized(InternalAggregations::readFrom, namedWriteableRegistry).ramBytesUsed();
         }
 
         /**

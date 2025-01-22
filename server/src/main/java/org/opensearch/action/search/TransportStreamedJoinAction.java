@@ -425,8 +425,8 @@ public class TransportStreamedJoinAction extends HandledTransportAction<JoinRequ
         );
     }
 
-    List<byte[]> tickets(SearchResponse response) {
+    byte[] tickets(SearchResponse response) {
         return Objects.requireNonNull(response.getTickets()).stream()
-            .map(OSTicket::getBytes).collect(Collectors.toList());
+            .map(OSTicket::getBytes).collect(Collectors.toList()).get(0);
     }
 }
