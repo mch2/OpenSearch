@@ -61,7 +61,7 @@ public class RunTask extends DefaultTestClustersTask {
     public static final String CUSTOM_SETTINGS_PREFIX = "tests.opensearch.";
     private static final int DEFAULT_HTTP_PORT = 9200;
     private static final int DEFAULT_TRANSPORT_PORT = 9300;
-    private static final int DEFAULT_STREAM_PORT = 8815;
+    private static final int DEFAULT_STREAM_PORT = 9880;
     private static final int DEFAULT_DEBUG_PORT = 5005;
     public static final String LOCALHOST_ADDRESS_PREFIX = "127.0.0.1:";
 

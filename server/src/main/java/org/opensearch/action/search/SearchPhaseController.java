@@ -55,9 +55,9 @@ import org.apache.lucene.search.TotalHits;
 import org.apache.lucene.search.TotalHits.Relation;
 import org.apache.lucene.search.grouping.CollapseTopFieldDocs;
 import org.apache.lucene.util.BytesRef;
-import org.opensearch.arrow.StreamIterator;
-import org.opensearch.arrow.StreamTicket;
 import org.opensearch.arrow.spi.StreamManager;
+import org.opensearch.arrow.spi.StreamReader;
+import org.opensearch.arrow.spi.StreamTicket;
 import org.opensearch.common.lucene.search.TopDocsAndMaxScore;
 import org.opensearch.core.common.breaker.CircuitBreaker;
 import org.opensearch.core.common.io.stream.NamedWriteableRegistry;
@@ -726,7 +726,7 @@ public final class SearchPhaseController {
 
             for (byte[] ticket : tickets) {
                 StreamTicket streamTicket = streamManager.getStreamTicketFactory().fromBytes(ticket);
-                StreamIterator streamIterator = streamManager.getStreamReader(StreamTicket.fromBytes(ticket));
+                StreamReader streamIterator = streamManager.getStreamReader(streamTicket);
                 while (streamIterator.next()) {
                     VectorSchemaRoot root = streamIterator.getRoot();
                     int rowCount = root.getRowCount();

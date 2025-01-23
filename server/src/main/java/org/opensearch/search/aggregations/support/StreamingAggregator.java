@@ -16,7 +16,7 @@ import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.search.FilterCollector;
 import org.apache.lucene.search.LeafCollector;
 import org.apache.lucene.search.Scorable;
-import org.opensearch.arrow.StreamProducer;
+import org.opensearch.arrow.spi.StreamProducer;
 import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.search.aggregations.Aggregation;
 import org.opensearch.search.aggregations.Aggregations;

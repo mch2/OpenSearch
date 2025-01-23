@@ -17,9 +17,10 @@ import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.lucene.search.Query;
-import org.opensearch.arrow.StreamManager;
-import org.opensearch.arrow.StreamProducer;
-import org.opensearch.arrow.StreamTicket;
+import org.opensearch.OpenSearchException;
+import org.opensearch.arrow.spi.StreamManager;
+import org.opensearch.arrow.spi.StreamProducer;
+import org.opensearch.arrow.spi.StreamTicket;
 import org.opensearch.search.SearchContextSourcePrinter;
 import org.opensearch.search.aggregations.AggregationProcessor;
 import org.opensearch.search.aggregations.Aggregator;
@@ -38,7 +39,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Produce stream from a shard search
+ * StreamSearchPhase is the search phase for streaming search.
  */
 public class StreamSearchPhase extends QueryPhase {
 
@@ -69,7 +70,7 @@ public class StreamSearchPhase extends QueryPhase {
     }
 
     /**
-     * Default implementation of {@link QueryPhaseSearcher}.
+     * DefaultStreamSearchPhaseSearcher
      */
     public static class DefaultStreamSearchPhaseSearcher extends DefaultQueryPhaseSearcher {
 
@@ -109,10 +110,18 @@ public class StreamSearchPhase extends QueryPhase {
             if (streamManager == null) {
                 throw new RuntimeException("StreamManager not setup");
             }
+            final boolean[] isCancelled = { false };
             StreamTicket ticket = streamManager.registerStream(new StreamProducer() {
+
+                @Override
+                public void close() {
+                    isCancelled[0] = true;
+                }
+
                 @Override
                 public BatchedJob createJob(BufferAllocator allocator) {
                     return new BatchedJob() {
+
                         @Override
                         public void run(VectorSchemaRoot root, StreamProducer.FlushSignal flushSignal) {
                             try {
@@ -125,8 +134,16 @@ public class StreamSearchPhase extends QueryPhase {
                                     searchContext.shardTarget().getShardId()
                                 );
                                 try {
+                                    searcher.addQueryCancellation(() -> {
+                                        if (isCancelled[0] == true) {
+                                            throw new OpenSearchException("Stream for query results cancelled.");
+                                        }
+                                    });
                                     searcher.search(query, arrowDocIdCollector);
                                 } catch (EarlyTerminatingCollector.EarlyTerminationException e) {
+                                    // EarlyTerminationException is not caught in ContextIndexSearcher to allow force termination of
+                                    // collection. Postcollection
+                                    // still needs to be processed for Aggregations when early termination takes place.
                                     searchContext.bucketCollectorProcessor().processPostCollection(arrowDocIdCollector);
                                     queryResult.terminatedEarly(true);
                                 }
@@ -152,7 +169,12 @@ public class StreamSearchPhase extends QueryPhase {
 
                         @Override
                         public void onCancel() {
+                            isCancelled[0] = true;
+                        }
 
+                        @Override
+                        public boolean isCancelled() {
+                            return searchContext.isCancelled() || isCancelled();
                         }
                     };
                 }
@@ -171,9 +193,14 @@ public class StreamSearchPhase extends QueryPhase {
                 public int estimatedRowCount() {
                     return searcher.getIndexReader().numDocs();
                 }
-            });
+
+                @Override
+                public String getAction() {
+                    return searchContext.getTask().getAction();
+                }
+            }, searchContext.getTask().getParentTaskId());
             StreamSearchResult streamSearchResult = searchContext.streamSearchResult();
-            streamSearchResult.flights(List.of(new OSTicket(ticket.getTicketID(), ticket.getNodeID())));
+            streamSearchResult.flights(List.of(new OSTicket(ticket.toBytes())));
             return false;
         }
     }

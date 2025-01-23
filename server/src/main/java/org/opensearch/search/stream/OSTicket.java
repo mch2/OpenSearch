@@ -8,7 +8,6 @@
 
 package org.opensearch.search.stream;
 
-import org.opensearch.arrow.StreamTicket;
 import org.opensearch.common.annotation.ExperimentalApi;
 import org.opensearch.core.common.io.stream.StreamInput;
 import org.opensearch.core.common.io.stream.StreamOutput;
@@ -19,37 +18,38 @@ import org.opensearch.core.xcontent.XContentBuilder;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 
+/**
+ * A ticket for a stream.
+ */
 @ExperimentalApi
 public class OSTicket implements Writeable, ToXContentFragment {
 
-    private final StreamTicket streamTicket;
+    private final byte[] bytes;
 
-    public OSTicket(String ticketID, String nodeID) {
-        this.streamTicket = new StreamTicket(ticketID, nodeID);
+    public OSTicket(byte[] bytes) {
+        this.bytes = bytes;
     }
 
     public OSTicket(StreamInput in) throws IOException {
-        byte[] bytes = in.readByteArray();
-        this.streamTicket = StreamTicket.fromBytes(bytes);
+        bytes = in.readByteArray();
     }
 
     public byte[] getBytes() {
-        return streamTicket.toBytes();
+        return bytes;
     }
 
     @Override
     public XContentBuilder toXContent(XContentBuilder builder, Params params) throws IOException {
-        byte[] bytes = streamTicket.toBytes();
         return builder.value(new String(bytes, StandardCharsets.UTF_8));
     }
 
     @Override
     public void writeTo(StreamOutput out) throws IOException {
-        out.writeByteArray(streamTicket.toBytes());
+        out.writeByteArray(bytes);
     }
 
     @Override
     public String toString() {
-        return "OSTicket{" + "ticketID='" + streamTicket.getTicketID() + '\'' + ", nodeID='" + streamTicket.getNodeID() + '\'' + '}';
+        return "OSTicket{" + new String(bytes, StandardCharsets.UTF_8) + "}";
     }
 }

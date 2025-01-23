@@ -34,12 +34,8 @@ package org.opensearch.action.search;
 
 import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.IntVector;
-import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.opensearch.arrow.StreamIterator;
-import org.opensearch.arrow.StreamManager;
-import org.opensearch.arrow.StreamTicket;
 import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.routing.GroupShardsIterator;
 import org.opensearch.common.util.concurrent.AbstractRunnable;
@@ -140,67 +136,35 @@ class StreamAsyncAction extends SearchQueryThenFetchAsyncAction {
 
         StreamReduceAction(SearchPhaseContext context, SearchPhase phase) {
             this.context = context;
+
         }
 
         @Override
         protected void doRun() throws Exception {
-            try {
-                // fetch all the tickets (one byte[] per shard) and hand that off to Datafusion.Query
-                // this creates a single stream that we'll register with the streammanager on this coordinator.
-                List<SearchPhaseResult> results = StreamAsyncAction.this.results.getAtomicArray().asList();
-                // List<byte[]> tickets = results.stream().flatMap(r -> ((StreamSearchResult) r).getFlightTickets().stream())
-                // .map(OSTicket::getBytes)
-                // .collect(Collectors.toList());
-
-                List<OSTicket> tickets = results.stream()
-                    .flatMap(r -> ((StreamSearchResult) r).getFlightTickets().stream())
-                    .collect(Collectors.toList());
-
-                // This is additional metadata for the fetch phase that will be conducted on the coordinator
-                // StreamTargetResponse is a wrapper for an individual shard that contains the contextId and ShardTarget that served the
-                // original
-                // query phase so we can fetch from it.
-                List<StreamTargetResponse> targets = StreamAsyncAction.this.results.getAtomicArray()
-                    .asList()
-                    .stream()
-                    .map(r -> new StreamTargetResponse(r.queryResult(), r.getSearchShardTarget()))
-                    .collect(Collectors.toList());
-
-                StreamManager streamManager = searchPhaseController.getStreamManager();
-                StreamIterator streamIterator = streamManager.getStreamIterator(StreamTicket.fromBytes(tickets.get(0).getBytes()));
-                List<TransportStreamedJoinAction.Hit> hits = new ArrayList<>();
-                while (streamIterator.next()) {
-                    VectorSchemaRoot root = streamIterator.getRoot();
-                    int rowCount = root.getRowCount();
-                    // Iterate through rows
-                    for (int row = 0; row < rowCount; row++) {
-                        FieldVector ord = root.getVector("ord");
-                        FieldVector count = root.getVector("count");
-                        ;
-
-                        int ordVal = (int) getValue(ord, row);
-                        int countVal = (int) getValue(count, row);
-                        logger.info("ORD {} COUNT {}", ordVal, countVal);
-                    }
+            List<OSTicket> tickets = new ArrayList<>();
+            for (SearchPhaseResult entry : results.getAtomicArray().asList()) {
+                if (entry instanceof StreamSearchResult) {
+                    tickets.addAll(((StreamSearchResult) entry).getFlightTickets());
                 }
-                // StreamTicket streamTicket = streamManager.registerStream(DataFrameStreamProducer.query(tickets));
-                InternalSearchResponse internalSearchResponse = new InternalSearchResponse(
-                    SearchHits.empty(),
-                    null,
-                    null,
-                    null,
-                    false,
-                    false,
-                    1,
-                    Collections.emptyList(),
-                    List.of(tickets.get(0)),
-                    targets
-                );
-                context.sendSearchResponse(internalSearchResponse, StreamAsyncAction.this.results.getAtomicArray());
-            } catch (Exception e) {
-                logger.error("broken", e);
-                throw e;
             }
+            List<StreamTargetResponse> targets = StreamAsyncAction.this.results.getAtomicArray()
+                .asList()
+                .stream()
+                .map(r -> new StreamTargetResponse(r.queryResult(), r.getSearchShardTarget()))
+                .collect(Collectors.toList());
+            InternalSearchResponse internalSearchResponse = new InternalSearchResponse(
+                SearchHits.empty(),
+                null,
+                null,
+                null,
+                false,
+                false,
+                1,
+                Collections.emptyList(),
+                tickets,
+                targets
+            );
+            context.sendSearchResponse(internalSearchResponse, results.getAtomicArray());
         }
 
         @Override

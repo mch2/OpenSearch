@@ -56,6 +56,7 @@ import org.opensearch.action.search.SearchTaskRequestOperationsListener;
 import org.opensearch.action.search.SearchTransportService;
 import org.opensearch.action.support.TransportAction;
 import org.opensearch.action.update.UpdateHelper;
+import org.opensearch.arrow.custom.StreamManagerWrapper;
 import org.opensearch.arrow.spi.StreamManager;
 import org.opensearch.bootstrap.BootstrapCheck;
 import org.opensearch.bootstrap.BootstrapContext;
@@ -1382,17 +1383,12 @@ public class Node implements Closeable {
                 admissionControlService,
                 cacheService
             );
-            StreamManager streamManager = null;
+            StreamManager streamManager;
             if (FeatureFlags.isEnabled(ARROW_STREAMS_SETTING)) {
                 List<StreamManagerPlugin> streamManagerPlugins = pluginsService.filterPlugins(StreamManagerPlugin.class);
                 if (streamManagerPlugins.size() > 1) {
                     throw new IllegalStateException(
-                        String.format(
-                            Locale.ROOT,
-                            "Only one StreamManagerPlugin can be installed. Found: %d",
-                            streamManagerPlugins.size()
-
-                        )
+                        String.format(Locale.ROOT, "Only one StreamManagerPlugin can be installed. Found: %d", streamManagerPlugins.size())
                     );
                 }
                 if (!streamManagerPlugins.isEmpty()) {
@@ -1400,10 +1396,15 @@ public class Node implements Closeable {
                     if (baseStreamManager != null) {
                         streamManager = new StreamManagerWrapper(baseStreamManager, transportService.getTaskManager());
                         logger.info("StreamManager initialized");
+                    } else {
+                        streamManager = null;
                     }
+                } else {
+                    streamManager = null;
                 }
+            } else {
+                streamManager = null;
             }
-            final StreamManager manager = streamManager;
             final SearchService searchService = newSearchService(
                 clusterService,
                 indicesService,
@@ -1418,7 +1419,7 @@ public class Node implements Closeable {
                 searchModule.getIndexSearcherExecutor(threadPool),
                 taskResourceTrackingService,
                 searchModule.getConcurrentSearchRequestDeciderFactories(),
-                manager
+                streamManager
             );
 
             final List<PersistentTasksExecutor<?>> tasksExecutors = pluginsService.filterPlugins(PersistentTaskPlugin.class)
@@ -1509,7 +1510,7 @@ public class Node implements Closeable {
                 b.bind(GatewayMetaState.class).toInstance(gatewayMetaState);
                 b.bind(Discovery.class).toInstance(discoveryModule.getDiscovery());
                 b.bind(RemoteStoreSettings.class).toInstance(remoteStoreSettings);
-                b.bind(StreamManager.class).toInstance(manager);
+                // b.bind(StreamManager.class).toInstance(streamManager);
                 {
                     b.bind(PeerRecoverySourceService.class)
                         .toInstance(new PeerRecoverySourceService(transportService, indicesService, recoverySettings));
