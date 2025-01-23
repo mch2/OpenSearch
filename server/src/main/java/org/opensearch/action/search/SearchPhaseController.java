@@ -56,15 +56,11 @@ import org.apache.lucene.search.TotalHits.Relation;
 import org.apache.lucene.search.grouping.CollapseTopFieldDocs;
 import org.apache.lucene.util.BytesRef;
 import org.opensearch.arrow.StreamIterator;
-import org.opensearch.arrow.StreamManager;
 import org.opensearch.arrow.StreamTicket;
+import org.opensearch.arrow.spi.StreamManager;
 import org.opensearch.common.lucene.search.TopDocsAndMaxScore;
 import org.opensearch.core.common.breaker.CircuitBreaker;
 import org.opensearch.core.common.io.stream.NamedWriteableRegistry;
-import org.opensearch.core.index.shard.ShardId;
-import org.opensearch.datafusion.DataFrame;
-import org.opensearch.datafusion.DataFusion;
-import org.opensearch.datafusion.SessionContext;
 import org.opensearch.index.fielddata.IndexFieldData;
 import org.opensearch.search.DocValueFormat;
 import org.opensearch.search.SearchHit;
@@ -729,7 +725,8 @@ public final class SearchPhaseController {
             Map<String, Long> bucketMap = new HashMap<String, Long>();
 
             for (byte[] ticket : tickets) {
-                StreamIterator streamIterator = streamManager.getStreamIterator(StreamTicket.fromBytes(ticket));
+                StreamTicket streamTicket = streamManager.getStreamTicketFactory().fromBytes(ticket);
+                StreamIterator streamIterator = streamManager.getStreamReader(StreamTicket.fromBytes(ticket));
                 while (streamIterator.next()) {
                     VectorSchemaRoot root = streamIterator.getRoot();
                     int rowCount = root.getRowCount();
@@ -812,110 +809,6 @@ public final class SearchPhaseController {
                 null,
                 1,
                 500,
-                0,
-                totalRows == 0,
-                list.stream().flatMap(ssr -> ssr.getFlightTickets().stream()).collect(Collectors.toList())
-            );
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
-    }
-
-    public ReducedQueryPhase reducedFromStreamInternal(
-        List<StreamSearchResult> list,
-        InternalAggregation.ReduceContextBuilder aggReduceContextBuilder,
-        boolean performFinalReduce
-    ) {
-        System.out.println("will try to reduce from stream here");
-        try {
-
-            List<byte[]> tickets = list.stream()
-                .flatMap(r -> r.getFlightTickets().stream())
-                .map(OSTicket::getBytes)
-                .collect(Collectors.toList());
-            int totalRows = 0;
-            List<ScoreDoc> scoreDocs = new ArrayList<>();
-            TotalHits totalHits = new TotalHits(totalRows, Relation.EQUAL_TO);
-            List<InternalAggregation> aggs = new ArrayList<>();
-            Map<String, Long> bucketMap = new HashMap<String, Long>();
-
-            for (byte[] ticket : tickets) {
-                StreamIterator streamIterator = streamManager.getStreamIterator(StreamTicket.fromBytes(ticket));
-                while (streamIterator.next()) {
-                    VectorSchemaRoot root = streamIterator.getRoot();
-                    int rowCount = root.getRowCount();
-                    totalRows += rowCount;
-                    System.out.println("Record Batch with " + rowCount + " rows:");
-
-                    // Iterate through rows
-                    for (int row = 0; row < rowCount; row++) {
-                        FieldVector ord = root.getVector("ord");
-                        FieldVector count = root.getVector("count");
-                        long countValue = (long) getValue(count, row);
-                        String ordValue = (String) getValue(ord, row);
-                        bucketMap.put(ordValue, bucketMap.getOrDefault(ordValue, 0L) + countValue);
-                    }
-                }
-
-                // List<BucketOrder> orders = new ArrayList<>();
-                // orders.add(BucketOrder.count(false));
-                // aggs.add(new StringTerms(
-                // "categories",
-                // InternalOrder.key(true),
-                // InternalOrder.compound(orders),
-                // null,
-                // DocValueFormat.RAW,
-                // 25,
-                // false,
-                // 0L,
-                // buckets,
-                // 0,
-                // new TermsAggregator.BucketCountThresholds(1, 0, 10, 25)
-                // ));
-                // InternalAggregations agg = InternalAggregations.reduce(List.of(InternalAggregations.from(aggs)),
-                // aggReduceContextBuilder.forFinalReduction());
-                // finalAggs.add(agg);
-            }
-            List<BucketOrder> orders = new ArrayList<>();
-            orders.add(BucketOrder.count(false));
-            List<StringTerms.Bucket> buckets = new ArrayList<>();
-            bucketMap.forEach((key, value) -> {
-                buckets.add(
-                    new StringTerms.Bucket(new BytesRef(key), value, new InternalAggregations(List.of()), false, 0, DocValueFormat.RAW)
-                );
-            });
-            aggs.add(
-                new StringTerms(
-                    "categories",
-                    InternalOrder.key(true),
-                    InternalOrder.compound(orders),
-                    null,
-                    DocValueFormat.RAW,
-                    25,
-                    false,
-                    0L,
-                    buckets,
-                    0,
-                    new TermsAggregator.BucketCountThresholds(1, 0, 10, 25)
-                )
-            );
-
-            // InternalAggregations finalReduce = reduceAggs(aggReduceContextBuilder, performFinalReduce,
-            // List.of(InternalAggregations.from(aggs)));
-
-            return new ReducedQueryPhase(
-                totalHits,
-                totalRows,
-                1.0f,
-                false,
-                false,
-                null,
-                InternalAggregations.from(aggs),
-                null,
-                new SortedTopDocs(scoreDocs.toArray(ScoreDoc[]::new), false, null, null, null),
-                null,
-                1,
-                totalRows,
                 0,
                 totalRows == 0,
                 list.stream().flatMap(ssr -> ssr.getFlightTickets().stream()).collect(Collectors.toList())

@@ -56,7 +56,7 @@ import org.opensearch.action.search.SearchTaskRequestOperationsListener;
 import org.opensearch.action.search.SearchTransportService;
 import org.opensearch.action.support.TransportAction;
 import org.opensearch.action.update.UpdateHelper;
-import org.opensearch.arrow.StreamManager;
+import org.opensearch.arrow.spi.StreamManager;
 import org.opensearch.bootstrap.BootstrapCheck;
 import org.opensearch.bootstrap.BootstrapContext;
 import org.opensearch.client.Client;
@@ -310,6 +310,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -1395,8 +1396,11 @@ public class Node implements Closeable {
                     );
                 }
                 if (!streamManagerPlugins.isEmpty()) {
-                    streamManager = streamManagerPlugins.get(0).getStreamManager();
-                    logger.info("StreamManager initialized");
+                    Supplier<StreamManager> baseStreamManager = streamManagerPlugins.get(0).getStreamManager();
+                    if (baseStreamManager != null) {
+                        streamManager = new StreamManagerWrapper(baseStreamManager, transportService.getTaskManager());
+                        logger.info("StreamManager initialized");
+                    }
                 }
             }
             final StreamManager manager = streamManager;
