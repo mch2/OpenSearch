@@ -14,7 +14,6 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.arrow.StreamProducer;
 
-import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Supplier;
 
@@ -54,6 +53,7 @@ public class DataFrameStreamProducer {
             logger.info("Returning VectorSchemaRoot");
             return vectorSchemaRoot;
         }
+
         public static Logger logger = LogManager.getLogger(DataFrameStreamProducer.class);
 
         @Override
@@ -91,7 +91,8 @@ public class DataFrameStreamProducer {
                 void close() throws Exception {
                     if (recordBatchStream != null) {
                         recordBatchStream.close();
-                    };
+                    }
+                    ;
                     df.close();
                 }
             };

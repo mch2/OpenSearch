@@ -730,7 +730,7 @@ public final class SearchPhaseController {
         HashMap<String, String> metadata = new HashMap<>();
         metadata.put("name", "categories");
         Schema schema = new Schema(arrowFields.values(), metadata);
-        logger.info("TICKETS {}", tickets);
+        logger.info("TICKETS {}", tickets.size());
         StreamTicket ticket = streamManager.registerLocalStream(schema, tickets.stream().map(StreamTicket::fromBytes).collect(Collectors.toList()));
 
         logger.info("Register stream at coordinator");

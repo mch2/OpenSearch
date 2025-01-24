@@ -26,6 +26,7 @@ pub async fn query(
     ctx: SessionContext,
     ticket: Bytes,
 ) -> datafusion::common::Result<DataFrame> {
+    println!("WHY IS QUERY CALLED");
     let df = dataframe_for_index(&ctx, "theIndex".to_owned(), ticket).await?;
 
     df.sort(vec![col("score").sort(false, true)])
@@ -37,8 +38,12 @@ pub async fn read_aggs(
     ticket: Bytes,
 ) -> datafusion::common::Result<DataFrame> {
     let df = dataframe_for_index(&ctx, "theIndex".to_owned(), ticket).await?;
+    // df.clone().show().await;
     df.filter(col("ord").is_not_null())?
-    .aggregate(vec![col("ord")], vec![sum(col("count")).alias("count")])
+    .aggregate(vec![col("ord")], vec![sum(col("count")).alias("count")])?
+    .sort(vec![col("count").sort(false, true)])? // true for descending, false for nulls last
+    .limit(0, Some(500))
+    .map_err(|e| DataFusionError::Execution(format!("Failed to agg DataFrame: {}", e)))
 }
 
 // inner join two tables together, returning a single DataFrame that can be consumed
@@ -96,6 +101,7 @@ pub async fn aggregate(
     ticket: Bytes,
 ) -> datafusion::common::Result<DataFrame> {
     let df = dataframe_for_index(&ctx, "theIndex".to_owned(), ticket).await?;
+
     df.aggregate(vec![col("")], vec![count(col("a"))])
      .map_err(|e| DataFusionError::Execution(format!("Failed to sort DataFrame: {}", e)))
 }

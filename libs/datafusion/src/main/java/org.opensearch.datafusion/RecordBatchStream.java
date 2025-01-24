@@ -36,7 +36,6 @@ public class RecordBatchStream implements AutoCloseable {
 
     private static native void destroy(long pointer);
 
-
     @Override
     public void close() throws Exception {
         destroy(ptr);
@@ -47,36 +46,33 @@ public class RecordBatchStream implements AutoCloseable {
     }
 
     private static native void next(long runtime, long pointer, ObjectResultCallback callback);
+
     public static Logger logger = LogManager.getLogger(RecordBatchStream.class);
 
     public CompletableFuture<Boolean> loadNextBatch() {
         ensureInitialized();
-        long runtimePointer =  context.getRuntime();
+        long runtimePointer = context.getRuntime();
         CompletableFuture<Boolean> result = new CompletableFuture<>();
-        next(
-            runtimePointer,
-            ptr,
-            (String errString, long arrowArrayAddress) -> {
-                if (errString != null && errString.isEmpty() == false) {
-                    logger.error("ERROR IS ", errString);
-                    result.completeExceptionally(new RuntimeException(errString));
-                } else if (arrowArrayAddress == 0) {
-                    // Reached end of stream
-                    logger.info("Reached end of stream");
-                    result.complete(false);
-                } else {
-                    try {
-                        ArrowArray arrowArray = ArrowArray.wrap(arrowArrayAddress);
-                        Data.importIntoVectorSchemaRoot(
-                            allocator, arrowArray, vectorSchemaRoot, dictionaryProvider);
-                        logger.info("Sending batch of stream");
-                        result.complete(true);
-                    } catch (Exception e) {
-                        logger.error("lol wtf", e);
-                        result.completeExceptionally(e);
-                    }
+        next(runtimePointer, ptr, (String errString, long arrowArrayAddress) -> {
+            if (errString != null && errString.isEmpty() == false) {
+                logger.error("ERROR IS {}", errString);
+                result.completeExceptionally(new RuntimeException(errString));
+            } else if (arrowArrayAddress == 0) {
+                // Reached end of stream
+                logger.info("Reached end of stream");
+                result.complete(false);
+            } else {
+                try {
+                    ArrowArray arrowArray = ArrowArray.wrap(arrowArrayAddress);
+                    Data.importIntoVectorSchemaRoot(allocator, arrowArray, vectorSchemaRoot, dictionaryProvider);
+                    logger.info("Sending batch of stream");
+                    result.complete(true);
+                } catch (Exception e) {
+                    logger.error("lol wtf", e);
+                    result.completeExceptionally(e);
                 }
-            });
+            }
+        });
         return result;
     }
 
@@ -99,22 +95,20 @@ public class RecordBatchStream implements AutoCloseable {
     private Schema getSchema() {
         // Native method is not async, but use a future to store the result for convenience
         CompletableFuture<Schema> result = new CompletableFuture<>();
-        getSchema(
-            ptr,
-            (errString, arrowSchemaAddress) -> {
-                if (errString != null && errString.isEmpty() == false) {
-                    result.completeExceptionally(new RuntimeException(errString));
-                } else {
-                    try {
-                        ArrowSchema arrowSchema = ArrowSchema.wrap(arrowSchemaAddress);
-                        Schema schema = Data.importSchema(allocator, arrowSchema, dictionaryProvider);
-                        result.complete(schema);
-                        // The FFI schema will be released from rust when it is dropped
-                    } catch (Exception e) {
-                        result.completeExceptionally(e);
-                    }
+        getSchema(ptr, (errString, arrowSchemaAddress) -> {
+            if (errString != null && errString.isEmpty() == false) {
+                result.completeExceptionally(new RuntimeException(errString));
+            } else {
+                try {
+                    ArrowSchema arrowSchema = ArrowSchema.wrap(arrowSchemaAddress);
+                    Schema schema = Data.importSchema(allocator, arrowSchema, dictionaryProvider);
+                    result.complete(schema);
+                    // The FFI schema will be released from rust when it is dropped
+                } catch (Exception e) {
+                    result.completeExceptionally(e);
                 }
-            });
+            }
+        });
         return result.join();
     }
 

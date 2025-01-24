@@ -96,7 +96,7 @@ public class StreamingAggregator extends FilterCollector {
                 currentRow[0]++;
                 if (currentRow[0] == batchSize) {
                     flushBatch();
-                    flushSignal.awaitConsumption(10000000);
+//                    flushSignal.awaitConsumption(10000000);
                 }
             }
 
@@ -104,7 +104,7 @@ public class StreamingAggregator extends FilterCollector {
             public void finish() throws IOException {
                 if (currentRow[0] > 0) {
                     flushBatch();
-                    flushSignal.awaitConsumption(10000000);
+//                    flushSignal.awaitConsumption(10000000);
                     logger.info("Flushed last batch for segment {}", context.toString());
                 }
             }
@@ -112,7 +112,7 @@ public class StreamingAggregator extends FilterCollector {
             private void flushBatch() throws IOException {
                 InternalAggregation agg = aggregator.buildAggregations(new long[]{0})[0];
 
-                    int bucketNum = 0;
+                int bucketNum = 0;
                 FieldVector termVector = vectors.get("ord");
                 FieldVector countVector = vectors.get("count");
                 if (agg instanceof InternalMappedTerms) {

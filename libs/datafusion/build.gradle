@@ -5,12 +5,15 @@
  * this file be licensed under the Apache-2.0 license or a
  * compatible open source license.
  */
+import org.opensearch.gradle.testclusters.OpenSearchCluster
 
 dependencies {
   api project(':libs:opensearch-common')
   api project(':libs:opensearch-arrow')
   api 'org.apache.arrow:arrow-c-data:17.0.0'
-
+  base {
+    archivesName = 'opensearch-datafusion'
+  }
   // logging
   implementation "org.apache.logging.log4j:log4j-api:${versions.log4j}"
   implementation "org.apache.logging.log4j:log4j-core:${versions.log4j}"
@@ -25,32 +28,58 @@ dependencies {
   }
 }
 
+compileJava {
+  dependsOn "cargoBuild"
+}
+
+tasks.named("assemble").configure {
+  dependsOn "cargoBuild"
+}
+
 tasks.named('forbiddenApisMain').configure {
   replaceSignatureFiles 'jdk-signatures'
 }
 
 task cargoBuild(type:Exec) {
+  println("Running Cargo Build")
   workingDir 'jni'
   commandLine 'cargo', 'build', '--release'
 }
 
-build.doFirst {
-  cargoBuild
+task copyNativeLib(type: Copy) {
+  from 'jni/target/release'
+  include '*.so', '*.dll', '*.dylib', '*.d'
+  into "$rootDir/native-lib"
+}
+
+clean.doFirst {
+  delete "jni/target"
+  delete "$rootDir/native-lib"
+}
+
+cargoBuild.finalizedBy copyNativeLib
+
+build {
+  dependsOn cargoBuild
 }
 
 clean.doFirst {
   delete "jni/target"
 }
 
-test {
-  dependsOn cargoBuild
-  systemProperty "java.library.path", "$rootDir/jni/target/release"
-}
+assemble.enabled = true
 
-testClusters.runTask {
-  print("$rootDir")
-  systemProperty("java.library.path", "$rootDir/libs/datafusion/jni/target/release")
-}
+//test {
+//  dependsOn cargoBuild
+//  systemProperty "java.library.path", "$rootDir/jni/target/release"
+//}
+//
+//testClusters.runTask {
+//  dependsOn cargoBuild
+//  println("ROOT DIR");
+//  print("$rootDir")
+//  systemProperty("java.library.path", "$rootDir/libs/datafusion/jni/target/release")
+//}
 
 
 // audit garbage

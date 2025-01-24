@@ -11,8 +11,6 @@ package org.opensearch.datafusion;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import java.util.List;
-import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.BiConsumer;
 
@@ -50,6 +48,7 @@ public class DataFusion {
         });
         return future;
     }
+
     public static Logger logger = LogManager.getLogger(DataFusion.class);
 
     public static CompletableFuture<DataFrame> agg(byte[] ticket) {

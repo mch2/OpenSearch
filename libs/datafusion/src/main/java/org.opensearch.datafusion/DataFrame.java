@@ -51,16 +51,13 @@ public class DataFrame implements AutoCloseable {
     public CompletableFuture<RecordBatchStream> getStream(BufferAllocator allocator) {
         CompletableFuture<RecordBatchStream> result = new CompletableFuture<>();
         long runtimePointer = ctx.getRuntime();
-        DataFusion.executeStream(
-            runtimePointer,
-            ptr,
-            (String errString, long streamId) -> {
-                if (errString != null && errString.isEmpty() == false) {
-                    result.completeExceptionally(new RuntimeException(errString));
-                } else {
-                    result.complete(new RecordBatchStream(ctx, streamId, allocator));
-                }
-            });
+        DataFusion.executeStream(runtimePointer, ptr, (String errString, long streamId) -> {
+            if (errString != null && errString.isEmpty() == false) {
+                result.completeExceptionally(new RuntimeException(errString));
+            } else {
+                result.complete(new RecordBatchStream(ctx, streamId, allocator));
+            }
+        });
         return result;
     }
 

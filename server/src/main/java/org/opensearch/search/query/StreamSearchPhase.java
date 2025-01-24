@@ -136,7 +136,7 @@ public static Logger logger = LogManager.getLogger(StreamSearchPhase.class);
                         @Override
                         public void run(VectorSchemaRoot root, StreamProducer.FlushSignal flushSignal) {
                             try {
-                                int batchSize = 100_000;
+                                int batchSize = 100_000_000;
                                 final StreamingAggregator arrowDocIdCollector = new StreamingAggregator((Aggregator) QueryCollectorContext.createQueryCollector(collectors), searchContext, root,  batchSize, flushSignal, searchContext.shardTarget().getShardId());
                                 try {
                                     searcher.search(query, arrowDocIdCollector);

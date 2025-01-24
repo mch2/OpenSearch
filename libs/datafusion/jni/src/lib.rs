@@ -31,7 +31,7 @@ pub extern "system" fn Java_org_opensearch_datafusion_DataFusion_query(
     let runtime = unsafe { &mut *(runtime as *mut Runtime) };
 
     runtime.block_on(async {
-        let result = provider::read_aggs(context.clone(), Bytes::from(input)).await;
+        let result = provider::query(context.clone(), Bytes::from(input)).await;
         let addr = result.map(|df| Box::into_raw(Box::new(df)));
         set_object_result(&mut env, callback, addr);
     });
