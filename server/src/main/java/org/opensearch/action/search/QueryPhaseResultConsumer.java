@@ -128,13 +128,9 @@ public class QueryPhaseResultConsumer extends ArraySearchPhaseResults<SearchPhas
     @Override
     public void consumeResult(SearchPhaseResult result, Runnable next) {
         super.consumeResult(result, () -> {});
-        if (result instanceof StreamSearchResult) {
-            next.run();
-        } else {
-            QuerySearchResult querySearchResult = result.queryResult();
-            progressListener.notifyQueryResult(querySearchResult.getShardIndex());
-            pendingMerges.consume(querySearchResult, next);
-        }
+        QuerySearchResult querySearchResult = result.queryResult();
+        progressListener.notifyQueryResult(querySearchResult.getShardIndex());
+        pendingMerges.consume(querySearchResult, next);
     }
 
     @Override
@@ -150,12 +146,8 @@ public class QueryPhaseResultConsumer extends ArraySearchPhaseResults<SearchPhas
 
         SearchPhaseController.ReducedQueryPhase reducePhase = null;
         if (results.get(0) instanceof StreamSearchResult) {
-            reducePhase = controller.reducedFromStream(
-                results.asList().stream().map(r -> (StreamSearchResult) r).collect(Collectors.toList()),
-                aggReduceContextBuilder,
-                performFinalReduce
-            );
-            logger.info("Will reduce results for {}", results.get(0));
+           reducePhase = controller.reducedAggsFromStream(results.asList()
+                .stream().map(r -> (StreamSearchResult) r).collect(Collectors.toList()));
         } else {
             final SearchPhaseController.TopDocsStats topDocsStats = pendingMerges.consumeTopDocsStats();
             final List<TopDocs> topDocsList = pendingMerges.consumeTopDocs();
@@ -343,7 +335,8 @@ public class QueryPhaseResultConsumer extends ArraySearchPhaseResults<SearchPhas
             if (hasAggs == false) {
                 return 0;
             }
-            return result.aggregations().asSerialized(InternalAggregations::readFrom, namedWriteableRegistry).ramBytesUsed();
+            return 0;
+//            return result.aggregations().asSerialized(InternalAggregations::readFrom, namedWriteableRegistry).ramBytesUsed();
         }
 
         /**

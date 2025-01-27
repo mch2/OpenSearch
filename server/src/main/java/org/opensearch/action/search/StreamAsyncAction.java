@@ -147,6 +147,7 @@ class StreamAsyncAction extends SearchQueryThenFetchAsyncAction {
                     tickets.addAll(((StreamSearchResult) entry).getFlightTickets());
                 }
             }
+
             List<StreamTargetResponse> targets = StreamAsyncAction.this.results.getAtomicArray()
                 .asList()
                 .stream()

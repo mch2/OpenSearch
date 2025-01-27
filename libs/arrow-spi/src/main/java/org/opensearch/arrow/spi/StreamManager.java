@@ -11,6 +11,9 @@ package org.opensearch.arrow.spi;
 import org.opensearch.common.annotation.ExperimentalApi;
 import org.opensearch.core.tasks.TaskId;
 
+import java.util.Set;
+import java.util.function.Function;
+
 /**
  * Interface for managing Arrow data streams between producers and consumers.
  * StreamManager handles the registration of producers, stream access control via tickets,

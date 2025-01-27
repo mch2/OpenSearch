@@ -13,6 +13,7 @@ import org.apache.arrow.flight.Ticket;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.opensearch.arrow.flight.bootstrap.FlightClientManager;
+import org.opensearch.arrow.spi.PartitionedStreamProducer;
 import org.opensearch.arrow.spi.StreamManager;
 import org.opensearch.arrow.spi.StreamProducer;
 import org.opensearch.arrow.spi.StreamReader;
@@ -22,8 +23,11 @@ import org.opensearch.common.SetOnce;
 import org.opensearch.common.cache.Cache;
 import org.opensearch.common.cache.CacheBuilder;
 import org.opensearch.common.unit.TimeValue;
+import org.opensearch.common.util.LongObjectPagedHashMap;
 import org.opensearch.core.tasks.TaskId;
 
+import java.util.Set;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 /**
@@ -75,6 +79,9 @@ public class FlightStreamManager implements StreamManager {
     public StreamTicket registerStream(StreamProducer provider, TaskId parentTaskId) {
         StreamTicket ticket = ticketFactory.newTicket();
         streamProducers.put(ticket.getTicketId(), new StreamProducerHolder(provider, allocatorSupplier.get()));
+        if (provider instanceof PartitionedStreamProducer) {
+            ((PartitionedStreamProducer) provider).setRootTicket(ticket);
+        }
         return ticket;
     }
 

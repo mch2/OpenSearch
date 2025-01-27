@@ -47,6 +47,7 @@ import org.opensearch.search.internal.InternalSearchResponse;
 import org.opensearch.search.internal.ShardSearchContextId;
 import org.opensearch.search.internal.ShardSearchRequest;
 import org.opensearch.search.query.QuerySearchResult;
+import org.opensearch.search.stream.StreamSearchResult;
 import org.opensearch.transport.Transport;
 
 import java.util.List;
@@ -141,11 +142,11 @@ final class FetchSearchPhase extends SearchPhase {
             reducedQueryPhase,
             queryAndFetchOptimization ? queryResults : fetchResults.getAtomicArray()
         );
-        if (queryAndFetchOptimization) {
-            // assert phaseResults.isEmpty() || phaseResults.get(0).fetchResult() != null : "phaseResults empty ["
-            // + phaseResults.isEmpty()
-            // + "], single result: "
-            // + phaseResults.get(0).fetchResult();
+        if (queryAndFetchOptimization && queryResults.get(0) instanceof StreamSearchResult == false) {
+            assert phaseResults.isEmpty() || phaseResults.get(0).fetchResult() != null : "phaseResults empty ["
+                + phaseResults.isEmpty()
+                + "], single result: "
+                + phaseResults.get(0).fetchResult();
             // query AND fetch optimization
             finishPhase.run();
         } else {

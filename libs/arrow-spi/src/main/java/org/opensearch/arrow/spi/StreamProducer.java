@@ -14,6 +14,8 @@ import org.opensearch.common.annotation.ExperimentalApi;
 import org.opensearch.core.tasks.TaskId;
 
 import java.io.Closeable;
+import java.util.Collections;
+import java.util.Set;
 
 /**
  * Represents a producer of Arrow streams. The producer first needs to define the job by implementing this interface and

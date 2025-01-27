@@ -22,10 +22,14 @@ import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.arrow.flight.bootstrap.FlightClientManager;
+import org.opensearch.arrow.spi.PartitionedStreamProducer;
 import org.opensearch.arrow.spi.StreamProducer;
 import org.opensearch.arrow.spi.StreamTicket;
 
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
+import java.util.Set;
 
 /**
  * BaseFlightProducer extends NoOpFlightProducer to provide stream management functionality
@@ -132,21 +136,30 @@ public class BaseFlightProducer extends NoOpFlightProducer {
         // TODO: this api should only be used internally
         StreamTicket streamTicket = streamManager.getStreamTicketFactory().fromBytes(descriptor.getCommand());
         FlightStreamManager.StreamProducerHolder streamProducerHolder;
+        List<FlightEndpoint> endpoints = new ArrayList<>();
         if (streamTicket.getNodeId().equals(flightClientManager.getLocalNodeId())) {
             streamProducerHolder = streamManager.getStreamProducer(streamTicket);
             if (streamProducerHolder == null) {
                 throw CallStatus.NOT_FOUND.withDescription("FlightInfo not found").toRuntimeException();
             }
-            Location location = flightClientManager.getFlightClientLocation(streamTicket.getNodeId());
-            if (location == null) {
-                throw CallStatus.UNAVAILABLE.withDescription("Internal error while determining location information from ticket.")
-                    .toRuntimeException();
+            StreamProducer producer = streamProducerHolder.getProducer();
+            if (producer instanceof PartitionedStreamProducer) {
+                Set<StreamTicket> partitions = ((PartitionedStreamProducer) producer).partitions();
+                for (StreamTicket partition : partitions) {
+                    Location location = flightClientManager.getFlightClientLocation(streamTicket.getNodeId());
+                    if (location == null) {
+                        throw CallStatus.UNAVAILABLE.withDescription("Internal error while determining location information from ticket.")
+                            .toRuntimeException();
+                    }
+                    endpoints.add(new FlightEndpoint(new Ticket(partition.toBytes()), location));
+                }
             }
-            FlightEndpoint endpoint = new FlightEndpoint(new Ticket(descriptor.getCommand()), location);
+//            Location location = flightClientManager.getFlightClientLocation(streamTicket.getNodeId());
+//            FlightEndpoint endpoint = new FlightEndpoint(new Ticket(descriptor.getCommand()), location);
             FlightInfo.Builder infoBuilder = FlightInfo.builder(
                 streamProducerHolder.getRoot().getSchema(),
                 descriptor,
-                Collections.singletonList(endpoint)
+                endpoints
             ).setRecords(streamProducerHolder.getProducer().estimatedRowCount());
             return infoBuilder.build();
         } else {
