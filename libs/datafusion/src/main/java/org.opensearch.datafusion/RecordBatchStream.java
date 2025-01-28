@@ -27,11 +27,12 @@ public class RecordBatchStream implements AutoCloseable {
     private final BufferAllocator allocator;
     private final CDataDictionaryProvider dictionaryProvider;
 
-    public RecordBatchStream(SessionContext ctx, long streamId, BufferAllocator allocator) {
+    public RecordBatchStream(SessionContext ctx, long streamId, BufferAllocator allocator, VectorSchemaRoot root) {
         this.context = ctx;
         this.ptr = streamId;
         this.allocator = allocator;
         this.dictionaryProvider = new CDataDictionaryProvider();
+        this.vectorSchemaRoot = root;
     }
 
     private static native void destroy(long pointer);
@@ -50,7 +51,7 @@ public class RecordBatchStream implements AutoCloseable {
     public static Logger logger = LogManager.getLogger(RecordBatchStream.class);
 
     public CompletableFuture<Boolean> loadNextBatch() {
-        ensureInitialized();
+//        ensureInitialized();
         long runtimePointer =  context.getRuntime();
         CompletableFuture<Boolean> result = new CompletableFuture<>();
         next(
@@ -111,6 +112,7 @@ public class RecordBatchStream implements AutoCloseable {
                         result.complete(schema);
                         // The FFI schema will be released from rust when it is dropped
                     } catch (Exception e) {
+                        logger.error("WTF", e);
                         result.completeExceptionally(e);
                     }
                 }

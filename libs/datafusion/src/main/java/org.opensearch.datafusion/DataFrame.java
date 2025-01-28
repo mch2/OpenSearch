@@ -9,6 +9,7 @@
 package org.opensearch.datafusion;
 
 import org.apache.arrow.memory.BufferAllocator;
+import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.ipc.ArrowFileReader;
 import org.apache.arrow.vector.ipc.ArrowReader;
 import org.apache.arrow.vector.util.ByteArrayReadableSeekableByteChannel;
@@ -48,14 +49,14 @@ public class DataFrame implements AutoCloseable {
     }
 
     // return a stream over the dataframe
-    public CompletableFuture<RecordBatchStream> getStream(BufferAllocator allocator) {
+    public CompletableFuture<RecordBatchStream> getStream(BufferAllocator allocator, VectorSchemaRoot root) {
         CompletableFuture<RecordBatchStream> result = new CompletableFuture<>();
         long runtimePointer = ctx.getRuntime();
         DataFusion.executeStream(runtimePointer, ptr, (String errString, long streamId) -> {
             if (errString != null && errString.isEmpty() == false) {
                 result.completeExceptionally(new RuntimeException(errString));
             } else {
-                result.complete(new RecordBatchStream(ctx, streamId, allocator));
+                result.complete(new RecordBatchStream(ctx, streamId, allocator, root));
             }
         });
         return result;

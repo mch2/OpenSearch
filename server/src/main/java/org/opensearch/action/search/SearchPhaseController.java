@@ -737,7 +737,7 @@ public final class SearchPhaseController {
                 new DataFrameStreamProducer((p -> streamManager.registerStream(p, TaskId.EMPTY_TASK_ID)), streamTickets, (t) -> DataFusion.agg(t.toBytes())));
 
         logger.info("Register stream at coordinator");
-        AccessController.doPrivileged((PrivilegedAction<ReducedQueryPhase>) () -> {
+        return AccessController.doPrivileged((PrivilegedAction<ReducedQueryPhase>) () -> {
             StreamReader streamIterator = streamManager.getStreamReader(producer.getRootTicket());
             logger.info("Finished register stream at coordinator");
 
@@ -760,6 +760,7 @@ public final class SearchPhaseController {
                     UInt8Vector count = (UInt8Vector) root.getVector("count");
 
                     Long bucketCount = (Long) getValue(count, row);
+                    logger.info("Got data from DF {} {}", ordName, bucketCount);
                     buckets.add(new StringTerms.Bucket(new BytesRef(ordName.getBytes()), bucketCount.longValue(), new InternalAggregations(List.of()), false, 0, DocValueFormat.RAW));
                 }
             }
@@ -782,8 +783,9 @@ public final class SearchPhaseController {
 //                        buckets.add(new StringTerms.Bucket(new BytesRef(ordName.getBytes()), bucketCount.longValue(), new InternalAggregations(List.of()), false, 0, DocValueFormat.RAW));
 //                    }
 //                }
+            logger.info("Buckets are {}", buckets);
             aggs.add(new StringTerms(
-                root.getSchema().getCustomMetadata().get("name"),
+                "category",
                 InternalOrder.key(true),
                 InternalOrder.key(true),
                 null,
@@ -818,7 +820,6 @@ public final class SearchPhaseController {
                     list.stream().flatMap(ssr -> ssr.getFlightTickets().stream()).collect(Collectors.toList())
                 );
         });
-        return null;
     }
 
     public ReducedQueryPhase reducedFromStream(List<StreamSearchResult> list) {

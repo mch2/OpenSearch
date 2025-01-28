@@ -41,6 +41,7 @@ public class DataFrameStreamProducer implements PartitionedStreamProducer {
 
     private StreamTicket rootTicket;
     private Set<StreamTicket> partitions;
+    VectorSchemaRoot root;
 
     public DataFrameStreamProducer(Function<StreamProducer, StreamTicket> streamRegistrar, Set<StreamTicket> partitions, Function<StreamTicket, CompletableFuture<DataFrame>> frameSupplier) {
         logger.info("Constructed DataFrameFlightProducer");
@@ -57,7 +58,8 @@ public class DataFrameStreamProducer implements PartitionedStreamProducer {
         arrowFields.put("count", countField);
         arrowFields.put("ord", new Field("ord", FieldType.nullable(new ArrowType.Utf8()), null));
         Schema schema = new Schema(arrowFields.values());
-        return VectorSchemaRoot.create(schema, allocator);
+        root = VectorSchemaRoot.create(schema, allocator);
+        return root;
     }
 
     @Override
@@ -72,9 +74,9 @@ public class DataFrameStreamProducer implements PartitionedStreamProducer {
                 try {
                     assert rootTicket != null;
                     df = frameSupplier.apply(rootTicket).join();
-                    recordBatchStream = df.getStream(allocator).get();
+                    recordBatchStream = df.getStream(allocator, root).get();
                     while (recordBatchStream.loadNextBatch().join()) {
-                        logger.info(recordBatchStream.getVectorSchemaRoot().getRowCount());
+//                        logger.info(recordBatchStream.getVectorSchemaRoot().getRowCount());
                         // wait for a signal to load the next batch
                         flushSignal.awaitConsumption(1000);
                     }
