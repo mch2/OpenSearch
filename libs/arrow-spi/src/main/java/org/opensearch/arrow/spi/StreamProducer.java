@@ -99,6 +99,11 @@ public interface StreamProducer extends Closeable {
      */
     BatchedJob createJob(BufferAllocator allocator);
 
+    default Set<StreamTicket> partitions() {
+        return Collections.emptySet();
+    }
+
+
     /**
      * Provides an estimate of the total number of rows that will be produced.
      *

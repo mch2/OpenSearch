@@ -1,12 +1,9 @@
-use arrow_flight::FlightEndpoint;
-use arrow_flight::{flight_service_client::FlightServiceClient, FlightDescriptor, FlightInfo};
+use arrow_flight::{flight_service_client::FlightServiceClient, FlightDescriptor};
 use bytes::Bytes;
-use datafusion::catalog::TableProvider;
 use datafusion::common::JoinType;
 use datafusion::common::Result;
 use datafusion::error::DataFusionError;
 use datafusion::functions_aggregate::expr_fn::sum;
-use datafusion::prelude::Expr;
 use futures::TryFutureExt;
 use std::{collections::HashMap, sync::Arc};
 
@@ -16,7 +13,6 @@ use datafusion_table_providers::flight::{
     FlightDriver, FlightMetadata, FlightProperties, FlightTableFactory, FlightTable
 };
 use datafusion::logical_expr::test::function_stub::count;
-use futures::future::try_join_all;
 use tonic::async_trait;
 use tonic::transport::Channel;
 mod test;
@@ -63,20 +59,6 @@ pub async fn join(
     println!("LEFT FRAME:");
     // left_df.clone().show().await;
     println!("RIGHT FRAME:");
-    // right_df.clone().show().await;
-
-    // // select all the cols returned by right but alias the join field
-    // let select_cols: Vec<Expr> = right_df.schema()
-    // .fields()
-    // .iter()
-    // .map(|field| {
-    //     if field.name() == &join_field {
-    //         col(&join_field).alias("right.join_field")
-    //     } else {
-    //         col(field.name())
-    //     }
-    // })
-    // .collect();
 
     return left_df
         .join(
@@ -95,8 +77,9 @@ pub async fn join(
 pub async fn aggregate(
     ctx: SessionContext,
     ticket: Bytes,
+    entry_point: String
 ) -> datafusion::common::Result<DataFrame> {
-    let df = dataframe_for_index(&ctx, "theIndex".to_owned(), ticket).await?;
+    let df = dataframe_for_index(&ctx, "theIndex".to_owned(), ticket,     entry_point).await?;
     df.aggregate(vec![col("")], vec![count(col("a"))])
      .map_err(|e| DataFusionError::Execution(format!("Failed to sort DataFrame: {}", e)))
 }
@@ -105,46 +88,12 @@ pub async fn aggregate(
 async fn dataframe_for_index(
     ctx: &SessionContext,
     prefix: String,
-    ticket: Bytes
+    ticket: Bytes,
+    entry_point: String
 ) -> Result<DataFrame> {
      let table_name = format!("{}-s", prefix);
-     get_dataframe_for_tickets(ctx, table_name, ticket.clone()).await
+     get_dataframe_for_tickets(ctx, table_name, ticket.clone(), entry_point.clone()).await
 }
-
-// Return a single dataframe for an entire index.
-// Each ticket in tickets represents a single shard.
-// async fn dataframe_for_index(
-//     ctx: &SessionContext,
-//     prefix: String,
-//     tickets: Vec<Bytes>,
-// ) -> Result<DataFrame> {
-//     println!("UNION");
-//     let inner_futures = tickets
-//         .into_iter()
-//         .enumerate()
-//         .map(|(j, bytes)| {
-//             let table_name = format!("{}-s-{}", prefix, j);
-//             get_dataframe_for_tickets(ctx, table_name, vec![bytes.clone()])
-//         })
-//         .collect::<Vec<_>>();
-
-//     let frames = try_join_all(inner_futures)
-//         .await
-//         .map_err(|e| DataFusionError::Execution(format!("Failed to join futures: {}", e)))?;
-//     frames[0].clone().show().await?;
-//     union_df(frames)
-// }
-
-// // Union a list of DataFrames
-// fn union_df(frames: Vec<DataFrame>) -> Result<DataFrame> {
-//     Ok(frames
-//         .into_iter()
-//         .reduce(|acc, df| match acc.union(df) {
-//             Ok(unioned_df) => unioned_df,
-//             Err(e) => panic!("Failed to union DataFrames: {}", e),
-//         })
-//         .ok_or_else(|| DataFusionError::Execution("No frames to union".to_string()))?)
-// }
 
 // registers a single table from the list of given tickets, then reads it immediately returning a dataframe.
 // intended to be used to register and get a df for a single shard.
@@ -152,19 +101,20 @@ async fn get_dataframe_for_tickets(
     ctx: &SessionContext,
     name: String,
     ticket: Bytes,
+    entry_point: String
 ) -> Result<DataFrame> {
     println!("Register");
-    register_table(ctx, name.clone(), ticket)
+    register_table(ctx, name.clone(), ticket, entry_point.clone())
         .and_then(|_| ctx.table(&name))
         .await
 }
 // registers a single table with datafusion using DataFusion TableProviders.
 // Uses a TicketedFlightDriver to register the table with the list of given tickets.
-async fn register_table(ctx: &SessionContext, name: String, ticket: Bytes) -> Result<()> {
+async fn register_table(ctx: &SessionContext, name: String, ticket: Bytes, entry_point: String) -> Result<()> {
     let driver: TicketedFlightDriver = TicketedFlightDriver { ticket };
     let table_factory: FlightTableFactory = FlightTableFactory::new(Arc::new(driver));
     let table: FlightTable = table_factory
-        .open_table(format!("http://localhost:{}", "8815"), HashMap::new())
+        .open_table(entry_point, HashMap::new())
         .await
         .map_err(|e| DataFusionError::Execution(format!("Error creating table: {}", e)))?;
     println!("Registering table {:?}", table);

@@ -15,11 +15,6 @@ dependencies {
   base {
     archivesName = 'opensearch-datafusion'
   }
-  // logging
-  implementation "org.apache.logging.log4j:log4j-api:${versions.log4j}"
-  implementation "org.apache.logging.log4j:log4j-core:${versions.log4j}"
-  implementation "org.apache.logging.log4j:log4j-slf4j-impl:${versions.log4j}"
-
   // testing
   testImplementation "com.carrotsearch.randomizedtesting:randomizedtesting-runner:${versions.randomizedrunner}"
   testImplementation "junit:junit:${versions.junit}"

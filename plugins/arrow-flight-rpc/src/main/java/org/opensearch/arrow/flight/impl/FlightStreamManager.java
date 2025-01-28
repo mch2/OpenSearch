@@ -79,9 +79,6 @@ public class FlightStreamManager implements StreamManager {
     public StreamTicket registerStream(StreamProducer provider, TaskId parentTaskId) {
         StreamTicket ticket = ticketFactory.newTicket();
         streamProducers.put(ticket.getTicketId(), new StreamProducerHolder(provider, allocatorSupplier.get()));
-        if (provider instanceof PartitionedStreamProducer) {
-            ((PartitionedStreamProducer) provider).setRootTicket(ticket);
-        }
         return ticket;
     }
 

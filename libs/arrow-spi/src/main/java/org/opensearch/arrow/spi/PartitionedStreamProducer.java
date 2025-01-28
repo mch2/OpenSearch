@@ -10,7 +10,9 @@ package org.opensearch.arrow.spi;
 
 import java.util.Set;
 
+/**
+ *
+ */
 public interface PartitionedStreamProducer extends StreamProducer {
    Set<StreamTicket> partitions();
-   void setRootTicket(StreamTicket ticket);
 }

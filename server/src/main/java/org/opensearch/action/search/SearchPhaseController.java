@@ -32,6 +32,7 @@
 
 package org.opensearch.action.search;
 
+import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.BigIntVector;
 import org.apache.arrow.vector.BitVector;
@@ -100,6 +101,8 @@ import org.opensearch.search.suggest.Suggest.Suggestion;
 import org.opensearch.search.suggest.completion.CompletionSuggestion;
 
 import java.io.IOException;
+import java.security.AccessController;
+import java.security.PrivilegedAction;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -730,34 +733,37 @@ public final class SearchPhaseController {
             .collect(Collectors.toList());
 
         Set<StreamTicket> streamTickets = tickets.stream().map(t -> streamManager.getStreamTicketFactory().fromBytes(t)).collect(Collectors.toSet());
-        StreamTicket ticket = streamManager.registerStream(new DataFrameStreamProducer(streamTickets, (t) -> DataFusion.agg(t.toBytes())), TaskId.EMPTY_TASK_ID);
+        DataFrameStreamProducer producer = AccessController.doPrivileged((PrivilegedAction<DataFrameStreamProducer>) () ->
+                new DataFrameStreamProducer((p -> streamManager.registerStream(p, TaskId.EMPTY_TASK_ID)), streamTickets, (t) -> DataFusion.agg(t.toBytes())));
 
         logger.info("Register stream at coordinator");
-        StreamReader streamIterator = streamManager.getStreamReader(ticket);
-        logger.info("Finished register stream at coordinator");
+        AccessController.doPrivileged((PrivilegedAction<ReducedQueryPhase>) () -> {
+            StreamReader streamIterator = streamManager.getStreamReader(producer.getRootTicket());
+            logger.info("Finished register stream at coordinator");
 
-        int totalRows = 0;
-        List<ScoreDoc> scoreDocs = new ArrayList<>();
-        List<InternalAggregation> aggs = new ArrayList<>();
-        VectorSchemaRoot root = streamIterator.getRoot();
-        List<StringTerms.Bucket> buckets = new ArrayList<>();
-        logger.info("Starting iteration at coordinator");
-        while (streamIterator.next()) {
-            logger.info(root.getRowCount());
-            int rowCount = root.getRowCount();
-            totalRows+= rowCount;
-            logger.info("AT COORD Record Batch with " + rowCount + " rows: total {}", totalRows);
+            int totalRows = 0;
+            List<ScoreDoc> scoreDocs = new ArrayList<>();
+            List<InternalAggregation> aggs = new ArrayList<>();
+            VectorSchemaRoot root = streamIterator.getRoot();
+            List<StringTerms.Bucket> buckets = new ArrayList<>();
+            logger.info("Starting iteration at coordinator");
+            while (streamIterator.next()) {
+                logger.info(root.getRowCount());
+                int rowCount = root.getRowCount();
+                totalRows+= rowCount;
+                logger.info("AT COORD Record Batch with " + rowCount + " rows: total {}", totalRows);
 
-            // Iterate through rows
-            for (int row = 0; row < rowCount; row++) {
-                FieldVector ordKey = root.getVector("ord");
-                String ordName = (String) getValue(ordKey, row);
-                UInt8Vector count = (UInt8Vector) root.getVector("count");
+                // Iterate through rows
+                for (int row = 0; row < rowCount; row++) {
+                    FieldVector ordKey = root.getVector("ord");
+                    String ordName = (String) getValue(ordKey, row);
+                    UInt8Vector count = (UInt8Vector) root.getVector("count");
 
-                Long bucketCount = (Long) getValue(count, row);
-                buckets.add(new StringTerms.Bucket(new BytesRef(ordName.getBytes()), bucketCount.longValue(), new InternalAggregations(List.of()), false, 0, DocValueFormat.RAW));
+                    Long bucketCount = (Long) getValue(count, row);
+                    buckets.add(new StringTerms.Bucket(new BytesRef(ordName.getBytes()), bucketCount.longValue(), new InternalAggregations(List.of()), false, 0, DocValueFormat.RAW));
+                }
             }
-        }
+
 //        recordBatchStream.close();
 //        dataFrame.close();
 //        while (streamIterator.next()) {
@@ -776,25 +782,25 @@ public final class SearchPhaseController {
 //                        buckets.add(new StringTerms.Bucket(new BytesRef(ordName.getBytes()), bucketCount.longValue(), new InternalAggregations(List.of()), false, 0, DocValueFormat.RAW));
 //                    }
 //                }
-        aggs.add(new StringTerms(
-            root.getSchema().getCustomMetadata().get("name"),
-            InternalOrder.key(true),
-            InternalOrder.key(true),
-            null,
-            DocValueFormat.RAW,
-            1,
-            false,
-            0L,
-             buckets,
-            0,
-            new TermsAggregator.BucketCountThresholds(0, 0, 0, 0)
-        ));
-                logger.info("End stream iterations?");
+            aggs.add(new StringTerms(
+                root.getSchema().getCustomMetadata().get("name"),
+                InternalOrder.key(true),
+                InternalOrder.key(true),
+                null,
+                DocValueFormat.RAW,
+                1,
+                false,
+                0L,
+                buckets,
+                0,
+                new TermsAggregator.BucketCountThresholds(0, 0, 0, 0)
+            ));
+            logger.info("End stream iterations?");
 
-                InternalAggregations aggregations = new InternalAggregations(aggs);
+            InternalAggregations aggregations = new InternalAggregations(aggs);
 
-                TotalHits totalHits = new TotalHits(totalRows, Relation.EQUAL_TO);
-                return new ReducedQueryPhase(
+            TotalHits totalHits = new TotalHits(totalRows, Relation.EQUAL_TO);
+        return new ReducedQueryPhase(
                     totalHits,
                     totalRows,
                     1.0f,
@@ -811,6 +817,8 @@ public final class SearchPhaseController {
                     totalRows == 0,
                     list.stream().flatMap(ssr -> ssr.getFlightTickets().stream()).collect(Collectors.toList())
                 );
+        });
+        return null;
     }
 
     public ReducedQueryPhase reducedFromStream(List<StreamSearchResult> list) {

@@ -26,6 +26,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -40,10 +42,11 @@ public class DataFrameStreamProducer implements PartitionedStreamProducer {
     private StreamTicket rootTicket;
     private Set<StreamTicket> partitions;
 
-    public DataFrameStreamProducer(Set<StreamTicket> partitions, Function<StreamTicket, CompletableFuture<DataFrame>> frameSupplier) {
+    public DataFrameStreamProducer(Function<StreamProducer, StreamTicket> streamRegistrar, Set<StreamTicket> partitions, Function<StreamTicket, CompletableFuture<DataFrame>> frameSupplier) {
         logger.info("Constructed DataFrameFlightProducer");
         this.frameSupplier = frameSupplier;
         this.partitions = partitions;
+        this.rootTicket = streamRegistrar.apply(this);
     }
 
     @Override
@@ -59,7 +62,6 @@ public class DataFrameStreamProducer implements PartitionedStreamProducer {
 
     @Override
     public BatchedJob createJob(BufferAllocator allocator) {
-        assert rootTicket != null;
         return new BatchedJob() {
 
             private DataFrame df;
@@ -68,6 +70,7 @@ public class DataFrameStreamProducer implements PartitionedStreamProducer {
             @Override
             public void run(VectorSchemaRoot root, FlushSignal flushSignal) {
                 try {
+                    assert rootTicket != null;
                     df = frameSupplier.apply(rootTicket).join();
                     recordBatchStream = df.getStream(allocator).get();
                     while (recordBatchStream.loadNextBatch().join()) {
@@ -125,8 +128,7 @@ public class DataFrameStreamProducer implements PartitionedStreamProducer {
         return partitions;
     }
 
-    @Override
-    public void setRootTicket(StreamTicket ticket) {
-        this.rootTicket = ticket;
+    public StreamTicket getRootTicket() {
+        return rootTicket;
     }
 }

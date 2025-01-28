@@ -47,9 +47,9 @@ public class BaseFlightProducer extends NoOpFlightProducer {
      * Constructs a new BaseFlightProducer.
      *
      * @param flightClientManager The FlightClientManager to handle client connections.
-     * @param streamManager The StreamManager to handle stream operations, including
-     *                      retrieving and removing streams based on tickets.
-     * @param allocator The BufferAllocator for memory management in Arrow operations.
+     * @param streamManager       The StreamManager to handle stream operations, including
+     *                            retrieving and removing streams based on tickets.
+     * @param allocator           The BufferAllocator for memory management in Arrow operations.
      */
     public BaseFlightProducer(FlightClientManager flightClientManager, FlightStreamManager streamManager, BufferAllocator allocator) {
         this.flightClientManager = flightClientManager;
@@ -62,8 +62,8 @@ public class BaseFlightProducer extends NoOpFlightProducer {
      * This method orchestrates the entire process of setting up the stream,
      * managing backpressure, and handling data flow to the client.
      *
-     * @param context The call context (unused in this implementation)
-     * @param ticket The ticket containing stream information
+     * @param context  The call context (unused in this implementation)
+     * @param ticket   The ticket containing stream information
      * @param listener The server stream listener to handle the data flow
      */
     @Override
@@ -127,7 +127,7 @@ public class BaseFlightProducer extends NoOpFlightProducer {
     /**
      * Retrieves FlightInfo for the given FlightDescriptor, handling both local and remote cases.
      *
-     * @param context The call context
+     * @param context    The call context
      * @param descriptor The FlightDescriptor containing stream information
      * @return FlightInfo for the requested stream
      */
@@ -143,17 +143,16 @@ public class BaseFlightProducer extends NoOpFlightProducer {
                 throw CallStatus.NOT_FOUND.withDescription("FlightInfo not found").toRuntimeException();
             }
             StreamProducer producer = streamProducerHolder.getProducer();
-            if (producer instanceof PartitionedStreamProducer) {
-                Set<StreamTicket> partitions = ((PartitionedStreamProducer) producer).partitions();
-                for (StreamTicket partition : partitions) {
-                    Location location = flightClientManager.getFlightClientLocation(streamTicket.getNodeId());
-                    if (location == null) {
-                        throw CallStatus.UNAVAILABLE.withDescription("Internal error while determining location information from ticket.")
-                            .toRuntimeException();
-                    }
-                    endpoints.add(new FlightEndpoint(new Ticket(partition.toBytes()), location));
+            Set<StreamTicket> partitions = producer.partitions();
+            for (StreamTicket partition : partitions) {
+                Location location = flightClientManager.getFlightClientLocation(streamTicket.getNodeId());
+                if (location == null) {
+                    throw CallStatus.UNAVAILABLE.withDescription("Internal error while determining location information from ticket.")
+                        .toRuntimeException();
                 }
+                endpoints.add(new FlightEndpoint(new Ticket(partition.toBytes()), location));
             }
+
 //            Location location = flightClientManager.getFlightClientLocation(streamTicket.getNodeId());
 //            FlightEndpoint endpoint = new FlightEndpoint(new Ticket(descriptor.getCommand()), location);
             FlightInfo.Builder infoBuilder = FlightInfo.builder(

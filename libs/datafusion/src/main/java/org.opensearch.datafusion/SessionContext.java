@@ -25,6 +25,8 @@ public class SessionContext implements AutoCloseable {
 
     static native long createSessionContext();
 
+//    static native long createTable();
+
     static native long createRuntime();
 
     static native void destroyRuntime(long pointer);

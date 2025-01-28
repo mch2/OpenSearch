@@ -10,6 +10,7 @@ package org.opensearch.arrow.custom;
 
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
+import org.opensearch.arrow.spi.PartitionedStreamProducer;
 import org.opensearch.arrow.spi.StreamManager;
 import org.opensearch.arrow.spi.StreamProducer;
 import org.opensearch.arrow.spi.StreamReader;
@@ -107,6 +108,11 @@ public class StreamManagerWrapper implements StreamManager {
         @Override
         public void close() throws IOException {
             streamProducer.close();
+        }
+
+        @Override
+        public Set<StreamTicket> partitions() {
+            return streamProducer.partitions();
         }
 
         static class BatchedJobTaskWrapper implements BatchedJob, TaskAwareRequest {
