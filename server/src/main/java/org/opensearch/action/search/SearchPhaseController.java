@@ -751,7 +751,6 @@ public final class SearchPhaseController {
                 logger.info(root.getRowCount());
                 int rowCount = root.getRowCount();
                 totalRows+= rowCount;
-                logger.info("AT COORD Record Batch with " + rowCount + " rows: total {}", totalRows);
 
                 // Iterate through rows
                 for (int row = 0; row < rowCount; row++) {
@@ -760,7 +759,6 @@ public final class SearchPhaseController {
                     UInt8Vector count = (UInt8Vector) root.getVector("count");
 
                     Long bucketCount = (Long) getValue(count, row);
-                    logger.info("Got data from DF {} {}", ordName, bucketCount);
                     buckets.add(new StringTerms.Bucket(new BytesRef(ordName.getBytes()), bucketCount.longValue(), new InternalAggregations(List.of()), false, 0, DocValueFormat.RAW));
                 }
             }
@@ -783,7 +781,6 @@ public final class SearchPhaseController {
 //                        buckets.add(new StringTerms.Bucket(new BytesRef(ordName.getBytes()), bucketCount.longValue(), new InternalAggregations(List.of()), false, 0, DocValueFormat.RAW));
 //                    }
 //                }
-            logger.info("Buckets are {}", buckets);
             aggs.add(new StringTerms(
                 "category",
                 InternalOrder.key(true),
@@ -797,7 +794,6 @@ public final class SearchPhaseController {
                 0,
                 new TermsAggregator.BucketCountThresholds(0, 0, 0, 0)
             ));
-            logger.info("End stream iterations?");
 
             InternalAggregations aggregations = new InternalAggregations(aggs);
 
