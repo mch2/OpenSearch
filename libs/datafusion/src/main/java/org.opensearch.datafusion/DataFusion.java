@@ -11,7 +11,6 @@ package org.opensearch.datafusion;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.BiConsumer;
 
@@ -27,7 +26,7 @@ public class DataFusion {
     // create a DataFrame from a list of tickets.
     static native void query(long runtime, long ctx, byte[] ticket, ObjectResultCallback callback);
 
-    static native void agg(long runtime, long ctx, byte[] ticket, ObjectResultCallback callback);
+    static native void agg(long runtime, long ctx, byte[] ticket, int size, ObjectResultCallback callback);
 
     // collect the DataFrame
     static native void collect(long runtime, long df, BiConsumer<String, byte[]> callback);
@@ -48,10 +47,10 @@ public class DataFusion {
         return future;
     }
 
-    public static CompletableFuture<DataFrame> agg(byte[] ticket) {
+    public static CompletableFuture<DataFrame> agg(byte[] ticket, int size) {
         SessionContext ctx = new SessionContext();
         CompletableFuture<DataFrame> future = new CompletableFuture<>();
-        DataFusion.agg(ctx.getRuntime(), ctx.getPointer(), ticket, (err, ptr) -> {
+        DataFusion.agg(ctx.getRuntime(), ctx.getPointer(), ticket, size, (err, ptr) -> {
             if (err != null) {
                 future.completeExceptionally(new RuntimeException(err));
             } else {

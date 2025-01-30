@@ -11,7 +11,7 @@ use datafusion::execution::SendableRecordBatchStream;
 use datafusion::prelude::{DataFrame, SessionConfig, SessionContext};
 use futures::stream::TryStreamExt;
 use jni::objects::{JByteArray, JClass, JObject, JString};
-use jni::sys::jlong;
+use jni::sys::{jint, jlong};
 use jni::JNIEnv;
 use std::io::BufWriter;
 use tokio::runtime::Runtime;
@@ -44,14 +44,16 @@ pub extern "system" fn Java_org_opensearch_datafusion_DataFusion_agg(
     runtime: jlong,
     ctx: jlong,
     ticket: JByteArray,
+    size: jint,
     callback: JObject,
 ) {
     let input = env.convert_byte_array(&ticket).unwrap();
+    env.lon
     let context = unsafe { &mut *(ctx as *mut SessionContext) };
     let runtime = unsafe { &mut *(runtime as *mut Runtime) };
 
     runtime.block_on(async {
-        let result = provider::read_aggs(context.clone(), Bytes::from(input)).await;
+        let result = provider::read_aggs(context.clone(), Bytes::from(input), size).await;
         let addr = result.map(|df| Box::into_raw(Box::new(df)));
         set_object_result(&mut env, callback, addr);
     });

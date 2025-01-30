@@ -52,6 +52,7 @@ public class StreamingAggregator extends FilterCollector {
     private final StreamProducer.FlushSignal flushSignal;
     private final int batchSize;
     private final ShardId shardId;
+    private final Map<String, FieldVector> vectors;
     /**
      * Sole constructor.
      *
@@ -72,16 +73,19 @@ public class StreamingAggregator extends FilterCollector {
         this.batchSize = batchSize;
         this.flushSignal = flushSignal;
         this.shardId = shardId;
+        this.vectors = new HashMap<>();
+        vectors.put("ord", root.getVector("ord"));
+        vectors.put("count", root.getVector("count"));
     }
     public static Logger logger = LogManager.getLogger(StreamingAggregator.class);
+//    final int[] sum = {0};
+    final int[] totalDocs = {0};
 
     @Override
     public LeafCollector getLeafCollector(LeafReaderContext context) throws IOException {
-        Map<String, FieldVector> vectors = new HashMap<>();
-        vectors.put("ord", root.getVector("ord"));
-        vectors.put("count", root.getVector("count"));
         final int[] currentRow = {0};
         final LeafBucketCollector leaf = aggregator.getLeafCollector(context);
+//        logger.info("New segment collect {}", sum[0]);
         return new LeafBucketCollector() {
 
 
@@ -103,6 +107,8 @@ public class StreamingAggregator extends FilterCollector {
             public void finish() throws IOException {
                 if (currentRow[0] > 0) {
                     flushBatch();
+//                    logger.info("otherDocCount {}", sum[0]);
+//                    logger.info("total docs {}", totalDocs[0]);
                     logger.info("Flushed last batch for segment {}", context.toString());
                 }
             }
@@ -143,7 +149,7 @@ public class StreamingAggregator extends FilterCollector {
 
 
                     // Also access high-level statistics
-//                    long otherDocCount = terms.getSumOfOtherDocCounts();
+//                    sum[0] += terms.getSumOfOtherDocCounts();
 //                    long docCountError = terms.getDocCountError();
                 } else if (agg instanceof InternalCardinality) {
                     InternalCardinality ic = (InternalCardinality) agg;
@@ -162,6 +168,7 @@ public class StreamingAggregator extends FilterCollector {
                 flushSignal.awaitConsumption(10000000);
                 logger.info("Consumed batch at data node");
                 aggregator.reset();
+//                totalDocs[0] += currentRow[0];
                 currentRow[0] = 0;
             }
         };

@@ -1,3 +1,4 @@
+use anyhow::Context;
 use arrow_flight::{flight_service_client::FlightServiceClient, FlightDescriptor};
 use bytes::Bytes;
 use datafusion::common::JoinType;
@@ -32,12 +33,15 @@ pub async fn query(
 pub async fn read_aggs(
     ctx: SessionContext,
     ticket: Bytes,
+    size: usize
 ) -> datafusion::common::Result<DataFrame> {
-    let df = dataframe_for_index(&ctx, "theIndex".to_owned(), ticket, "http://localhost:9400".to_owned()).await?;
+    let df = dataframe_for_index(&ctx, "theIndex".to_owned(), ticket, "http://localhost:9450".to_owned()).await?;
+    // Ok(df)
+    // df.clone().explain(true, true)?.collect().await?;
     df.filter(col("ord").is_not_null())?
     .aggregate(vec![col("ord")], vec![sum(col("count")).alias("count")])?
     .sort(vec![col("count").sort(false, true)])?  // Sort by count descending
-    .limit(0, Some(500))  // Get top 500 results
+    .limit(0, Some(500)) // Get top 500 results
 }
 
 // inner join two tables together, returning a single DataFrame that can be consumed
@@ -105,7 +109,6 @@ async fn get_dataframe_for_tickets(
     ticket: Bytes,
     entry_point: String
 ) -> Result<DataFrame> {
-    println!("Register");
     register_table(ctx, name.clone(), ticket, entry_point.clone())
         .and_then(|_| ctx.table(&name))
         .await
@@ -119,7 +122,7 @@ async fn register_table(ctx: &SessionContext, name: String, ticket: Bytes, entry
         .open_table(entry_point, HashMap::new())
         .await
         .map_err(|e| DataFusionError::Execution(format!("Error creating table: {}", e)))?;
-    println!("Registering table {:?}", table);
+    // println!("Registering table {:?}", table);
     ctx.register_table(name, Arc::new(table))
         .map_err(|e| DataFusionError::Execution(format!("Error registering table: {}", e)))?;
     // let df = ctx.sql("SHOW TABLES").await?;
@@ -140,27 +143,27 @@ impl FlightDriver for TicketedFlightDriver {
         channel: Channel,
         _options: &HashMap<String, String>,
     ) -> arrow_flight::error::Result<FlightMetadata> {
-        println!("DRIVER: options: {:?}", _options);
+        // println!("DRIVER: options: {:?}", _options);
         
         let mut client: FlightServiceClient<Channel> = FlightServiceClient::new(channel.clone());
         
-        println!("DRIVER: Using ticket: {:?}", self.ticket);
+        // println!("DRIVER: Using ticket: {:?}", self.ticket);
         
         let descriptor = FlightDescriptor::new_cmd(self.ticket.clone());
-        println!("DRIVER: Created descriptor: {:?}", descriptor);
+        // println!("DRIVER: Created descriptor: {:?}", descriptor);
         
         let request = tonic::Request::new(descriptor);
-        println!("DRIVER: Sending get_flight_info request");
+        // println!("DRIVER: Sending get_flight_info request");
         
         match client.get_flight_info(request).await {
             Ok(info) => {
-                println!("DRIVER: Received flight info response");
+                // println!("DRIVER: Received flight info response");
                 let info = info.into_inner();
-                println!("DRIVER: Flight info: {:?}", info);
+                // println!("DRIVER: Flight info: {:?}", info);
                 FlightMetadata::try_new(info, FlightProperties::default())
             }
             Err(status) => {
-                println!("DRIVER: Error getting flight info: {:?}", status);
+                // println!("DRIVER: Error getting flight info: {:?}", status);
                 Err(status.into())
             }
         }

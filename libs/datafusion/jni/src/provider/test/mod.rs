@@ -3,8 +3,10 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use arrow::array::{StringArray, StructArray};
+use arrow::datatypes::SchemaRef;
 use arrow::ipc;
 use arrow_flight::encode::FlightDataEncoderBuilder;
 use arrow_flight::flight_service_server::{FlightService, FlightServiceServer};
@@ -36,13 +38,14 @@ const BEARER_TOKEN: &str = "Bearer flight-sql-token";
 
 struct TestFlightService {
     flight_info: FlightInfo,
-    partition_data: RecordBatch,
+    schema: SchemaRef,
+    batch_counter: Arc<AtomicUsize>,
     shutdown_sender: Option<Sender<()>>,
 }
 
 impl TestFlightService {
     async fn run_in_background(self, rx: Receiver<()>) -> SocketAddr {
-        let addr = SocketAddr::from(([127, 0, 0, 1], 8815));
+        let addr = SocketAddr::from(([127, 0, 0, 1], 9450));
         let listener = TcpListener::bind(addr).await.unwrap();
         let addr = listener.local_addr().unwrap();
         let service = FlightServiceServer::new(self);
@@ -59,6 +62,27 @@ impl TestFlightService {
         });
         tokio::time::sleep(Duration::from_millis(25)).await;
         addr
+    }
+
+    fn generate_batch(schema: SchemaRef, batch_num: usize) -> RecordBatch {
+        println!("TEST SERVER: Generating batch {}", batch_num);
+        match batch_num {
+            0 => RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(StringArray::from(vec!["A", "B"])),
+                    Arc::new(Int64Array::from(vec![10, 20])),
+                ],
+            ).unwrap(),
+            1 => RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(StringArray::from(vec!["A", "C"])),
+                    Arc::new(Int64Array::from(vec![30, 40])),
+                ],
+            ).unwrap(),
+            _ => panic!("No more batches to generate"),
+        }
     }
 }
 
@@ -98,12 +122,34 @@ impl FlightService for TestFlightService {
     ) -> Result<Response<Self::DoGetStream>, Status> {
         println!("TEST SERVER: do_get called");
         println!("TEST SERVER: ticket: {:?}", request.get_ref());
-        
-        let data = self.partition_data.clone();
-        let rb = async move { Ok(data) };
+
+        let counter = self.batch_counter.clone();
+        let schema = self.schema.clone();
+
+        // Create an async stream that generates batches on demand
+        let stream = futures::stream::unfold(0usize, move |current_batch| {
+            let counter = counter.clone();
+            let schema = schema.clone();
+
+            async move {
+                if current_batch >= 2 { // Total number of batches we want to generate
+                    return None;
+                }
+
+                // Simulate some async work before generating the batch
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                
+                counter.fetch_add(1, Ordering::SeqCst);
+                println!("TEST SERVER: Preparing batch {}", current_batch);
+                
+                let batch = Self::generate_batch(schema, current_batch);
+                Some((Ok(batch), current_batch + 1))
+            }
+        });
+        // Build the Flight data encoder with the schema from the first batch
         let stream = FlightDataEncoderBuilder::default()
-            .with_schema(self.partition_data.schema())
-            .build(stream::once(rb))
+            .with_schema(self.schema.clone())
+            .build(stream)
             .map_err(|e| Status::internal(e.to_string()));
 
         Ok(Response::new(Box::pin(stream)))
@@ -177,29 +223,24 @@ impl FlightService for TestFlightService {
 
 #[tokio::test]
     async fn test_read_aggs() -> datafusion::common::Result<()> {
-        // Create test data
-        let partition_data: RecordBatch = RecordBatch::try_new(
-            Arc::new(Schema::new([
-                Arc::new(Field::new("ord", DataType::Utf8, false)),
-                Arc::new(Field::new("count", DataType::Int64, false)),
-            ])),
-            vec![
-                Arc::new(StringArray::from(vec!["A", "B", "A", "C"])),
-                Arc::new(Int64Array::from(vec![10, 20, 30, 40])),
-            ],
-        )?;
+    // Create test data schema
+    let schema = Arc::new(Schema::new([
+        Arc::new(Field::new("ord", DataType::Utf8, false)),
+        Arc::new(Field::new("count", DataType::Int64, false)),
+    ]));
 
         // Set up flight endpoint
         let endpoint = FlightEndpoint::default().with_ticket(Ticket::new("bytes".as_bytes()));
         let flight_info = FlightInfo::default()
-            .try_with_schema(partition_data.schema().as_ref())?
+            .try_with_schema(schema.as_ref())?
             .with_endpoint(endpoint);
 
         // Set up test service
         let (tx, rx) = channel();
         let service = TestFlightService {
             flight_info,
-            partition_data,
+            schema: schema.clone(),
+            batch_counter: Arc::new(AtomicUsize::new(0)),
             shutdown_sender: Some(tx),
         };
 
@@ -214,12 +255,6 @@ impl FlightService for TestFlightService {
         // Set up session context
         let config = SessionConfig::new().with_batch_size(1);
         let ctx = SessionContext::new_with_config(config);
-        // let props_template = FlightProperties::new().with_reusable_flight_info(true);
-        // let driver = FlightSqlDriver::new().with_properties_template(props_template);
-        // ctx.state_ref().write().table_factories_mut().insert(
-        //     "FLIGHT_SQL".into(),
-        //     Arc::new(FlightTableFactory::new(Arc::new(driver))),
-        // );
 
         // Create test bytes for ticket
         let test_bytes = Bytes::from("test_ticket");

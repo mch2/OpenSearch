@@ -76,7 +76,6 @@ public class DataFrameStreamProducer implements PartitionedStreamProducer {
                     df = frameSupplier.apply(rootTicket).join();
                     recordBatchStream = df.getStream(allocator, root).get();
                     while (recordBatchStream.loadNextBatch().join()) {
-//                        logger.info(recordBatchStream.getVectorSchemaRoot().getRowCount());
                         // wait for a signal to load the next batch
                         flushSignal.awaitConsumption(1000);
                     }

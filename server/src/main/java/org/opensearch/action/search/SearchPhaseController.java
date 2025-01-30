@@ -726,15 +726,16 @@ public final class SearchPhaseController {
 
     public static Logger logger = LogManager.getLogger(SearchPhaseController.class);
 
-    public ReducedQueryPhase reducedAggsFromStream(List<StreamSearchResult> list) throws Exception {
+    public ReducedQueryPhase reducedAggsFromStream(List<StreamSearchResult> list, int size) throws Exception {
 
         List<byte[]> tickets = list.stream().flatMap(r -> r.getFlightTickets().stream())
             .map(OSTicket::getBytes)
             .collect(Collectors.toList());
 
         Set<StreamTicket> streamTickets = tickets.stream().map(t -> streamManager.getStreamTicketFactory().fromBytes(t)).collect(Collectors.toSet());
+
         DataFrameStreamProducer producer = AccessController.doPrivileged((PrivilegedAction<DataFrameStreamProducer>) () ->
-                new DataFrameStreamProducer((p -> streamManager.registerStream(p, TaskId.EMPTY_TASK_ID)), streamTickets, (t) -> DataFusion.agg(t.toBytes())));
+                new DataFrameStreamProducer((p -> streamManager.registerStream(p, TaskId.EMPTY_TASK_ID)), streamTickets, (t) -> DataFusion.agg(t.toBytes(), size)));
 
         logger.info("Register stream at coordinator");
         return AccessController.doPrivileged((PrivilegedAction<ReducedQueryPhase>) () -> {
@@ -748,7 +749,6 @@ public final class SearchPhaseController {
             List<StringTerms.Bucket> buckets = new ArrayList<>();
             logger.info("Starting iteration at coordinator");
             while (streamIterator.next()) {
-                logger.info(root.getRowCount());
                 int rowCount = root.getRowCount();
                 totalRows+= rowCount;
 
@@ -763,24 +763,6 @@ public final class SearchPhaseController {
                 }
             }
 
-//        recordBatchStream.close();
-//        dataFrame.close();
-//        while (streamIterator.next()) {
-//                    int rowCount = root.getRowCount();
-//                    totalRows+= rowCount;
-//                    logger.info("AT COORD Record Batch with " + rowCount + " rows:");
-//
-//                    // Iterate through rows
-//                    for (int row = 0; row < rowCount; row++) {
-//                        FieldVector ordKey = root.getVector("ord");
-//                        String ordName = (String) getValue(ordKey, row);
-//                        Float8Vector count = (Float8Vector) root.getVector("count");
-//
-//                        Double bucketCount = (Double) getValue(count, row);
-//                        logger.info("Ord: " + ordName + " Bucket Count" + bucketCount + "NodeID: ");
-//                        buckets.add(new StringTerms.Bucket(new BytesRef(ordName.getBytes()), bucketCount.longValue(), new InternalAggregations(List.of()), false, 0, DocValueFormat.RAW));
-//                    }
-//                }
             aggs.add(new StringTerms(
                 "category",
                 InternalOrder.key(true),
