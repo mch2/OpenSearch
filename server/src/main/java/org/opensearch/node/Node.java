@@ -1383,7 +1383,8 @@ public class Node implements Closeable {
                 admissionControlService,
                 cacheService
             );
-            StreamManager streamManager = null;
+
+            StreamManager streamManager;
             if (FeatureFlags.isEnabled(ARROW_STREAMS_SETTING)) {
                 List<StreamManagerPlugin> streamManagerPlugins = pluginsService.filterPlugins(StreamManagerPlugin.class);
                 if (streamManagerPlugins.size() > 1) {
@@ -1396,8 +1397,14 @@ public class Node implements Closeable {
                     if (baseStreamManager != null) {
                         streamManager = new StreamManagerWrapper(baseStreamManager, transportService.getTaskManager());
                         logger.info("StreamManager initialized");
+                    } else {
+                        streamManager = null;
                     }
+                } else {
+                    streamManager = null;
                 }
+            } else {
+                streamManager = null;
             }
             final SearchService searchService = newSearchService(
                 clusterService,
@@ -1487,7 +1494,7 @@ public class Node implements Closeable {
                 b.bind(SearchService.class).toInstance(searchService);
                 b.bind(SearchTransportService.class).toInstance(searchTransportService);
                 b.bind(SearchPhaseController.class)
-                    .toInstance(new SearchPhaseController(namedWriteableRegistry, searchService::aggReduceContextBuilder));
+                    .toInstance(new SearchPhaseController(namedWriteableRegistry, searchService::aggReduceContextBuilder, streamManager));
                 b.bind(Transport.class).toInstance(transport);
                 b.bind(TransportService.class).toInstance(transportService);
                 b.bind(NetworkService.class).toInstance(networkService);
