@@ -93,7 +93,7 @@ public class GlobalOrdinalsStringTermsAggregator extends AbstractStringTermsAggr
 
     private final LongPredicate acceptedGlobalOrdinals;
     private final long valueCount;
-    private final String fieldName;
+    public final String fieldName;
     private Weight weight;
     protected final CollectionStrategy collectionStrategy;
     private final SetOnce<SortedSetDocValues> dvs = new SetOnce<>();
