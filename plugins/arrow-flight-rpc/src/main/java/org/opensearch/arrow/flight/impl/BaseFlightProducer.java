@@ -19,14 +19,18 @@ import org.apache.arrow.flight.OSFlightClient;
 import org.apache.arrow.flight.Ticket;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.arrow.flight.bootstrap.FlightClientManager;
 import org.opensearch.arrow.spi.StreamProducer;
 import org.opensearch.arrow.spi.StreamTicket;
 
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * BaseFlightProducer extends NoOpFlightProducer to provide stream management functionality
@@ -44,9 +48,9 @@ public class BaseFlightProducer extends NoOpFlightProducer {
      * Constructs a new BaseFlightProducer.
      *
      * @param flightClientManager The FlightClientManager to handle client connections.
-     * @param streamManager The StreamManager to handle stream operations, including
-     *                      retrieving and removing streams based on tickets.
-     * @param allocator The BufferAllocator for memory management in Arrow operations.
+     * @param streamManager       The StreamManager to handle stream operations, including
+     *                            retrieving and removing streams based on tickets.
+     * @param allocator           The BufferAllocator for memory management in Arrow operations.
      */
     public BaseFlightProducer(FlightClientManager flightClientManager, FlightStreamManager streamManager, BufferAllocator allocator) {
         this.flightClientManager = flightClientManager;
@@ -59,8 +63,8 @@ public class BaseFlightProducer extends NoOpFlightProducer {
      * This method orchestrates the entire process of setting up the stream,
      * managing backpressure, and handling data flow to the client.
      *
-     * @param context The call context (unused in this implementation)
-     * @param ticket The ticket containing stream information
+     * @param context  The call context (unused in this implementation)
+     * @param ticket   The ticket containing stream information
      * @param listener The server stream listener to handle the data flow
      */
     @Override
@@ -132,7 +136,7 @@ public class BaseFlightProducer extends NoOpFlightProducer {
     /**
      * Retrieves FlightInfo for the given FlightDescriptor, handling both local and remote cases.
      *
-     * @param context The call context
+     * @param context    The call context
      * @param descriptor The FlightDescriptor containing stream information
      * @return FlightInfo for the requested stream
      */
@@ -145,23 +149,24 @@ public class BaseFlightProducer extends NoOpFlightProducer {
             if (streamProducerHolder.isEmpty()) {
                 throw CallStatus.NOT_FOUND.withDescription("FlightInfo not found").toRuntimeException();
             }
-            Location location = flightClientManager.getFlightClientLocation(streamTicket.getNodeId());
-            if (location == null) {
-                throw CallStatus.UNAVAILABLE.withDescription("Internal error while determining location information from ticket.")
-                    .toRuntimeException();
+            StreamProducer producer = streamProducerHolder.get().producer();
+            if (producer.partitions().isEmpty() == false) {
+                return getPartitionedFlightInfo(producer, descriptor);
+            } else {
+                // if no partitions add local server
+                Location location = flightClientManager.getFlightClientLocation(streamTicket.getNodeId());
+                FlightEndpoint endpoint = new FlightEndpoint(new Ticket(descriptor.getCommand()), location);
+                try {
+                    FlightInfo.Builder infoBuilder = FlightInfo.builder(
+                        streamProducerHolder.get().getRoot().getSchema(),
+                        descriptor,
+                        Collections.singletonList(endpoint)
+                    ).setRecords(streamProducerHolder.get().producer().estimatedRowCount());
+                    return infoBuilder.build();
+                } catch (Exception e) {
+                    throw CallStatus.INTERNAL.withDescription("Internal error while creating VectorSchemaRoot.").toRuntimeException();
+                }
             }
-            FlightEndpoint endpoint = new FlightEndpoint(new Ticket(descriptor.getCommand()), location);
-            FlightInfo.Builder infoBuilder;
-            try {
-                infoBuilder = FlightInfo.builder(
-                    streamProducerHolder.get().getRoot().getSchema(),
-                    descriptor,
-                    Collections.singletonList(endpoint)
-                ).setRecords(streamProducerHolder.get().producer().estimatedRowCount());
-            } catch (Exception e) {
-                throw CallStatus.INTERNAL.withDescription("Internal error while creating VectorSchemaRoot.").toRuntimeException();
-            }
-            return infoBuilder.build();
         } else {
             Optional<OSFlightClient> remoteClient = flightClientManager.getFlightClient(streamTicket.getNodeId());
             if (remoteClient.isEmpty()) {
@@ -169,5 +174,36 @@ public class BaseFlightProducer extends NoOpFlightProducer {
             }
             return remoteClient.get().getInfo(descriptor);
         }
+    }
+
+    /**
+     * This returns FlightInfo for a partitioned stream.
+     */
+    private FlightInfo getPartitionedFlightInfo(StreamProducer producer, FlightDescriptor descriptor) {
+        Set<StreamTicket> partitions = producer.partitions();
+        List<FlightEndpoint> endpoints = new ArrayList<>();
+        Schema schema = null;
+        for (StreamTicket partition : partitions) {
+            Location location = flightClientManager.getFlightClientLocation(partition.getNodeId());
+            if (location == null) {
+                throw CallStatus.UNAVAILABLE.withDescription("Internal error while determining location information from ticket.")
+                    .toRuntimeException();
+            }
+            endpoints.add(new FlightEndpoint(new Ticket(partition.toBytes()), location));
+            if (schema == null) {
+                // we need to fetch the schema from one of the endpoints otherwise we get in an infinite loop.
+                Optional<OSFlightClient> flightClient = flightClientManager.getFlightClient(partition.getNodeId());
+                if (flightClient.isPresent()) {
+                    OSFlightClient client = flightClient.get();
+                    schema = client.getSchema(FlightDescriptor.command(partition.toBytes())).getSchema();
+                }
+            }
+        }
+        return FlightInfo.builder(
+                schema,
+                descriptor,
+                endpoints
+            ).setRecords(producer.estimatedRowCount())
+            .build();
     }
 }

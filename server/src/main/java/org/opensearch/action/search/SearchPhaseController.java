@@ -32,6 +32,20 @@
 
 package org.opensearch.action.search;
 
+import org.apache.arrow.memory.BufferAllocator;
+import org.apache.arrow.memory.RootAllocator;
+import org.apache.arrow.vector.BigIntVector;
+import org.apache.arrow.vector.BitVector;
+import org.apache.arrow.vector.FieldVector;
+import org.apache.arrow.vector.Float4Vector;
+import org.apache.arrow.vector.Float8Vector;
+import org.apache.arrow.vector.IntVector;
+import org.apache.arrow.vector.UInt8Vector;
+import org.apache.arrow.vector.VarCharVector;
+import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.ipc.ArrowReader;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.search.CollectionStatistics;
 import org.apache.lucene.search.FieldDoc;
@@ -45,22 +59,31 @@ import org.apache.lucene.search.TopFieldDocs;
 import org.apache.lucene.search.TotalHits;
 import org.apache.lucene.search.TotalHits.Relation;
 import org.apache.lucene.search.grouping.CollapseTopFieldDocs;
+import org.apache.lucene.util.BytesRef;
 import org.opensearch.arrow.spi.StreamManager;
+import org.opensearch.arrow.spi.StreamProducer;
+import org.opensearch.arrow.spi.StreamReader;
+import org.opensearch.arrow.spi.StreamTicket;
 import org.opensearch.common.lucene.search.TopDocsAndMaxScore;
+import org.opensearch.common.unit.TimeValue;
 import org.opensearch.core.common.breaker.CircuitBreaker;
 import org.opensearch.core.common.io.stream.NamedWriteableRegistry;
+import org.opensearch.core.index.shard.ShardId;
+import org.opensearch.core.tasks.TaskId;
+import org.opensearch.datafusion.DataFrame;
+import org.opensearch.datafusion.DataFrameStreamProducer;
+import org.opensearch.datafusion.DataFusion;
+import org.opensearch.datafusion.SessionContext;
 import org.opensearch.index.fielddata.IndexFieldData;
 import org.opensearch.search.DocValueFormat;
 import org.opensearch.search.SearchHit;
 import org.opensearch.search.SearchHits;
 import org.opensearch.search.SearchPhaseResult;
 import org.opensearch.search.SearchService;
-import org.opensearch.search.aggregations.BucketOrder;
 import org.opensearch.search.aggregations.InternalAggregation;
 import org.opensearch.search.aggregations.InternalAggregation.ReduceContext;
 import org.opensearch.search.aggregations.InternalAggregations;
 import org.opensearch.search.aggregations.InternalOrder;
-import org.opensearch.search.aggregations.bucket.terms.InternalTerms;
 import org.opensearch.search.aggregations.bucket.terms.StringTerms;
 import org.opensearch.search.aggregations.bucket.terms.TermsAggregator;
 import org.opensearch.search.builder.SearchSourceBuilder;
@@ -71,9 +94,7 @@ import org.opensearch.search.internal.InternalSearchResponse;
 import org.opensearch.search.internal.SearchContext;
 import org.opensearch.search.profile.ProfileShardResult;
 import org.opensearch.search.profile.SearchProfileShardResults;
-import org.opensearch.search.query.BatchProcessor;
 import org.opensearch.search.query.QuerySearchResult;
-import org.opensearch.search.query.TicketProcessor;
 import org.opensearch.search.sort.SortedWiderNumericSortField;
 import org.opensearch.search.stream.OSTicket;
 import org.opensearch.search.stream.StreamSearchResult;
@@ -81,16 +102,17 @@ import org.opensearch.search.suggest.Suggest;
 import org.opensearch.search.suggest.Suggest.Suggestion;
 import org.opensearch.search.suggest.completion.CompletionSuggestion;
 
+import java.io.IOException;
+import java.security.AccessController;
+import java.security.PrivilegedAction;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.PriorityQueue;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
 import java.util.function.Consumer;
@@ -593,9 +615,9 @@ public final class SearchPhaseController {
         return toReduce.isEmpty()
             ? null
             : InternalAggregations.topLevelReduce(
-                toReduce,
-                performFinalReduce ? aggReduceContextBuilder.forFinalReduction() : aggReduceContextBuilder.forPartialReduction()
-            );
+            toReduce,
+            performFinalReduce ? aggReduceContextBuilder.forFinalReduction() : aggReduceContextBuilder.forPartialReduction()
+        );
     }
 
     /**
@@ -702,72 +724,69 @@ public final class SearchPhaseController {
             : source.from());
     }
 
-    public ReducedQueryPhase reducedFromStream(
-        List<StreamSearchResult> list,
-        InternalAggregation.ReduceContextBuilder aggReduceContextBuilder,
-        boolean performFinalReduce,
-        Executor executor
-    ) {
-        List<byte[]> tickets = list.stream()
-            .flatMap(r -> r.getFlightTickets().stream())
+    public static Logger logger = LogManager.getLogger(SearchPhaseController.class);
+
+    public ReducedQueryPhase reducedAggsFromStream(List<StreamSearchResult> list, int size) {
+
+        List<byte[]> tickets = list.stream().flatMap(r -> r.getFlightTickets().stream())
             .map(OSTicket::getBytes)
             .collect(Collectors.toList());
 
-        List<CompletableFuture<TicketProcessor.TicketProcessorResult>> producerFutures = new ArrayList<>();
-        BatchProcessor batchProcessor = new BatchProcessor();
-        int totalRows = 0;
+        Set<StreamTicket> streamTickets = tickets.stream().map(t -> streamManager.getStreamTicketFactory().fromBytes(t)).collect(Collectors.toSet());
 
-        CompletableFuture<Void> consumerFuture = CompletableFuture.runAsync(() -> {
-            try {
-                batchProcessor.processBatches();
-            } catch (Exception e) {
-                throw new CompletionException(e);
-            }
-        }, executor);
+        // create a stream that when run, registers and executes a DF producer.
+        // This stream will get read immediately after registration
 
-        try {
-            for (byte[] ticket : tickets) {
-                CompletableFuture<TicketProcessor.TicketProcessorResult> future = CompletableFuture.supplyAsync(() -> {
-                    try {
-                        return new TicketProcessor(ticket, streamManager, batchProcessor.getBatchQueue()).call();
-                    } catch (Exception e) {
-                        throw new CompletionException(e);
+        DataFrameStreamProducer producer = AccessController.doPrivileged((PrivilegedAction<DataFrameStreamProducer>) () ->
+            new DataFrameStreamProducer((p -> {
+                return streamManager.registerStream(p, TaskId.EMPTY_TASK_ID);
+            }), streamTickets, (t) -> DataFusion.agg(t.toBytes(), size)));
+
+//        StreamTicket ticket = streamManager.registerStream(new PartitionedStreamProducer(producer), TaskId.EMPTY_TASK_ID);
+        StreamTicket ticket = streamManager.registerStream(producer, TaskId.EMPTY_TASK_ID);
+
+        return AccessController.doPrivileged((PrivilegedAction<ReducedQueryPhase>) () -> {
+            StreamReader streamIterator = streamManager.getStreamReader(ticket);
+
+            int totalRows = 0;
+            List<ScoreDoc> scoreDocs = new ArrayList<>();
+            List<InternalAggregation> aggs = new ArrayList<>();
+            List<StringTerms.Bucket> buckets = new ArrayList<>();
+            try (VectorSchemaRoot root = streamIterator.getRoot()) {
+                while (streamIterator.next()) {
+                    int rowCount = root.getRowCount();
+                    totalRows += rowCount;
+
+                    // Iterate through rows
+                    for (int row = 0; row < rowCount; row++) {
+                        FieldVector ordKey = root.getVector("ord");
+                        String ordName = (String) getValue(ordKey, row);
+                        UInt8Vector count = (UInt8Vector) root.getVector("count");
+
+                        Long bucketCount = (Long) getValue(count, row);
+                        buckets.add(new StringTerms.Bucket(new BytesRef(ordName.getBytes()), bucketCount.longValue(), new InternalAggregations(List.of()), false, 0, DocValueFormat.RAW));
                     }
-                }, executor);
-                producerFutures.add(future);
+                }
+            } catch (Exception e) {
+                logger.error("Shit broke");
+                return null;
             }
-            CompletableFuture<Void> allProducers = CompletableFuture.allOf(producerFutures.toArray(new CompletableFuture[0]));
-            allProducers.join();
-            batchProcessor.markProducersComplete();
-            consumerFuture.join();
-
-            for (CompletableFuture<TicketProcessor.TicketProcessorResult> future : producerFutures) {
-                TicketProcessor.TicketProcessorResult result = future.get();
-                totalRows += result.getRowCount();
-            }
+            aggs.add(new StringTerms(
+                "category",
+                InternalOrder.key(true),
+                InternalOrder.key(true),
+                null,
+                DocValueFormat.RAW,
+                1,
+                false,
+                0L,
+                buckets,
+                0,
+                new TermsAggregator.BucketCountThresholds(0, 0, 0, 0)
+            ));
+            InternalAggregations aggregations = new InternalAggregations(aggs);
 
             TotalHits totalHits = new TotalHits(totalRows, Relation.EQUAL_TO);
-            List<ScoreDoc> scoreDocs = new ArrayList<>();
-            List<BucketOrder> orders = new ArrayList<>();
-            orders.add(BucketOrder.count(false));
-            List<InternalAggregation> aggs = new ArrayList<>();
-            List<StringTerms.Bucket> buckets = getTop500Buckets(batchProcessor.getMergedBuckets());
-            aggs.add(
-                new StringTerms(
-                    "categories",
-                    InternalOrder.key(true),
-                    InternalOrder.compound(orders),
-                    null,
-                    DocValueFormat.RAW,
-                    25,
-                    false,
-                    0L,
-                    buckets,
-                    0,
-                    new TermsAggregator.BucketCountThresholds(1, 0, 10, 25)
-                )
-            );
-
             return new ReducedQueryPhase(
                 totalHits,
                 totalRows,
@@ -775,48 +794,120 @@ public final class SearchPhaseController {
                 false,
                 false,
                 null,
-                InternalAggregations.from(aggs),
+                aggregations,
                 null,
                 new SortedTopDocs(scoreDocs.toArray(ScoreDoc[]::new), false, null, null, null),
                 null,
                 1,
-                500,
+                totalRows,
                 0,
                 totalRows == 0,
                 list.stream().flatMap(ssr -> ssr.getFlightTickets().stream()).collect(Collectors.toList())
             );
+        });
+    }
 
-        } catch (InterruptedException | ExecutionException e) {
-            Thread.currentThread().interrupt();
-            throw new RuntimeException("Error processing tickets in parallel", e);
+    public ReducedQueryPhase reducedFromStream(List<StreamSearchResult> list) {
+
+
+        try (SessionContext context = new SessionContext()) {
+
+            List<byte[]> tickets = list.stream().flatMap(r -> r.getFlightTickets().stream())
+                .map(OSTicket::getBytes)
+                .collect(Collectors.toList());
+
+            // execute the query and get a dataframe
+            CompletableFuture<DataFrame> frame = DataFusion.query(tickets.get(0));
+
+            DataFrame dataFrame = null;
+            ArrowReader arrowReader = null;
+            try {
+                dataFrame = frame.get();
+                arrowReader = dataFrame.collect(new RootAllocator()).get();
+            } catch (InterruptedException | ExecutionException e) {
+                throw new RuntimeException(e);
+            }
+
+            int totalRows = 0;
+            List<ScoreDoc> scoreDocs = new ArrayList<>();
+            try {
+                while (arrowReader.loadNextBatch()) {
+                    VectorSchemaRoot root = arrowReader.getVectorSchemaRoot();
+                    int rowCount = root.getRowCount();
+                    totalRows += rowCount;
+                    System.out.println("Record Batch with " + rowCount + " rows:");
+
+                    // Iterate through rows
+                    for (int row = 0; row < rowCount; row++) {
+                        FieldVector docID = root.getVector("docID");
+                        Float4Vector score = (Float4Vector) root.getVector("score");
+                        FieldVector shardID = root.getVector("shardID");
+                        FieldVector nodeID = root.getVector("nodeID");
+
+                        ShardId sid = ShardId.fromString((String) getValue(shardID, row));
+                        int value = (int) getValue(docID, row);
+                        System.out.println("DocID: " + value + " ShardID" + sid + "NodeID: " + getValue(nodeID, row));
+                        scoreDocs.add(new ScoreDoc(value, score.get(row), sid.id()));
+                    }
+                }
+
+                TotalHits totalHits = new TotalHits(totalRows, Relation.EQUAL_TO);
+                return new ReducedQueryPhase(
+                    totalHits,
+                    totalRows,
+                    1.0f,
+                    false,
+                    false,
+                    null,
+                    null,
+                    null,
+                    new SortedTopDocs(scoreDocs.toArray(ScoreDoc[]::new), false, null, null, null),
+                    null,
+                    1,
+                    totalRows,
+                    0,
+                    totalRows == 0,
+                    list.stream().flatMap(ssr -> ssr.getFlightTickets().stream()).collect(Collectors.toList())
+                );
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            } finally {
+                try {
+                    arrowReader.close();
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            }
+        } catch (Exception e) {
+            throw new RuntimeException(e);
         }
     }
 
-    private List<StringTerms.Bucket> getTop500Buckets(List<StringTerms.Bucket> finalBuckets) {
-        PriorityQueue<StringTerms.Bucket> top500Queue = new PriorityQueue<>(
-            500,
-            Comparator.comparingLong(InternalTerms.Bucket::getDocCount)
-        );
-
-        int i = 0;
-        for (; i < Math.min(500, finalBuckets.size()); i++) {
-            top500Queue.offer(finalBuckets.get(i));
+    private static Object getValue(FieldVector vector, int index) {
+        if (vector.isNull(index)) {
+            return "null";
         }
 
-        for (; i < finalBuckets.size(); i++) {
-            StringTerms.Bucket bucket = finalBuckets.get(i);
-            if (bucket.getDocCount() > top500Queue.peek().getDocCount()) {
-                top500Queue.poll();
-                top500Queue.offer(bucket);
-            }
+        if (vector instanceof UInt8Vector) {
+            return ((UInt8Vector) vector).get(index);
+        } else if (vector instanceof IntVector) {
+            return ((IntVector) vector).get(index);
+        } else if (vector instanceof BigIntVector) {
+            return ((BigIntVector) vector).get(index);
+        } else if (vector instanceof Float4Vector) {
+            return ((Float4Vector) vector).get(index);
+        } else if (vector instanceof Float8Vector) {
+            return ((Float8Vector) vector).get(index);
+        } else if (vector instanceof VarCharVector) {
+            return new String(((VarCharVector) vector).get(index));
+        } else if (vector instanceof BitVector) {
+            return ((BitVector) vector).get(index) != 0;
+        } else if (vector instanceof UInt8Vector) {
+            return ((UInt8Vector) vector).get(index);
         }
+        // Add more types as needed
 
-        ArrayList<StringTerms.Bucket> result = new ArrayList<>(top500Queue.size());
-        while (!top500Queue.isEmpty()) {
-            result.addFirst(top500Queue.poll());
-        }
-        result.sort((o1, o2) -> Long.compare(o2.getDocCount(), o1.getDocCount()));
-        return result;
+        return "Unsupported type: " + vector.getClass().getSimpleName();
     }
 
     /**

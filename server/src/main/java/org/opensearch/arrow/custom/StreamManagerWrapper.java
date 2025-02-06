@@ -26,6 +26,7 @@ import org.opensearch.tasks.TaskAwareRequest;
 import org.opensearch.tasks.TaskManager;
 
 import java.io.IOException;
+import java.util.Set;
 import java.util.function.Supplier;
 
 /**
@@ -111,6 +112,11 @@ public class StreamManagerWrapper implements StreamManager {
         @Override
         public void close() throws IOException {
             streamProducer.close();
+        }
+
+        @Override
+        public Set<StreamTicket> partitions() {
+            return streamProducer.partitions();
         }
 
         static class BatchedJobTaskWrapper implements BatchedJob, TaskAwareRequest {
