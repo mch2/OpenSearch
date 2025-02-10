@@ -37,8 +37,8 @@ import org.opensearch.common.annotation.ExperimentalApi;
 import org.opensearch.common.unit.TimeValue;
 import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.datafusion.DataFrame;
+import org.opensearch.datafusion.DataFusion;
 import org.opensearch.datafusion.RecordBatchStream;
-import org.opensearch.datafusion.SessionContext;
 
 import java.io.IOException;
 import java.security.AccessController;
@@ -49,7 +49,7 @@ import java.util.List;
  * Arrow collector for OpenSearch fields values
  */
 @ExperimentalApi
-public class ArrowCollector extends FilterCollector {
+public class ArrowStreamingCollector extends FilterCollector {
 
     private final VectorSchemaRoot collectionRoot;
     private final DictionaryProvider provider;
@@ -57,12 +57,12 @@ public class ArrowCollector extends FilterCollector {
     List<ArrowFieldAdaptor> fields;
     private final VectorSchemaRoot bucketRoot;
     private final StreamProducer.FlushSignal flushSignal;
-    public static Logger logger = LogManager.getLogger(ArrowCollector.class);
+    public static Logger logger = LogManager.getLogger(ArrowStreamingCollector.class);
     // Pre-allocate reusable buffers
     private byte[] terms;
     private int batchSize;
 
-    public ArrowCollector(
+    public ArrowStreamingCollector(
         Collector in,
         DictionaryProvider provider,
         VectorSchemaRoot collectionRoot,
@@ -92,18 +92,8 @@ public class ArrowCollector extends FilterCollector {
         final int maxOrd = (int) dv.getValueCount();
 
         // vector to hold ordinals
-        final FieldVector vector = collectionRoot.getVector(arrowFieldAdaptor.fieldName);
+        FieldVector vector = collectionRoot.getVector(arrowFieldAdaptor.fieldName);
         vector.setInitialCapacity(maxOrd);
-
-        StreamingCollector streamingCollector = new StreamingCollector(
-            new SessionContext(),
-            allocator,
-            collectionRoot,
-            batchSize,
-            TimeValue.timeValueMillis(1000 * 120),
-            term,
-            500
-        );
 
         final int[] currentRow = {0};
         return new LeafCollector() {
@@ -123,55 +113,65 @@ public class ArrowCollector extends FilterCollector {
             }
 
             private void flushDocs() throws IOException {
+
+                // set ord value count
                 vector.setValueCount(currentRow[0]);
                 collectionRoot.setRowCount(currentRow[0]);
+                logger.info("Starting flush of {} docs", currentRow[0]);
 
-                // Offer batch to streaming collector
-                streamingCollector.offerBatch(collectionRoot);
+                // DATAFUSION HANDOFF
+                AccessController.doPrivileged((PrivilegedAction<Void>) () -> {
+                    try {
+                        DataFrame dataFrame = DataFusion.from_vsr(allocator, collectionRoot, provider, term).get();
+                        RecordBatchStream recordBatchStream = dataFrame.getStream(allocator).get();
+                        VectorSchemaRoot root = recordBatchStream.getVectorSchemaRoot();
+                        VarCharVector ordVector = (VarCharVector) bucketRoot.getVector("ord");
+                        BigIntVector countVector = (BigIntVector) bucketRoot.getVector("count");
+                        int row = 0;
+                        while (recordBatchStream.loadNextBatch().join()) {
+                            UInt8Vector dfVector = (UInt8Vector) root.getVector("ord");
+                            FieldVector cv = root.getVector("count");
+                            logger.info("DF VECTOR {}", dfVector);
+                            logger.info("COUNT VECTOR {}", cv);
+                            // Create transfer pair for the count vector
+//                            TransferPair countTransfer = cv.makeTransferPair(countVector);
 
-                // Clear for next batch
-                collectionRoot.clear();
-                currentRow[0] = 0;
+                            // Transfer the counts
+//                            countTransfer.transfer();
+                            // for each row
+                            for (int i = 0; i < dfVector.getValueCount(); i++) {
+                                // look up ord value
+                                BytesRef bytesRef = dv.lookupOrd(dfVector.get(i));
+                                ordVector.setSafe(row, bytesRef.bytes, 0, bytesRef.length);
+                                countVector.setSafe(row, ((BigIntVector) cv).get(i));
+                                row++;
+                            }
+                            ordVector.setValueCount(row);
+                            countVector.setValueCount(row);
+                            bucketRoot.setRowCount(row);
+                            flushSignal.awaitConsumption(TimeValue.timeValueMillis(1000 * 120));
+                            row = 0;
+                            ordVector.clear();
+                            countVector.clear();;
+                            bucketRoot.setRowCount(0);
+                        }
+//                       flushSignal.awaitConsumption(TimeValue.timeValueMillis(1000 * 120));
+                        recordBatchStream.close(); // clean up DF pointers
+                        collectionRoot.clear();
+                        dataFrame.close();
+                    } catch (Exception e) {
+                        logger.error("eh", e);
+                        throw new RuntimeException(e);
+                    }
+                    currentRow[0] = 0;
+                    return null;
+                });
             }
 
             @Override
             public void finish() throws IOException {
                 if (currentRow[0] > 0) {
                     flushDocs();
-                }
-
-                try {
-                    // Get final results and process into bucketRoot
-                    DataFrame results = streamingCollector.getResults();
-                    if (results != null) {
-                        RecordBatchStream recordBatchStream = results.getStream(allocator).get();
-                        VectorSchemaRoot root = recordBatchStream.getVectorSchemaRoot();
-                        VarCharVector ordVector = (VarCharVector) bucketRoot.getVector("ord");
-                        BigIntVector countVector = (BigIntVector) bucketRoot.getVector("count");
-                        int row = 0;
-
-                        while (recordBatchStream.loadNextBatch().join()) {
-                            UInt8Vector dfVector = (UInt8Vector) root.getVector("ord");
-                            FieldVector cv = root.getVector("count");
-
-                            for (int i = 0; i < dfVector.getValueCount(); i++) {
-                                BytesRef bytesRef = dv.lookupOrd(dfVector.get(i));
-                                ordVector.setSafe(row, bytesRef.bytes, 0, bytesRef.length);
-                                countVector.setSafe(row, ((BigIntVector) cv).get(i));
-                                row++;
-                            }
-                        }
-                        ordVector.setValueCount(row);
-                        countVector.setValueCount(row);
-                        bucketRoot.setRowCount(row);
-                        flushSignal.awaitConsumption(TimeValue.timeValueMillis(1000 * 120));
-                        recordBatchStream.close();
-                        results.close();
-                    }
-                } catch (Exception e) {
-                    logger.error("Fack", e);
-                } finally {
-                    streamingCollector.close();
                 }
             }
 

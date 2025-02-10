@@ -100,6 +100,10 @@ public interface StreamProducer extends Closeable {
      */
     BatchedJob createJob(BufferAllocator allocator);
 
+    /**
+     *
+     * @return
+     */
     default Set<StreamTicket> partitions() {
         return Collections.emptySet();
     }

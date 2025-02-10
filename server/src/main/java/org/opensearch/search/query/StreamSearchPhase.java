@@ -43,6 +43,7 @@ import org.opensearch.search.stream.OSTicket;
 import org.opensearch.search.stream.StreamSearchResult;
 import org.opensearch.search.stream.collector.ArrowCollector;
 import org.opensearch.search.stream.collector.ArrowFieldAdaptor;
+import org.opensearch.search.stream.collector.PushStreamingCollector;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -206,16 +207,8 @@ public class StreamSearchPhase extends QueryPhase {
                                     new ArrayList<>(fieldVectors.values()),
                                     0
                                 );
-                                final ArrowCollector arrowDocIdCollector = new ArrowCollector(finalCollector, provider, collectionRoot, root, allocator, arrowFieldAdaptors, 10_000_000, flushSignal, searchContext.shardTarget().getShardId());
-
-//                                final StreamingAggregator arrowDocIdCollector = new StreamingAggregator(
-//                                    (Aggregator) QueryCollectorContext.createQueryCollector(collectors),
-//                                    searchContext,
-//                                    root,
-//                                    1_000_000,
-//                                    flushSignal,
-//                                    searchContext.shardTarget().getShardId()
-//                                );
+                                final PushStreamingCollector arrowDocIdCollector = new PushStreamingCollector(finalCollector, provider, collectionRoot, root, allocator, arrowFieldAdaptors, 1_000_000, flushSignal, searchContext.shardTarget().getShardId());
+//                                final ArrowCollector arrowDocIdCollector = new ArrowCollector(finalCollector, provider, collectionRoot, root, allocator, arrowFieldAdaptors, 1_000_000, flushSignal, searchContext.shardTarget().getShardId());
                                 try {
                                     searcher.addQueryCancellation(() -> {
                                         if (isCancelled[0] == true) {
