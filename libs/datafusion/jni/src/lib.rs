@@ -11,7 +11,7 @@ use arrow::ipc::writer::FileWriter;
 use bytes::Bytes;
 use datafusion::catalog::Session;
 use datafusion::error::DataFusionError;
-use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream};
+use datafusion::execution::{context, RecordBatchStream, SendableRecordBatchStream};
 use datafusion::functions_aggregate::count::count;
 use datafusion::functions_aggregate::sum::sum;
 use datafusion::physical_expr::EquivalenceProperties;
@@ -73,15 +73,9 @@ pub extern "system" fn Java_org_opensearch_datafusion_DataFusion_load(
                         ],
                     )
                 })
-            .and_then(|agg_df| {
-                agg_df.sort(vec![col("count").sort(true, false)])
-            })
-            .and_then(|sorted| {
-                sorted.limit(0, Some(500))
-            })
-            .and_then(|limited| {
-                limited.sort(vec![col("ord").sort(false, true)])
-            });
+                .and_then(|agg_df| agg_df.sort(vec![col("count").sort(true, false)]))
+                .and_then(|sorted| sorted.limit(0, Some(500)))
+                .and_then(|limited| limited.sort(vec![col("ord").sort(false, true)]));
 
             df
         };
@@ -207,7 +201,7 @@ pub extern "system" fn Java_org_opensearch_datafusion_SessionContext_createSessi
     _class: JClass,
     size: jint,
 ) -> jlong {
-    let config = SessionConfig::new().with_batch_size(size.try_into().unwrap());
+    let config = SessionConfig::new().with_repartition_aggregations(true);
     let context = SessionContext::new_with_config(config);
     Box::into_raw(Box::new(context)) as jlong
 }
@@ -380,30 +374,56 @@ impl DataFusionAggregator {
     }
 
     pub async fn push_batch(&mut self, batch: RecordBatch) -> Result<(), DataFusionError> {
-        // agg and collect the new batch immediately
-        let aggregated = self.context.read_batch(batch)?
+        // agg and collect the new batch immediately, we need to pre-aggregate the incoming batch
+        // so that union works, otherwise we have 2 cols union with 1.
+        let aggregated = self
+            .context
+            .read_batch(batch)?
             .filter(col(&self.term_column).is_not_null())?
             .aggregate(
                 vec![col(&self.term_column).alias("ord")],
                 vec![count(col(&self.term_column)).alias("count")],
-            )?.collect().await?;
+            )?
+            .collect()
+            .await?;
 
-            let incoming_frame = self.context.read_batches(aggregated).unwrap();
-    
+        // Convert collected batches back to DataFrame
+        let incoming_df = self.context.read_batches(aggregated)?;
+
         // Merge with existing aggregation if we have one
         self.current_aggregation = match self.current_aggregation.take() {
             Some(existing) => {
-                Some(existing
-                    .union(incoming_frame)?
-                    .aggregate(
-                        vec![col("ord")],
-                        vec![sum(col("count")).alias("count")]
-                    )?
-                )
-            },
-            None => Some(incoming_frame),
+                let merged = existing
+                    .union(incoming_df)?
+                    .collect()
+                    .await?;
+                Some(self.context.read_batches(merged)?)
+            }
+            None => Some(incoming_df),
         };
+
         Ok(())
+    }
+
+    pub fn get_results(&self) -> Option<DataFrame> {
+        self.current_aggregation
+            .as_ref()
+            .and_then(|df| df.clone()
+            .aggregate(vec![col("ord")], vec![sum(col("count")).alias("count")]).unwrap()
+            .sort(vec![col("ord").sort(false, false)]).ok())
+    }
+
+    pub fn get_results_with_limit(&self, limit: i32) -> Option<DataFrame> {
+        self.current_aggregation.as_ref().and_then(|df| {
+            if limit > 0 {
+                df.clone()
+                    .limit(0, Some(limit as usize))
+                    .and_then(|limited| limited.sort(vec![col("ord").sort(false, false)]))
+                    .ok()
+            } else {
+                Some(df.clone())
+            }
+        })
     }
 
     pub fn take_results(&mut self) -> Option<DataFrame> {
@@ -477,30 +497,13 @@ pub extern "system" fn Java_org_opensearch_search_stream_collector_DataFusionAgg
     limit: jint,
     callback: JObject,
 ) {
-    let runtime = unsafe { &mut *(runtime as *mut Runtime) };
     let aggregator = unsafe { &mut *(agg_ptr as *mut DataFusionAggregator) };
-    
-    let result = match aggregator.take_results() {
-        Some(mut df) => {
-            if limit > 0 {
-                // Apply limit and THEN sort by ord, this ensures we do lookups only on the top ords.
-                match df.limit(0, Some(limit as usize)).and_then(|limited| {
-                    runtime.block_on(async {
-                        println!("Limited DataFrame:");
-                        limited.clone().show().await.unwrap();
-                    });
-                    limited.sort(vec![col("ord").sort(false, true)])
-                }) {
-                    Ok(limited_df) => Ok(Box::into_raw(Box::new(limited_df))),
-                    Err(e) => Err(e)
-                }
-            } else {
-                Ok(Box::into_raw(Box::new(df)))
-            }
-        },
-        None => Ok(std::ptr::null_mut())
-    };
-    
+
+    let result = aggregator
+        .get_results()
+        .map(|df| Box::into_raw(Box::new(df)))
+        .ok_or_else(|| DataFusionError::Execution("No results available".to_string()));
+
     set_object_result::<DataFrame, DataFusionError>(&mut env, callback, result);
 }
 
@@ -516,47 +519,42 @@ pub extern "system" fn Java_org_opensearch_search_stream_collector_DataFusionAgg
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{Int64Array};
+    use arrow::array::Int64Array;
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
+    use datafusion::assert_batches_sorted_eq;
     use std::sync::Arc;
 
     fn create_test_batch(values: Vec<i64>) -> RecordBatch {
         let schema = Schema::new(vec![Field::new("category", DataType::Int64, false)]);
         let array = Int64Array::from(values);
-        
-        RecordBatch::try_new(
-            Arc::new(schema),
-            vec![Arc::new(array)]
-        ).unwrap()
+
+        RecordBatch::try_new(Arc::new(schema), vec![Arc::new(array)]).unwrap()
     }
 
     #[tokio::test]
     async fn test_aggregator_single_batch() {
-        let ctx = SessionContext::new();
+        let ctx = SessionContext::new_with_config(SessionConfig::new().with_batch_size(1));
         let mut aggregator = DataFusionAggregator::new(ctx, "`category`".to_string());
 
         // Create a batch with [1, 1, 2, 2, 2]
-        let batch = create_test_batch(vec![1, 1, 2, 2, 2]);
-        
+        let batch: RecordBatch = create_test_batch(vec![1, 1, 2, 2, 2]);
+
         // Push batch and check results
         aggregator.push_batch(batch).await.unwrap();
-        
+
         // Get results and verify
         let batches = aggregator.take_results().unwrap().collect().await.unwrap();
-        println!("BATCHES ARE {:?}", batches);
-        assert_eq!(batches.len(), 1);
-        
-        let batch = &batches[0];
-        assert_eq!(batch.num_rows(), 2); // Should have two rows (for values 1 and 2)
-        
-        // Verify counts
-        let counts = batch.column(1)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        assert_eq!(counts.value(0), 2); // Count for value 1
-        assert_eq!(counts.value(1), 3); // Count for value 2
+
+        let expected = vec![
+            "+-----+-------+",
+            "| ord | count |",
+            "+-----+-------+",
+            "| 1   | 2     |",
+            "| 2   | 3     |",
+            "+-----+-------+",
+        ];
+        assert_batches_sorted_eq!(expected, &batches);
     }
 
     #[tokio::test]
@@ -565,22 +563,53 @@ mod tests {
         let mut aggregator = DataFusionAggregator::new(ctx, "`category`".to_string());
 
         // Push multiple batches
-        aggregator.push_batch(create_test_batch(vec![1, 1])).await.unwrap();
-        aggregator.push_batch(create_test_batch(vec![2, 2])).await.unwrap();
-        aggregator.push_batch(create_test_batch(vec![1, 2])).await.unwrap();
-        
-        // Get results and verify
-        let batches = aggregator.take_results().unwrap().collect().await.unwrap();
-        let batch = &batches[0];
-        assert_eq!(batch.num_rows(), 2); // Should have two rows
-        
-        // Verify counts
-        let counts = batch.column(1)
-            .as_any()
-            .downcast_ref::<Int64Array>()
+        aggregator
+            .push_batch(create_test_batch(vec![1, 1]))
+            .await
             .unwrap();
-        assert_eq!(counts.value(0), 3); // Total count for value 1
-        assert_eq!(counts.value(1), 3); // Total count for value 2
+
+        let batches = aggregator.get_results().unwrap().collect().await.unwrap();
+        let expected = vec![
+            "+-----+-------+",
+            "| ord | count |",
+            "+-----+-------+",
+            "| 1   | 2     |",
+            "+-----+-------+",
+        ];
+        assert_batches_sorted_eq!(expected, &batches);
+
+        aggregator
+            .push_batch(create_test_batch(vec![2, 2]))
+            .await
+            .unwrap();
+
+        let batches = aggregator.get_results().unwrap().collect().await.unwrap();
+        let expected = vec![
+            "+-----+-------+",
+            "| ord | count |",
+            "+-----+-------+",
+            "| 1   | 2     |",
+            "| 2   | 2     |",
+            "+-----+-------+",
+        ];
+        assert_batches_sorted_eq!(expected, &batches);
+
+        aggregator
+            .push_batch(create_test_batch(vec![2]))
+            .await
+            .unwrap();
+
+        // Get results and verify
+        let batches = aggregator.get_results().unwrap().collect().await.unwrap();
+        let expected = vec![
+            "+-----+-------+",
+            "| ord | count |",
+            "+-----+-------+",
+            "| 1   | 2     |",
+            "| 2   | 3     |",
+            "+-----+-------+",
+        ];
+        assert_batches_sorted_eq!(expected, &batches);
     }
 
     #[tokio::test]
@@ -591,24 +620,54 @@ mod tests {
         // Push empty batch
         let batch = create_test_batch(vec![]);
         aggregator.push_batch(batch).await.unwrap();
-        
+
         // Get results and verify
         let batches = aggregator.take_results().unwrap().collect().await.unwrap();
         assert!(batches.is_empty());
     }
 
     #[tokio::test]
-    async fn test_aggregator_limit() {
+    async fn test_aggregator_limit_and_sort() {
         let ctx = SessionContext::new();
         let mut aggregator = DataFusionAggregator::new(ctx, "`category`".to_string());
 
         // Create batch with multiple values
-        let batch = create_test_batch(vec![1, 1, 2, 2, 3, 3, 4, 4]);
+        let batch = create_test_batch(vec![1, 1, 1, 1, 2, 2, 3, 3, 3, 4]);
         aggregator.push_batch(batch).await.unwrap();
-        
+
         // Get results with limit
-        let batches = aggregator.take_results().unwrap().collect().await.unwrap();
-        assert_eq!(batches[0].num_rows(), 2); // Should only have 2 rows due to limit
+        let batches = aggregator
+            .get_results_with_limit(1)
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let expected = vec![
+            "+-----+-------+",
+            "| ord | count |",
+            "+-----+-------+",
+            "| 1   | 4     |",
+            "+-----+-------+",
+        ];
+        assert_batches_sorted_eq!(expected, &batches);
+
+        let batches = aggregator
+            .get_results_with_limit(4)
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let expected = vec![
+            "+-----+-------+",
+            "| ord | count |",
+            "+-----+-------+",
+            "| 1   | 4     |",
+            "| 2   | 2     |",
+            "| 3   | 3     |",
+            "| 4   | 1     |",
+            "+-----+-------+",
+        ];
+        assert_batches_sorted_eq!(expected, &batches);
     }
 
     #[tokio::test]
@@ -617,25 +676,28 @@ mod tests {
         let mut aggregator = DataFusionAggregator::new(ctx, "`category`".to_string());
 
         // Push values in random order
-        aggregator.push_batch(create_test_batch(vec![3, 1])).await.unwrap();
-        aggregator.push_batch(create_test_batch(vec![2, 4])).await.unwrap();
-        
+        aggregator
+            .push_batch(create_test_batch(vec![3, 1]))
+            .await
+            .unwrap();
+        aggregator
+            .push_batch(create_test_batch(vec![2, 4]))
+            .await
+            .unwrap();
+
         // Get results and verify ordering
         let batches = aggregator.take_results().unwrap().collect().await.unwrap();
-        
-        let batch = &batches[0];
-        let ords = batch.column(0)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        
-        // Verify values are in ascending order
-        let mut prev = ords.value(0);
-        for i in 1..batch.num_rows() {
-            let curr = ords.value(i);
-            assert!(curr > prev);
-            prev = curr;
-        }
+        let expected = vec![
+            "+-----+-------+",
+            "| ord | count |",
+            "+-----+-------+",
+            "| 1   | 1     |",
+            "| 2   | 1     |",
+            "| 3   | 1     |",
+            "| 4   | 1     |",
+            "+-----+-------+",
+        ];
+        assert_batches_sorted_eq!(expected, &batches);
     }
 
     #[tokio::test]
@@ -646,64 +708,55 @@ mod tests {
         // Create a batch with some null values
         let schema = Schema::new(vec![Field::new("category", DataType::Int64, true)]);
         let array = Int64Array::from(vec![Some(1), None, Some(2), None, Some(1)]);
-        
-        let batch = RecordBatch::try_new(
-            Arc::new(schema),
-            vec![Arc::new(array)]
-        ).unwrap();
-        
+
+        let batch = RecordBatch::try_new(Arc::new(schema), vec![Arc::new(array)]).unwrap();
+
         aggregator.push_batch(batch).await.unwrap();
-        
+
         // Get results and verify
-        let result = aggregator.take_results().unwrap().collect().await.unwrap();
-        let batch = &result[0];
-        
-        // Verify counts (nulls should be filtered out)
-        let counts = batch.column(1)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        assert_eq!(counts.value(0), 2); // Count for value 1
-        assert_eq!(counts.value(1), 1); // Count for value 2
+        let batches = aggregator.take_results().unwrap().collect().await.unwrap();
+        let expected = vec![
+            "+-----+-------+",
+            "| ord | count |",
+            "+-----+-------+",
+            "| 1   | 2     |",
+            "| 2   | 1     |",
+            "+-----+-------+",
+        ];
+        assert_batches_sorted_eq!(expected, &batches);
     }
 }
-
-
 
 // I WAS TRYING SOME WEIRD SHIT BELOW THIS LINE, IT DOES NOT WORK BUT IM LEAVING IT FOR ANOTHER TIME WHEN
 // I WANT TO TRY WEIRD SHIT AGAIN
 
-use std::sync::Arc;
-use std::pin::Pin;
-use std::task::{Context, Poll};
-use std::fmt;
 use std::any::Any;
+use std::fmt;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use async_trait::async_trait;
 use futures::Stream;
 
-use arrow::datatypes::{SchemaRef};
-use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties
-};
-use datafusion::execution::{
-    TaskContext,
-    context::{SessionState},
-};
+use arrow::datatypes::SchemaRef;
 use datafusion::datasource::{TableProvider, TableType};
+use datafusion::execution::{context::SessionState, TaskContext};
 use datafusion::logical_expr::Expr;
+use datafusion::physical_plan::{
+    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
+};
 
 use jni::JavaVM;
 
 use jni::objects::GlobalRef;
-
 
 struct CollectorStream {
     collector_ref: GlobalRef,
     schema: SchemaRef,
     finished: bool,
     metrics: MetricsSet,
-    jvm: Arc<JavaVM>,  // Store JavaVM instead of AttachGuard
+    jvm: Arc<JavaVM>, // Store JavaVM instead of AttachGuard
 }
 
 impl Stream for CollectorStream {
@@ -711,51 +764,51 @@ impl Stream for CollectorStream {
 
     fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
-        
+
         if this.finished {
             return Poll::Ready(None);
         }
 
         let mut env_guard = match this.jvm.attach_current_thread() {
             Ok(guard) => guard,
-            Err(e) => return Poll::Ready(Some(Err(DataFusionError::External(Box::new(e)))))
+            Err(e) => return Poll::Ready(Some(Err(DataFusionError::External(Box::new(e))))),
         };
 
         let result = env_guard.call_method(
             this.collector_ref.as_obj(),
             "getNextBatch",
             "()LBatchPointers;",
-            &[]
+            &[],
         );
 
         match result {
-            Ok(output) => {
-                match output.l() {
-                    Ok(obj) => {
-                        if obj.is_null() {
-                            this.finished = true;
-                            Poll::Ready(None)
-                        } else {
-                            let schema_ptr = env_guard.get_field(&obj, "schemaPtr", "J")
-                                .map_err(|e| DataFusionError::External(Box::new(e)))?
-                                .j()
-                                .map_err(|e| DataFusionError::External(Box::new(e)))?;
-                            
-                            let array_ptr = env_guard.get_field(&obj, "arrayPtr", "J")
-                                .map_err(|e| DataFusionError::External(Box::new(e)))?
-                                .j()
-                                .map_err(|e| DataFusionError::External(Box::new(e)))?;
-                            
-                            match convert_to_record_batch(schema_ptr, array_ptr, &this.jvm) {
-                                Ok(batch) => Poll::Ready(Some(Ok(batch))),
-                                Err(e) => Poll::Ready(Some(Err(e)))
-                            }
+            Ok(output) => match output.l() {
+                Ok(obj) => {
+                    if obj.is_null() {
+                        this.finished = true;
+                        Poll::Ready(None)
+                    } else {
+                        let schema_ptr = env_guard
+                            .get_field(&obj, "schemaPtr", "J")
+                            .map_err(|e| DataFusionError::External(Box::new(e)))?
+                            .j()
+                            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+
+                        let array_ptr = env_guard
+                            .get_field(&obj, "arrayPtr", "J")
+                            .map_err(|e| DataFusionError::External(Box::new(e)))?
+                            .j()
+                            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+
+                        match convert_to_record_batch(schema_ptr, array_ptr, &this.jvm) {
+                            Ok(batch) => Poll::Ready(Some(Ok(batch))),
+                            Err(e) => Poll::Ready(Some(Err(e))),
                         }
-                    },
-                    Err(e) => Poll::Ready(Some(Err(DataFusionError::External(Box::new(e)))))
+                    }
                 }
+                Err(e) => Poll::Ready(Some(Err(DataFusionError::External(Box::new(e))))),
             },
-            Err(e) => Poll::Ready(Some(Err(DataFusionError::External(Box::new(e)))))
+            Err(e) => Poll::Ready(Some(Err(DataFusionError::External(Box::new(e))))),
         }
     }
 }
@@ -763,7 +816,7 @@ impl Stream for CollectorStream {
 #[derive(Debug)]
 struct CollectorScan {
     collector_ref: GlobalRef,
-    jvm: Arc<JavaVM>,  // Wrap JavaVM in Arc here too
+    jvm: Arc<JavaVM>, // Wrap JavaVM in Arc here too
     projected_schema: SchemaRef,
     metrics: MetricsSet,
     properties: PlanProperties,
@@ -777,10 +830,11 @@ impl CollectorScan {
             projected_schema: schema.clone(),
             metrics: MetricsSet::new(),
             properties: PlanProperties::new(
-                EquivalenceProperties::new(schema.clone()), 
-                Partitioning::RoundRobinBatch(5), 
-                datafusion::physical_plan::execution_plan::EmissionType::Incremental, 
-                datafusion::physical_plan::execution_plan::Boundedness::Bounded)
+                EquivalenceProperties::new(schema.clone()),
+                Partitioning::RoundRobinBatch(5),
+                datafusion::physical_plan::execution_plan::EmissionType::Incremental,
+                datafusion::physical_plan::execution_plan::Boundedness::Bounded,
+            ),
         }
     }
 }
@@ -837,7 +891,7 @@ impl ExecutionPlan for CollectorScan {
             schema: self.projected_schema.clone(),
             finished: false,
             metrics: self.metrics.clone(),
-            jvm: self.jvm.clone()
+            jvm: self.jvm.clone(),
         };
 
         // Just use one Box with pin
@@ -857,7 +911,7 @@ impl ExecutionPlan for CollectorScan {
 pub struct CollectorTable {
     collector_ref: GlobalRef,
     schema: SchemaRef,
-    jvm: Arc<JavaVM>,  // Wrap JavaVM in Arc
+    jvm: Arc<JavaVM>, // Wrap JavaVM in Arc
 }
 
 impl CollectorTable {
@@ -865,7 +919,7 @@ impl CollectorTable {
         Self {
             collector_ref,
             schema,
-            jvm: Arc::new(jvm),  // Wrap in Arc when creating
+            jvm: Arc::new(jvm), // Wrap in Arc when creating
         }
     }
 }
@@ -899,8 +953,13 @@ impl TableProvider for CollectorTable {
     }
 }
 
-fn convert_to_record_batch(array_ptr: i64, schema_ptr: i64, jvm: &JavaVM) -> Result<RecordBatch, DataFusionError> {
-    let mut env = jvm.attach_current_thread()
+fn convert_to_record_batch(
+    array_ptr: i64,
+    schema_ptr: i64,
+    jvm: &JavaVM,
+) -> Result<RecordBatch, DataFusionError> {
+    let mut env = jvm
+        .attach_current_thread()
         .map_err(|e| DataFusionError::External(Box::new(e)))?;
 
     let array = unsafe { ffi::FFI_ArrowArray::from_raw(array_ptr as *mut _) };
@@ -912,10 +971,13 @@ fn convert_to_record_batch(array_ptr: i64, schema_ptr: i64, jvm: &JavaVM) -> Res
         let struct_array = arrow_array
             .as_any()
             .downcast_ref::<StructArray>()
-            .ok_or_else(|| DataFusionError::Internal("Failed to convert to StructArray".to_string()))?;
-        
-        RecordBatch::try_from(struct_array.clone())
-            .map_err(|e| DataFusionError::Internal(format!("Failed to convert to RecordBatch: {}", e)))
+            .ok_or_else(|| {
+                DataFusionError::Internal("Failed to convert to StructArray".to_string())
+            })?;
+
+        RecordBatch::try_from(struct_array.clone()).map_err(|e| {
+            DataFusionError::Internal(format!("Failed to convert to RecordBatch: {}", e))
+        })
     }
 }
 
@@ -963,17 +1025,11 @@ pub extern "system" fn Java_org_opensearch_search_stream_collector_StreamingColl
         Ok(df) => df
             .aggregate(
                 vec![col(&term_str).alias("ord")],
-                vec![count(col("ord")).alias("count")]
+                vec![count(col("ord")).alias("count")],
             )
-            .and_then(|agg_df| {
-                agg_df.sort(vec![col("count").sort(true, false)])
-            })
-            .and_then(|sorted| {
-                sorted.limit(0, Some(limit as usize))
-            })
-            .and_then(|limited| {
-                limited.sort(vec![col("ord").sort(false, true)])
-            }),
+            .and_then(|agg_df| agg_df.sort(vec![col("count").sort(true, false)]))
+            .and_then(|sorted| sorted.limit(0, Some(limit as usize)))
+            .and_then(|limited| limited.sort(vec![col("ord").sort(false, true)])),
         Err(_) => return -1,
     };
 

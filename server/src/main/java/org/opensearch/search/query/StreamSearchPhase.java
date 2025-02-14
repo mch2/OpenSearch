@@ -43,6 +43,7 @@ import org.opensearch.search.stream.OSTicket;
 import org.opensearch.search.stream.StreamSearchResult;
 import org.opensearch.search.stream.collector.ArrowCollector;
 import org.opensearch.search.stream.collector.ArrowFieldAdaptor;
+import org.opensearch.search.stream.collector.ArrowStreamingCollector;
 import org.opensearch.search.stream.collector.PushStreamingCollector;
 
 import java.io.IOException;
@@ -208,7 +209,7 @@ public class StreamSearchPhase extends QueryPhase {
                                     0
                                 );
                                 final PushStreamingCollector arrowDocIdCollector = new PushStreamingCollector(finalCollector, provider, collectionRoot, root, allocator, arrowFieldAdaptors, 1_000_000, flushSignal, searchContext.shardTarget().getShardId());
-//                                final ArrowCollector arrowDocIdCollector = new ArrowCollector(finalCollector, provider, collectionRoot, root, allocator, arrowFieldAdaptors, 1_000_000, flushSignal, searchContext.shardTarget().getShardId());
+//                                final ArrowStreamingCollector arrowDocIdCollector = new ArrowStreamingCollector(finalCollector, provider, collectionRoot, root, allocator, arrowFieldAdaptors, 1_000_000, flushSignal, searchContext.shardTarget().getShardId());
                                 try {
                                     searcher.addQueryCancellation(() -> {
                                         if (isCancelled[0] == true) {
@@ -286,7 +287,6 @@ public class StreamSearchPhase extends QueryPhase {
                     return searchContext.getTask().getAction();
                 }
             }, searchContext.getTask().getParentTaskId());
-            logger.info("Registered stream with ticket {}", ticket);
             StreamSearchResult streamSearchResult = searchContext.streamSearchResult();
             streamSearchResult.flights(List.of(new OSTicket(ticket.toBytes())));
             return false;

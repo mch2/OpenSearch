@@ -768,7 +768,7 @@ public final class SearchPhaseController {
                     }
                 }
             } catch (Exception e) {
-                logger.error("Shit broke");
+                logger.error("Something went wrong", e);
                 return null;
             }
             aggs.add(new StringTerms(

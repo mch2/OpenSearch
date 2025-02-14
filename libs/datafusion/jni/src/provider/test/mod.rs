@@ -34,9 +34,7 @@ use tonic::codegen::tokio_stream;
 use tonic::metadata::MetadataMap;
 use tonic::transport::{Channel, Server};
 use tonic::{Extensions, Request, Response, Status, Streaming};
-use datafusion::logical_expr::cast; 
-const AUTH_HEADER: &str = "authorization";
-const BEARER_TOKEN: &str = "Bearer flight-sql-token";
+use datafusion::logical_expr::cast;
 
 struct TestFlightService {
     flight_info: FlightInfo,

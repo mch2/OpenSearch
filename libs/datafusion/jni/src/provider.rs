@@ -42,17 +42,6 @@ pub async fn read_aggs(
     .limit(0, Some(size)) // Get top 500 results
 }
 
-pub async fn aggregate(
-    ctx: SessionContext,
-    ticket: Bytes,
-    entry_point: String
-) -> datafusion::common::Result<DataFrame> {
-    let df = dataframe_for_index(&ctx, "theIndex".to_owned(), ticket,     entry_point).await?;
-    df.aggregate(vec![col("")], vec![count(col("a"))])
-     .map_err(|e| DataFusionError::Execution(format!("Failed to sort DataFrame: {}", e)))
-}
-
-
 async fn dataframe_for_index(
     ctx: &SessionContext,
     prefix: String,

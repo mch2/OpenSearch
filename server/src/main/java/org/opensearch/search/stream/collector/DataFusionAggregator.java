@@ -70,6 +70,7 @@ public class DataFusionAggregator implements AutoCloseable {
     }
 
     public CompletableFuture<DataFrame> getResults(int limit) {
+        // limit currently ignored in DF.
         CompletableFuture<DataFrame> result = new CompletableFuture<>();
         getResults(
             context.getRuntime(),

@@ -50,15 +50,15 @@ import java.util.List;
 @ExperimentalApi
 public class PushStreamingCollector extends FilterCollector {
 
+    public static final String COUNT = "count";
+    public static final String ORD = "ord";
     private final VectorSchemaRoot collectionRoot;
-    private final DictionaryProvider provider;
     private final BufferAllocator allocator;
     List<ArrowFieldAdaptor> fields;
     private final VectorSchemaRoot bucketRoot;
     private final StreamProducer.FlushSignal flushSignal;
     public static Logger logger = LogManager.getLogger(PushStreamingCollector.class);
     // Pre-allocate reusable buffers
-    private byte[] terms;
     private int batchSize;
 
     public PushStreamingCollector(
@@ -73,7 +73,6 @@ public class PushStreamingCollector extends FilterCollector {
         ShardId shardId
     ) {
         super(in);
-        this.provider = provider;
         this.allocator = allocator;
         this.fields = fields;
         this.bucketRoot = root;
@@ -90,9 +89,10 @@ public class PushStreamingCollector extends FilterCollector {
         SortedSetDocValues dv = ((ArrowFieldAdaptor.SortedDocValuesType) arrowFieldAdaptor.getDocValues(context.reader())).getSortedDocValues();
         final int maxOrd = (int) dv.getValueCount();
 
-        // vector to hold ordinals
-        FieldVector vector = collectionRoot.getVector(arrowFieldAdaptor.fieldName);
-        vector.setInitialCapacity(maxOrd);
+        // ordinalVector to hold ordinals
+        FieldVector ordinalVector = collectionRoot.getVector(arrowFieldAdaptor.fieldName);
+        // setting initial capacity to maxOrd to skip a few resizes.
+        ordinalVector.setInitialCapacity(maxOrd);
         DataFusionAggregator aggregator = new DataFusionAggregator(term);
 
         final int[] currentRow = {0};
@@ -103,19 +103,19 @@ public class PushStreamingCollector extends FilterCollector {
                 if (currentRow[0] >= batchSize) {
                     pushBatch();
                 }
-                // dump all the ords into an arrow vector, df will aggregate on these and then decode
+                // dump all the ords into an arrow ordinalVector, df will aggregate on these and then decode
                 dv.advance(docId);
-                for (int i = 0; i < dv.docValueCount(); i++) {
+                final int docValueCount = dv.docValueCount();
+                for (int i = 0; i < docValueCount; i++) {
                     long ord = dv.nextOrd();
-                    ((UInt8Vector) vector).setSafe(currentRow[0], ord);
+                    ((UInt8Vector) ordinalVector).setSafe(currentRow[0], ord);
                 }
-                currentRow[0] += dv.docValueCount();
+                currentRow[0] += docValueCount;
             }
 
             private void pushBatch() throws IOException {
-                vector.setValueCount(currentRow[0]);
+                ordinalVector.setValueCount(currentRow[0]);
                 collectionRoot.setRowCount(currentRow[0]);
-                logger.info("Starting flush of {} docs", currentRow[0]);
 
                 AccessController.doPrivileged((PrivilegedAction<Void>) () -> {
                     try {
@@ -142,15 +142,12 @@ public class PushStreamingCollector extends FilterCollector {
                     if (results != null) {
                         RecordBatchStream recordBatchStream = results.getStream(allocator).get();
                         VectorSchemaRoot root = recordBatchStream.getVectorSchemaRoot();
-                        VarCharVector ordVector = (VarCharVector) bucketRoot.getVector("ord");
-                        BigIntVector countVector = (BigIntVector) bucketRoot.getVector("count");
+                        VarCharVector ordVector = (VarCharVector) bucketRoot.getVector(ORD);
+                        BigIntVector countVector = (BigIntVector) bucketRoot.getVector(COUNT);
                         int row = 0;
-
                         while (recordBatchStream.loadNextBatch().join()) {
-                            UInt8Vector dfVector = (UInt8Vector) root.getVector("ord");
-                            FieldVector cv = root.getVector("count");
-
-
+                            UInt8Vector dfVector = (UInt8Vector) root.getVector(ORD);
+                            FieldVector cv = root.getVector(COUNT);
                             for (int i = 0; i < dfVector.getValueCount(); i++) {
                                 BytesRef bytesRef = dv.lookupOrd(dfVector.get(i));
                                 ordVector.setSafe(row, bytesRef.bytes, 0, bytesRef.length);
@@ -158,7 +155,6 @@ public class PushStreamingCollector extends FilterCollector {
                                 row++;
                             }
                         }
-                        logger.info(ordVector.get(0));
                         ordVector.setValueCount(row);
                         countVector.setValueCount(row);
                         bucketRoot.setRowCount(row);
@@ -169,7 +165,7 @@ public class PushStreamingCollector extends FilterCollector {
 
                     aggregator.close();
                 } catch (Exception e) {
-                    logger.error("Fack", e);
+                    logger.error("Error flushing aggregation to coordinator", e);
                 }
             }
 
