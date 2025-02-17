@@ -167,6 +167,7 @@ public final class ClusterAllocationExplanation implements ToXContentObject, Wri
             builder.field("index", shardRouting.getIndexName());
             builder.field("shard", shardRouting.getId());
             builder.field("primary", shardRouting.primary());
+//            builder.field("search", shardRouting.isSearchOnly());
             builder.field("current_state", shardRouting.state().toString().toLowerCase(Locale.ROOT));
             if (shardRouting.unassignedInfo() != null) {
                 unassignedInfoToXContent(shardRouting.unassignedInfo(), builder);

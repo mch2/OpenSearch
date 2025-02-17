@@ -32,6 +32,8 @@
 
 package org.opensearch.cluster.routing.allocation.decider;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.routing.RoutingNode;
 import org.opensearch.cluster.routing.ShardRouting;
@@ -150,6 +152,8 @@ public class AwarenessAllocationDecider extends AllocationDecider {
         return underCapacity(shardRouting, node, allocation, false);
     }
 
+    public static Logger logger = LogManager.getLogger(AwarenessAllocationDecider.class);
+
     private Decision underCapacity(ShardRouting shardRouting, RoutingNode node, RoutingAllocation allocation, boolean moveToNode) {
         if (awarenessAttributes.isEmpty()) {
             return allocation.decision(
@@ -179,6 +183,7 @@ public class AwarenessAllocationDecider extends AllocationDecider {
             // build attr_value -> nodes map
 
             Set<String> nodesPerAttribute = getNodesPerAttributeSet(shardRouting, allocation, awarenessAttribute);
+            logger.info("NODES PER ATTR {}", nodesPerAttribute);
             int numberOfAttributes = nodesPerAttribute.size(); // number of nodes that contain the "zone" attr
             List<String> fullValues = forcedAwarenessAttributes.get(awarenessAttribute);
 
@@ -193,8 +198,9 @@ public class AwarenessAllocationDecider extends AllocationDecider {
 
             // TODO should we remove ones that are not part of full list?
             final int maximumNodeCount = (shardCount + numberOfAttributes - 1) / numberOfAttributes; // ceil(shardCount/numberOfAttributes)
+            logger.info("Current node count {} {} {} {} - MAX - CURRENT {}", shardRouting.isSearchOnly(), currentNodeCount, nodesPerAttribute.size(), maximumNodeCount, currentNodeCount);
             if (currentNodeCount > maximumNodeCount) {
-                return allocation.decision(
+                Decision decision = allocation.decision(
                     Decision.NO,
                     NAME,
                     "there are too many copies of the shard allocated to nodes with attribute [%s], there are [%d] total configured "
@@ -206,6 +212,15 @@ public class AwarenessAllocationDecider extends AllocationDecider {
                     currentNodeCount,
                     maximumNodeCount
                 );
+                logger.warn(                    "there are too many copies of the shard allocated to nodes with attribute [{}], there are [{}] total configured "
+                        + "shard copies for this shard id and [{}] total attribute values, expected the allocated shard count per "
+                        + "attribute [{}] to be less than or equal to the upper bound of the required number of shards per attribute [{}]",
+                    awarenessAttribute, // the attribute (zone)
+                    shardCount, // total shard count
+                    numberOfAttributes, // num of unique attribute values
+                    currentNodeCount, // num of assigned shard copies with the same attr value as the node in consideration
+                    maximumNodeCount);
+                return decision;
             }
         }
 
@@ -233,6 +248,8 @@ public class AwarenessAllocationDecider extends AllocationDecider {
         final List<ShardRouting> shardRoutings = allocation.routingNodes().assignedShards(shardRouting.shardId());
         final List<ShardRouting> assignedShards = shardRouting.isSearchOnly() ? shardRoutings.stream().filter(ShardRouting::isSearchOnly).collect(Collectors.toList()) :
             shardRoutings.stream().filter(s -> s.isSearchOnly() == false).collect(Collectors.toList());
+        logger.info("{} SSIGNED SHARDS {}", shardRouting.isSearchOnly(), assignedShards);
+//            .stream().filter(s -> s.isSearchOnly() && shardRouting.isSearchOnly()).collect(Collectors.toList());
 
         for (ShardRouting assignedShard : assignedShards) {
             if (assignedShard.started() || assignedShard.initializing()) {
@@ -259,11 +276,15 @@ public class AwarenessAllocationDecider extends AllocationDecider {
                     ++currentNodeCount;
                 }
             } else {
-                if (shardRouting.isSearchOnly() == SearchReplicaAllocationDecider.isSearchOnlyNode(node.node())) {
+                logger.info("Shard not assigned, isSearchOnly: {}, node isSearchOnly: {}",
+                    shardRouting.isSearchOnly(),
+                    SearchReplicaAllocationDecider.isSearchOnlyNode(node.node()));                if (shardRouting.isSearchOnly() == SearchReplicaAllocationDecider.isSearchOnlyNode(node.node())) {
                     ++currentNodeCount;
                 }
+//                logger.info("ELSE Increment {} {} {}", currentNodeCount, shardRouting.isSearchOnly(), SearchReplicaAllocationDecider.isSearchOnlyNode(node.node()));
             }
         }
+
         return currentNodeCount;
     }
 

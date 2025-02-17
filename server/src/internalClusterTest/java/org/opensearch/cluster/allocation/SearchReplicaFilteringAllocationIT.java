@@ -230,6 +230,7 @@ public class SearchReplicaFilteringAllocationIT extends RemoteStoreBaseIntegTest
             System.out.println(shardRouting);
         }
         System.out.println(allocatedWriters);
+        assertEquals(1, allocatedWriters.size());
     }
 
     private IndexShardRoutingTable getRoutingTable() {

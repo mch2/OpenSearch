@@ -8,8 +8,6 @@
 
 package org.opensearch.cluster.routing.allocation.decider;
 
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
 import org.opensearch.cluster.node.DiscoveryNode;
 import org.opensearch.cluster.node.DiscoveryNodeFilters;
 import org.opensearch.cluster.routing.RoutingNode;
@@ -32,7 +30,6 @@ import static org.opensearch.cluster.node.DiscoveryNodeFilters.OpType.OR;
  * The filter behaves similar to an include for any defined node attribute.
  * A search replica can be allocated to only nodes with one of the specified attributes while
  * other shard types will be rejected from nodes with any of the attributes.
- *
  * @opensearch.internal
  */
 public class SearchReplicaAllocationDecider extends AllocationDecider {
@@ -51,8 +48,7 @@ public class SearchReplicaAllocationDecider extends AllocationDecider {
         clusterSettings.addAffixMapUpdateConsumer(
             SEARCH_REPLICA_ROUTING_INCLUDE_GROUP_SETTING,
             this::setSearchReplicaIncludeFilters,
-            (a, b) -> {
-            }
+            (a, b) -> {}
         );
     }
 
@@ -66,14 +62,9 @@ public class SearchReplicaAllocationDecider extends AllocationDecider {
         return shouldFilter(shardRouting, node.node(), allocation);
     }
 
-    public static Logger logger = LogManager.getLogger(SearchReplicaAllocationDecider.class);
-
     private Decision shouldFilter(ShardRouting shardRouting, DiscoveryNode node, RoutingAllocation allocation) {
         if (searchReplicaIncludeFilters != null) {
-            logger.info("Should filter");
             final boolean match = searchReplicaIncludeFilters.match(node);
-            logger.info("Node {} match {} routing {}", node.getName(), match, shardRouting.isSearchOnly());
-
             if (match == false && shardRouting.isSearchOnly()) {
                 return allocation.decision(
                     Decision.NO,
@@ -93,8 +84,9 @@ public class SearchReplicaAllocationDecider extends AllocationDecider {
                     searchReplicaIncludeFilters
                 );
             }
-        } else if (shardRouting.isSearchOnly()) {
-            return allocation.decision(Decision.NO, NAME, "There are no nodes designated with node attribute [%s] for search replicas", SEARCH_REPLICA_ROUTING_INCLUDE_GROUP_PREFIX);
+        }
+        if (shardRouting.isSearchOnly()) {
+            return allocation.decision(Decision.NO, NAME, "There are no nodes designated with node attribute [%] for search replicas", SEARCH_REPLICA_ROUTING_INCLUDE_GROUP_PREFIX);
         }
         return allocation.decision(Decision.YES, NAME, "node passes include/exclude/require filters");
     }

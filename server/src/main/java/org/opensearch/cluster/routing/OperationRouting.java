@@ -256,6 +256,7 @@ public class OperationRouting {
                 preference = Preference.PRIMARY_FIRST.type();
             }
 
+            // FIXME: Need another metadata setting to force write only so we don't fall back
             if (isReaderWriterSplitEnabled) {
                 if (preference == null || preference.isEmpty()) {
                     if (indexMetadataForShard.getNumberOfSearchOnlyReplicas() > 0) {
