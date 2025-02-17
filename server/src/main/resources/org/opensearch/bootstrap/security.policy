@@ -93,9 +93,22 @@ grant codeBase "${codebase.reactor-core}" {
   permission java.net.SocketPermission "*", "connect,resolve";
 };
 
+grant codeBase "${codebase.opensearch-arrow-memory-shaded}" {
+    permission java.lang.RuntimePermission "modifyThreadGroup";
+    permission java.lang.RuntimePermission "modifyThread";
+
+    // Reflection access needed by Arrow
+    permission java.lang.RuntimePermission "accessDeclaredMembers";
+    permission java.lang.reflect.ReflectPermission "suppressAccessChecks";
+
+    // Memory access
+    permission java.lang.RuntimePermission "accessClassInPackage.sun.misc";
+};
+
 //// Everything else:
 
 grant {
+
   // needed by vendored Guice
   permission java.lang.RuntimePermission "accessClassInPackage.jdk.internal.vm.annotation";
 
@@ -195,4 +208,7 @@ grant {
   permission java.io.FilePermission "/sys/fs/cgroup/cpuacct/-", "read";
   permission java.io.FilePermission "/sys/fs/cgroup/memory", "read";
   permission java.io.FilePermission "/sys/fs/cgroup/memory/-", "read";
+
+  // Needed for netty based arrow flight server for netty configs related to buffer allocator
+  permission java.security.AllPermission "modifyThreadGroup";
 };

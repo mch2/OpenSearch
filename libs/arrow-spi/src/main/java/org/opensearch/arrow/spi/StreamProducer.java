@@ -11,9 +11,12 @@ package org.opensearch.arrow.spi;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.opensearch.common.annotation.ExperimentalApi;
+import org.opensearch.common.unit.TimeValue;
 import org.opensearch.core.tasks.TaskId;
 
 import java.io.Closeable;
+import java.util.Collections;
+import java.util.Set;
 
 /**
  * Represents a producer of Arrow streams. The producer first needs to define the job by implementing this interface and
@@ -86,7 +89,7 @@ public interface StreamProducer extends Closeable {
      * @param allocator The allocator to use for creating vectors
      * @return A new VectorSchemaRoot instance
      */
-    VectorSchemaRoot createRoot(BufferAllocator allocator);
+    VectorSchemaRoot createRoot(BufferAllocator allocator) throws Exception;
 
     /**
      * Creates a job that will produce the stream data in batches. The job will populate
@@ -96,6 +99,23 @@ public interface StreamProducer extends Closeable {
      * @return A new BatchedJob instance
      */
     BatchedJob createJob(BufferAllocator allocator);
+
+    /**
+     *
+     * @return
+     */
+    default Set<StreamTicket> partitions() {
+        return Collections.emptySet();
+    }
+
+
+    /**
+     * Returns the deadline for the job execution.
+     * After this deadline, the job should be considered expired.
+     *
+     * @return TimeValue representing the job's deadline
+     */
+    TimeValue getJobDeadline();
 
     /**
      * Provides an estimate of the total number of rows that will be produced.
@@ -122,7 +142,7 @@ public interface StreamProducer extends Closeable {
          * @param root The VectorSchemaRoot to populate with data
          * @param flushSignal Signal to coordinate with consumers
          */
-        void run(VectorSchemaRoot root, FlushSignal flushSignal);
+        void run(VectorSchemaRoot root, FlushSignal flushSignal) throws Exception;
 
         /**
          * Called to signal producer when the job is canceled.
@@ -150,8 +170,8 @@ public interface StreamProducer extends Closeable {
         /**
          * Blocks until the current batch has been consumed or timeout occurs.
          *
-         * @param timeout Maximum milliseconds to wait
+         * @param timeout Maximum time to wait
          */
-        void awaitConsumption(int timeout);
+        void awaitConsumption(TimeValue timeout);
     }
 }

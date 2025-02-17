@@ -56,6 +56,8 @@ import org.opensearch.action.search.SearchTaskRequestOperationsListener;
 import org.opensearch.action.search.SearchTransportService;
 import org.opensearch.action.support.TransportAction;
 import org.opensearch.action.update.UpdateHelper;
+import org.opensearch.arrow.custom.StreamManagerWrapper;
+import org.opensearch.arrow.spi.StreamManager;
 import org.opensearch.bootstrap.BootstrapCheck;
 import org.opensearch.bootstrap.BootstrapContext;
 import org.opensearch.cluster.ClusterInfoService;
@@ -218,6 +220,7 @@ import org.opensearch.plugins.ScriptPlugin;
 import org.opensearch.plugins.SearchPipelinePlugin;
 import org.opensearch.plugins.SearchPlugin;
 import org.opensearch.plugins.SecureSettingsFactory;
+import org.opensearch.plugins.StreamManagerPlugin;
 import org.opensearch.plugins.SystemIndexPlugin;
 import org.opensearch.plugins.TaskManagerClientPlugin;
 import org.opensearch.plugins.TelemetryAwarePlugin;
@@ -240,6 +243,7 @@ import org.opensearch.search.deciders.ConcurrentSearchRequestDecider;
 import org.opensearch.search.fetch.FetchPhase;
 import org.opensearch.search.pipeline.SearchPipelineService;
 import org.opensearch.search.query.QueryPhase;
+import org.opensearch.search.query.StreamSearchPhase;
 import org.opensearch.snapshots.InternalSnapshotsInfoService;
 import org.opensearch.snapshots.RestoreService;
 import org.opensearch.snapshots.SnapshotShardsService;
@@ -309,11 +313,13 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static java.util.stream.Collectors.toList;
+import static org.opensearch.common.util.FeatureFlags.ARROW_STREAMS_SETTING;
 import static org.opensearch.common.util.FeatureFlags.BACKGROUND_TASK_EXECUTION_EXPERIMENTAL;
 import static org.opensearch.common.util.FeatureFlags.TELEMETRY;
 import static org.opensearch.env.NodeEnvironment.collectFileCacheDataPath;
@@ -1386,6 +1392,28 @@ public class Node implements Closeable {
                 cacheService
             );
 
+            StreamManager streamManager;
+            if (FeatureFlags.isEnabled(ARROW_STREAMS_SETTING)) {
+                List<StreamManagerPlugin> streamManagerPlugins = pluginsService.filterPlugins(StreamManagerPlugin.class);
+                if (streamManagerPlugins.size() > 1) {
+                    throw new IllegalStateException(
+                        String.format(Locale.ROOT, "Only one StreamManagerPlugin can be installed. Found: %d", streamManagerPlugins.size())
+                    );
+                }
+                if (!streamManagerPlugins.isEmpty()) {
+                    Supplier<StreamManager> baseStreamManager = streamManagerPlugins.get(0).getStreamManager();
+                    if (baseStreamManager != null) {
+                        streamManager = new StreamManagerWrapper(baseStreamManager, transportService.getTaskManager());
+                        logger.info("StreamManager initialized");
+                    } else {
+                        streamManager = null;
+                    }
+                } else {
+                    streamManager = null;
+                }
+            } else {
+                streamManager = null;
+            }
             final SearchService searchService = newSearchService(
                 clusterService,
                 indicesService,
@@ -1394,11 +1422,13 @@ public class Node implements Closeable {
                 bigArrays,
                 searchModule.getQueryPhase(),
                 searchModule.getFetchPhase(),
+                searchModule.getStreamPhase(),
                 responseCollectorService,
                 circuitBreakerService,
                 searchModule.getIndexSearcherExecutor(threadPool),
                 taskResourceTrackingService,
-                searchModule.getConcurrentSearchRequestDeciderFactories()
+                searchModule.getConcurrentSearchRequestDeciderFactories(),
+                streamManager
             );
 
             final List<PersistentTasksExecutor<?>> tasksExecutors = pluginsService.filterPlugins(PersistentTaskPlugin.class)
@@ -1472,7 +1502,7 @@ public class Node implements Closeable {
                 b.bind(SearchService.class).toInstance(searchService);
                 b.bind(SearchTransportService.class).toInstance(searchTransportService);
                 b.bind(SearchPhaseController.class)
-                    .toInstance(new SearchPhaseController(namedWriteableRegistry, searchService::aggReduceContextBuilder));
+                    .toInstance(new SearchPhaseController(namedWriteableRegistry, searchService::aggReduceContextBuilder, streamManager));
                 b.bind(Transport.class).toInstance(transport);
                 b.bind(TransportService.class).toInstance(transportService);
                 b.bind(NetworkService.class).toInstance(networkService);
@@ -2060,11 +2090,13 @@ public class Node implements Closeable {
         BigArrays bigArrays,
         QueryPhase queryPhase,
         FetchPhase fetchPhase,
+        StreamSearchPhase streamSearchPhase,
         ResponseCollectorService responseCollectorService,
         CircuitBreakerService circuitBreakerService,
         Executor indexSearcherExecutor,
         TaskResourceTrackingService taskResourceTrackingService,
-        Collection<ConcurrentSearchRequestDecider.Factory> concurrentSearchDeciderFactories
+        Collection<ConcurrentSearchRequestDecider.Factory> concurrentSearchDeciderFactories,
+        StreamManager streamManager
     ) {
         return new SearchService(
             clusterService,
@@ -2074,11 +2106,13 @@ public class Node implements Closeable {
             bigArrays,
             queryPhase,
             fetchPhase,
+            streamSearchPhase,
             responseCollectorService,
             circuitBreakerService,
             indexSearcherExecutor,
             taskResourceTrackingService,
-            concurrentSearchDeciderFactories
+            concurrentSearchDeciderFactories,
+            streamManager
         );
     }
 
@@ -2151,7 +2185,6 @@ public class Node implements Closeable {
             if (isRemoteStoreAttributePresent(settings)) {
                 remoteStoreNodeService.createAndVerifyRepositories(discoveryNode);
             }
-
             localNode.set(discoveryNode);
             return localNode.get();
         }

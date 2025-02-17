@@ -1,0 +1,34 @@
+[package]
+name = "datafusion_jni"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+jni = "0.21.1"
+datafusion = "44.0.0"
+datafusion-table-providers = { version = "0.2.2", features = ["flight"] }
+tokio = { version = "1.41.0", features = ["full"] }
+arrow = { version = "53.1.0", features = ["ffi" ] }
+arrow-flight = "53.0.0"
+futures = "0.3"
+serde_json = "1.0.132"
+tonic = "0.12.3"
+bytes = "1.8.0"
+async-trait = "0.1"
+num_cpus = "1.16"
+
+[dev-dependencies]
+anyhow = "1.0"
+bollard = "0.18.1"
+geozero = { version = "0.14.0", features = ["with-wkb"] }
+insta = { version = "1.42.0", features = ["filters"] }
+prost = { version = "0.13" }
+rand = "0.8"
+reqwest = "0.12"
+rstest = "0.24.0"
+test-log = { version = "0.2", features = ["trace"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[lib]
+crate_type = ["cdylib"]

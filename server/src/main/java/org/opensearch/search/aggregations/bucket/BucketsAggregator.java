@@ -108,6 +108,15 @@ public abstract class BucketsAggregator extends AggregatorBase {
         docCounts = bigArrays.grow(docCounts, maxBucketOrd);
     }
 
+    @Override
+    public void reset() {
+        try (LongArray oldArray = docCounts) {
+            // Create new array after releasing the old one
+            docCounts.fill(0, docCounts.size(), 0);
+            // docCounts = bigArrays.newLongArray(1, true);
+        }
+    }
+
     /**
      * Utility method to collect the given doc in the given bucket (identified by the bucket ordinal)
      */
@@ -236,6 +245,10 @@ public abstract class BucketsAggregator extends AggregatorBase {
         }
         InternalAggregations[] result = new InternalAggregations[bucketOrdsToCollect.length];
         for (int ord = 0; ord < bucketOrdsToCollect.length; ord++) {
+            InternalAggregation[] slice = new InternalAggregation[subAggregators.length];
+            for (int i = 0; i < subAggregators.length; i++) {
+                slice[i] = aggregations[i][ord];
+            }
             final int thisOrd = ord;
             result[ord] = InternalAggregations.from(new AbstractList<InternalAggregation>() {
                 @Override

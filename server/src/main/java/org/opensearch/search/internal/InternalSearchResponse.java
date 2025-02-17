@@ -34,6 +34,7 @@ package org.opensearch.search.internal;
 
 import org.opensearch.Version;
 import org.opensearch.action.search.SearchResponseSections;
+import org.opensearch.action.search.StreamTargetResponse;
 import org.opensearch.common.annotation.PublicApi;
 import org.opensearch.core.common.io.stream.StreamInput;
 import org.opensearch.core.common.io.stream.StreamOutput;
@@ -44,6 +45,7 @@ import org.opensearch.search.SearchHits;
 import org.opensearch.search.aggregations.InternalAggregations;
 import org.opensearch.search.pipeline.ProcessorExecutionDetail;
 import org.opensearch.search.profile.SearchProfileShardResults;
+import org.opensearch.search.stream.OSTicket;
 import org.opensearch.search.suggest.Suggest;
 
 import java.io.IOException;
@@ -119,8 +121,9 @@ public class InternalSearchResponse extends SearchResponseSections implements Wr
         boolean timedOut,
         Boolean terminatedEarly,
         int numReducePhases,
-        List<SearchExtBuilder> searchExtBuilderList
-
+        List<SearchExtBuilder> searchExtBuilderList,
+        List<ProcessorExecutionDetail> processorResult,
+        List<OSTicket> osTickets
     ) {
         super(
             hits,
@@ -131,7 +134,61 @@ public class InternalSearchResponse extends SearchResponseSections implements Wr
             profileResults,
             numReducePhases,
             searchExtBuilderList,
-            Collections.emptyList()
+            processorResult,
+            osTickets
+        );
+    }
+
+    public InternalSearchResponse(
+        SearchHits hits,
+        InternalAggregations aggregations,
+        Suggest suggest,
+        SearchProfileShardResults profileResults,
+        boolean timedOut,
+        Boolean terminatedEarly,
+        int numReducePhases,
+        List<SearchExtBuilder> searchExtBuilderList
+    ) {
+        this(
+            hits,
+            aggregations,
+            suggest,
+            profileResults,
+            timedOut,
+            terminatedEarly,
+            numReducePhases,
+            searchExtBuilderList,
+            null,
+            null,
+            null
+        );
+    }
+
+    public InternalSearchResponse(
+        SearchHits hits,
+        InternalAggregations aggregations,
+        Suggest suggest,
+        SearchProfileShardResults profileResults,
+        boolean timedOut,
+        Boolean terminatedEarly,
+        int numReducePhases,
+        List<SearchExtBuilder> searchExtBuilderList,
+        List<ProcessorExecutionDetail> processorResult,
+        List<OSTicket> tickets,
+        List<StreamTargetResponse> result
+    ) {
+        super(
+            hits,
+            aggregations,
+            suggest,
+            timedOut,
+            terminatedEarly,
+            profileResults,
+            numReducePhases,
+            searchExtBuilderList,
+            processorResult,
+            tickets,
+            result
         );
     }
 
@@ -145,7 +202,9 @@ public class InternalSearchResponse extends SearchResponseSections implements Wr
             in.readOptionalWriteable(SearchProfileShardResults::new),
             in.readVInt(),
             readSearchExtBuildersOnOrAfter(in),
-            readProcessorResultOnOrAfter(in)
+            readProcessorResultOnOrAfter(in),
+            (in.readBoolean() ? in.readList(OSTicket::new) : null),
+            (in.readBoolean() ? in.readList(StreamTargetResponse::new) : null)
         );
     }
 
@@ -160,6 +219,14 @@ public class InternalSearchResponse extends SearchResponseSections implements Wr
         out.writeVInt(numReducePhases);
         writeSearchExtBuildersOnOrAfter(out, searchExtBuilders);
         writeProcessorResultOnOrAfter(out, processorResult);
+        if (tickets != null && !tickets.isEmpty()) {
+            out.writeBoolean(true);
+            out.writeList(tickets);
+        }
+        if (shardResults != null && !shardResults.isEmpty()) {
+            out.writeBoolean(true);
+            out.writeList(shardResults);
+        }
     }
 
     private static List<SearchExtBuilder> readSearchExtBuildersOnOrAfter(StreamInput in) throws IOException {

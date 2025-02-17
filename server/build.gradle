@@ -69,13 +69,15 @@ dependencies {
   api project(":libs:opensearch-geo")
   api project(":libs:opensearch-telemetry")
   api project(":libs:opensearch-task-commons")
+  implementation project(':libs:opensearch-arrow-spi')
+  implementation project(':libs:opensearch-datafusion')
+
 
   compileOnly project(':libs:opensearch-plugin-classloader')
   testRuntimeOnly project(':libs:opensearch-plugin-classloader')
 
   api libs.bundles.lucene
 
-  // utilities
   api project(":libs:opensearch-cli")
 
   // time handling, remove with java 8 time
@@ -380,7 +382,6 @@ tasks.test {
         jvmArgs += ["--add-opens", "java.base/java.nio.file=ALL-UNNAMED"]
     }
 }
-
 tasks.named("sourcesJar").configure {
   // Ignore duplicates for protobuf generated code (main and generatedSources).
   filesMatching("**/proto/*") {

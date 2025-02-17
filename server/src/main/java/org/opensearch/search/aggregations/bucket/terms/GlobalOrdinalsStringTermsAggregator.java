@@ -40,10 +40,12 @@ import org.apache.lucene.index.SortedDocValues;
 import org.apache.lucene.index.SortedSetDocValues;
 import org.apache.lucene.index.Terms;
 import org.apache.lucene.index.TermsEnum;
+import org.apache.lucene.search.CollectionTerminatedException;
 import org.apache.lucene.search.Weight;
 import org.apache.lucene.util.ArrayUtil;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.PriorityQueue;
+import org.opensearch.action.search.SearchType;
 import org.opensearch.common.SetOnce;
 import org.opensearch.common.lease.Releasable;
 import org.opensearch.common.lease.Releasables;
@@ -91,7 +93,7 @@ public class GlobalOrdinalsStringTermsAggregator extends AbstractStringTermsAggr
 
     private final LongPredicate acceptedGlobalOrdinals;
     private final long valueCount;
-    private final String fieldName;
+    public final String fieldName;
     private Weight weight;
     protected final CollectionStrategy collectionStrategy;
     private final SetOnce<SortedSetDocValues> dvs = new SetOnce<>();
@@ -164,32 +166,35 @@ public class GlobalOrdinalsStringTermsAggregator extends AbstractStringTermsAggr
      @return A LeafBucketCollector implementation with collection termination, since collection is complete
      @throws IOException If an I/O error occurs during reading
      */
-    boolean tryCollectFromTermFrequencies(LeafReaderContext ctx, SortedSetDocValues globalOrds, BiConsumer<Long, Integer> ordCountConsumer)
-        throws IOException {
+    LeafBucketCollector termDocFreqCollector(
+        LeafReaderContext ctx,
+        SortedSetDocValues globalOrds,
+        BiConsumer<Long, Integer> ordCountConsumer
+    ) throws IOException {
         if (weight == null) {
             // Weight not assigned - cannot use this optimization
-            return false;
+            return null;
         } else {
             if (weight.count(ctx) == 0) {
                 // No documents matches top level query on this segment, we can skip the segment entirely
-                return true;
+                return LeafBucketCollector.NO_OP_COLLECTOR;
             } else if (weight.count(ctx) != ctx.reader().maxDoc()) {
                 // weight.count(ctx) == ctx.reader().maxDoc() implies there are no deleted documents and
                 // top-level query matches all docs in the segment
-                return false;
+                return null;
             }
         }
 
         Terms segmentTerms = ctx.reader().terms(this.fieldName);
         if (segmentTerms == null) {
             // Field is not indexed.
-            return false;
+            return null;
         }
 
         NumericDocValues docCountValues = DocValues.getNumeric(ctx.reader(), DocCountFieldMapper.NAME);
         if (docCountValues.nextDoc() != NO_MORE_DOCS) {
             // This segment has at least one document with the _doc_count field.
-            return false;
+            return null;
         }
 
         TermsEnum indexTermsEnum = segmentTerms.iterator();
@@ -213,28 +218,31 @@ public class GlobalOrdinalsStringTermsAggregator extends AbstractStringTermsAggr
                 ordinalTerm = globalOrdinalTermsEnum.next();
             }
         }
-        return true;
-    }
-
-    @Override
-    protected boolean tryPrecomputeAggregationForLeaf(LeafReaderContext ctx) throws IOException {
-        SortedSetDocValues globalOrds = valuesSource.globalOrdinalsValues(ctx);
-        if (collectionStrategy instanceof DenseGlobalOrds
-            && this.resultStrategy instanceof StandardTermsResults
-            && subAggregators.length == 0) {
-            return tryCollectFromTermFrequencies(
-                ctx,
-                globalOrds,
-                (ord, docCount) -> incrementBucketDocCount(collectionStrategy.globalOrdToBucketOrd(0, ord), docCount)
-            );
-        }
-        return false;
+        return new LeafBucketCollector() {
+            @Override
+            public void collect(int doc, long owningBucketOrd) throws IOException {
+                throw new CollectionTerminatedException();
+            }
+        };
     }
 
     @Override
     public LeafBucketCollector getLeafCollector(LeafReaderContext ctx, LeafBucketCollector sub) throws IOException {
         SortedSetDocValues globalOrds = valuesSource.globalOrdinalsValues(ctx);
         collectionStrategy.globalOrdsReady(globalOrds);
+
+        // if (collectionStrategy instanceof DenseGlobalOrds
+        // && this.resultStrategy instanceof StandardTermsResults
+        // && sub == LeafBucketCollector.NO_OP_COLLECTOR) {
+        // LeafBucketCollector termDocFreqCollector = termDocFreqCollector(
+        // ctx,
+        // globalOrds,
+        // (ord, docCount) -> incrementBucketDocCount(collectionStrategy.globalOrdToBucketOrd(0, ord), docCount)
+        // );
+        // if (termDocFreqCollector != null) {
+        // return termDocFreqCollector;
+        // }
+        // }
 
         SortedDocValues singleValues = DocValues.unwrapSingleton(globalOrds);
         if (singleValues != null) {
@@ -430,24 +438,6 @@ public class GlobalOrdinalsStringTermsAggregator extends AbstractStringTermsAggr
         }
 
         @Override
-        protected boolean tryPrecomputeAggregationForLeaf(LeafReaderContext ctx) throws IOException {
-            if (subAggregators.length == 0) {
-                if (mapping != null) {
-                    mapSegmentCountsToGlobalCounts(mapping);
-                }
-                final SortedSetDocValues segmentOrds = valuesSource.ordinalsValues(ctx);
-                segmentDocCounts = context.bigArrays().grow(segmentDocCounts, 1 + segmentOrds.getValueCount());
-                mapping = valuesSource.globalOrdinalsMapping(ctx);
-                return tryCollectFromTermFrequencies(
-                    ctx,
-                    segmentOrds,
-                    (ord, docCount) -> incrementBucketDocCount(mapping.applyAsLong(ord), docCount)
-                );
-            }
-            return false;
-        }
-
-        @Override
         public LeafBucketCollector getLeafCollector(LeafReaderContext ctx, LeafBucketCollector sub) throws IOException {
             if (mapping != null) {
                 mapSegmentCountsToGlobalCounts(mapping);
@@ -456,6 +446,17 @@ public class GlobalOrdinalsStringTermsAggregator extends AbstractStringTermsAggr
             segmentDocCounts = context.bigArrays().grow(segmentDocCounts, 1 + segmentOrds.getValueCount());
             assert sub == LeafBucketCollector.NO_OP_COLLECTOR;
             mapping = valuesSource.globalOrdinalsMapping(ctx);
+
+            if (this.resultStrategy instanceof StandardTermsResults) {
+                LeafBucketCollector termDocFreqCollector = this.termDocFreqCollector(
+                    ctx,
+                    segmentOrds,
+                    (ord, docCount) -> incrementBucketDocCount(mapping.applyAsLong(ord), docCount)
+                );
+                if (termDocFreqCollector != null) {
+                    return termDocFreqCollector;
+                }
+            }
 
             final SortedDocValues singleValues = DocValues.unwrapSingleton(segmentOrds);
             if (singleValues != null) {
@@ -469,6 +470,8 @@ public class GlobalOrdinalsStringTermsAggregator extends AbstractStringTermsAggr
                         }
                         int ord = singleValues.ordValue();
                         long docCount = docCountProvider.getDocCount(doc);
+                        BytesRef bytesRef = singleValues.lookupOrd(ord);
+                        String s = bytesRef.utf8ToString();
                         segmentDocCounts.increment(ord + 1, docCount);
                     }
                 });
@@ -731,11 +734,15 @@ public class GlobalOrdinalsStringTermsAggregator extends AbstractStringTermsAggr
             long[] otherDocCount = new long[owningBucketOrds.length];
             for (int ordIdx = 0; ordIdx < owningBucketOrds.length; ordIdx++) {
                 final int size;
-                if (localBucketCountThresholds.getMinDocCount() == 0) {
-                    // if minDocCount == 0 then we can end up with more buckets then maxBucketOrd() returns
-                    size = (int) Math.min(valueCount, localBucketCountThresholds.getRequiredSize());
+                if (context.searchType().equals(SearchType.STREAM)) {
+                    size = (int) maxBucketOrd();
                 } else {
-                    size = (int) Math.min(maxBucketOrd(), localBucketCountThresholds.getRequiredSize());
+                    if (localBucketCountThresholds.getMinDocCount() == 0) {
+                        // if minDocCount == 0 then we can end up with more buckets then maxBucketOrd() returns
+                        size = (int) Math.min(valueCount, localBucketCountThresholds.getRequiredSize());
+                    } else {
+                        size = (int) Math.min(maxBucketOrd(), localBucketCountThresholds.getRequiredSize());
+                    }
                 }
                 PriorityQueue<TB> ordered = buildPriorityQueue(size);
                 final int finalOrdIdx = ordIdx;

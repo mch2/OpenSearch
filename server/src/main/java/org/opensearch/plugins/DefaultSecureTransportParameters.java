@@ -11,6 +11,11 @@ package org.opensearch.plugins;
 import org.opensearch.common.network.NetworkModule;
 import org.opensearch.common.settings.Settings;
 
+import javax.net.ssl.KeyManagerFactory;
+import javax.net.ssl.TrustManagerFactory;
+
+import java.util.Optional;
+
 /**
  * Default implementation of {@link SecureTransportSettingsProvider.SecureTransportParameters}.
  */
@@ -24,5 +29,35 @@ class DefaultSecureTransportParameters implements SecureTransportSettingsProvide
     @Override
     public boolean dualModeEnabled() {
         return NetworkModule.TRANSPORT_SSL_DUAL_MODE_ENABLED.get(settings);
+    }
+
+    @Override
+    public Optional<KeyManagerFactory> keyManagerFactory() {
+        return Optional.empty();
+    }
+
+    @Override
+    public String sslProvider() {
+        return "";
+    }
+
+    @Override
+    public String clientAuth() {
+        return "";
+    }
+
+    @Override
+    public String[] protocols() {
+        return null;
+    }
+
+    @Override
+    public Iterable<String> cipherSuites() {
+        return null;
+    }
+
+    @Override
+    public TrustManagerFactory trustManagerFactory() {
+        return null;
     }
 }
