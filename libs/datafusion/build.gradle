@@ -10,8 +10,8 @@ import org.opensearch.gradle.testclusters.OpenSearchCluster
 dependencies {
   api project(':libs:opensearch-common')
   implementation project(':libs:opensearch-arrow-spi')
-  implementation 'org.slf4j:slf4j-api:1.7.36'
-  implementation 'org.slf4j:slf4j-simple:1.7.36'
+  runtimeOnly 'org.slf4j:slf4j-api:1.7.36'
+  runtimeOnly 'org.slf4j:slf4j-simple:1.7.36'
   api 'org.apache.arrow:arrow-c-data:17.0.0'
   base {
     archivesName = 'opensearch-datafusion'
