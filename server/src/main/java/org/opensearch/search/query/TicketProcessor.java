@@ -11,7 +11,10 @@ package org.opensearch.search.query;
 import org.apache.arrow.vector.UInt8Vector;
 import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.apache.lucene.util.BytesRef;
+import org.opensearch.action.search.SearchPhaseController;
 import org.opensearch.arrow.spi.StreamManager;
 import org.opensearch.arrow.spi.StreamReader;
 import org.opensearch.arrow.spi.StreamTicket;
@@ -34,6 +37,7 @@ public class TicketProcessor implements Callable<TicketProcessor.TicketProcessor
         this.streamManager = streamManager;
         this.batchQueue = batchQueue;
     }
+    public static Logger logger = LogManager.getLogger(SearchPhaseController.class);
 
     @Override
     public TicketProcessorResult call() throws Exception {
@@ -46,14 +50,18 @@ public class TicketProcessor implements Callable<TicketProcessor.TicketProcessor
                 VectorSchemaRoot root = streamReader.getRoot();
                 int rowCount = root.getRowCount();
                 localRowCount += rowCount;
-
-                for (int row = 0; row < rowCount; row++) {
-                    VarCharVector termVector = (VarCharVector) root.getVector("ord");
-                    UInt8Vector countVector = (UInt8Vector) root.getVector("count");
-
+                VarCharVector termVector = (VarCharVector) root.getVector("ord");
+                UInt8Vector countVector = (UInt8Vector) root.getVector("count");
+                for (int row = 0; row < termVector.getValueCount(); row++) {
+                    String s = new String(termVector.get(row));
+                    BytesRef term = new BytesRef(s.getBytes());
+                    long docCount = countVector.get(row);
+                    if (term.utf8ToString().equalsIgnoreCase("quartzheron")) {
+                        logger.info("quartzheron at coord: {}", docCount);
+                    }
                     StringTerms.Bucket bucket = new StringTerms.Bucket(
-                        new BytesRef(termVector.get(row)),
-                        countVector.get(row),
+                        term,
+                        docCount,
                         new InternalAggregations(List.of()),
                         false,
                         0,

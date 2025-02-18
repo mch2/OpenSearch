@@ -15,8 +15,6 @@ import org.opensearch.common.unit.TimeValue;
 import org.opensearch.core.tasks.TaskId;
 
 import java.io.Closeable;
-import java.util.Collections;
-import java.util.Set;
 
 /**
  * Represents a producer of Arrow streams. The producer first needs to define the job by implementing this interface and
@@ -99,15 +97,6 @@ public interface StreamProducer extends Closeable {
      * @return A new BatchedJob instance
      */
     BatchedJob createJob(BufferAllocator allocator);
-
-    /**
-     *
-     * @return
-     */
-    default Set<StreamTicket> partitions() {
-        return Collections.emptySet();
-    }
-
 
     /**
      * Returns the deadline for the job execution.

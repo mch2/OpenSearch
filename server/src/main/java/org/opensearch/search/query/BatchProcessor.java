@@ -8,6 +8,9 @@
 
 package org.opensearch.search.query;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.opensearch.action.search.SearchPhaseController;
 import org.opensearch.search.aggregations.bucket.terms.StringTerms;
 
 import java.util.ArrayList;
@@ -27,6 +30,7 @@ public class BatchProcessor {
         this.producersComplete = false;
 
     }
+    public static Logger logger = LogManager.getLogger(BatchProcessor.class);
 
     public BlockingQueue<List<StringTerms.Bucket>> getBatchQueue() {
         return batchQueue;
@@ -38,6 +42,12 @@ public class BatchProcessor {
             try {
                 List<StringTerms.Bucket> currentBatch = batchQueue.poll(100, TimeUnit.MILLISECONDS);
                 if (currentBatch != null) {
+                    for (int i = 0; i < currentBatch.size(); i++) {
+                        StringTerms.Bucket bucket = currentBatch.get(i);
+                        if (bucket.termBytes.utf8ToString().equalsIgnoreCase("quartzheron")) {
+                            logger.info("quartzheron in batch: {}", bucket.getDocCount());
+                        }
+                    }
                     mergeSortedLists(currentBatch);
                     cnt++;
                 }
@@ -58,7 +68,7 @@ public class BatchProcessor {
     }
 
     private void mergeSortedLists(List<StringTerms.Bucket> newBatch) {
-        // System.out.println("##Merging a new batch of size: " + newBatch.size());
+         logger.info("##Merging a new batch of size: " + newBatch.size());
 
         List<StringTerms.Bucket> merged = new ArrayList<>();
         int i = 0;
@@ -94,6 +104,12 @@ public class BatchProcessor {
 
         mergedResult.clear();
         mergedResult.addAll(merged);
+        for (int wtf  = 0; wtf < mergedResult.size(); wtf++) {
+            StringTerms.Bucket bucket = mergedResult.get(wtf);
+            if (bucket.termBytes.utf8ToString().equalsIgnoreCase("quartzheron")) {
+                logger.info("quartzheron post merge???: {}", bucket.getDocCount());
+            }
+        }
     }
 
 }

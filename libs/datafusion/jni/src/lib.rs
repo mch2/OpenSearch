@@ -382,7 +382,8 @@ impl DataFusionAggregator {
             .filter(col(&self.term_column).is_not_null())?
             .aggregate(
                 vec![col(&self.term_column).alias("ord")],
-                vec![count(col(&self.term_column)).alias("count")],
+                vec![count(col(&self.term_column))
+                .alias("count")],
             )?
             .collect()
             .await?;

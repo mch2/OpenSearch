@@ -15,6 +15,7 @@ package org.opensearch.search.stream.collector;/*
  */
 
 import org.apache.arrow.memory.BufferAllocator;
+import org.apache.arrow.vector.BigIntVector;
 import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.UInt8Vector;
 import org.apache.arrow.vector.VarCharVector;
@@ -37,8 +38,10 @@ import org.opensearch.common.unit.TimeValue;
 import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.datafusion.DataFrame;
 import org.opensearch.datafusion.RecordBatchStream;
+import org.opensearch.search.DocValueFormat;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.security.AccessController;
 import java.security.PrivilegedAction;
 import java.util.List;
@@ -142,26 +145,34 @@ public class PushStreamingCollector extends FilterCollector {
                         RecordBatchStream recordBatchStream = results.getStream(allocator).get();
                         VectorSchemaRoot root = recordBatchStream.getVectorSchemaRoot();
                         VarCharVector ordVector = (VarCharVector) bucketRoot.getVector(ORD);
-                        UInt8Vector  countVector = (UInt8Vector) bucketRoot.getVector(COUNT);
+                        BigIntVector countVector = (BigIntVector) bucketRoot.getVector(COUNT);
                         int row = 0;
                         while (recordBatchStream.loadNextBatch().join()) {
                             UInt8Vector dfVector = (UInt8Vector) root.getVector(ORD);
                             FieldVector cv = root.getVector(COUNT);
                             for (int i = 0; i < dfVector.getValueCount(); i++) {
-                                BytesRef bytesRef = dv.lookupOrd(dfVector.get(i));
-                                ordVector.setSafe(row, bytesRef.bytes, 0, bytesRef.length);
-                                countVector.setSafe(row, ((UInt8Vector) cv).get(i));
+//                                BytesRef bytesRef = dv.lookupOrd(dfVector.get(i));
+//                                ordVector.setSafe(row, bytesRef.bytes, 0, bytesRef.length);
+                                long ordKey = dfVector.get(i);
+                                BytesRef term = BytesRef.deepCopyOf(dv.lookupOrd(ordKey));
+                                byte[] bytes = DocValueFormat.RAW.format(term).toString().getBytes(StandardCharsets.UTF_8);
+                                ordVector.setSafe(row, bytes);
+                                long value = ((BigIntVector) cv).get(i);
+                                if (term.utf8ToString().equalsIgnoreCase("quartzheron")) {
+                                    logger.info("quartzheron: {}", value);
+                                }
+                                countVector.setSafe(row, value);
                                 row++;
                             }
                         }
                         ordVector.setValueCount(row);
                         countVector.setValueCount(row);
                         bucketRoot.setRowCount(row);
-                        flushSignal.awaitConsumption(TimeValue.timeValueMillis(1000 * 120));
                         recordBatchStream.close();
                         results.close();
                     }
 
+                    flushSignal.awaitConsumption(TimeValue.timeValueMillis(1000 * 120));
                     aggregator.close();
                 } catch (Exception e) {
                     logger.error("Error flushing aggregation to coordinator", e);

@@ -114,11 +114,6 @@ public class StreamManagerWrapper implements StreamManager {
             streamProducer.close();
         }
 
-        @Override
-        public Set<StreamTicket> partitions() {
-            return streamProducer.partitions();
-        }
-
         static class BatchedJobTaskWrapper implements BatchedJob, TaskAwareRequest {
             private final BatchedJob batchedJob;
             private final TaskManager taskManager;

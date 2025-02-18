@@ -32,6 +32,8 @@
 
 package org.opensearch.action.search;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.search.CollectionStatistics;
 import org.apache.lucene.search.FieldDoc;
@@ -77,6 +79,7 @@ import org.opensearch.search.query.TicketProcessor;
 import org.opensearch.search.sort.SortedWiderNumericSortField;
 import org.opensearch.search.stream.OSTicket;
 import org.opensearch.search.stream.StreamSearchResult;
+import org.opensearch.search.stream.collector.PushStreamingCollector;
 import org.opensearch.search.suggest.Suggest;
 import org.opensearch.search.suggest.Suggest.Suggestion;
 import org.opensearch.search.suggest.completion.CompletionSuggestion;
@@ -701,6 +704,8 @@ public final class SearchPhaseController {
             ? SearchService.DEFAULT_FROM
             : source.from());
     }
+    public static Logger logger = LogManager.getLogger(SearchPhaseController.class);
+
 
     public ReducedQueryPhase reducedFromStream(
         List<StreamSearchResult> list,
@@ -743,8 +748,10 @@ public final class SearchPhaseController {
 
             for (CompletableFuture<TicketProcessor.TicketProcessorResult> future : producerFutures) {
                 TicketProcessor.TicketProcessorResult result = future.get();
+                logger.info("Row at coord {}", result.getRowCount());
                 totalRows += result.getRowCount();
             }
+            logger.info("Total {}", totalRows);
 
             TotalHits totalHits = new TotalHits(totalRows, Relation.EQUAL_TO);
             List<ScoreDoc> scoreDocs = new ArrayList<>();

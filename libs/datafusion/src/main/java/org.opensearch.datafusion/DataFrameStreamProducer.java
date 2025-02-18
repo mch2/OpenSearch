@@ -121,7 +121,6 @@ public class DataFrameStreamProducer implements StreamProducer {
         }
     }
 
-    @Override
     public Set<StreamTicket> partitions() {
         return partitions;
     }
