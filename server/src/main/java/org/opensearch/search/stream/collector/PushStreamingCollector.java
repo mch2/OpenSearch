@@ -15,7 +15,6 @@ package org.opensearch.search.stream.collector;/*
  */
 
 import org.apache.arrow.memory.BufferAllocator;
-import org.apache.arrow.vector.BigIntVector;
 import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.UInt8Vector;
 import org.apache.arrow.vector.VarCharVector;
@@ -143,7 +142,7 @@ public class PushStreamingCollector extends FilterCollector {
                         RecordBatchStream recordBatchStream = results.getStream(allocator).get();
                         VectorSchemaRoot root = recordBatchStream.getVectorSchemaRoot();
                         VarCharVector ordVector = (VarCharVector) bucketRoot.getVector(ORD);
-                        BigIntVector countVector = (BigIntVector) bucketRoot.getVector(COUNT);
+                        UInt8Vector  countVector = (UInt8Vector) bucketRoot.getVector(COUNT);
                         int row = 0;
                         while (recordBatchStream.loadNextBatch().join()) {
                             UInt8Vector dfVector = (UInt8Vector) root.getVector(ORD);
@@ -151,7 +150,7 @@ public class PushStreamingCollector extends FilterCollector {
                             for (int i = 0; i < dfVector.getValueCount(); i++) {
                                 BytesRef bytesRef = dv.lookupOrd(dfVector.get(i));
                                 ordVector.setSafe(row, bytesRef.bytes, 0, bytesRef.length);
-                                countVector.setSafe(row, ((BigIntVector) cv).get(i));
+                                countVector.setSafe(row, ((UInt8Vector) cv).get(i));
                                 row++;
                             }
                         }

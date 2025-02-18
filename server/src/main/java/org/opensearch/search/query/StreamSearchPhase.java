@@ -9,7 +9,6 @@
 package org.opensearch.search.query;
 
 import org.apache.arrow.memory.BufferAllocator;
-import org.apache.arrow.vector.BigIntVector;
 import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.UInt8Vector;
 import org.apache.arrow.vector.VarCharVector;
@@ -263,17 +262,13 @@ public class StreamSearchPhase extends QueryPhase {
 
                 @Override
                 public VectorSchemaRoot createRoot(BufferAllocator allocator) {
+                    Map<String, Field> arrowFields = new HashMap<>();
                     Field countField = new Field("count", FieldType.nullable(new ArrowType.Int(64, false)), null);
-                    Field ordField = new Field("ord", FieldType.nullable(new ArrowType.Utf8()), null);
+                    arrowFields.put("count", countField);
+                    arrowFields.put("ord", new Field("ord", FieldType.nullable(new ArrowType.Utf8()), null));
 
-                    List<Field> fields = Arrays.asList(ordField, countField);
-                    List<FieldVector> vectors = new ArrayList<>();
-                    vectors.add(new VarCharVector("ord", allocator));
-                    vectors.add(new BigIntVector("count", allocator));  // Explicitly create BigIntVector
-
-                    VectorSchemaRoot r = new VectorSchemaRoot(fields, vectors);
-                    root[0] = Optional.of(r);
-                    schema[0] = r.getSchema();
+                    schema[0] = new Schema(arrowFields.values());
+                    root[0] = Optional.of(VectorSchemaRoot.create(schema[0], allocator));
                     return root[0].get();
                 }
 

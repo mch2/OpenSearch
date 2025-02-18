@@ -44,10 +44,8 @@ import org.opensearch.core.common.breaker.CircuitBreakingException;
 import org.opensearch.core.common.io.stream.NamedWriteableRegistry;
 import org.opensearch.search.SearchPhaseResult;
 import org.opensearch.search.SearchShardTarget;
-import org.opensearch.search.aggregations.AggregationBuilder;
 import org.opensearch.search.aggregations.InternalAggregation.ReduceContextBuilder;
 import org.opensearch.search.aggregations.InternalAggregations;
-import org.opensearch.search.aggregations.bucket.terms.TermsAggregationBuilder;
 import org.opensearch.search.builder.SearchSourceBuilder;
 import org.opensearch.search.query.QuerySearchResult;
 import org.opensearch.search.stream.StreamSearchResult;
@@ -55,7 +53,6 @@ import org.opensearch.search.stream.StreamSearchResult;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
@@ -94,7 +91,6 @@ public class QueryPhaseResultConsumer extends ArraySearchPhaseResults<SearchPhas
 
     private final PendingMerges pendingMerges;
     private final Consumer<Exception> onPartialMergeFailure;
-    private final Collection<AggregationBuilder> aggregationBuilders;
 
     /**
      * Creates a {@link QueryPhaseResultConsumer} that incrementally reduces aggregation results
@@ -125,7 +121,6 @@ public class QueryPhaseResultConsumer extends ArraySearchPhaseResults<SearchPhas
         this.hasAggs = source != null && source.aggregations() != null;
         int batchReduceSize = (hasAggs || hasTopDocs) ? Math.min(request.getBatchedReduceSize(), expectedResultSize) : expectedResultSize;
         this.pendingMerges = new PendingMerges(batchReduceSize, request.resolveTrackTotalHitsUpTo());
-        this.aggregationBuilders = source.aggregations().getAggregatorFactories();
     }
 
     public void setSearchStreamExecutor(Executor searchStreamExecutor) {
@@ -162,12 +157,13 @@ public class QueryPhaseResultConsumer extends ArraySearchPhaseResults<SearchPhas
 
         SearchPhaseController.ReducedQueryPhase reducePhase = null;
         if (results.get(0) instanceof StreamSearchResult) {
-            int size = 0;
-            for (AggregationBuilder aggregatorFactory : aggregationBuilders) {
-                size = ((TermsAggregationBuilder) aggregatorFactory).size();
-            }
-           reducePhase = controller.reducedAggsFromStream(results.asList()
-                .stream().map(r -> (StreamSearchResult) r).collect(Collectors.toList()), size);
+            reducePhase = controller.reducedFromStream(
+                results.asList().stream().map(r -> (StreamSearchResult) r).collect(Collectors.toList()),
+                aggReduceContextBuilder,
+                performFinalReduce,
+                streamExecutor.orElse(executor)
+            );
+            logger.info("Will reduce results for {}", results.get(0));
         } else {
             final SearchPhaseController.TopDocsStats topDocsStats = pendingMerges.consumeTopDocsStats();
             final List<TopDocs> topDocsList = pendingMerges.consumeTopDocs();

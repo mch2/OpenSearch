@@ -19,7 +19,6 @@ import org.opensearch.arrow.flight.api.flightinfo.NodesFlightInfoAction;
 import org.opensearch.arrow.flight.api.flightinfo.NodesFlightInfoRequest;
 import org.opensearch.arrow.flight.api.flightinfo.NodesFlightInfoResponse;
 import org.opensearch.arrow.flight.bootstrap.tls.SslContextProvider;
-import org.opensearch.client.Client;
 import org.opensearch.cluster.ClusterChangedEvent;
 import org.opensearch.cluster.ClusterStateListener;
 import org.opensearch.cluster.node.DiscoveryNode;
@@ -41,6 +40,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 
 import io.grpc.netty.shaded.io.netty.channel.EventLoopGroup;
+import org.opensearch.transport.client.Client;
 
 import static org.opensearch.common.util.FeatureFlags.ARROW_STREAMS_SETTING;
 

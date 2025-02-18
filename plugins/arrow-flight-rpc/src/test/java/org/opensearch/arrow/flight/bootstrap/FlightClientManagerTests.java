@@ -17,7 +17,6 @@ import org.opensearch.arrow.flight.api.flightinfo.NodesFlightInfoAction;
 import org.opensearch.arrow.flight.api.flightinfo.NodesFlightInfoRequest;
 import org.opensearch.arrow.flight.api.flightinfo.NodesFlightInfoResponse;
 import org.opensearch.arrow.flight.bootstrap.tls.SslContextProvider;
-import org.opensearch.client.Client;
 import org.opensearch.cluster.ClusterChangedEvent;
 import org.opensearch.cluster.ClusterName;
 import org.opensearch.cluster.ClusterState;
@@ -55,6 +54,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import io.grpc.netty.shaded.io.netty.channel.EventLoopGroup;
 import io.grpc.netty.shaded.io.netty.util.NettyRuntime;
+import org.opensearch.transport.client.Client;
 
 import static org.opensearch.arrow.flight.bootstrap.FlightClientManager.LOCATION_TIMEOUT_MS;
 import static org.mockito.ArgumentMatchers.any;
