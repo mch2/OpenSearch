@@ -748,10 +748,8 @@ public final class SearchPhaseController {
 
             for (CompletableFuture<TicketProcessor.TicketProcessorResult> future : producerFutures) {
                 TicketProcessor.TicketProcessorResult result = future.get();
-                logger.info("Row at coord {}", result.getRowCount());
                 totalRows += result.getRowCount();
             }
-            logger.info("Total {}", totalRows);
 
             TotalHits totalHits = new TotalHits(totalRows, Relation.EQUAL_TO);
             List<ScoreDoc> scoreDocs = new ArrayList<>();

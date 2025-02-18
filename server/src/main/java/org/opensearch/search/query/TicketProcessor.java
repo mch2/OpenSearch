@@ -53,15 +53,9 @@ public class TicketProcessor implements Callable<TicketProcessor.TicketProcessor
                 VarCharVector termVector = (VarCharVector) root.getVector("ord");
                 UInt8Vector countVector = (UInt8Vector) root.getVector("count");
                 for (int row = 0; row < termVector.getValueCount(); row++) {
-                    String s = new String(termVector.get(row));
-                    BytesRef term = new BytesRef(s.getBytes());
-                    long docCount = countVector.get(row);
-                    if (term.utf8ToString().equalsIgnoreCase("quartzheron")) {
-                        logger.info("quartzheron at coord: {}", docCount);
-                    }
                     StringTerms.Bucket bucket = new StringTerms.Bucket(
-                        term,
-                        docCount,
+                        new BytesRef(termVector.get(row)),
+                        countVector.get(row),
                         new InternalAggregations(List.of()),
                         false,
                         0,

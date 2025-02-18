@@ -10,7 +10,6 @@ package org.opensearch.search.query;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.opensearch.action.search.SearchPhaseController;
 import org.opensearch.search.aggregations.bucket.terms.StringTerms;
 
 import java.util.ArrayList;
@@ -28,7 +27,6 @@ public class BatchProcessor {
         this.batchQueue = new LinkedBlockingQueue<>();
         this.mergedResult = new ArrayList<>();
         this.producersComplete = false;
-
     }
     public static Logger logger = LogManager.getLogger(BatchProcessor.class);
 
@@ -37,26 +35,20 @@ public class BatchProcessor {
     }
 
     public void processBatches() {
-        int cnt = 0;
+//        int cnt = 0;
         while (!producersComplete || !batchQueue.isEmpty()) {
             try {
                 List<StringTerms.Bucket> currentBatch = batchQueue.poll(100, TimeUnit.MILLISECONDS);
                 if (currentBatch != null) {
-                    for (int i = 0; i < currentBatch.size(); i++) {
-                        StringTerms.Bucket bucket = currentBatch.get(i);
-                        if (bucket.termBytes.utf8ToString().equalsIgnoreCase("quartzheron")) {
-                            logger.info("quartzheron in batch: {}", bucket.getDocCount());
-                        }
-                    }
                     mergeSortedLists(currentBatch);
-                    cnt++;
+//                    cnt++;
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throw new RuntimeException("Interrupted while processing batches", e);
             }
         }
-        System.out.println("##Total batches processed: " + cnt);
+//        System.out.println("##Total batches processed: " + cnt);
     }
 
     public void markProducersComplete() {
@@ -68,8 +60,6 @@ public class BatchProcessor {
     }
 
     private void mergeSortedLists(List<StringTerms.Bucket> newBatch) {
-         logger.info("##Merging a new batch of size: " + newBatch.size());
-
         List<StringTerms.Bucket> merged = new ArrayList<>();
         int i = 0;
         int j = 0;
@@ -104,12 +94,6 @@ public class BatchProcessor {
 
         mergedResult.clear();
         mergedResult.addAll(merged);
-        for (int wtf  = 0; wtf < mergedResult.size(); wtf++) {
-            StringTerms.Bucket bucket = mergedResult.get(wtf);
-            if (bucket.termBytes.utf8ToString().equalsIgnoreCase("quartzheron")) {
-                logger.info("quartzheron post merge???: {}", bucket.getDocCount());
-            }
-        }
     }
 
 }

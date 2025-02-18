@@ -163,7 +163,7 @@ public class QueryPhaseResultConsumer extends ArraySearchPhaseResults<SearchPhas
                 performFinalReduce,
                 streamExecutor.orElse(executor)
             );
-            logger.info("Will reduce results for {}", results.get(0));
+//            logger.info("Will reduce results for {}", results.get(0));
         } else {
             final SearchPhaseController.TopDocsStats topDocsStats = pendingMerges.consumeTopDocsStats();
             final List<TopDocs> topDocsList = pendingMerges.consumeTopDocs();

@@ -411,7 +411,7 @@ impl DataFusionAggregator {
             .as_ref()
             .and_then(|df| df.clone()
             .aggregate(vec![col("ord")], vec![sum(col("count")).alias("count")]).unwrap()
-            .sort(vec![col("ord").sort(false, false)]).ok())
+            .sort(vec![col("ord").sort(true, false)]).ok())
     }
 
     pub fn get_results_with_limit(&self, limit: i32) -> Option<DataFrame> {

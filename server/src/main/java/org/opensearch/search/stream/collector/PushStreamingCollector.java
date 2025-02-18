@@ -147,20 +147,19 @@ public class PushStreamingCollector extends FilterCollector {
                         VarCharVector ordVector = (VarCharVector) bucketRoot.getVector(ORD);
                         BigIntVector countVector = (BigIntVector) bucketRoot.getVector(COUNT);
                         int row = 0;
+
                         while (recordBatchStream.loadNextBatch().join()) {
+
                             UInt8Vector dfVector = (UInt8Vector) root.getVector(ORD);
                             FieldVector cv = root.getVector(COUNT);
                             for (int i = 0; i < dfVector.getValueCount(); i++) {
-//                                BytesRef bytesRef = dv.lookupOrd(dfVector.get(i));
-//                                ordVector.setSafe(row, bytesRef.bytes, 0, bytesRef.length);
-                                long ordKey = dfVector.get(i);
-                                BytesRef term = BytesRef.deepCopyOf(dv.lookupOrd(ordKey));
-                                byte[] bytes = DocValueFormat.RAW.format(term).toString().getBytes(StandardCharsets.UTF_8);
-                                ordVector.setSafe(row, bytes);
+                                BytesRef bytesRef = dv.lookupOrd(dfVector.get(i));
+                                ordVector.setSafe(row, bytesRef.bytes, 0, bytesRef.length);
+//                                long ordKey = dfVector.get(i);
+//                                BytesRef term = BytesRef.deepCopyOf(dv.lookupOrd(ordKey));
+//                                byte[] bytes = DocValueFormat.RAW.format(term).toString().getBytes(StandardCharsets.UTF_8);
+//                                ordVector.setSafe(row, bytes);
                                 long value = ((BigIntVector) cv).get(i);
-                                if (term.utf8ToString().equalsIgnoreCase("quartzheron")) {
-                                    logger.info("quartzheron: {}", value);
-                                }
                                 countVector.setSafe(row, value);
                                 row++;
                             }
