@@ -120,9 +120,17 @@ public class PushStreamingCollector extends FilterCollector {
                 AccessController.doPrivileged((PrivilegedAction<Void>) () -> {
                     try {
                         // Push batch to streaming aggregator
-                        aggregator.pushBatch(allocator, collectionRoot).get();
-                        collectionRoot.clear();
-                        currentRow[0] = 0;
+                        aggregator.pushBatch(allocator, collectionRoot).thenAccept(
+                            v -> {
+                                collectionRoot.clear();
+                                currentRow[0] = 0;
+                            }
+                        ).exceptionally(throwable -> {
+                            logger.error("Error pushing batch", throwable);
+                            throw new RuntimeException(throwable);
+                        });
+//                        collectionRoot.clear();
+//                        currentRow[0] = 0;
                     } catch (Exception e) {
                         throw new RuntimeException(e);
                     }

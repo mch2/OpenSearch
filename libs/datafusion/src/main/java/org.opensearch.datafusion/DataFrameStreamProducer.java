@@ -21,6 +21,7 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 /**
  *
@@ -66,14 +67,26 @@ public class DataFrameStreamProducer implements StreamProducer {
             public void run(VectorSchemaRoot root, FlushSignal flushSignal) {
                 try {
                     assert rootTicket != null;
-                    while (recordBatchStream.loadNextBatch().join()) {
-                        // wait for a signal to load the next batch
-                        flushSignal.awaitConsumption(TimeValue.timeValueMillis(1000));
-                    }
+                    pollUntilFalse(() -> recordBatchStream.loadNextBatch(), flushSignal);
                     close();
                 } catch (Exception e) {
                     throw new RuntimeException(e);
                 }
+            }
+
+            private CompletableFuture<Void> pollUntilFalse(
+                Supplier<CompletableFuture<Boolean>> pollingFunction, FlushSignal signal) {
+                return pollingFunction.get()
+                    .thenCompose(result -> {
+                        if (result) {
+                            // If true, continue polling
+                            signal.awaitConsumption(TimeValue.timeValueMillis(1000));
+                            return pollUntilFalse(pollingFunction, signal);
+                        } else {
+                            // If false, stop polling
+                            return CompletableFuture.completedFuture(null);
+                        }
+                    });
             }
 
             @Override
