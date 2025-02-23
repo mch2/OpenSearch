@@ -143,140 +143,6 @@ pub extern "system" fn Java_org_opensearch_datafusion_DataFusion_agg(
 }
 
 #[no_mangle]
-pub extern "system" fn Java_org_opensearch_datafusion_DataFusion_aggFromEndpoints(
-    mut env: JNIEnv,
-    _class: JClass, 
-    runtime_ptr: jlong,
-    ctx: jlong,
-    endpoints_list: JObject,
-    schema_ptr: jlong,
-    callback: JObject,
-) {
-    let context = unsafe { &mut *(ctx as *mut SessionContext) };
-    let runtime = unsafe { &mut *(runtime_ptr as *mut Runtime) };
-    let ffi_schema = unsafe { ffi::FFI_ArrowSchema::from_raw(schema_ptr as *mut _) };
-    let arrow_schema = arrow::datatypes::Schema::try_from(&ffi_schema)
-        .expect("Valid schema from FFI");
-
-    // Use IpcDataGenerator to handle all the protocol details
-    let data_gen = IpcDataGenerator::default();
-    let schema_message = data_gen.schema_to_bytes(
-        &arrow_schema,
-        &IpcWriteOptions::default()
-    ).ipc_message;
-    let mut endpoints = Vec::<FlightEndpoint>::new();
-    println!("Endpoints {:?}", endpoints);
-    let endpoint_count = match env.call_method(
-        &endpoints_list,
-        "size",
-        "()I",
-        &[]
-    ) {
-        Ok(size) => size.i().unwrap_or(0),
-        Err(_) => {
-            // set_object_result_error(&mut env, &callback, &DataFusionError::Execution("Failed to get endpoints list size".to_string()));
-            return;
-        }
-    };
-
-    println!("Endpoint count {:?}", endpoint_count);
-
-    for i in 0..endpoint_count {
-        let endpoint_obj = match env.call_method(
-            &endpoints_list,
-            "get",
-            "(I)Ljava/lang/Object;",
-            &[JValue::Int(i)]
-        ).and_then(|obj| obj.l()) {
-            Ok(obj) => obj,
-            Err(_) => {
-                // set_object_result_error(&mut env, &callback, &DataFusionError::Execution("Failed to get endpoint from list".to_string()));
-                return;
-            }
-        };
-
-        // Get uri field with proper lifetime handling
-        let uri_str = {
-            let uri_field = match env.get_field(&endpoint_obj, "uri", "Ljava/lang/String;")
-                .and_then(|uri| uri.l()) {
-                Ok(uri_obj) => uri_obj,
-                Err(_) => {
-                    // set_object_result_error(&mut env, &callback, &DataFusionError::Execution("Failed to get uri from endpoint".to_string()));
-                    return;
-                }
-            };
-            
-            let uri_string = JString::from(uri_field);
-            let result = env.get_string(&uri_string)
-                .map(|s| s.to_str().unwrap_or_default().to_owned());
-            
-            match result {
-                Ok(s) => s,
-                Err(_) => {
-                    // set_object_result_error(&mut env, &callback, &DataFusionError::Execution("Failed to get uri string".to_string()));
-                    return;
-                }
-            }
-        };
-
-        let ticket_bytes = {
-            let ticket_field = match env.get_field(&endpoint_obj, "ticket", "[B")
-                .and_then(|ticket| ticket.l()) {
-                Ok(ticket_obj) => ticket_obj,
-                Err(_) => {
-                    // set_object_result_error(&mut env, &callback, &DataFusionError::Execution("Failed to get ticket from endpoint".to_string()));
-                    return;
-                }
-            };
-
-            let byte_array = JByteArray::from(ticket_field);
-            match env.convert_byte_array(&byte_array) {
-                Ok(bytes) => bytes,
-                Err(_) => {
-                    // set_object_result_error(&mut env, &callback, &DataFusionError::Execution("Failed to get ticket bytes".to_string()));
-                    return;
-                }
-            }
-        };
-
-        if ticket_bytes.is_empty() {
-            // set_object_result_error(&mut env, &callback, &DataFusionError::Execution("Empty ticket bytes".to_string()));
-            return;
-        }
-        
-        println!("URI {:?}", uri_str);
-        println!("Bytes {:?}", ticket_bytes);
-
-        endpoints.push(FlightEndpoint {
-            ticket: Some(Ticket { ticket: Bytes::from(ticket_bytes) }),
-            location: vec![Location { uri: uri_str }],
-            app_metadata: Bytes::new(),
-            expiration_time: None,
-        });
-    }
-
-    println!("IN DF {:?}", endpoints);
-
-    if !endpoints.is_empty() {
-        let result = runtime.block_on(async {
-            provider::read_aggs_with_endpoints(
-                context.clone(),
-                endpoints,
-                "http://localhost:9450".to_owned(),
-                500,
-                Bytes::copy_from_slice(&schema_message).into()
-            )
-            .await
-            .map(|df| Box::into_raw(Box::new(df)))
-        });
-
-        set_object_result(&mut env, callback, result);
-    } else {
-        set_object_result_error(&mut env, callback, &DataFusionError::Execution("No valid endpoints found".to_string()));
-    }
-}
-
-#[no_mangle]
 pub extern "system" fn Java_org_opensearch_datafusion_DataFusion_collect(
     mut env: JNIEnv,
     _class: JClass,
@@ -405,56 +271,56 @@ pub fn set_object_result_error<T: Error>(env: &mut JNIEnv, callback: JObject, er
     .expect("Failed to call object result callback with error");
 }
 
-#[no_mangle]
-pub extern "system" fn Java_org_opensearch_datafusion_DataFusion_runAsync<'local>(
-    mut env: JNIEnv<'local>,
-    _class: JClass<'local>,
-    input: JString<'local>,
-    runtime: jlong,
-    callback: JObject<'local>,
-) {
-    println!("GOT REQ");
-    // Convert Java string to Rust string
-    let input_str: String = env
-        .get_string(&input)
-        .expect("Failed to get Java string")
-        .into();
+// #[no_mangle]
+// pub extern "system" fn Java_org_opensearch_datafusion_DataFusion_runAsync<'local>(
+//     mut env: JNIEnv<'local>,
+//     _class: JClass<'local>,
+//     input: JString<'local>,
+//     runtime: jlong,
+//     callback: JObject<'local>,
+// ) {
+//     println!("GOT REQ");
+//     // Convert Java string to Rust string
+//     let input_str: String = env
+//         .get_string(&input)
+//         .expect("Failed to get Java string")
+//         .into();
 
-    // Create global references to pass into the async block
-    let callback_ref = env.new_global_ref(callback)
-        .expect("Failed to create global reference");
-    let java_vm = Arc::new(env.get_java_vm().expect("Failed to get JavaVM"));
+//     // Create global references to pass into the async block
+//     let callback_ref = env.new_global_ref(callback)
+//         .expect("Failed to create global reference");
+//     let java_vm = Arc::new(env.get_java_vm().expect("Failed to get JavaVM"));
 
-    // Get the runtime and spawn the async task
-    let runtime = unsafe { &mut *(runtime as *mut Runtime) };
-    runtime.spawn(async move {
-        // Simulate async work
-        println!("SPAWNING");
-        sleep(Duration::from_secs(2)).await;
-        let result: String = format!("Processed: {}", input_str);
-        println!("IN RUST {:?}", result);
-        // Call back to Java with the result
-        call_java_callback(java_vm, callback_ref, result);
-    });
-}
+//     // Get the runtime and spawn the async task
+//     let runtime = unsafe { &mut *(runtime as *mut Runtime) };
+//     runtime.spawn(async move {
+//         // Simulate async work
+//         println!("SPAWNING");
+//         sleep(Duration::from_secs(2)).await;
+//         let result: String = format!("Processed: {}", input_str);
+//         println!("IN RUST {:?}", result);
+//         // Call back to Java with the result
+//         call_java_callback(java_vm, callback_ref, result);
+//     });
+// }
 
 
-fn call_java_callback(java_vm: Arc<JavaVM>, callback: GlobalRef, result: String) {
-    // Attach to the JVM from this thread
-    let mut env = java_vm.attach_current_thread().expect("Failed to attach to JVM");
+// fn call_java_callback(java_vm: Arc<JavaVM>, callback: GlobalRef, result: String) {
+//     // Attach to the JVM from this thread
+//     let mut env = java_vm.attach_current_thread().expect("Failed to attach to JVM");
 
-    // Convert Rust string to Java string
-    let result_jstring = env.new_string(result)
-        .expect("Failed to create Java string");
+//     // Convert Rust string to Java string
+//     let result_jstring = env.new_string(result)
+//         .expect("Failed to create Java string");
 
-    // Call the callback method
-    env.call_method(
-        callback.as_obj(),
-        "onComplete",
-        "(Ljava/lang/String;)V",
-        &[(&result_jstring).into()]
-    ).expect("Failed to call callback");
-}
+//     // Call the callback method
+//     env.call_method(
+//         callback.as_obj(),
+//         "onComplete",
+//         "(Ljava/lang/String;)V",
+//         &[(&result_jstring).into()]
+//     ).expect("Failed to call callback");
+// }
 
 #[no_mangle]
 pub extern "system" fn Java_org_opensearch_datafusion_DataFusion_executeStream(
@@ -508,26 +374,6 @@ pub extern "system" fn Java_org_opensearch_datafusion_RecordBatchStream_next(
                 }
             }
     });
-    // runtime.block_on(async {
-    //     let next: Result<Option<arrow::array::RecordBatch>, datafusion::error::DataFusionError> =
-    //         stream.try_next().await;
-    //     match next {
-    //         Ok(Some(batch)) => {
-    //             // Convert to struct array for compatibility with FFI
-    //             let struct_array: StructArray = batch.into();
-    //             let array_data = struct_array.into_data();
-    //             let mut ffi_array = FFI_ArrowArray::new(&array_data);
-    //             // ffi_array must remain alive until after the callback is called
-    //             c(&mut env, callback, addr_of_mut!(ffi_array));
-    //         }
-    //         Ok(None) => {
-    //             set_object_result_ok(&mut env, callback, 0 as *mut FFI_ArrowSchema);
-    //         }
-    //         Err(err) => {
-    //             set_object_result_error(&mut env, callback, &err);
-    //         }
-    //     }
-    // });
 }
 
 fn set_object_result_async<T>(java_vm: Arc<JavaVM>, callback: GlobalRef, address: *mut T) {
