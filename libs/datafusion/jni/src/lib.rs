@@ -1,26 +1,30 @@
+use std::collections::HashMap;
 use std::error::Error;
 use std::io::Cursor;
 use std::ptr::addr_of_mut;
-use std::time::Duration;
+use std::sync::Arc;
 
 use arrow::array::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
 use arrow::array::{Array, RecordBatch, StructArray};
 use arrow::datatypes::Schema;
-use arrow::ffi::{self};
-use arrow::ipc::writer::FileWriter;
+use arrow::ffi::{self, from_ffi};
+use arrow::ipc::convert::IpcSchemaEncoder;
+use arrow::ipc::writer::{DictionaryTracker, FileWriter, IpcDataGenerator, IpcWriteOptions};
+use arrow_flight::{FlightEndpoint, Location, Ticket};
 use bytes::Bytes;
 use datafusion::catalog::Session;
 use datafusion::error::DataFusionError;
-use datafusion::execution::{context, RecordBatchStream, SendableRecordBatchStream};
+use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
 use datafusion::functions_aggregate::count::count;
 use datafusion::functions_aggregate::sum::sum;
 use datafusion::physical_expr::EquivalenceProperties;
 use datafusion::physical_plan::metrics::MetricsSet;
 use datafusion::prelude::{col, DataFrame, SessionConfig, SessionContext};
 use futures::stream::TryStreamExt;
-use jni::objects::{JByteArray, JClass, JObject, JString};
+use jni::objects::{GlobalRef, JByteArray, JClass, JObject, JString, JValue};
 use jni::sys::{jint, jlong};
-use jni::{AttachGuard, JNIEnv};
+use jni::{JNIEnv, JavaVM};
+use tokio::time::{sleep, Duration};
 
 use std::io::BufWriter;
 use tokio::runtime::Runtime;
@@ -136,6 +140,140 @@ pub extern "system" fn Java_org_opensearch_datafusion_DataFusion_agg(
         let addr = result.map(|df| Box::into_raw(Box::new(df)));
         set_object_result(&mut env, callback, addr);
     });
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_opensearch_datafusion_DataFusion_aggFromEndpoints(
+    mut env: JNIEnv,
+    _class: JClass, 
+    runtime_ptr: jlong,
+    ctx: jlong,
+    endpoints_list: JObject,
+    schema_ptr: jlong,
+    callback: JObject,
+) {
+    let context = unsafe { &mut *(ctx as *mut SessionContext) };
+    let runtime = unsafe { &mut *(runtime_ptr as *mut Runtime) };
+    let ffi_schema = unsafe { ffi::FFI_ArrowSchema::from_raw(schema_ptr as *mut _) };
+    let arrow_schema = arrow::datatypes::Schema::try_from(&ffi_schema)
+        .expect("Valid schema from FFI");
+
+    // Use IpcDataGenerator to handle all the protocol details
+    let data_gen = IpcDataGenerator::default();
+    let schema_message = data_gen.schema_to_bytes(
+        &arrow_schema,
+        &IpcWriteOptions::default()
+    ).ipc_message;
+    let mut endpoints = Vec::<FlightEndpoint>::new();
+    println!("Endpoints {:?}", endpoints);
+    let endpoint_count = match env.call_method(
+        &endpoints_list,
+        "size",
+        "()I",
+        &[]
+    ) {
+        Ok(size) => size.i().unwrap_or(0),
+        Err(_) => {
+            // set_object_result_error(&mut env, &callback, &DataFusionError::Execution("Failed to get endpoints list size".to_string()));
+            return;
+        }
+    };
+
+    println!("Endpoint count {:?}", endpoint_count);
+
+    for i in 0..endpoint_count {
+        let endpoint_obj = match env.call_method(
+            &endpoints_list,
+            "get",
+            "(I)Ljava/lang/Object;",
+            &[JValue::Int(i)]
+        ).and_then(|obj| obj.l()) {
+            Ok(obj) => obj,
+            Err(_) => {
+                // set_object_result_error(&mut env, &callback, &DataFusionError::Execution("Failed to get endpoint from list".to_string()));
+                return;
+            }
+        };
+
+        // Get uri field with proper lifetime handling
+        let uri_str = {
+            let uri_field = match env.get_field(&endpoint_obj, "uri", "Ljava/lang/String;")
+                .and_then(|uri| uri.l()) {
+                Ok(uri_obj) => uri_obj,
+                Err(_) => {
+                    // set_object_result_error(&mut env, &callback, &DataFusionError::Execution("Failed to get uri from endpoint".to_string()));
+                    return;
+                }
+            };
+            
+            let uri_string = JString::from(uri_field);
+            let result = env.get_string(&uri_string)
+                .map(|s| s.to_str().unwrap_or_default().to_owned());
+            
+            match result {
+                Ok(s) => s,
+                Err(_) => {
+                    // set_object_result_error(&mut env, &callback, &DataFusionError::Execution("Failed to get uri string".to_string()));
+                    return;
+                }
+            }
+        };
+
+        let ticket_bytes = {
+            let ticket_field = match env.get_field(&endpoint_obj, "ticket", "[B")
+                .and_then(|ticket| ticket.l()) {
+                Ok(ticket_obj) => ticket_obj,
+                Err(_) => {
+                    // set_object_result_error(&mut env, &callback, &DataFusionError::Execution("Failed to get ticket from endpoint".to_string()));
+                    return;
+                }
+            };
+
+            let byte_array = JByteArray::from(ticket_field);
+            match env.convert_byte_array(&byte_array) {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    // set_object_result_error(&mut env, &callback, &DataFusionError::Execution("Failed to get ticket bytes".to_string()));
+                    return;
+                }
+            }
+        };
+
+        if ticket_bytes.is_empty() {
+            // set_object_result_error(&mut env, &callback, &DataFusionError::Execution("Empty ticket bytes".to_string()));
+            return;
+        }
+        
+        println!("URI {:?}", uri_str);
+        println!("Bytes {:?}", ticket_bytes);
+
+        endpoints.push(FlightEndpoint {
+            ticket: Some(Ticket { ticket: Bytes::from(ticket_bytes) }),
+            location: vec![Location { uri: uri_str }],
+            app_metadata: Bytes::new(),
+            expiration_time: None,
+        });
+    }
+
+    println!("IN DF {:?}", endpoints);
+
+    if !endpoints.is_empty() {
+        let result = runtime.block_on(async {
+            provider::read_aggs_with_endpoints(
+                context.clone(),
+                endpoints,
+                "http://localhost:9450".to_owned(),
+                500,
+                Bytes::copy_from_slice(&schema_message).into()
+            )
+            .await
+            .map(|df| Box::into_raw(Box::new(df)))
+        });
+
+        set_object_result(&mut env, callback, result);
+    } else {
+        set_object_result_error(&mut env, callback, &DataFusionError::Execution("No valid endpoints found".to_string()));
+    }
 }
 
 #[no_mangle]
@@ -268,6 +406,57 @@ pub fn set_object_result_error<T: Error>(env: &mut JNIEnv, callback: JObject, er
 }
 
 #[no_mangle]
+pub extern "system" fn Java_org_opensearch_datafusion_DataFusion_runAsync<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    input: JString<'local>,
+    runtime: jlong,
+    callback: JObject<'local>,
+) {
+    println!("GOT REQ");
+    // Convert Java string to Rust string
+    let input_str: String = env
+        .get_string(&input)
+        .expect("Failed to get Java string")
+        .into();
+
+    // Create global references to pass into the async block
+    let callback_ref = env.new_global_ref(callback)
+        .expect("Failed to create global reference");
+    let java_vm = Arc::new(env.get_java_vm().expect("Failed to get JavaVM"));
+
+    // Get the runtime and spawn the async task
+    let runtime = unsafe { &mut *(runtime as *mut Runtime) };
+    runtime.spawn(async move {
+        // Simulate async work
+        println!("SPAWNING");
+        sleep(Duration::from_secs(2)).await;
+        let result: String = format!("Processed: {}", input_str);
+        println!("IN RUST {:?}", result);
+        // Call back to Java with the result
+        call_java_callback(java_vm, callback_ref, result);
+    });
+}
+
+
+fn call_java_callback(java_vm: Arc<JavaVM>, callback: GlobalRef, result: String) {
+    // Attach to the JVM from this thread
+    let mut env = java_vm.attach_current_thread().expect("Failed to attach to JVM");
+
+    // Convert Rust string to Java string
+    let result_jstring = env.new_string(result)
+        .expect("Failed to create Java string");
+
+    // Call the callback method
+    env.call_method(
+        callback.as_obj(),
+        "onComplete",
+        "(Ljava/lang/String;)V",
+        &[(&result_jstring).into()]
+    ).expect("Failed to call callback");
+}
+
+#[no_mangle]
 pub extern "system" fn Java_org_opensearch_datafusion_DataFusion_executeStream(
     mut env: JNIEnv,
     _class: JClass,
@@ -297,26 +486,62 @@ pub extern "system" fn Java_org_opensearch_datafusion_RecordBatchStream_next(
 ) {
     let runtime = unsafe { &mut *(runtime as *mut Runtime) };
     let stream = unsafe { &mut *(stream as *mut SendableRecordBatchStream) };
-    runtime.block_on(async {
-        let next: Result<Option<arrow::array::RecordBatch>, datafusion::error::DataFusionError> =
-            stream.try_next().await;
-        match next {
-            Ok(Some(batch)) => {
-                // Convert to struct array for compatibility with FFI
+    
+        // Create global references to pass into the async block
+    let callback_ref = env.new_global_ref(callback)
+        .expect("Failed to create global reference");
+    let java_vm = Arc::new(env.get_java_vm().expect("Failed to get JavaVM"));
+
+    runtime.spawn(async move {
+        let next: Option<RecordBatch> =
+            stream.try_next().await.unwrap();
+            match next {
+                Some(batch) => {
                 let struct_array: StructArray = batch.into();
                 let array_data = struct_array.into_data();
                 let mut ffi_array = FFI_ArrowArray::new(&array_data);
                 // ffi_array must remain alive until after the callback is called
-                set_object_result_ok(&mut env, callback, addr_of_mut!(ffi_array));
+                set_object_result_async(java_vm, callback_ref, addr_of_mut!(ffi_array));
+                }
+                None => {
+                set_object_result_async(java_vm, callback_ref, 0 as *mut FFI_ArrowSchema);
+                }
             }
-            Ok(None) => {
-                set_object_result_ok(&mut env, callback, 0 as *mut FFI_ArrowSchema);
-            }
-            Err(err) => {
-                set_object_result_error(&mut env, callback, &err);
-            }
-        }
     });
+    // runtime.block_on(async {
+    //     let next: Result<Option<arrow::array::RecordBatch>, datafusion::error::DataFusionError> =
+    //         stream.try_next().await;
+    //     match next {
+    //         Ok(Some(batch)) => {
+    //             // Convert to struct array for compatibility with FFI
+    //             let struct_array: StructArray = batch.into();
+    //             let array_data = struct_array.into_data();
+    //             let mut ffi_array = FFI_ArrowArray::new(&array_data);
+    //             // ffi_array must remain alive until after the callback is called
+    //             c(&mut env, callback, addr_of_mut!(ffi_array));
+    //         }
+    //         Ok(None) => {
+    //             set_object_result_ok(&mut env, callback, 0 as *mut FFI_ArrowSchema);
+    //         }
+    //         Err(err) => {
+    //             set_object_result_error(&mut env, callback, &err);
+    //         }
+    //     }
+    // });
+}
+
+fn set_object_result_async<T>(java_vm: Arc<JavaVM>, callback: GlobalRef, address: *mut T) {
+    // Attach to the JVM from this thread
+    let mut env = java_vm.attach_current_thread().expect("Failed to attach to JVM");
+
+    let err_message = JObject::null();
+    env.call_method(
+        callback,
+        "callback",
+        "(Ljava/lang/String;J)V",
+        &[(&err_message).into(), (address as jlong).into()],
+    )
+    .expect("Failed to call object result callback with address");
 }
 
 #[no_mangle]
@@ -430,6 +655,7 @@ impl DataFusionAggregator {
         self.current_aggregation.take()
     }
 }
+
 
 // JNI bindings
 #[no_mangle]
@@ -724,317 +950,5 @@ mod tests {
             "+-----+-------+",
         ];
         assert_batches_sorted_eq!(expected, &batches);
-    }
-}
-
-// I WAS TRYING SOME WEIRD SHIT BELOW THIS LINE, IT DOES NOT WORK BUT IM LEAVING IT FOR ANOTHER TIME WHEN
-// I WANT TO TRY WEIRD SHIT AGAIN
-
-use std::any::Any;
-use std::fmt;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll};
-
-use async_trait::async_trait;
-use futures::Stream;
-
-use arrow::datatypes::SchemaRef;
-use datafusion::datasource::{TableProvider, TableType};
-use datafusion::execution::{context::SessionState, TaskContext};
-use datafusion::logical_expr::Expr;
-use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
-};
-
-use jni::JavaVM;
-
-use jni::objects::GlobalRef;
-
-struct CollectorStream {
-    collector_ref: GlobalRef,
-    schema: SchemaRef,
-    finished: bool,
-    metrics: MetricsSet,
-    jvm: Arc<JavaVM>, // Store JavaVM instead of AttachGuard
-}
-
-impl Stream for CollectorStream {
-    type Item = Result<RecordBatch, DataFusionError>;
-
-    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.get_mut();
-
-        if this.finished {
-            return Poll::Ready(None);
-        }
-
-        let mut env_guard = match this.jvm.attach_current_thread() {
-            Ok(guard) => guard,
-            Err(e) => return Poll::Ready(Some(Err(DataFusionError::External(Box::new(e))))),
-        };
-
-        let result = env_guard.call_method(
-            this.collector_ref.as_obj(),
-            "getNextBatch",
-            "()LBatchPointers;",
-            &[],
-        );
-
-        match result {
-            Ok(output) => match output.l() {
-                Ok(obj) => {
-                    if obj.is_null() {
-                        this.finished = true;
-                        Poll::Ready(None)
-                    } else {
-                        let schema_ptr = env_guard
-                            .get_field(&obj, "schemaPtr", "J")
-                            .map_err(|e| DataFusionError::External(Box::new(e)))?
-                            .j()
-                            .map_err(|e| DataFusionError::External(Box::new(e)))?;
-
-                        let array_ptr = env_guard
-                            .get_field(&obj, "arrayPtr", "J")
-                            .map_err(|e| DataFusionError::External(Box::new(e)))?
-                            .j()
-                            .map_err(|e| DataFusionError::External(Box::new(e)))?;
-
-                        match convert_to_record_batch(schema_ptr, array_ptr, &this.jvm) {
-                            Ok(batch) => Poll::Ready(Some(Ok(batch))),
-                            Err(e) => Poll::Ready(Some(Err(e))),
-                        }
-                    }
-                }
-                Err(e) => Poll::Ready(Some(Err(DataFusionError::External(Box::new(e))))),
-            },
-            Err(e) => Poll::Ready(Some(Err(DataFusionError::External(Box::new(e))))),
-        }
-    }
-}
-
-#[derive(Debug)]
-struct CollectorScan {
-    collector_ref: GlobalRef,
-    jvm: Arc<JavaVM>, // Wrap JavaVM in Arc here too
-    projected_schema: SchemaRef,
-    metrics: MetricsSet,
-    properties: PlanProperties,
-}
-
-impl CollectorScan {
-    fn new(collector_ref: GlobalRef, jvm: Arc<JavaVM>, schema: SchemaRef) -> Self {
-        CollectorScan {
-            collector_ref,
-            jvm,
-            projected_schema: schema.clone(),
-            metrics: MetricsSet::new(),
-            properties: PlanProperties::new(
-                EquivalenceProperties::new(schema.clone()),
-                Partitioning::RoundRobinBatch(5),
-                datafusion::physical_plan::execution_plan::EmissionType::Incremental,
-                datafusion::physical_plan::execution_plan::Boundedness::Bounded,
-            ),
-        }
-    }
-}
-
-impl DisplayAs for CollectorScan {
-    fn fmt_as(&self, t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
-        match t {
-            DisplayFormatType::Default => {
-                write!(f, "CollectorScan")
-            }
-            DisplayFormatType::Verbose => todo!(),
-        }
-    }
-}
-
-impl<'a> RecordBatchStream for CollectorStream {
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
-    }
-}
-
-unsafe impl<'a> Send for CollectorStream {}
-
-impl ExecutionPlan for CollectorScan {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn schema(&self) -> SchemaRef {
-        self.projected_schema.clone()
-    }
-
-    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
-        vec![]
-    }
-
-    fn with_new_children(
-        self: Arc<Self>,
-        _: Vec<Arc<dyn ExecutionPlan>>,
-    ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
-        Ok(self)
-    }
-
-    fn execute(
-        &self,
-        _partition: usize,
-        _context: Arc<TaskContext>,
-    ) -> Result<datafusion::physical_plan::SendableRecordBatchStream, DataFusionError> {
-        // let env_guard = self.jvm.attach_current_thread()
-        //     .map_err(|e| DataFusionError::External(Box::new(e)))?;
-
-        let stream = CollectorStream {
-            collector_ref: self.collector_ref.clone(),
-            schema: self.projected_schema.clone(),
-            finished: false,
-            metrics: self.metrics.clone(),
-            jvm: self.jvm.clone(),
-        };
-
-        // Just use one Box with pin
-        Ok(Box::pin(stream))
-    }
-
-    fn name(&self) -> &str {
-        "CollectorScan"
-    }
-
-    fn properties(&self) -> &PlanProperties {
-        &self.properties
-    }
-}
-
-#[derive(Debug)]
-pub struct CollectorTable {
-    collector_ref: GlobalRef,
-    schema: SchemaRef,
-    jvm: Arc<JavaVM>, // Wrap JavaVM in Arc
-}
-
-impl CollectorTable {
-    pub fn new(collector_ref: GlobalRef, schema: SchemaRef, jvm: JavaVM) -> Self {
-        Self {
-            collector_ref,
-            schema,
-            jvm: Arc::new(jvm), // Wrap in Arc when creating
-        }
-    }
-}
-
-#[async_trait]
-impl TableProvider for CollectorTable {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
-    }
-
-    fn table_type(&self) -> TableType {
-        TableType::Base
-    }
-
-    async fn scan(
-        &self,
-        _state: &dyn Session,
-        projection: Option<&Vec<usize>>,
-        _filters: &[Expr],
-        _limit: Option<usize>,
-    ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
-        Ok(Arc::new(CollectorScan::new(
-            self.collector_ref.clone(),
-            self.jvm.clone(),
-            project_schema(&self.schema, projection),
-        )))
-    }
-}
-
-fn convert_to_record_batch(
-    array_ptr: i64,
-    schema_ptr: i64,
-    jvm: &JavaVM,
-) -> Result<RecordBatch, DataFusionError> {
-    let mut env = jvm
-        .attach_current_thread()
-        .map_err(|e| DataFusionError::External(Box::new(e)))?;
-
-    let array = unsafe { ffi::FFI_ArrowArray::from_raw(array_ptr as *mut _) };
-    let schema = unsafe { ffi::FFI_ArrowSchema::from_raw(schema_ptr as *mut _) };
-
-    unsafe {
-        let data = arrow::ffi::from_ffi(array, &schema)?;
-        let arrow_array = arrow::array::make_array(data);
-        let struct_array = arrow_array
-            .as_any()
-            .downcast_ref::<StructArray>()
-            .ok_or_else(|| {
-                DataFusionError::Internal("Failed to convert to StructArray".to_string())
-            })?;
-
-        RecordBatch::try_from(struct_array.clone()).map_err(|e| {
-            DataFusionError::Internal(format!("Failed to convert to RecordBatch: {}", e))
-        })
-    }
-}
-
-fn project_schema(schema: &SchemaRef, projection: Option<&Vec<usize>>) -> SchemaRef {
-    match projection {
-        Some(proj) => Arc::new(schema.project(proj).unwrap()),
-        None => schema.clone(),
-    }
-}
-
-#[no_mangle]
-pub extern "system" fn Java_org_opensearch_search_stream_collector_StreamingCollector_create(
-    mut env: JNIEnv,
-    _class: JClass,
-    ctx: jlong,
-    collector: JObject,
-    limit: jint,
-    term: JString,
-    schema_ptr: jlong,
-) -> jlong {
-    let context = unsafe { &*(ctx as *const SessionContext) };
-    let schema = unsafe { &*(schema_ptr as *const Schema) };
-    let jvm = env.get_java_vm().unwrap();
-
-    let term_str: String = format!(
-        "`{}`",
-        env.get_string(&term)
-            .expect("Invalid term string")
-            .to_string_lossy()
-            .into_owned()
-    );
-
-    let collector_ref = match env.new_global_ref(collector) {
-        Ok(global) => global,
-        Err(_) => return -1,
-    };
-
-    let table = Arc::new(CollectorTable::new(
-        collector_ref,
-        Arc::new(schema.clone()),
-        jvm,
-    ));
-
-    let df = match context.read_table(table) {
-        Ok(df) => df
-            .aggregate(
-                vec![col(&term_str).alias("ord")],
-                vec![count(col("ord")).alias("count")],
-            )
-            .and_then(|agg_df| agg_df.sort(vec![col("count").sort(true, false)]))
-            .and_then(|sorted| sorted.limit(0, Some(limit as usize)))
-            .and_then(|limited| limited.sort(vec![col("ord").sort(false, true)])),
-        Err(_) => return -1,
-    };
-
-    match df {
-        Ok(plan) => Box::into_raw(Box::new(plan)) as jlong,
-        Err(_) => -1,
     }
 }

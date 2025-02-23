@@ -3,6 +3,8 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
+use arrow::ipc::convert::IpcSchemaEncoder;
+use arrow::ipc::writer::{DictionaryTracker, IpcDataGenerator, IpcWriteOptions};
 use arrow::util::pretty::print_batches;
 use datafusion::functions_aggregate::count::count;
 
@@ -15,8 +17,7 @@ use arrow_flight::flight_service_server::{FlightService, FlightServiceServer};
 use arrow_flight::sql::server::FlightSqlService;
 use arrow_flight::sql::{CommandStatementQuery, ProstMessageExt, SqlInfo, TicketStatementQuery};
 use arrow_flight::{
-    Action, ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightEndpoint, FlightInfo,
-    HandshakeRequest, HandshakeResponse, PollInfo, PutResult, SchemaResult, Ticket,
+    Action, ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightEndpoint, FlightInfo, HandshakeRequest, HandshakeResponse, Location, PollInfo, PutResult, SchemaResult, Ticket
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -185,18 +186,26 @@ impl FlightService for TestFlightService {
 
 #[tokio::test]
 async fn test_read_aggs() -> datafusion::common::Result<()> {
-    // Create test data
+    let schema = Schema::new([
+        Arc::new(Field::new("ord", DataType::Utf8, false)),
+        Arc::new(Field::new("count", DataType::Int64, false)),
+    ]);
+    
     let partition_data: RecordBatch = RecordBatch::try_new(
-        Arc::new(Schema::new([
-            Arc::new(Field::new("ord", DataType::Utf8, false)),
-            Arc::new(Field::new("count", DataType::Int64, false)),
-        ])),
+        Arc::new(schema.clone()),
         vec![
             Arc::new(StringArray::from(vec!["A", "B", "A", "C"])),
             Arc::new(Int64Array::from(vec![10, 20, 30, 40])),
         ],
     )?;
-
+    // Simple schema encoding
+    let fb = IpcSchemaEncoder::new().schema_to_fb(&schema);
+    let schema_bytes = &fb.finished_data();
+        // Add IPC message framing
+        let mut message = Vec::new();
+        message.extend_from_slice(&(schema_bytes.len() as i32).to_le_bytes());
+        message.extend_from_slice(schema_bytes);
+    
     // Set up flight endpoint
     let endpoint = FlightEndpoint::default().with_ticket(Ticket::new("bytes".as_bytes()));
     let flight_info = FlightInfo::default()
@@ -232,12 +241,21 @@ async fn test_read_aggs() -> datafusion::common::Result<()> {
     // Create test bytes for ticket
     let test_bytes = Bytes::from("test_ticket");
 
+    let endpoint = FlightEndpoint {
+        ticket: Some(Ticket { ticket: Bytes::from(test_bytes) }),
+        location: vec![Location { uri: "http://localhost:8815".to_string() }],
+        app_metadata: Bytes::new(),
+        expiration_time: None,
+    };
+    // let schema_bytes = schema_bytes;
+
     // Execute read_aggs
-    let result_df = provider::read_aggs(
+    let result_df = provider::read_aggs_with_endpoints(
         ctx.clone(),
-        test_bytes,
-        "http://localhost:9450".to_owned(),
+        vec![endpoint],
+        "http://localhost:8815".to_owned(),
         500,
+        Bytes::from(schema_bytes.clone())
     )
     .await
     .map_err(|e| {
