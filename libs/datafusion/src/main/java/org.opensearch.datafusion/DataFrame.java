@@ -30,6 +30,10 @@ public class DataFrame implements AutoCloseable {
     public static Logger logger = LogManager.getLogger(DataFrame.class);
     private final SessionContext ctx;
 
+    public long getPtr() {
+        return ptr;
+    }
+
     long ptr;
 
     static native void destroyDataFrame(long pointer);

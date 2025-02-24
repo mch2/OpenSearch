@@ -42,7 +42,9 @@ import org.opensearch.datafusion.RecordBatchStream;
 import java.io.IOException;
 import java.security.AccessController;
 import java.security.PrivilegedAction;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * Arrow collector for OpenSearch fields values
@@ -52,7 +54,7 @@ public class PushStreamingCollector extends FilterCollector {
 
     public static final String COUNT = "count";
     public static final String ORD = "ord";
-    private final VectorSchemaRoot collectionRoot;
+    private VectorSchemaRoot collectionRoot;
     private final BufferAllocator allocator;
     List<ArrowFieldAdaptor> fields;
     private final VectorSchemaRoot bucketRoot;
@@ -90,10 +92,11 @@ public class PushStreamingCollector extends FilterCollector {
         final int maxOrd = (int) dv.getValueCount();
 
         // ordinalVector to hold ordinals
-        FieldVector ordinalVector = collectionRoot.getVector(arrowFieldAdaptor.fieldName);
+        final FieldVector[] ordinalVector = {collectionRoot.getVector(arrowFieldAdaptor.fieldName)};
         // setting initial capacity to maxOrd to skip a few resizes.
-        ordinalVector.setInitialCapacity(maxOrd);
+        ordinalVector[0].setInitialCapacity(maxOrd);
         DataFusionAggregator aggregator = new DataFusionAggregator(term);
+        List<CompletableFuture<DataFrame>> futures = new ArrayList<>();
 
         final int[] currentRow = {0};
         return new LeafCollector() {
@@ -108,29 +111,34 @@ public class PushStreamingCollector extends FilterCollector {
                 final int docValueCount = dv.docValueCount();
                 for (int i = 0; i < docValueCount; i++) {
                     long ord = dv.nextOrd();
-                    ((UInt8Vector) ordinalVector).setSafe(currentRow[0], ord);
+                    ((UInt8Vector) ordinalVector[0]).setSafe(currentRow[0], ord);
                 }
                 currentRow[0] += docValueCount;
             }
 
             private void pushBatch() throws IOException {
-                ordinalVector.setValueCount(currentRow[0]);
+                ordinalVector[0].setValueCount(currentRow[0]);
                 collectionRoot.setRowCount(currentRow[0]);
 
                 AccessController.doPrivileged((PrivilegedAction<Void>) () -> {
                     try {
+                        // get a ref to the existing batch to aggregate
+                        VectorSchemaRoot batchToProcess = collectionRoot;
+                        // create a new vector with the same schema to write new batch into
+                        collectionRoot = VectorSchemaRoot.create(batchToProcess.getSchema(), allocator);
+                        // get a ref to a new ord vector to fill
+                        ordinalVector[0] = collectionRoot.getVector(arrowFieldAdaptor.fieldName);
+
                         // Push batch to streaming aggregator
-                        aggregator.pushBatch(allocator, collectionRoot).thenAccept(
-                            v -> {
-                                collectionRoot.clear();
-                                currentRow[0] = 0;
-                            }
-                        ).exceptionally(throwable -> {
-                            logger.error("Error pushing batch", throwable);
-                            throw new RuntimeException(throwable);
+                        CompletableFuture<DataFrame> fut = aggregator.pushBatch(allocator, batchToProcess);
+                        fut.whenComplete((frame, err) -> {
+                            batchToProcess.close();
                         });
-//                        collectionRoot.clear();
-//                        currentRow[0] = 0;
+                        futures.add(fut);
+
+                        // Only reset after we've set up the new batch
+                        currentRow[0] = 0;
+
                     } catch (Exception e) {
                         throw new RuntimeException(e);
                     }
@@ -146,7 +154,14 @@ public class PushStreamingCollector extends FilterCollector {
 
                 try {
                     // Get final results and process into bucketRoot
-                    DataFrame results = aggregator.getResults(500).get();
+                    // ensure all batches have finished being processed in DF
+                    CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+                    List<DataFrame> frames = new ArrayList<>(futures.size());
+                    for (CompletableFuture<DataFrame> future : futures) {
+                        frames.add(future.join());
+                    }
+
+                    DataFrame results = aggregator.getResults(frames, 500).get();
                     if (results != null) {
                         RecordBatchStream recordBatchStream = results.getStream(allocator).get();
                         VectorSchemaRoot root = recordBatchStream.getVectorSchemaRoot();

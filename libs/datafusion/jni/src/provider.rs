@@ -106,7 +106,7 @@ async fn get_dataframe_for_endpoints(
 // registers a single table with datafusion using DataFusion TableProviders.
 // Uses a TicketedFlightDriver to register the table with the list of given tickets.
 async fn register_table(ctx: &SessionContext, name: String, ticket: Bytes, entry_point: String) -> Result<()> {
-    println!("Registring table!");
+
     let driver: TicketedFlightDriver = TicketedFlightDriver { ticket };
     let table_factory: FlightTableFactory = FlightTableFactory::new(Arc::new(driver));
     let table: FlightTable = table_factory
@@ -117,7 +117,7 @@ async fn register_table(ctx: &SessionContext, name: String, ticket: Bytes, entry
         println!("Error backtrace:\n{:?}", bt);
         DataFusionError::Execution(format!("Error creating table: {}", e))
     })?;
-    println!("Table created but not reg?");
+
     ctx.register_table(name, Arc::new(table))
         .map_err(|e| DataFusionError::Execution(format!("Error registering table: {}", e)))?;
     Ok(())
@@ -131,7 +131,7 @@ async fn register_table_with_endpoints(
     entry_point: String,
     schema_bytes: Bytes,
 ) -> Result<()> {
-    println!("EP: {:?}", endpoints);
+
     let driver: LocalFlightDriver = LocalFlightDriver { endpoints, schema_bytes };
     let table_factory: FlightTableFactory = FlightTableFactory::new(Arc::new(driver));
     let table: FlightTable = table_factory
@@ -142,7 +142,7 @@ async fn register_table_with_endpoints(
         println!("Error backtrace:\n{:?}", bt);
         DataFusionError::Execution(format!("Error creating table: {}", e))
     })?;
-    println!("Table created but not reg?");
+
     ctx.register_table(name, Arc::new(table))
         .map_err(|e| DataFusionError::Execution(format!("Error registering table: {}", e)))?;
     Ok(())

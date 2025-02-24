@@ -19,6 +19,7 @@ import org.opensearch.datafusion.DataFrame;
 import org.opensearch.datafusion.ObjectResultCallback;
 import org.opensearch.datafusion.SessionContext;
 
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 public class DataFusionAggregator implements AutoCloseable {
@@ -28,10 +29,12 @@ public class DataFusionAggregator implements AutoCloseable {
     private final SessionContext context;
     private final long ptr;
     private final DictionaryProvider dictionaryProvider;
+    private final String term;
 
     public DataFusionAggregator(String term, int batchSize) {
         this.context = new SessionContext(batchSize);
         this.ptr = create(context.getPointer(), term);
+        this.term = term;
         this.dictionaryProvider = new CDataDictionaryProvider();
     }
 
@@ -40,10 +43,11 @@ public class DataFusionAggregator implements AutoCloseable {
         this.context = new SessionContext();
         this.ptr = create(context.getPointer(), term);
         this.dictionaryProvider = new CDataDictionaryProvider();
+        this.term = term;
     }
 
-    public CompletableFuture<Void> pushBatch(BufferAllocator allocator, VectorSchemaRoot root) {
-        CompletableFuture<Void> result = new CompletableFuture<>();
+    public CompletableFuture<DataFrame> pushBatch(BufferAllocator allocator, VectorSchemaRoot root) {
+        CompletableFuture<DataFrame> result = new CompletableFuture<>();
 
         try {
             ArrowArray array = ArrowArray.allocateNew(allocator);
@@ -51,16 +55,18 @@ public class DataFusionAggregator implements AutoCloseable {
 
             Data.exportVectorSchemaRoot(allocator, root, dictionaryProvider, array, schema);
 
-            pushBatch(
+            processBatch(
                 context.getRuntime(),
-                ptr,
+                context.getPointer(),
                 array.memoryAddress(),
                 schema.memoryAddress(),
+                this.term,
                 (String errString, long ptr) -> {
                     if (errString != null && !errString.isEmpty()) {
                         result.completeExceptionally(new RuntimeException(errString));
                     } else {
-                        result.complete(null);
+                        DataFrame df = new DataFrame(context, ptr);
+                        result.complete(df);
                     }
                 });
         } catch (Exception e) {
@@ -93,9 +99,43 @@ public class DataFusionAggregator implements AutoCloseable {
         destroy(ptr);
     }
 
+    private static native void processBatch(long runtime, long ctx, long arrayPtr, long schemaPtr, String term, ObjectResultCallback callback);
     private static native long create(long ctx, String term);
     private static native void pushBatch(long runtime, long ptr, long schema, long array, ObjectResultCallback callback);
     private static native void getResults(long runtime, long ptr, int limit, ObjectResultCallback callback);
     private static native void destroy(long ptr);
+    private static native void unionFrames(long runtime, long ctx, long[] framePointers, int limit, ObjectResultCallback callback);
 
+    public CompletableFuture<DataFrame> getResults(List<DataFrame> frames, int limit) {
+        CompletableFuture<DataFrame> result = new CompletableFuture<>();
+
+        try {
+            // Convert frames to array of pointers
+            long[] framePointers = new long[frames.size()];
+            for (int i = 0; i < frames.size(); i++) {
+                framePointers[i] = frames.get(i).getPtr();
+            }
+
+            // Call native method
+            unionFrames(
+                context.getRuntime(),
+                context.getPointer(),
+                framePointers,
+                limit,
+                (String errString, long ptr) -> {
+                    if (errString != null && !errString.isEmpty()) {
+                        result.completeExceptionally(new RuntimeException(errString));
+                    } else if (ptr == 0) {
+                        result.complete(null);
+                    } else {
+                        result.complete(new DataFrame(context, ptr));
+                    }
+                }
+            );
+        } catch (Exception e) {
+            result.completeExceptionally(e);
+        }
+
+        return result;
+    }
 }

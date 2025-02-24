@@ -67,6 +67,8 @@ public class DataFusion {
         return future;
     }
 
+    private static native void processBatch(long runtime, long ctx, long arrayPtr, long schemaPtr, String term, ObjectResultCallback callback);
+
     private static native void load(long runtime, long ctx, long arrayPtr, long schemaPtr, String term, ObjectResultCallback callback);
 
     public static CompletableFuture<DataFrame> from_vsr(BufferAllocator allocator, VectorSchemaRoot root, DictionaryProvider provider, String term) {
