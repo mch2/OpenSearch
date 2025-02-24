@@ -18,6 +18,8 @@ import org.apache.arrow.vector.util.ByteArrayReadableSeekableByteChannel;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
@@ -35,12 +37,20 @@ public class DataFrame implements AutoCloseable {
     }
 
     long ptr;
+    List<DataFrame> children;
 
     static native void destroyDataFrame(long pointer);
 
     public DataFrame(SessionContext ctx, long ptr) {
         this.ctx = ctx;
         this.ptr = ptr;
+        this.children = Collections.emptyList();
+    }
+
+    public DataFrame(SessionContext ctx, long ptr, List<DataFrame> children) {
+        this.ctx = ctx;
+        this.ptr = ptr;
+        this.children = children;
     }
 
     public CompletableFuture<ArrowReader> collect(BufferAllocator allocator) {
@@ -75,6 +85,9 @@ public class DataFrame implements AutoCloseable {
 
     @Override
     public void close() throws Exception {
+//        for (DataFrame child : children) {
+//            child.close();
+//        }
         destroyDataFrame(ptr);
         ctx.close();
     }

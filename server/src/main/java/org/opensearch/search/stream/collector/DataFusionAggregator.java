@@ -128,7 +128,7 @@ public class DataFusionAggregator implements AutoCloseable {
                     } else if (ptr == 0) {
                         result.complete(null);
                     } else {
-                        result.complete(new DataFrame(context, ptr));
+                        result.complete(new DataFrame(context, ptr, frames));
                     }
                 }
             );

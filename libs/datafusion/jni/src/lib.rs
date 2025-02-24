@@ -218,17 +218,6 @@ pub extern "system" fn Java_org_opensearch_datafusion_DataFusion_agg(
         .expect("Failed to create global reference");
     let java_vm = Arc::new(env.get_java_vm().expect("Failed to get JavaVM"));
 
-    // runtime.block_on(async {
-    //     let result = provider::read_aggs(
-    //         context.clone(),
-    //         Bytes::from(input),
-    //         "http://localhost:9450".to_owned(),
-    //         size.try_into().unwrap(),
-    //     )
-    //     .await;
-    //     let addr = result.map(|df| Box::into_raw(Box::new(df)));
-    //     set_object_result(&mut env, callback, addr);
-    // });
     runtime.spawn(async move {
         let result = provider::read_aggs(
             context.clone(),
@@ -236,7 +225,7 @@ pub extern "system" fn Java_org_opensearch_datafusion_DataFusion_agg(
             "http://localhost:9450".to_owned(),
             size.try_into().unwrap(),
         ).await;
-        
+                
         match result {
             Ok(df) => {
                 let df_box = Box::new(df);
@@ -390,13 +379,31 @@ pub extern "system" fn Java_org_opensearch_datafusion_DataFusion_executeStream(
 ) {
     let runtime = unsafe { &mut *(runtime as *mut Runtime) };
     let dataframe = unsafe { &mut *(dataframe as *mut DataFrame) };
-    runtime.block_on(async {
-        let stream_result = dataframe.clone().execute_stream().await;
-        set_object_result(
-            &mut env,
-            callback,
-            stream_result.map(|stream| Box::into_raw(Box::new(stream))),
-        );
+    let callback_ref = env
+    .new_global_ref(callback)
+    .expect("Failed to create global reference");
+    let java_vm = Arc::new(env.get_java_vm().expect("Failed to get JavaVM"));
+
+    runtime.spawn(async move {
+        let result = dataframe.clone().execute_stream().await;
+        match result {
+            Ok(stream) => {
+                let stream_box = Box::new(stream);
+                let stream_ptr = Box::into_raw(stream_box);
+                set_object_result_async(java_vm, callback_ref, stream_ptr);
+            }
+            Err(e) => {
+                // set_object_result_async(java_vm, callback_ref, std::ptr::null_mut());
+                println!("ERROR {:?}", e);
+            }
+        }
+        // let mut address = stream_result.map(|stream| Box::into_raw(Box::new(stream)));
+        // set_object_result_async(java_vm, callback_ref, addr_of_mut!(address));
+        // set_object_result(
+        //     &mut env,
+        //     callback,
+        //     stream_result.map(|stream| Box::into_raw(Box::new(stream))),
+        // );
     });
 }
 

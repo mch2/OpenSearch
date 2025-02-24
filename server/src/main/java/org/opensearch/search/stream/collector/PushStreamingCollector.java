@@ -186,6 +186,7 @@ public class PushStreamingCollector extends FilterCollector {
                         results.close();
                     }
 
+                    collectionRoot.close();
                     aggregator.close();
                 } catch (Exception e) {
                     logger.error("Error flushing aggregation to coordinator", e);
