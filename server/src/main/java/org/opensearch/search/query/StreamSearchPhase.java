@@ -167,9 +167,9 @@ public class StreamSearchPhase extends QueryPhase {
                     if (root[0].isPresent()) {
                         root[0].get().close();
                     }
-                    if (collectionRoot[0].isPresent()) {
-                        collectionRoot[0].get().close();
-                    }
+//                    if (collectionRoot[0].isPresent()) {
+//                        collectionRoot[0].get().close();
+//                    }
                 }
 
                 @Override

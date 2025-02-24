@@ -92,6 +92,13 @@ public class DataFrameStreamProducer implements StreamProducer {
             }
 
             void close() throws Exception {
+                logger.info("Closing in provider");
+//                if (recordBatchStream != null) {
+//                    recordBatchStream.close();
+//                }
+//                if (df != null) {
+//                    df.close();
+//                }
             }
         };
     }
@@ -108,6 +115,7 @@ public class DataFrameStreamProducer implements StreamProducer {
 
     @Override
     public void close() throws IOException {
+        logger.info("Closing in producer");
         if (recordBatchStream != null) {
             try {
                 recordBatchStream.close();

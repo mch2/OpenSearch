@@ -89,6 +89,6 @@ public class DataFrame implements AutoCloseable {
 //            child.close();
 //        }
         destroyDataFrame(ptr);
-        ctx.close();
+//        ctx.close();
     }
 }

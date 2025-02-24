@@ -95,8 +95,9 @@ public class DataFusionAggregator implements AutoCloseable {
     }
 
     @Override
-    public void close() {
+    public void close() throws Exception {
         destroy(ptr);
+        context.close();
     }
 
     private static native void processBatch(long runtime, long ctx, long arrayPtr, long schemaPtr, String term, ObjectResultCallback callback);
@@ -135,7 +136,13 @@ public class DataFusionAggregator implements AutoCloseable {
         } catch (Exception e) {
             result.completeExceptionally(e);
         }
-
+        for (DataFrame frame : frames) {
+            try {
+                frame.close();
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        }
         return result;
     }
 }

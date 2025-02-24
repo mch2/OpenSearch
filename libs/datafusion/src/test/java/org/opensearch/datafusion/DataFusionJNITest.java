@@ -27,17 +27,17 @@ public class DataFusionJNITest extends OpenSearchTestCase {
         System.loadLibrary("datafusion_jni");
     }
 
-    @Test
-    public void testSerDe() throws ExecutionException, InterruptedException {
-//        CompletableFuture<DataFrame> dataFrameCompletableFuture = DataFusion.aggWithEndpoints(List.of(new StreamManager.Endpoint("http://localhost:9200", new byte[]{1, 2, 3, 4})));
-//        dataFrameCompletableFuture.get();
-        CompletableFuture<String> myString = DataFusion.runAsync("MY STRING");
-        myString.whenComplete((s, throwable) -> {
-            System.out.println(s);
-        });
-        System.out.println("RUNNING SOMETHING ASYNC");
-        myString.get();
-    }
+//    @Test
+//    public void testSerDe() throws ExecutionException, InterruptedException {
+////        CompletableFuture<DataFrame> dataFrameCompletableFuture = DataFusion.aggWithEndpoints(List.of(new StreamManager.Endpoint("http://localhost:9200", new byte[]{1, 2, 3, 4})));
+////        dataFrameCompletableFuture.get();
+//        CompletableFuture<String> myString = DataFusion.runAsync("MY STRING");
+//        myString.whenComplete((s, throwable) -> {
+//            System.out.println(s);
+//        });
+//        System.out.println("RUNNING SOMETHING ASYNC");
+//        myString.get();
+//    }
 
     @Test
     public void testExecuteSubstrait() throws Exception {

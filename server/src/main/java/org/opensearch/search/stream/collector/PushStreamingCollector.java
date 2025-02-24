@@ -81,7 +81,6 @@ public class PushStreamingCollector extends FilterCollector {
         this.collectionRoot = collectionRoot;
         this.flushSignal = flushSignal;
         this.batchSize = batchSize;
-        // Pre-allocate arrays
     }
 
     @Override
