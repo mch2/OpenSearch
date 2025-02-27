@@ -12,16 +12,18 @@ import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.opensearch.arrow.spi.StreamManager;
 import org.opensearch.arrow.spi.StreamProducer;
 import org.opensearch.arrow.spi.StreamTicket;
 import org.opensearch.common.unit.TimeValue;
+import org.opensearch.core.tasks.TaskId;
 
 import java.io.IOException;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.function.BiFunction;
 import java.util.function.Function;
-import java.util.function.Supplier;
 
 /**
  *
@@ -29,26 +31,31 @@ import java.util.function.Supplier;
 public class DataFrameStreamProducer implements StreamProducer {
 
     public static Logger logger = LogManager.getLogger(DataFrameStreamProducer.class);
-    private final Function<StreamTicket, CompletableFuture<DataFrame>> frameSupplier;
-    private final Function<StreamProducer, StreamTicket> streamRegistrar;
+    private final BiFunction<SessionContext, StreamTicket, CompletableFuture<DataFrame>> frameSupplier;
+    private final StreamManager streamRegistrar;
 
     private StreamTicket rootTicket;
     private Set<StreamTicket> partitions;
     VectorSchemaRoot root;
     private DataFrame df;
     private RecordBatchStream recordBatchStream;
-
-    public DataFrameStreamProducer(Function<StreamProducer, StreamTicket> streamRegistrar, Set<StreamTicket> partitions, Function<StreamTicket, CompletableFuture<DataFrame>> frameSupplier) {
+    private boolean isCancelled = false;
+    SessionContext ctx;
+    public DataFrameStreamProducer(StreamManager streamRegistrar,
+                                   Set<StreamTicket> partitions,
+                                   BiFunction<SessionContext, StreamTicket, CompletableFuture<DataFrame>> frameSupplier) {
+        this.ctx = new SessionContext();
         this.streamRegistrar = streamRegistrar;
         this.frameSupplier = frameSupplier;
         this.partitions = partitions;
-        this.rootTicket = streamRegistrar.apply(this);
+        this.rootTicket = streamRegistrar.registerStream(this, TaskId.EMPTY_TASK_ID);
+        logger.info("Registering stream producer {}", rootTicket);
     }
 
     @Override
     public VectorSchemaRoot createRoot(BufferAllocator allocator) {
         if (recordBatchStream == null || df == null) {
-            this.df = frameSupplier.apply(rootTicket).join();
+            this.df = frameSupplier.apply(ctx, rootTicket).join();
             try {
                 this.recordBatchStream = df.getStream(allocator).get();
             } catch (InterruptedException | ExecutionException e) {
@@ -68,10 +75,9 @@ public class DataFrameStreamProducer implements StreamProducer {
                 try {
                     assert rootTicket != null;
                     // loadNextBatch will execute async in datafusion
-                    while (recordBatchStream.loadNextBatch().join()) {
+                    while (recordBatchStream.loadNextBatch(root).join()) {
                         flushSignal.awaitConsumption(TimeValue.timeValueMillis(1000));
                     }
-                    close();
                 } catch (Exception e) {
                     throw new RuntimeException(e);
                 }
@@ -79,26 +85,17 @@ public class DataFrameStreamProducer implements StreamProducer {
 
             @Override
             public void onCancel() {
-                try {
-                    close();
-                } catch (Exception e) {
-                    throw new RuntimeException(e);
-                }
+                isCancelled = true;
             }
 
             @Override
             public boolean isCancelled() {
-                return false;
+                return isCancelled;
             }
 
             void close() throws Exception {
-                logger.info("Closing in provider");
-//                if (recordBatchStream != null) {
-//                    recordBatchStream.close();
-//                }
-//                if (df != null) {
-//                    df.close();
-//                }
+                logger.info("Closing in BatchedJob");
+                // close things when the producer does
             }
         };
     }
@@ -125,6 +122,12 @@ public class DataFrameStreamProducer implements StreamProducer {
         }
         try {
             df.close();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        streamRegistrar.removeStream(rootTicket);
+        try {
+            ctx.close();
         } catch (Exception e) {
             throw new RuntimeException(e);
         }

@@ -20,7 +20,6 @@ import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.UInt8Vector;
 import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
-import org.apache.arrow.vector.dictionary.DictionaryProvider;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.lucene.index.LeafReaderContext;
@@ -35,14 +34,12 @@ import org.apache.lucene.util.BytesRef;
 import org.opensearch.arrow.spi.StreamProducer;
 import org.opensearch.common.annotation.ExperimentalApi;
 import org.opensearch.common.unit.TimeValue;
-import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.datafusion.DataFrame;
 import org.opensearch.datafusion.RecordBatchStream;
 
 import java.io.IOException;
 import java.security.AccessController;
 import java.security.PrivilegedAction;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
@@ -54,9 +51,15 @@ public class PushStreamingCollector extends FilterCollector {
 
     public static final String COUNT = "count";
     public static final String ORD = "ord";
+
+    // VectorSchemaRoot that will be used to collect batches to be sent to DataFusion.
+    // schema (field)
     private VectorSchemaRoot collectionRoot;
+
     private final BufferAllocator allocator;
     List<ArrowFieldAdaptor> fields;
+
+    // VectorSchemaRoot that will be used to output results over flight back to the coord - schema (ord/count vectors)
     private final VectorSchemaRoot bucketRoot;
     private final StreamProducer.FlushSignal flushSignal;
     public static Logger logger = LogManager.getLogger(PushStreamingCollector.class);
@@ -65,14 +68,12 @@ public class PushStreamingCollector extends FilterCollector {
 
     public PushStreamingCollector(
         Collector in,
-        DictionaryProvider provider,
         VectorSchemaRoot collectionRoot,
         VectorSchemaRoot root,
         BufferAllocator allocator,
         List<ArrowFieldAdaptor> fields,
         int batchSize,
-        StreamProducer.FlushSignal flushSignal,
-        ShardId shardId
+        StreamProducer.FlushSignal flushSignal
     ) {
         super(in);
         this.allocator = allocator;
@@ -90,12 +91,15 @@ public class PushStreamingCollector extends FilterCollector {
         SortedSetDocValues dv = ((ArrowFieldAdaptor.SortedDocValuesType) arrowFieldAdaptor.getDocValues(context.reader())).getSortedDocValues();
         final int maxOrd = (int) dv.getValueCount();
 
-        // ordinalVector to hold ordinals
+        // ordinalVector to hold ordinals from doc values
         final FieldVector[] ordinalVector = {collectionRoot.getVector(arrowFieldAdaptor.fieldName)};
         // setting initial capacity to maxOrd to skip a few resizes.
         ordinalVector[0].setInitialCapacity(maxOrd);
+
         DataFusionAggregator aggregator = new DataFusionAggregator(term);
-        List<CompletableFuture<DataFrame>> futures = new ArrayList<>();
+
+        // each batch will create a DataFrame (logical plan in DataFusion)
+        // completes once the incremental batch has finished aggregation and we can read it out via getSream.
 
         final int[] currentRow = {0};
         return new LeafCollector() {
@@ -131,9 +135,9 @@ public class PushStreamingCollector extends FilterCollector {
                         // Push batch to streaming aggregator
                         CompletableFuture<DataFrame> fut = aggregator.pushBatch(allocator, batchToProcess);
                         fut.whenComplete((frame, err) -> {
+                            // close each incremental batch
                             batchToProcess.close();
                         });
-                        futures.add(fut);
 
                         // Only reset after we've set up the new batch
                         currentRow[0] = 0;
@@ -154,15 +158,14 @@ public class PushStreamingCollector extends FilterCollector {
                 try {
                     // Get final results and process into bucketRoot
                     // ensure all batches have finished being processed in DF
-                    CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
-                    List<DataFrame> frames = new ArrayList<>(futures.size());
-                    for (CompletableFuture<DataFrame> future : futures) {
-                        frames.add(future.join());
-                    }
 
-                    DataFrame results = aggregator.getResults(frames, 500).get();
+                    DataFrame results = aggregator.getResults().get();
                     if (results != null) {
                         RecordBatchStream recordBatchStream = results.getStream(allocator).get();
+                        // fetch the root of the aggregated batches
+                        // schema differs from our collectionRoot as it has ord/count
+                        // we can't just write to bucketRoot either because we have to look up the ord
+                        // values manually
                         VectorSchemaRoot root = recordBatchStream.getVectorSchemaRoot();
                         VarCharVector ordVector = (VarCharVector) bucketRoot.getVector(ORD);
                         BigIntVector countVector = (BigIntVector) bucketRoot.getVector(COUNT);
@@ -181,10 +184,12 @@ public class PushStreamingCollector extends FilterCollector {
                         countVector.setValueCount(row);
                         bucketRoot.setRowCount(row);
                         flushSignal.awaitConsumption(TimeValue.timeValueMillis(1000 * 120));
+                        // close the batch, closes underlying root
                         recordBatchStream.close();
                         results.close();
                     }
 
+                    // close the final batch
                     collectionRoot.close();
                     aggregator.close();
                 } catch (Exception e) {

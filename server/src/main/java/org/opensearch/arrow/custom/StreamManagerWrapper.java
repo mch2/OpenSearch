@@ -62,6 +62,11 @@ public class StreamManagerWrapper implements StreamManager {
     }
 
     @Override
+    public void removeStream(StreamTicket ticket) {
+        streamManager.get().removeStream(ticket);
+    }
+
+    @Override
     public void close() throws Exception {
         streamManager.get().close();
     }

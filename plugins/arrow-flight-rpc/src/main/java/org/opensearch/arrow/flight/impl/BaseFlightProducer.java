@@ -73,6 +73,7 @@ public class BaseFlightProducer extends NoOpFlightProducer {
         Optional<FlightStreamManager.StreamProducerHolder> streamProducerHolder = Optional.empty();
         try {
             if (streamTicket.getNodeId().equals(flightClientManager.getLocalNodeId())) {
+                logger.info("Removing stream producer {}", streamTicket.getTicketId());
                 streamProducerHolder = streamManager.removeStreamProducer(streamTicket);
             } else {
                 Optional<OSFlightClient> remoteClient = flightClientManager.getFlightClient(streamTicket.getNodeId());

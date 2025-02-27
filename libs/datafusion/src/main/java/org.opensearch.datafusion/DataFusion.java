@@ -39,8 +39,7 @@ public class DataFusion {
 
     static native void executeStream(long runtime, long dataframe, ObjectResultCallback callback);
 
-    public static CompletableFuture<DataFrame> query(byte[] ticket) {
-        SessionContext ctx = new SessionContext();
+    public static CompletableFuture<DataFrame> query(SessionContext ctx, byte[] ticket) {
         CompletableFuture<DataFrame> future = new CompletableFuture<>();
         DataFusion.query(ctx.getRuntime(), ctx.getPointer(), ticket, (err, ptr) -> {
             if (err != null) {
@@ -53,8 +52,7 @@ public class DataFusion {
         return future;
     }
 
-    public static CompletableFuture<DataFrame> agg(byte[] ticket, int limit) {
-        SessionContext ctx = new SessionContext();
+    public static CompletableFuture<DataFrame> agg(SessionContext ctx, byte[] ticket, int limit) {
         CompletableFuture<DataFrame> future = new CompletableFuture<>();
         DataFusion.agg(ctx.getRuntime(), ctx.getPointer(), ticket, limit, (err, ptr) -> {
             if (err != null) {
@@ -67,8 +65,6 @@ public class DataFusion {
         return future;
     }
 
-    private static native void load(long runtime, long ctx, long arrayPtr, long schemaPtr, String term, ObjectResultCallback callback);
-
     public static CompletableFuture<DataFrame> from_vsr(BufferAllocator allocator, VectorSchemaRoot root, DictionaryProvider provider, String term) {
         SessionContext ctx = new SessionContext();
         CompletableFuture<DataFrame> result = new CompletableFuture<>();
@@ -80,14 +76,14 @@ public class DataFusion {
         long arrayPtr = array.memoryAddress();
         long schemaPtr = schema.memoryAddress();
 
-        DataFusion.load(ctx.getRuntime(), ctx.getPointer(), arrayPtr, schemaPtr, term, (err, ptr) -> {
-            if (err != null) {
-                result.completeExceptionally(new RuntimeException(err));
-            } else {
-                DataFrame df = new DataFrame(ctx, ptr);
-                result.complete(df);
-            }
-        });
+//        DataFusion.load(ctx.getRuntime(), ctx.getPointer(), arrayPtr, schemaPtr, term, (err, ptr) -> {
+//            if (err != null) {
+//                result.completeExceptionally(new RuntimeException(err));
+//            } else {
+//                DataFrame df = new DataFrame(ctx, ptr);
+//                result.complete(df);
+//            }
+//        });
 
         return result;
     }

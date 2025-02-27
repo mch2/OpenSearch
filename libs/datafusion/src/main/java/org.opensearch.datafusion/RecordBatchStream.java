@@ -34,21 +34,15 @@ public class RecordBatchStream implements AutoCloseable {
     private final long ptr;
     private final BufferAllocator allocator;
     private final CDataDictionaryProvider dictionaryProvider;
-//    private final Map<Integer, DictionaryEncoding> dictionaryEncodings;
-
+    private boolean initialized = false;
+    private VectorSchemaRoot vectorSchemaRoot = null;
 
     public RecordBatchStream(SessionContext ctx, long streamId, BufferAllocator allocator) {
         this.context = ctx;
         this.ptr = streamId;
         this.allocator = allocator;
-//        this.vectorSchemaRoot = root;
         this.dictionaryProvider = new CDataDictionaryProvider();
-
-//        this.dictionaryEncodings = new HashMap<>();
-//        for (long id : provider.getDictionaryIds()) {
-//            Dictionary dict = provider.lookup(id);
-//            this.dictionaryEncodings.put((int)id, dict.getEncoding());
-//        }
+        logger.info("Created RecordBatchStream {}", ptr);
     }
 
     private static native void destroy(long pointer);
@@ -97,9 +91,7 @@ public class RecordBatchStream implements AutoCloseable {
         return result;
     }
 
-    private boolean initialized = false;
-    private VectorSchemaRoot vectorSchemaRoot = null;
-
+    // get the root from the stream
     public VectorSchemaRoot getVectorSchemaRoot() {
         ensureInitialized();
         return vectorSchemaRoot;
@@ -111,16 +103,6 @@ public class RecordBatchStream implements AutoCloseable {
             this.vectorSchemaRoot = VectorSchemaRoot.create(schema, allocator);
         }
         initialized = true;
-    }
-
-//    @Override
-    public Dictionary lookup(long id) {
-        return dictionaryProvider.lookup(id);
-    }
-
-//    @Override
-    public Set<Long> getDictionaryIds() {
-        return dictionaryProvider.getDictionaryIds();
     }
 
     private Schema getSchema() {

@@ -19,6 +19,7 @@ import org.opensearch.datafusion.DataFrame;
 import org.opensearch.datafusion.ObjectResultCallback;
 import org.opensearch.datafusion.SessionContext;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
@@ -30,6 +31,8 @@ public class DataFusionAggregator implements AutoCloseable {
     private final long ptr;
     private final DictionaryProvider dictionaryProvider;
     private final String term;
+    List<CompletableFuture<DataFrame>> batchFutures = new ArrayList<>();
+
 
     public DataFusionAggregator(String term, int batchSize) {
         this.context = new SessionContext(batchSize);
@@ -48,7 +51,7 @@ public class DataFusionAggregator implements AutoCloseable {
 
     public CompletableFuture<DataFrame> pushBatch(BufferAllocator allocator, VectorSchemaRoot root) {
         CompletableFuture<DataFrame> result = new CompletableFuture<>();
-
+        batchFutures.add(result);
         try {
             ArrowArray array = ArrowArray.allocateNew(allocator);
             ArrowSchema schema = ArrowSchema.allocateNew(allocator);
@@ -75,22 +78,41 @@ public class DataFusionAggregator implements AutoCloseable {
         return result;
     }
 
-    public CompletableFuture<DataFrame> getResults(int limit) {
-        // limit currently ignored in DF.
+    public CompletableFuture<DataFrame> getResults() {
         CompletableFuture<DataFrame> result = new CompletableFuture<>();
-        getResults(
-            context.getRuntime(),
-            ptr,
-            limit,
-            (String errString, long ptr) -> {
-                if (errString != null && !errString.isEmpty()) {
-                    result.completeExceptionally(new RuntimeException(errString));
-                } else if (ptr == 0) {
-                    result.complete(null);
-                } else {
-                    result.complete(new DataFrame(context, ptr));
+        CompletableFuture.allOf(batchFutures.toArray(new CompletableFuture[0])).thenAccept(a -> {
+            List<DataFrame> frames = new ArrayList<>(batchFutures.size());
+            for (CompletableFuture<DataFrame> future : batchFutures) {
+                frames.add(future.join());
+            }
+
+            try {
+                // Convert frames to array of pointers
+                long[] framePointers = new long[frames.size()];
+                for (int i = 0; i < frames.size(); i++) {
+                    framePointers[i] = frames.get(i).getPtr();
                 }
-            });
+
+                // Call native method
+                unionFrames(
+                    context.getRuntime(),
+                    context.getPointer(),
+                    framePointers,
+                    500,
+                    (String errString, long ptr) -> {
+                        if (errString != null && !errString.isEmpty()) {
+                            result.completeExceptionally(new RuntimeException(errString));
+                        } else if (ptr == 0) {
+                            result.complete(null);
+                        } else {
+                            result.complete(new DataFrame(context, ptr, frames));
+                        }
+                    }
+                );
+            } catch (Exception e) {
+                result.completeExceptionally(e);
+            }
+        });
         return result;
     }
 
@@ -102,47 +124,6 @@ public class DataFusionAggregator implements AutoCloseable {
 
     private static native void processBatch(long runtime, long ctx, long arrayPtr, long schemaPtr, String term, ObjectResultCallback callback);
     private static native long create(long ctx, String term);
-    private static native void pushBatch(long runtime, long ptr, long schema, long array, ObjectResultCallback callback);
-    private static native void getResults(long runtime, long ptr, int limit, ObjectResultCallback callback);
     private static native void destroy(long ptr);
     private static native void unionFrames(long runtime, long ctx, long[] framePointers, int limit, ObjectResultCallback callback);
-
-    public CompletableFuture<DataFrame> getResults(List<DataFrame> frames, int limit) {
-        CompletableFuture<DataFrame> result = new CompletableFuture<>();
-
-        try {
-            // Convert frames to array of pointers
-            long[] framePointers = new long[frames.size()];
-            for (int i = 0; i < frames.size(); i++) {
-                framePointers[i] = frames.get(i).getPtr();
-            }
-
-            // Call native method
-            unionFrames(
-                context.getRuntime(),
-                context.getPointer(),
-                framePointers,
-                limit,
-                (String errString, long ptr) -> {
-                    if (errString != null && !errString.isEmpty()) {
-                        result.completeExceptionally(new RuntimeException(errString));
-                    } else if (ptr == 0) {
-                        result.complete(null);
-                    } else {
-                        result.complete(new DataFrame(context, ptr, frames));
-                    }
-                }
-            );
-        } catch (Exception e) {
-            result.completeExceptionally(e);
-        }
-        for (DataFrame frame : frames) {
-            try {
-                frame.close();
-            } catch (Exception e) {
-                throw new RuntimeException(e);
-            }
-        }
-        return result;
-    }
 }

@@ -17,6 +17,8 @@ bytes = "1.8.0"
 async-trait = "0.1"
 num_cpus = "1.16"
 rand = "0.8"
+jemallocator = { version = "0.5", features = ["profiling", "stats"] }
+jemalloc-sys = { version = "0.5", features = ["profiling", "stats"] }
 
 [dev-dependencies]
 anyhow = "1.0"

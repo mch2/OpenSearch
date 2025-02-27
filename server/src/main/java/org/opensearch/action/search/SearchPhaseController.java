@@ -738,12 +738,11 @@ public final class SearchPhaseController {
         // This stream will get read immediately after registration
 
         DataFrameStreamProducer producer = AccessController.doPrivileged((PrivilegedAction<DataFrameStreamProducer>) () ->
-            new DataFrameStreamProducer((p -> {
-                return streamManager.registerStream(p, TaskId.EMPTY_TASK_ID);
-            }), streamTickets, (t) -> DataFusion.agg(t.toBytes(), size)));
+            new DataFrameStreamProducer(streamManager, streamTickets, (ctx, ticket) -> DataFusion.agg(ctx, ticket.toBytes(), size)));
 
 //        StreamTicket ticket = streamManager.registerStream(new PartitionedStreamProducer(producer), TaskId.EMPTY_TASK_ID);
         StreamTicket ticket = streamManager.registerStream(producer, TaskId.EMPTY_TASK_ID);
+        logger.info("Registered DataFrameStreamProducer producer {}", ticket.getTicketId());
 
         return AccessController.doPrivileged((PrivilegedAction<ReducedQueryPhase>) () -> {
             StreamReader streamIterator = streamManager.getStreamReader(ticket);
@@ -817,7 +816,7 @@ public final class SearchPhaseController {
                 .collect(Collectors.toList());
 
             // execute the query and get a dataframe
-            CompletableFuture<DataFrame> frame = DataFusion.query(tickets.get(0));
+            CompletableFuture<DataFrame> frame = DataFusion.query(context, tickets.get(0));
 
             DataFrame dataFrame = null;
             ArrowReader arrowReader = null;

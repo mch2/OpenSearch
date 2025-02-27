@@ -58,5 +58,5 @@ public interface StreamManager extends AutoCloseable {
      */
     StreamTicketFactory getStreamTicketFactory();
 
-
+    default void removeStream(StreamTicket ticket) {}
 }

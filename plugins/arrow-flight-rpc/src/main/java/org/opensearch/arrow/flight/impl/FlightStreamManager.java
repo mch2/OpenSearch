@@ -152,6 +152,11 @@ public class FlightStreamManager implements StreamManager {
         return ticketFactory;
     }
 
+    @Override
+    public void removeStream(StreamTicket ticket) {
+        removeStreamProducer(ticket);
+    }
+
     /**
      * Gets the StreamProducer associated with a ticket if it hasn't expired based on its deadline.
      *
@@ -184,8 +189,11 @@ public class FlightStreamManager implements StreamManager {
         StreamProducerHolder holder = streamProducers.get(ticketId);
 
         if (holder != null) {
+            System.out.println("invalidating: " + ticketId);
             streamProducers.invalidate(ticketId);
             return Optional.of(holder);
+        } else {
+            System.out.println("null holder: " + ticketId);
         }
         return Optional.empty();
     }

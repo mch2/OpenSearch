@@ -156,7 +156,6 @@ public class StreamSearchPhase extends QueryPhase {
             final boolean[] isCancelled = { false };
             final Schema[] schema = { null };
             final Optional<VectorSchemaRoot>[] root = new Optional[] { Optional.empty() };
-            final Optional<VectorSchemaRoot>[] collectionRoot = new Optional[] { Optional.empty() };
             Collector finalCollector = collector;
 
             StreamTicket ticket = streamManager.registerStream(new StreamProducer() {
@@ -180,19 +179,19 @@ public class StreamSearchPhase extends QueryPhase {
                         public void run(VectorSchemaRoot root, StreamProducer.FlushSignal flushSignal) {
                             try {
                                 Map<String, Field> arrowFields = new HashMap<>();
-                                DictionaryProvider.MapDictionaryProvider provider = new DictionaryProvider.MapDictionaryProvider();
+//                                DictionaryProvider.MapDictionaryProvider provider = new DictionaryProvider.MapDictionaryProvider();
                                 Map<String, FieldVector> fieldVectors = new HashMap<>();
 
                                 arrowFieldAdaptors.forEach(field -> {
                                     long dictId = field.getFieldName().hashCode();
                                     DictionaryEncoding encoding = new DictionaryEncoding(dictId, false, null);
                                     // Create dictionary vector
-                                    FieldType dictFieldType = new FieldType(true, field.getArrowType(), null);
-                                    VarCharVector dictionaryVector = new VarCharVector("dict_" + field.getFieldName(), dictFieldType, allocator);
-
-                                    // Create Dictionary instance and register with provider
-                                    Dictionary dictionary = new Dictionary(dictionaryVector, encoding);
-                                    provider.put(dictionary);
+//                                    FieldType dictFieldType = new FieldType(true, field.getArrowType(), null);
+//                                    VarCharVector dictionaryVector = new VarCharVector("dict_" + field.getFieldName(), dictFieldType, allocator);
+//
+//                                    // Create Dictionary instance and register with provider
+//                                    Dictionary dictionary = new Dictionary(dictionaryVector, encoding);
+//                                    provider.put(dictionary);
 
                                     // Create encoded vector with dictionary encoding reference
                                     FieldType encodedType = new FieldType(true, new ArrowType.Int(64, false), null);
@@ -208,7 +207,7 @@ public class StreamSearchPhase extends QueryPhase {
                                     new ArrayList<>(fieldVectors.values()),
                                     0
                                 );
-                                final PushStreamingCollector arrowDocIdCollector = new PushStreamingCollector(finalCollector, provider, collectionRoot, root, allocator, arrowFieldAdaptors, 1_000_000, flushSignal, searchContext.shardTarget().getShardId());
+                                final PushStreamingCollector arrowDocIdCollector = new PushStreamingCollector(finalCollector, collectionRoot, root, allocator, arrowFieldAdaptors, 1_000_000, flushSignal);
 //                                final ArrowStreamingCollector arrowDocIdCollector = new ArrowStreamingCollector(finalCollector, provider, collectionRoot, root, allocator, arrowFieldAdaptors, 1_000_000, flushSignal, searchContext.shardTarget().getShardId());
                                 try {
                                     searcher.addQueryCancellation(() -> {

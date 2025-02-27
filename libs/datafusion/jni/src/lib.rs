@@ -1,6 +1,8 @@
 use std::error::Error;
+use std::ffi::CString;
 use std::io::Cursor;
 use std::ptr::addr_of_mut;
+use std::sync::atomic::{AtomicBool,Ordering};
 use std::sync::Arc;
 
 use arrow::array::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
@@ -24,6 +26,14 @@ use tokio::time::Duration;
 use std::io::BufWriter;
 use tokio::runtime::Runtime;
 mod provider;
+
+#[cfg(not(target_env = "msvc"))]
+use jemallocator::Jemalloc;
+
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
+static JEMALLOC_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 #[no_mangle]
 pub extern "system" fn Java_org_opensearch_search_stream_collector_DataFusionAggregator_processBatch(
@@ -110,66 +120,6 @@ async fn process_data(
     Ok(context.read_batches(result)?)
 }
 
-// JNI functino that unions all the frames
-
-#[no_mangle]
-pub extern "system" fn Java_org_opensearch_datafusion_DataFusion_load(
-    mut env: JNIEnv,
-    _class: JClass,
-    runtime: jlong,
-    ctx: jlong,
-    array_ptr: jlong,
-    schema_ptr: jlong,
-    term: JString,
-    callback: JObject,
-) {
-    let context = unsafe { &mut *(ctx as *mut SessionContext) };
-    let runtime = unsafe { &mut *(runtime as *mut Runtime) };
-    let term_str: String = format!(
-        "`{}`",
-        env.get_string(&term)
-            .expect("Invalid term string")
-            .to_string_lossy()
-            .into_owned()
-    );
-    // Take ownership of FFI structs immediately outside the async block
-    let array = unsafe { ffi::FFI_ArrowArray::from_raw(array_ptr as *mut _) };
-    let schema = unsafe { ffi::FFI_ArrowSchema::from_raw(schema_ptr as *mut _) };
-
-    runtime.block_on(async {
-        let result = unsafe {
-            let data = arrow::ffi::from_ffi(array, &schema).unwrap();
-            let arrow_array = arrow::array::make_array(data);
-
-            // Create DataFrame
-            let struct_array = arrow_array
-                .as_any()
-                .downcast_ref::<arrow::array::StructArray>()
-                .unwrap();
-            let record_batch = RecordBatch::try_from(struct_array).unwrap();
-            let df = context
-                .read_batch(record_batch)
-                .and_then(|df| df.filter(col(&term_str).is_not_null()))
-                .and_then(|df| {
-                    df.aggregate(
-                        vec![col(&term_str).alias("ord")],
-                        vec![
-                            datafusion::functions_aggregate::count::count(col(&term_str))
-                                .alias("count"),
-                        ],
-                    )
-                })
-                .and_then(|agg_df| agg_df.sort(vec![col("count").sort(true, false)]))
-                .and_then(|sorted| sorted.limit(0, Some(500)))
-                .and_then(|limited| limited.sort(vec![col("ord").sort(false, true)]));
-
-            df
-        };
-
-        let addr = result.map(|df| Box::into_raw(Box::new(df)));
-        set_object_result(&mut env, callback, addr);
-    });
-}
 
 #[no_mangle]
 pub extern "system" fn Java_org_opensearch_datafusion_DataFusion_query(
@@ -294,6 +244,7 @@ pub extern "system" fn Java_org_opensearch_datafusion_SessionContext_destroySess
     _class: JClass,
     pointer: jlong,
 ) {
+    println!("Destroy ctx {}", pointer);
     let _ = unsafe { Box::from_raw(pointer as *mut SessionContext) };
 }
 
@@ -303,9 +254,22 @@ pub extern "system" fn Java_org_opensearch_datafusion_SessionContext_createSessi
     _class: JClass,
     size: jint,
 ) -> jlong {
+        // Set initialized flag and print confirmation
+        if !JEMALLOC_INITIALIZED.swap(true, Ordering::SeqCst) {
+            eprintln!("JEMALLOC INITIALIZED - Profiling should be active");
+            
+            // Check if MALLOC_CONF is set
+            if let Ok(conf) = std::env::var("MALLOC_CONF") {
+                eprintln!("MALLOC_CONF is set to: {}", conf);
+            } else {
+                eprintln!("WARNING: MALLOC_CONF environment variable is not set");
+            }
+        }
     let config = SessionConfig::new().with_repartition_aggregations(true);
     let context = SessionContext::new_with_config(config);
-    Box::into_raw(Box::new(context)) as jlong
+    let ctx = Box::into_raw(Box::new(context)) as jlong;
+    print!("Context created {:?}", ctx);
+    ctx
 }
 
 #[no_mangle]
@@ -463,6 +427,7 @@ pub extern "system" fn Java_org_opensearch_datafusion_RecordBatchStream_destroy(
     _class: JClass,
     pointer: jlong,
 ) {
+    println!("Destroy recordbatchStream {:?}", pointer);
     let _ = unsafe { Box::from_raw(pointer as *mut SendableRecordBatchStream) };
 }
 
@@ -493,6 +458,7 @@ pub extern "system" fn Java_org_opensearch_datafusion_DataFrame_destroyDataFrame
     _class: JClass,
     pointer: jlong,
 ) {
+    println!("Destroy dataFrame {:?}", pointer);
     let _ = unsafe { Box::from_raw(pointer as *mut DataFrame) };
 }
 
@@ -568,6 +534,21 @@ impl DataFusionAggregator {
     }
 }
 
+// Function to manually trigger a heap dump
+fn force_jemalloc_dump() {
+    unsafe {
+        let dump_str = CString::new("prof.dump").unwrap();
+        jemalloc_sys::mallctl(
+            dump_str.as_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            0,
+        );
+        eprintln!("Manually triggered jemalloc heap dump");
+    }
+}
+
 #[no_mangle]
 pub extern "system" fn Java_org_opensearch_search_stream_collector_DataFusionAggregator_unionFrames(
     mut env: JNIEnv,
@@ -611,7 +592,7 @@ pub extern "system" fn Java_org_opensearch_search_stream_collector_DataFusionAgg
         let df_box = Box::new(df);
         Box::into_raw(df_box)
     });
-    
+    force_jemalloc_dump();
     set_object_result(&mut env, callback, ptr_result);
 }
 
@@ -633,62 +614,9 @@ pub extern "system" fn Java_org_opensearch_search_stream_collector_DataFusionAgg
     );
 
     let aggregator = DataFusionAggregator::new(context.clone(), term_str);
-    Box::into_raw(Box::new(aggregator)) as jlong
-}
-
-#[no_mangle]
-pub extern "system" fn Java_org_opensearch_search_stream_collector_DataFusionAggregator_pushBatch(
-    mut env: JNIEnv,
-    _class: JClass,
-    runtime: jlong,
-    agg_ptr: jlong,
-    array_ptr: jlong,
-    schema_ptr: jlong,
-    callback: JObject,
-) {
-    let runtime = unsafe { &mut *(runtime as *mut Runtime) };
-    let aggregator = unsafe { &mut *(agg_ptr as *mut DataFusionAggregator) };
-
-    let array = unsafe { ffi::FFI_ArrowArray::from_raw(array_ptr as *mut _) };
-    let schema = unsafe { ffi::FFI_ArrowSchema::from_raw(schema_ptr as *mut _) };
-
-    runtime.block_on(async {
-        let result = unsafe {
-            let data = arrow::ffi::from_ffi(array, &schema).unwrap();
-            let arrow_array = arrow::array::make_array(data);
-            let struct_array = arrow_array
-                .as_any()
-                .downcast_ref::<arrow::array::StructArray>()
-                .unwrap();
-            let record_batch = RecordBatch::try_from(struct_array).unwrap();
-
-            aggregator
-                .push_batch(record_batch)
-                .await
-                .map(|_| Box::into_raw(Box::new(1i32)))
-        };
-
-        set_object_result(&mut env, callback, result);
-    });
-}
-
-#[no_mangle]
-pub extern "system" fn Java_org_opensearch_search_stream_collector_DataFusionAggregator_getResults(
-    mut env: JNIEnv,
-    _class: JClass,
-    runtime: jlong,
-    agg_ptr: jlong,
-    limit: jint,
-    callback: JObject,
-) {
-    let aggregator = unsafe { &mut *(agg_ptr as *mut DataFusionAggregator) };
-
-    let result = aggregator
-        .get_results()
-        .map(|df| Box::into_raw(Box::new(df)))
-        .ok_or_else(|| DataFusionError::Execution("No results available".to_string()));
-
-    set_object_result::<DataFrame, DataFusionError>(&mut env, callback, result);
+    let ptr = Box::into_raw(Box::new(aggregator)) as jlong;
+    println!("Create aggregator {}", ptr);
+    ptr
 }
 
 #[no_mangle]
@@ -697,6 +625,7 @@ pub extern "system" fn Java_org_opensearch_search_stream_collector_DataFusionAgg
     _class: JClass,
     pointer: jlong,
 ) {
+    println!("Destroy aggregator {}", pointer);
     let _ = unsafe { Box::from_raw(pointer as *mut DataFusionAggregator) };
 }
 

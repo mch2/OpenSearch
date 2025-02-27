@@ -280,20 +280,20 @@ public class ArrowOrdinalCollector extends FilterCollector {
                             FieldVector cv = root.getVector("count");
                             long dictId = encodedVector.getField().getDictionary().getId();
 
-                            try (VarCharVector ordinals = (VarCharVector) DictionaryEncoder.decode(encodedVector, recordBatchStream.lookup(dictId))) {
-                                logger.info("Value count {} {}", ordinals.getValueCount(), batchNumRows);
-                                ordVector.setInitialCapacity(ordinals.getValueCapacity());
-                                // Copy values one by one to ensure proper transfer
-                                for (int i = 0; i < ordinals.getValueCount(); i++) {
-                                    if (!ordinals.isNull(i)) {
-                                        byte[] value = ordinals.get(i);
-                                        // Get the actual length of this string
-                                        int length = ordinals.getValueLength(i);
-                                        // Copy exactly length bytes from the value array
-                                        ordVector.setSafe(i, value, 0, length);
-                                    }
-                                }
-                            }
+//                            try (VarCharVector ordinals = (VarCharVector) DictionaryEncoder.decode(encodedVector, recordBatchStream.lookup(dictId))) {
+//                                logger.info("Value count {} {}", ordinals.getValueCount(), batchNumRows);
+//                                ordVector.setInitialCapacity(ordinals.getValueCapacity());
+//                                // Copy values one by one to ensure proper transfer
+//                                for (int i = 0; i < ordinals.getValueCount(); i++) {
+//                                    if (!ordinals.isNull(i)) {
+//                                        byte[] value = ordinals.get(i);
+//                                        // Get the actual length of this string
+//                                        int length = ordinals.getValueLength(i);
+//                                        // Copy exactly length bytes from the value array
+//                                        ordVector.setSafe(i, value, 0, length);
+//                                    }
+//                                }
+//                            }
                             // For count vector
                             for (int i = 0; i < cv.getValueCount(); i++) {
                                 countVector.setSafe(i, ((BigIntVector) cv).get(i));
