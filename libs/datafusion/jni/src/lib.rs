@@ -27,14 +27,6 @@ use std::io::BufWriter;
 use tokio::runtime::Runtime;
 mod provider;
 
-#[cfg(not(target_env = "msvc"))]
-use jemallocator::Jemalloc;
-
-#[cfg(not(target_env = "msvc"))]
-#[global_allocator]
-static GLOBAL: Jemalloc = Jemalloc;
-static JEMALLOC_INITIALIZED: AtomicBool = AtomicBool::new(false);
-
 #[no_mangle]
 pub extern "system" fn Java_org_opensearch_search_stream_collector_DataFusionAggregator_processBatch(
     mut env: JNIEnv,
@@ -254,17 +246,6 @@ pub extern "system" fn Java_org_opensearch_datafusion_SessionContext_createSessi
     _class: JClass,
     size: jint,
 ) -> jlong {
-        // Set initialized flag and print confirmation
-        if !JEMALLOC_INITIALIZED.swap(true, Ordering::SeqCst) {
-            eprintln!("JEMALLOC INITIALIZED - Profiling should be active");
-            
-            // Check if MALLOC_CONF is set
-            if let Ok(conf) = std::env::var("MALLOC_CONF") {
-                eprintln!("MALLOC_CONF is set to: {}", conf);
-            } else {
-                eprintln!("WARNING: MALLOC_CONF environment variable is not set");
-            }
-        }
     let config = SessionConfig::new().with_repartition_aggregations(true);
     let context = SessionContext::new_with_config(config);
     let ctx = Box::into_raw(Box::new(context)) as jlong;
@@ -534,20 +515,20 @@ impl DataFusionAggregator {
     }
 }
 
-// Function to manually trigger a heap dump
-fn force_jemalloc_dump() {
-    unsafe {
-        let dump_str = CString::new("prof.dump").unwrap();
-        jemalloc_sys::mallctl(
-            dump_str.as_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            0,
-        );
-        eprintln!("Manually triggered jemalloc heap dump");
-    }
-}
+// // Function to manually trigger a heap dump
+// fn force_jemalloc_dump() {
+//     unsafe {
+//         let dump_str = CString::new("prof.dump").unwrap();
+//         jemalloc_sys::mallctl(
+//             dump_str.as_ptr(),
+//             std::ptr::null_mut(),
+//             std::ptr::null_mut(),
+//             std::ptr::null_mut(),
+//             0,
+//         );
+//         eprintln!("Manually triggered jemalloc heap dump");
+//     }
+// }
 
 #[no_mangle]
 pub extern "system" fn Java_org_opensearch_search_stream_collector_DataFusionAggregator_unionFrames(
@@ -592,7 +573,7 @@ pub extern "system" fn Java_org_opensearch_search_stream_collector_DataFusionAgg
         let df_box = Box::new(df);
         Box::into_raw(df_box)
     });
-    force_jemalloc_dump();
+    // force_jemalloc_dump();
     set_object_result(&mut env, callback, ptr_result);
 }
 
