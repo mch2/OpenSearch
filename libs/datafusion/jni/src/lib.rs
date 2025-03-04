@@ -1,10 +1,9 @@
 use std::error::Error;
-use std::ffi::CString;
 use std::io::Cursor;
 use std::ptr::addr_of_mut;
-use std::sync::atomic::{AtomicBool,Ordering};
 use std::sync::Arc;
 
+use aggregator::DataFusionAggregator;
 use arrow::array::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
 use arrow::array::{Array, RecordBatch, StructArray};
 use arrow::ffi::{self};
@@ -14,18 +13,19 @@ use bytes::Bytes;
 use datafusion::error::DataFusionError;
 use datafusion::execution::SendableRecordBatchStream;
 use datafusion::functions_aggregate::count::count;
-use datafusion::functions_aggregate::sum::sum;
 
 use datafusion::prelude::{col, DataFrame, SessionConfig, SessionContext};
 use futures::stream::TryStreamExt;
-use jni::objects::{GlobalRef, JByteArray, JClass, JLongArray, JObject, JString, JValue, ReleaseMode};
+use jni::objects::{GlobalRef, JByteArray, JClass, JLongArray, JObject, JString, ReleaseMode};
 use jni::sys::{jint, jlong};
 use jni::{JNIEnv, JavaVM};
 use tokio::time::Duration;
 
 use std::io::BufWriter;
 use tokio::runtime::Runtime;
+
 mod provider;
+mod aggregator; 
 
 #[no_mangle]
 pub extern "system" fn Java_org_opensearch_search_stream_collector_DataFusionAggregator_processBatch(
@@ -338,17 +338,10 @@ pub extern "system" fn Java_org_opensearch_datafusion_DataFusion_executeStream(
                 set_object_result_async(java_vm, callback_ref, stream_ptr);
             }
             Err(e) => {
-                // set_object_result_async(java_vm, callback_ref, std::ptr::null_mut());
+                set_object_result_async(java_vm, callback_ref, std::ptr::null_mut());
                 println!("ERROR {:?}", e);
             }
         }
-        // let mut address = stream_result.map(|stream| Box::into_raw(Box::new(stream)));
-        // set_object_result_async(java_vm, callback_ref, addr_of_mut!(address));
-        // set_object_result(
-        //     &mut env,
-        //     callback,
-        //     stream_result.map(|stream| Box::into_raw(Box::new(stream))),
-        // );
     });
 }
 
@@ -443,92 +436,7 @@ pub extern "system" fn Java_org_opensearch_datafusion_DataFrame_destroyDataFrame
     let _ = unsafe { Box::from_raw(pointer as *mut DataFrame) };
 }
 
-pub struct DataFusionAggregator {
-    context: SessionContext,
-    current_aggregation: Option<DataFrame>,
-    term_column: String,
-}
 
-impl DataFusionAggregator {
-    pub fn new(context: SessionContext, term_column: String) -> Self {
-        DataFusionAggregator {
-            context,
-            current_aggregation: None,
-            term_column,
-        }
-    }
-
-    pub async fn push_batch(&mut self, batch: RecordBatch) -> Result<(), DataFusionError> {
-        // agg and collect the new batch immediately, we need to pre-aggregate the incoming batch
-        // so that union works, otherwise we have 2 cols union with 1.
-        let aggregated = self
-            .context
-            .read_batch(batch)?
-            .filter(col(&self.term_column).is_not_null())?
-            .aggregate(
-                vec![col(&self.term_column).alias("ord")],
-                vec![count(col(&self.term_column)).alias("count")],
-            )?
-            .collect()
-            .await?;
-
-        // Convert collected batches back to DataFrame
-        let incoming_df = self.context.read_batches(aggregated)?;
-
-        // Merge with existing aggregation if we have one
-        self.current_aggregation = match self.current_aggregation.take() {
-            Some(existing) => {
-                let merged = existing.union(incoming_df)?.collect().await?;
-                Some(self.context.read_batches(merged)?)
-            }
-            None => Some(incoming_df),
-        };
-
-        Ok(())
-    }
-
-    pub fn get_results(&self) -> Option<DataFrame> {
-        self.current_aggregation.as_ref().and_then(|df| {
-            df.clone()
-                .aggregate(vec![col("ord")], vec![sum(col("count")).alias("count")])
-                .unwrap()
-                .sort(vec![col("ord").sort(false, false)])
-                .ok()
-        })
-    }
-
-    pub fn get_results_with_limit(&self, limit: i32) -> Option<DataFrame> {
-        self.current_aggregation.as_ref().and_then(|df| {
-            if limit > 0 {
-                df.clone()
-                    .limit(0, Some(limit as usize))
-                    .and_then(|limited| limited.sort(vec![col("ord").sort(false, false)]))
-                    .ok()
-            } else {
-                Some(df.clone())
-            }
-        })
-    }
-
-    pub fn take_results(&mut self) -> Option<DataFrame> {
-        self.current_aggregation.take()
-    }
-}
-
-// // Function to manually trigger a heap dump
-// fn force_jemalloc_dump() {
-//     unsafe {
-//         let dump_str = CString::new("prof.dump").unwrap();
-//         jemalloc_sys::mallctl(
-//             dump_str.as_ptr(),
-//             std::ptr::null_mut(),
-//             std::ptr::null_mut(),
-//             std::ptr::null_mut(),
-//             0,
-//         );
-//         eprintln!("Manually triggered jemalloc heap dump");
-//     }
-// }
 
 #[no_mangle]
 pub extern "system" fn Java_org_opensearch_search_stream_collector_DataFusionAggregator_unionFrames(
@@ -547,7 +455,7 @@ pub extern "system" fn Java_org_opensearch_search_stream_collector_DataFusionAgg
     };
     
     if elements.is_empty() {
-        // set_object_result(&mut env, callback, Ok(std::ptr::null_mut()));
+        set_object_result(&mut env, callback, Ok(std::ptr::null_mut()));
         return;
     }
 
