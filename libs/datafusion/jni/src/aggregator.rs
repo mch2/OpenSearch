@@ -1,74 +1,77 @@
 use arrow::array::RecordBatch;
 use datafusion::{error::DataFusionError, functions_aggregate::{count::count, sum::sum}, prelude::{col, DataFrame, SessionContext}};
 
-pub struct DataFusionAggregator {
-    context: SessionContext,
-    current_aggregation: Option<DataFrame>,
-    term_column: String,
+ pub async fn aggregate_batch(
+    ctx: &SessionContext,
+    record_batch: RecordBatch,
+    term_str: &str,
+) -> Result<DataFrame, DataFusionError> {
+
+    // Process the data using DataFusion
+    let result = ctx
+        .read_batch(record_batch)?
+        .filter(col(term_str).is_not_null())?
+        .aggregate(
+            vec![col(term_str).alias("ord")],
+            vec![count(col(term_str)).alias("count")],
+        )?
+        .collect()
+        .await?;
+
+    // Convert result back to DataFrame
+    Ok(ctx.read_batches(result)?)
 }
 
-impl DataFusionAggregator {
-    pub fn new(context: SessionContext, term_column: String) -> Self {
-        DataFusionAggregator {
-            context,
-            current_aggregation: None,
-            term_column,
-        }
-    }
-
-    pub async fn push_batch(&mut self, batch: RecordBatch) -> Result<(), DataFusionError> {
-        // agg and collect the new batch immediately, we need to pre-aggregate the incoming batch
-        // so that union works, otherwise we have 2 cols union with 1.
-        let aggregated = self
-            .context
-            .read_batch(batch)?
-            .filter(col(&self.term_column).is_not_null())?
-            .aggregate(
-                vec![col(&self.term_column).alias("ord")],
-                vec![count(col(&self.term_column)).alias("count")],
-            )?
-            .collect()
-            .await?;
-
-        // Convert collected batches back to DataFrame
-        let incoming_df = self.context.read_batches(aggregated)?;
-
-        // Merge with existing aggregation if we have one
-        self.current_aggregation = match self.current_aggregation.take() {
-            Some(existing) => {
-                let merged = existing.union(incoming_df)?.collect().await?;
-                Some(self.context.read_batches(merged)?)
-            }
-            None => Some(incoming_df),
-        };
-
-        Ok(())
-    }
-
-    pub fn get_results(&self) -> Option<DataFrame> {
-        self.current_aggregation.as_ref().and_then(|df| {
-            df.clone()
-                .aggregate(vec![col("ord")], vec![sum(col("count")).alias("count")])
-                .unwrap()
-                .sort(vec![col("ord").sort(false, false)])
-                .ok()
+// Union a list of DataFrames
+fn union_df(frames: Vec<DataFrame>) -> datafusion::common::Result<DataFrame> {
+    Ok(frames
+        .into_iter()
+        .reduce(|acc, df| match acc.union(df) {
+            Ok(unioned_df) => unioned_df,
+            Err(e) => panic!("Failed to union DataFrames: {}", e),
         })
+        .ok_or_else(|| DataFusionError::Execution("No frames to union".to_string()))?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::array::Int64Array;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use datafusion::assert_batches_sorted_eq;
+    use datafusion::prelude::SessionConfig;
+    use std::sync::Arc;
+
+    fn create_test_batch(values: Vec<i64>) -> RecordBatch {
+        let schema = Schema::new(vec![Field::new("category", DataType::Int64, false)]);
+        let array = Int64Array::from(values);
+
+        RecordBatch::try_new(Arc::new(schema), vec![Arc::new(array)]).unwrap()
     }
 
-    pub fn get_results_with_limit(&self, limit: i32) -> Option<DataFrame> {
-        self.current_aggregation.as_ref().and_then(|df| {
-            if limit > 0 {
-                df.clone()
-                    .limit(0, Some(limit as usize))
-                    .and_then(|limited| limited.sort(vec![col("ord").sort(false, false)]))
-                    .ok()
-            } else {
-                Some(df.clone())
-            }
-        })
-    }
+    #[tokio::test]
+    async fn test_aggregator_single_batch() {
+        let ctx = SessionContext::new_with_config(SessionConfig::new().with_batch_size(1));
+        // let mut aggregator = DataFusionAggregator::new(ctx, "`category`".to_string());
 
-    pub fn take_results(&mut self) -> Option<DataFrame> {
-        self.current_aggregation.take()
+        // Create a batch with [1, 1, 2, 2, 2]
+        let batch: RecordBatch = create_test_batch(vec![1, 1, 2, 2, 2]);
+
+        // Push batch and check results
+        let df = aggregate_batch(&ctx, batch, "category").await.unwrap();
+
+        // Get results and verify
+        let batches = df.collect().await.unwrap();
+
+        let expected = vec![
+            "+-----+-------+",
+            "| ord | count |",
+            "+-----+-------+",
+            "| 1   | 2     |",
+            "| 2   | 3     |",
+            "+-----+-------+",
+        ];
+        assert_batches_sorted_eq!(expected, &batches);
     }
 }

@@ -36,6 +36,7 @@ public class RecordBatchStream implements AutoCloseable {
     private final CDataDictionaryProvider dictionaryProvider;
     private boolean initialized = false;
     private VectorSchemaRoot vectorSchemaRoot = null;
+    public static Logger logger = LogManager.getLogger(RecordBatchStream.class);
 
     public RecordBatchStream(SessionContext ctx, long streamId, BufferAllocator allocator) {
         this.context = ctx;
@@ -46,7 +47,8 @@ public class RecordBatchStream implements AutoCloseable {
     }
 
     private static native void destroy(long pointer);
-
+    private static native void next(long runtime, long pointer, ObjectResultCallback callback);
+    private static native void getSchema(long pointer, ObjectResultCallback callback);
 
     @Override
     public void close() throws Exception {
@@ -57,8 +59,6 @@ public class RecordBatchStream implements AutoCloseable {
         }
     }
 
-    private static native void next(long runtime, long pointer, ObjectResultCallback callback);
-    public static Logger logger = LogManager.getLogger(RecordBatchStream.class);
 
     public CompletableFuture<Boolean> loadNextBatch() {
         ensureInitialized();
@@ -125,6 +125,4 @@ public class RecordBatchStream implements AutoCloseable {
             });
         return result.join();
     }
-
-    private static native void getSchema(long pointer, ObjectResultCallback callback);
 }

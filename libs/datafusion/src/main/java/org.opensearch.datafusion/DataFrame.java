@@ -22,6 +22,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.BiConsumer;
 
 /**
  * Represents a DataFrame, which is a result of a query.
@@ -55,9 +56,27 @@ public class DataFrame implements AutoCloseable {
         this.children = children;
     }
 
+    static native void executeStream(long runtime, long dataframe, ObjectResultCallback callback);
+    static native void collect(long runtime, long df, BiConsumer<String, byte[]> callback);
+    static native void union(long runtime, long frame, long another, ObjectResultCallback callback);
+
+    public CompletableFuture<DataFrame> union(DataFrame other) {
+        CompletableFuture<DataFrame> result = new CompletableFuture<>();
+        assert ctx.getPointer() == other.ctx.getPointer() : "Cannot union frames from different SessionContexts";
+        union(ctx.getRuntime(), ptr, other.ptr, (err, obj) -> {
+            if (err != null && err.isEmpty() == false) {
+                result.completeExceptionally(new RuntimeException(err));
+            } else {
+                DataFrame df = new DataFrame(ctx, ptr);
+                result.complete(df);
+            }
+        });
+        return result;
+    }
+
     public CompletableFuture<ArrowReader> collect(BufferAllocator allocator) {
         CompletableFuture<ArrowReader> result = new CompletableFuture<>();
-        DataFusion.collect(ctx.getRuntime(), ptr, (err, obj) -> {
+        collect(ctx.getRuntime(), ptr, (err, obj) -> {
             if (err != null && err.isEmpty() == false) {
                 result.completeExceptionally(new RuntimeException(err));
             } else {
@@ -71,7 +90,7 @@ public class DataFrame implements AutoCloseable {
     public CompletableFuture<RecordBatchStream> getStream(BufferAllocator allocator) {
         CompletableFuture<RecordBatchStream> result = new CompletableFuture<>();
         long runtimePointer = ctx.getRuntime();
-        DataFusion.executeStream(runtimePointer, ptr, (String errString, long streamId) -> {
+        executeStream(runtimePointer, ptr, (String errString, long streamId) -> {
             if (errString != null && errString.isEmpty() == false) {
                 result.completeExceptionally(new RuntimeException(errString));
             } else {

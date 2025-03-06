@@ -122,8 +122,8 @@ public class ArrowStreamingCollector extends FilterCollector {
                 // DATAFUSION HANDOFF
                 AccessController.doPrivileged((PrivilegedAction<Void>) () -> {
                     try {
-                        DataFrame dataFrame = DataFusion.from_vsr(allocator, collectionRoot, provider, term).get();
-                        RecordBatchStream recordBatchStream = dataFrame.getStream(allocator).get();
+//                        DataFrame dataFrame = DataFusion.from_vsr(allocator, collectionRoot, provider, term).get();
+                        RecordBatchStream recordBatchStream = null; // not used leaving for example
                         VectorSchemaRoot root = recordBatchStream.getVectorSchemaRoot();
                         VarCharVector ordVector = (VarCharVector) bucketRoot.getVector("ord");
                         BigIntVector countVector = (BigIntVector) bucketRoot.getVector("count");
@@ -158,7 +158,7 @@ public class ArrowStreamingCollector extends FilterCollector {
 //                       flushSignal.awaitConsumption(TimeValue.timeValueMillis(1000 * 120));
                         recordBatchStream.close(); // clean up DF pointers
                         collectionRoot.clear();
-                        dataFrame.close();
+//                        dataFrame.close();
                     } catch (Exception e) {
                         logger.error("eh", e);
                         throw new RuntimeException(e);

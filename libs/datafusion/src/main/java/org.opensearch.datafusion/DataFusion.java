@@ -29,15 +29,12 @@ public class DataFusion {
         System.loadLibrary("datafusion_jni");
     }
 
-    // create a DataFrame from a list of tickets.
+    // Coordinator methods -
+    // creates a DataFrame from a list of tickets.
     static native void query(long runtime, long ctx, byte[] ticket, ObjectResultCallback callback);
-
     static native void agg(long runtime, long ctx, byte[] ticket, int size, ObjectResultCallback callback);
 
-    // collect the DataFrame
-    static native void collect(long runtime, long df, BiConsumer<String, byte[]> callback);
-
-    static native void executeStream(long runtime, long dataframe, ObjectResultCallback callback);
+    // Data Node methods
 
     public static CompletableFuture<DataFrame> query(SessionContext ctx, byte[] ticket) {
         CompletableFuture<DataFrame> future = new CompletableFuture<>();
@@ -64,28 +61,4 @@ public class DataFusion {
         });
         return future;
     }
-
-    public static CompletableFuture<DataFrame> from_vsr(BufferAllocator allocator, VectorSchemaRoot root, DictionaryProvider provider, String term) {
-        SessionContext ctx = new SessionContext();
-        CompletableFuture<DataFrame> result = new CompletableFuture<>();
-        ArrowArray array = ArrowArray.allocateNew(allocator);
-        ArrowSchema schema = ArrowSchema.allocateNew(allocator);
-
-        Data.exportVectorSchemaRoot(allocator, root, provider, array, schema);
-
-        long arrayPtr = array.memoryAddress();
-        long schemaPtr = schema.memoryAddress();
-
-//        DataFusion.load(ctx.getRuntime(), ctx.getPointer(), arrayPtr, schemaPtr, term, (err, ptr) -> {
-//            if (err != null) {
-//                result.completeExceptionally(new RuntimeException(err));
-//            } else {
-//                DataFrame df = new DataFrame(ctx, ptr);
-//                result.complete(df);
-//            }
-//        });
-
-        return result;
-    }
-
 }

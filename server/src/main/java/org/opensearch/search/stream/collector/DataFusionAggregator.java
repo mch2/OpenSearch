@@ -28,15 +28,12 @@ public class DataFusionAggregator implements AutoCloseable {
         System.loadLibrary("datafusion_jni");
     }
     private final SessionContext context;
-    private final long ptr;
     private final DictionaryProvider dictionaryProvider;
     private final String term;
     List<CompletableFuture<DataFrame>> batchFutures = new ArrayList<>();
 
-
     public DataFusionAggregator(String term, int batchSize) {
         this.context = new SessionContext(batchSize);
-        this.ptr = create(context.getPointer(), term);
         this.term = term;
         this.dictionaryProvider = new CDataDictionaryProvider();
     }
@@ -44,18 +41,17 @@ public class DataFusionAggregator implements AutoCloseable {
     // use default DF batch size (8192)
     public DataFusionAggregator(String term) {
         this.context = new SessionContext();
-        this.ptr = create(context.getPointer(), term);
         this.dictionaryProvider = new CDataDictionaryProvider();
         this.term = term;
     }
 
-    public CompletableFuture<DataFrame> pushBatch(BufferAllocator allocator, VectorSchemaRoot root) {
+    public CompletableFuture<DataFrame> exportBatch(BufferAllocator allocator, VectorSchemaRoot root) {
         CompletableFuture<DataFrame> result = new CompletableFuture<>();
         batchFutures.add(result);
-        try {
+        try (
             ArrowArray array = ArrowArray.allocateNew(allocator);
-            ArrowSchema schema = ArrowSchema.allocateNew(allocator);
-
+            ArrowSchema schema = ArrowSchema.allocateNew(allocator)
+        ) {
             Data.exportVectorSchemaRoot(allocator, root, dictionaryProvider, array, schema);
 
             processBatch(
@@ -118,12 +114,9 @@ public class DataFusionAggregator implements AutoCloseable {
 
     @Override
     public void close() throws Exception {
-        destroy(ptr);
         context.close();
     }
 
     private static native void processBatch(long runtime, long ctx, long arrayPtr, long schemaPtr, String term, ObjectResultCallback callback);
-    private static native long create(long ctx, String term);
-    private static native void destroy(long ptr);
     private static native void unionFrames(long runtime, long ctx, long[] framePointers, int limit, ObjectResultCallback callback);
 }

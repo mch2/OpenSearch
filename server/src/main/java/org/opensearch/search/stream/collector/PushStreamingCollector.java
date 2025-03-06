@@ -133,7 +133,7 @@ public class PushStreamingCollector extends FilterCollector {
                         ordinalVector[0] = collectionRoot.getVector(arrowFieldAdaptor.fieldName);
 
                         // Push batch to streaming aggregator
-                        CompletableFuture<DataFrame> fut = aggregator.pushBatch(allocator, batchToProcess);
+                        CompletableFuture<DataFrame> fut = aggregator.exportBatch(allocator, batchToProcess);
                         fut.whenComplete((frame, err) -> {
                             // close each incremental batch
                             batchToProcess.close();

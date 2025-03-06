@@ -200,11 +200,11 @@ async fn test_read_aggs() -> datafusion::common::Result<()> {
     )?;
     // Simple schema encoding
     let fb = IpcSchemaEncoder::new().schema_to_fb(&schema);
-    let schema_bytes = &fb.finished_data();
+    let schema_bytes = Bytes::new();
         // Add IPC message framing
         let mut message = Vec::new();
         message.extend_from_slice(&(schema_bytes.len() as i32).to_le_bytes());
-        message.extend_from_slice(schema_bytes);
+        message.extend_from_slice(&schema_bytes);
     
     // Set up flight endpoint
     let endpoint = FlightEndpoint::default().with_ticket(Ticket::new("bytes".as_bytes()));
@@ -280,16 +280,6 @@ async fn test_read_aggs() -> datafusion::common::Result<()> {
         for i in 0..ord_array.len() {
             println!("  index {}: {:?}", i, ord_array.value(i));
         }
-
-        // let count_array = batch
-        //     .column(1)
-        //     .downcast_ref::<Int64Array>()
-        //     .expect("Expected Int64Array for count column");
-
-        // println!("count_array contents:");
-        // for i in 0..count_array.len() {
-        //     println!("  index {}: {:?}", i, count_array.value(i));
-        // }
     }
     Ok(())
 }

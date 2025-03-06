@@ -268,7 +268,7 @@ public class ArrowOrdinalCollector extends FilterCollector {
                     try {
 //                    logger.info("passing batch of {} docs to DF", currentRow[0]);
 //                    logger.info(provider.lookup(provider.getDictionaryIds().stream().findFirst().get()).getVector().)
-                        DataFrame dataFrame = DataFusion.from_vsr(allocator, collectionRoot, provider, term).get();
+                        DataFrame dataFrame = null; // not used, leaving for reference.
                         RecordBatchStream recordBatchStream = dataFrame.getStream(allocator).get();
                         VectorSchemaRoot root = recordBatchStream.getVectorSchemaRoot();
                         VarCharVector ordVector = (VarCharVector) bucketRoot.getVector("ord");
