@@ -52,7 +52,6 @@ public class DataFrameStreamProducer implements StreamProducer {
         this.frameSupplier = frameSupplier;
         this.partitions = partitions;
         this.rootTicket = streamRegistrar.registerStream(this, TaskId.EMPTY_TASK_ID);
-        logger.info("Registering stream producer {}", rootTicket);
     }
 
     @Override

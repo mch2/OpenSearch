@@ -742,7 +742,6 @@ public final class SearchPhaseController {
 
 //        StreamTicket ticket = streamManager.registerStream(new PartitionedStreamProducer(producer), TaskId.EMPTY_TASK_ID);
         StreamTicket ticket = streamManager.registerStream(producer, TaskId.EMPTY_TASK_ID);
-        logger.info("Registered DataFrameStreamProducer producer {}", ticket.getTicketId());
 
         return AccessController.doPrivileged((PrivilegedAction<ReducedQueryPhase>) () -> {
             StreamReader streamIterator = streamManager.getStreamReader(ticket);
