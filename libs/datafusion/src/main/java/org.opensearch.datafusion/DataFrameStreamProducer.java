@@ -12,6 +12,7 @@ import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.opensearch.ExceptionsHelper;
 import org.opensearch.arrow.spi.StreamManager;
 import org.opensearch.arrow.spi.StreamProducer;
 import org.opensearch.arrow.spi.StreamTicket;
@@ -22,6 +23,7 @@ import java.io.IOException;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 
@@ -41,6 +43,7 @@ public class DataFrameStreamProducer implements StreamProducer {
     private RecordBatchStream recordBatchStream;
     private boolean isCancelled = false;
     SessionContext ctx;
+    AtomicBoolean closed = new AtomicBoolean(false);
     public DataFrameStreamProducer(StreamManager streamRegistrar,
                                    Set<StreamTicket> partitions,
                                    BiFunction<SessionContext, StreamTicket, CompletableFuture<DataFrame>> frameSupplier) {
@@ -92,11 +95,6 @@ public class DataFrameStreamProducer implements StreamProducer {
             public boolean isCancelled() {
                 return isCancelled;
             }
-
-            void close() throws Exception {
-                logger.info("Closing in BatchedJob");
-                // close things when the producer does
-            }
         };
     }
 
@@ -112,25 +110,27 @@ public class DataFrameStreamProducer implements StreamProducer {
 
     @Override
     public void close() throws IOException {
-        logger.info("Closing in producer");
-        if (recordBatchStream != null) {
+        if (closed.getAndSet(true) == false) {
+            logger.error("Closing in producer {}", ExceptionsHelper.formatStackTrace(Thread.currentThread().getStackTrace()));
+            if (recordBatchStream != null) {
+                try {
+                    recordBatchStream.close();
+                } catch (Exception e) {
+                    logger.error("Unable to close recordbatchstream", e);
+                    throw new RuntimeException(e);
+                }
+            }
             try {
-                recordBatchStream.close();
+                df.close();
             } catch (Exception e) {
-                logger.error("Unable to close recordbatchstream", e);
                 throw new RuntimeException(e);
             }
-        }
-        try {
-            df.close();
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
-        streamRegistrar.removeStream(rootTicket);
-        try {
-            ctx.close();
-        } catch (Exception e) {
-            throw new RuntimeException(e);
+            streamRegistrar.removeStream(rootTicket);
+            try {
+                ctx.close();
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
         }
     }
 
