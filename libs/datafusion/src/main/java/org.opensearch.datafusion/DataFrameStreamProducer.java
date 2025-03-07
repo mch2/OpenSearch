@@ -111,7 +111,6 @@ public class DataFrameStreamProducer implements StreamProducer {
     @Override
     public void close() throws IOException {
         if (closed.getAndSet(true) == false) {
-            logger.error("Closing in producer {}", ExceptionsHelper.formatStackTrace(Thread.currentThread().getStackTrace()));
             if (recordBatchStream != null) {
                 try {
                     recordBatchStream.close();

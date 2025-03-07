@@ -43,14 +43,12 @@ public class DataFrame implements AutoCloseable {
     static native void destroyDataFrame(long pointer);
 
     public DataFrame(SessionContext ctx, long ptr) {
-        logger.info("Creating data frame {}", ptr);
         this.ctx = ctx;
         this.ptr = ptr;
         this.children = Collections.emptyList();
     }
 
     public DataFrame(SessionContext ctx, long ptr, List<DataFrame> children) {
-        logger.info("Creating data frame {}", ptr);
         this.ctx = ctx;
         this.ptr = ptr;
         this.children = children;

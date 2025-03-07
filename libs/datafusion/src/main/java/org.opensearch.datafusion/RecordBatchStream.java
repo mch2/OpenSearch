@@ -43,7 +43,6 @@ public class RecordBatchStream implements AutoCloseable {
         this.ptr = streamId;
         this.allocator = allocator;
         this.dictionaryProvider = new CDataDictionaryProvider();
-        logger.info("Created RecordBatchStream {}", ptr);
     }
 
     private static native void destroy(long pointer);
@@ -52,7 +51,6 @@ public class RecordBatchStream implements AutoCloseable {
 
     @Override
     public void close() throws Exception {
-        logger.info("Closing {}", ptr);
         destroy(ptr);
         dictionaryProvider.close();
         if (initialized) {
