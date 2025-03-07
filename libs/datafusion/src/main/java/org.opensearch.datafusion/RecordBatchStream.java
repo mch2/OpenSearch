@@ -52,6 +52,7 @@ public class RecordBatchStream implements AutoCloseable {
 
     @Override
     public void close() throws Exception {
+        logger.info("Closing {}", ptr);
         destroy(ptr);
         dictionaryProvider.close();
         if (initialized) {
@@ -65,7 +66,7 @@ public class RecordBatchStream implements AutoCloseable {
         return loadNextBatch(vectorSchemaRoot);
     }
 
-    public CompletableFuture<Boolean> loadNextBatch(VectorSchemaRoot root) {
+    CompletableFuture<Boolean> loadNextBatch(VectorSchemaRoot root) {
         long runtimePointer =  context.getRuntime();
         CompletableFuture<Boolean> result = new CompletableFuture<>();
         next(

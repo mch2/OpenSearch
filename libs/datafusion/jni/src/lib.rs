@@ -216,20 +216,6 @@ pub extern "system" fn Java_org_opensearch_datafusion_RecordBatchStream_next(
     });
 }
 
-// helper to pass Result<T, E> back to java - separate async functions here bc of use of JavaVM instead of JNIEnv
-// and GlobalRefs on callback.  
-fn set_object_result_async<T, E: Error>(
-    java_vm: JavaVM,
-    callback: GlobalRef,
-    address: Result<*mut T, E>,
-) {
-    let mut env = java_vm.attach_current_thread().unwrap();
-    match address {
-        Ok(address) => set_object_result_async_ok(&mut env, &callback, address),
-        Err(err) => set_object_result_async_err(&mut env, &callback, err),
-    };
-}
-
 fn set_object_result_async_ok<T>(env: &mut JNIEnv, callback: &GlobalRef, address: *mut T) {
     let err_message = JObject::null();
     env.call_method(
@@ -296,7 +282,12 @@ pub extern "system" fn Java_org_opensearch_datafusion_RecordBatchStream_destroy(
     _class: JClass,
     pointer: jlong,
 ) {
-    let _ = unsafe { Box::from_raw(pointer as *mut SendableRecordBatchStream) };
+    if pointer != 0 {
+        println!("Destroying RecordBatchStream at {:?}", pointer);
+        let _ = unsafe { Box::from_raw(pointer as *mut SendableRecordBatchStream) };
+    } else {
+        println!("Attempt to destroy null RecordBatchStream pointer");
+    }
 }
 
 // Data node aggregation helpers

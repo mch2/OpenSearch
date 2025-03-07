@@ -75,7 +75,7 @@ public class DataFrameStreamProducer implements StreamProducer {
                 try {
                     assert rootTicket != null;
                     // loadNextBatch will execute async in datafusion
-                    while (recordBatchStream.loadNextBatch(root).join()) {
+                    while (recordBatchStream.loadNextBatch().join()) {
                         flushSignal.awaitConsumption(TimeValue.timeValueMillis(1000));
                     }
                 } catch (Exception e) {
@@ -117,6 +117,7 @@ public class DataFrameStreamProducer implements StreamProducer {
             try {
                 recordBatchStream.close();
             } catch (Exception e) {
+                logger.error("Unable to close recordbatchstream", e);
                 throw new RuntimeException(e);
             }
         }
