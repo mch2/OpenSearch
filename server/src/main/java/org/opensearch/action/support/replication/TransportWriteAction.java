@@ -35,6 +35,10 @@ package org.opensearch.action.support.replication;
 import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.message.ParameterizedMessage;
 import org.opensearch.action.ActionRunnable;
+import org.opensearch.action.DocWriteResponse;
+import org.opensearch.action.admin.indices.flush.FlushRequest;
+import org.opensearch.action.bulk.BulkItemResponse;
+import org.opensearch.action.bulk.BulkShardResponse;
 import org.opensearch.action.support.ActionFilters;
 import org.opensearch.action.support.TransportActions;
 import org.opensearch.action.support.WriteRequest;
@@ -53,12 +57,15 @@ import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.index.IndexingPressureService;
 import org.opensearch.index.engine.Engine;
 import org.opensearch.index.mapper.MapperParsingException;
+import org.opensearch.index.seqno.SequenceNumbers;
 import org.opensearch.index.shard.IndexShard;
 import org.opensearch.index.shard.PrimaryShardClosedException;
+import org.opensearch.index.shard.ReplicationSinkException;
 import org.opensearch.index.translog.Translog;
 import org.opensearch.index.translog.Translog.Location;
 import org.opensearch.indices.IndicesService;
 import org.opensearch.indices.SystemIndices;
+import org.opensearch.indices.replication.common.ReplicationTimer;
 import org.opensearch.ratelimitting.admissioncontrol.enums.AdmissionControlActionType;
 import org.opensearch.telemetry.tracing.Span;
 import org.opensearch.telemetry.tracing.SpanBuilder;
@@ -68,8 +75,12 @@ import org.opensearch.telemetry.tracing.listener.TraceableActionListener;
 import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.TransportService;
 
+import java.util.Arrays;
+import java.util.Objects;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 
@@ -335,6 +346,8 @@ public abstract class TransportWriteAction<
         public final Location location;
         public final IndexShard primary;
         private final Logger logger;
+        private final long seqNo;
+
 
         public WritePrimaryResult(
             ReplicaRequest request,
@@ -344,7 +357,20 @@ public abstract class TransportWriteAction<
             IndexShard primary,
             Logger logger
         ) {
+            this(request, finalResponse, location, SequenceNumbers.NO_OPS_PERFORMED, operationFailure, primary, logger);
+        }
+
+        public WritePrimaryResult(
+            ReplicaRequest request,
+            @Nullable Response finalResponse,
+            @Nullable Location location,
+            @Nullable long maxSeqNo,
+            @Nullable Exception operationFailure,
+            IndexShard primary,
+            Logger logger
+        ) {
             super(request, finalResponse, operationFailure);
+            this.seqNo = maxSeqNo;
             this.location = location;
             this.primary = primary;
             this.logger = logger;
@@ -365,7 +391,7 @@ public abstract class TransportWriteAction<
                  * We call this after replication because this might wait for a refresh and that can take a while.
                  * This way we wait for the refresh in parallel on the primary and on the replica.
                  */
-                new AsyncAfterWriteAction(primary, replicaRequest, location, new RespondingWriteResult() {
+                new AsyncAfterWriteAction(primary, replicaRequest, location, seqNo, new RespondingWriteResult() {
                     @Override
                     public void onSuccess(boolean forcedRefresh) {
                         finalResponseIfSuccessful.setForcedRefresh(forcedRefresh);
@@ -411,7 +437,7 @@ public abstract class TransportWriteAction<
             if (finalFailure != null) {
                 listener.onFailure(finalFailure);
             } else {
-                new AsyncAfterWriteAction(replica, request, location, new RespondingWriteResult() {
+                new AsyncAfterWriteAction(replica, request, location, SequenceNumbers.NO_OPS_PERFORMED, new RespondingWriteResult() {
                     @Override
                     public void onSuccess(boolean forcedRefresh) {
                         listener.onResponse(null);
@@ -467,15 +493,20 @@ public abstract class TransportWriteAction<
         private final AtomicInteger pendingOps = new AtomicInteger(1);
         private final AtomicBoolean refreshed = new AtomicBoolean(false);
         private final AtomicReference<Exception> syncFailure = new AtomicReference<>(null);
+        private final AtomicReference<Exception> replicationFailure = new AtomicReference<>(null);
         private final RespondingWriteResult respond;
         private final IndexShard indexShard;
         private final WriteRequest<?> request;
         private final Logger logger;
+        private final long seqNo;
+        private final ReplicationTimer replicationTimer;
+        private final ReplicationTimer translogTimer;
 
         AsyncAfterWriteAction(
             final IndexShard indexShard,
             final WriteRequest<?> request,
             @Nullable final Translog.Location location,
+            final long seqNo,
             final RespondingWriteResult respond,
             final Logger logger
         ) {
@@ -501,11 +532,16 @@ public abstract class TransportWriteAction<
             this.waitUntilRefresh = waitUntilRefresh;
             this.respond = respond;
             this.location = location;
+            this.seqNo = seqNo;
             if ((sync = indexShard.getTranslogDurability() == Translog.Durability.REQUEST && location != null)) {
+                pendingOps.incrementAndGet();
+                // increment twice here for our new listener
                 pendingOps.incrementAndGet();
             }
             this.logger = logger;
             assert pendingOps.get() >= 0 && pendingOps.get() <= 3 : "pendingOpts was: " + pendingOps.get();
+            this.replicationTimer = new ReplicationTimer();
+            this.translogTimer = new ReplicationTimer();
         }
 
         /** calls the response listener if all pending operations have returned otherwise it just decrements the pending opts counter.*/
@@ -514,9 +550,12 @@ public abstract class TransportWriteAction<
             if (numPending == 0) {
                 if (syncFailure.get() != null) {
                     respond.onFailure(syncFailure.get());
+                } if (replicationFailure.get() != null) {
+                    respond.onFailure(replicationFailure.get());
                 } else {
                     respond.onSuccess(refreshed.get());
                 }
+                logger.info("Request finished with translog time --- {} --- replication seqNo: {} time: {}", translogTimer.time(), seqNo, replicationTimer.time());
             }
             assert numPending >= 0 && numPending <= 2 : "numPending must either 2, 1 or 0 but was " + numPending;
         }
@@ -540,10 +579,21 @@ public abstract class TransportWriteAction<
                     maybeFinish();
                 });
             }
+
             if (sync) {
                 assert pendingOps.get() > 0;
+                translogTimer.start();
                 indexShard.sync(location, (ex) -> {
+                    translogTimer.stop();
+//                    logger.info("[{}] Translog sync time --- {}", id, timer.time());
                     syncFailure.set(ex);
+                    maybeFinish();
+                });
+                replicationTimer.start();
+                indexShard.addReplicationListener(seqNo, (ex) -> {
+                    replicationTimer.stop();
+//                    logger.info("[{}] Replication Listener time --- {}", id, timer.time());
+                    replicationFailure.set(ex);
                     maybeFinish();
                 });
             }

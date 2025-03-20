@@ -117,6 +117,7 @@ public class ThreadPool implements ReportingService<ThreadPoolInfo>, Scheduler {
         public static final String SYSTEM_WRITE = "system_write";
         public static final String TRANSLOG_TRANSFER = "translog_transfer";
         public static final String TRANSLOG_SYNC = "translog_sync";
+        public static final String REPLICATION_SINKS = "REPLICATION_SINKS";
         public static final String REMOTE_PURGE = "remote_purge";
         public static final String REMOTE_REFRESH_RETRY = "remote_refresh_retry";
         public static final String REMOTE_RECOVERY = "remote_recovery";
@@ -194,6 +195,7 @@ public class ThreadPool implements ReportingService<ThreadPoolInfo>, Scheduler {
         map.put(Names.SYSTEM_WRITE, ThreadPoolType.FIXED);
         map.put(Names.TRANSLOG_TRANSFER, ThreadPoolType.SCALING);
         map.put(Names.TRANSLOG_SYNC, ThreadPoolType.FIXED);
+        map.put(Names.REPLICATION_SINKS, ThreadPoolType.FIXED);
         map.put(Names.REMOTE_PURGE, ThreadPoolType.SCALING);
         map.put(Names.REMOTE_REFRESH_RETRY, ThreadPoolType.SCALING);
         map.put(Names.REMOTE_RECOVERY, ThreadPoolType.SCALING);
@@ -301,6 +303,7 @@ public class ThreadPool implements ReportingService<ThreadPoolInfo>, Scheduler {
             new ScalingExecutorBuilder(Names.TRANSLOG_TRANSFER, 1, halfProc, TimeValue.timeValueMinutes(5))
         );
         builders.put(Names.TRANSLOG_SYNC, new FixedExecutorBuilder(settings, Names.TRANSLOG_SYNC, allocatedProcessors * 4, 10000));
+        builders.put(Names.REPLICATION_SINKS, new FixedExecutorBuilder(settings, Names.REPLICATION_SINKS, allocatedProcessors * 4, 10000));
         builders.put(Names.REMOTE_PURGE, new ScalingExecutorBuilder(Names.REMOTE_PURGE, 1, halfProc, TimeValue.timeValueMinutes(5)));
         builders.put(
             Names.REMOTE_REFRESH_RETRY,

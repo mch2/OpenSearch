@@ -40,6 +40,7 @@ import org.opensearch.action.support.replication.ReplicationResponse;
 import org.opensearch.action.support.replication.TransportWriteAction;
 import org.opensearch.core.index.AppendOnlyIndexOperationRetryException;
 import org.opensearch.index.engine.Engine;
+import org.opensearch.index.seqno.SequenceNumbers;
 import org.opensearch.index.shard.IndexShard;
 import org.opensearch.index.translog.Translog;
 
@@ -85,6 +86,7 @@ class BulkPrimaryExecutionContext {
     private final BulkShardRequest request;
     private final IndexShard primary;
     private Translog.Location locationToSync = null;
+    private long maxSeqNo = SequenceNumbers.NO_OPS_PERFORMED;
     private int currentIndex = -1;
 
     private ItemProcessingState currentItemState;
@@ -193,6 +195,10 @@ class BulkPrimaryExecutionContext {
         return locationToSync;
     }
 
+    public long getMaxSeqNoWritten() {
+        return maxSeqNo;
+    }
+
     private BulkItemRequest getCurrentItem() {
         return request.items()[currentIndex];
     }
@@ -296,6 +302,7 @@ class BulkPrimaryExecutionContext {
                 // set a blank ShardInfo so we can safely send it to the replicas. We won't use it in the real response though.
                 executionResult.getResponse().setShardInfo(new ReplicationResponse.ShardInfo());
                 locationToSync = TransportWriteAction.locationToSync(locationToSync, result.getTranslogLocation());
+                maxSeqNo = Math.max(maxSeqNo, result.getSeqNo());
                 break;
             case FAILURE:
                 if (result.getFailure() instanceof AppendOnlyIndexOperationRetryException) {

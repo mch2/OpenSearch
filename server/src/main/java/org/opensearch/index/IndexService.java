@@ -88,6 +88,8 @@ import org.opensearch.index.shard.IndexEventListener;
 import org.opensearch.index.shard.IndexShard;
 import org.opensearch.index.shard.IndexShardClosedException;
 import org.opensearch.index.shard.IndexingOperationListener;
+import org.opensearch.index.shard.ReplicationOperationListener;
+import org.opensearch.index.shard.ReplicationSink;
 import org.opensearch.index.shard.SearchOperationListener;
 import org.opensearch.index.shard.ShardNotFoundException;
 import org.opensearch.index.shard.ShardNotInPrimaryModeException;
@@ -116,6 +118,7 @@ import org.opensearch.threadpool.ThreadPool;
 import java.io.Closeable;
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -170,6 +173,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
     private final IndexSettings indexSettings;
     private final List<SearchOperationListener> searchOperationListeners;
     private final List<IndexingOperationListener> indexingOperationListeners;
+    private final List<ReplicationSink> replicationSinks;
     private final BooleanSupplier allowExpensiveQueries;
     private volatile AsyncRefreshTask refreshTask;
     private volatile AsyncTranslogFSync fsyncTask;
@@ -223,6 +227,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
         IndicesFieldDataCache indicesFieldDataCache,
         List<SearchOperationListener> searchOperationListeners,
         List<IndexingOperationListener> indexingOperationListeners,
+        List<ReplicationSink> replicationSinks,
         NamedWriteableRegistry namedWriteableRegistry,
         BooleanSupplier idFieldDataEnabled,
         BooleanSupplier allowExpensiveQueries,
@@ -304,6 +309,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
         this.readerWrapper = wrapperFactory.apply(this);
         this.searchOperationListeners = Collections.unmodifiableList(searchOperationListeners);
         this.indexingOperationListeners = Collections.unmodifiableList(indexingOperationListeners);
+        this.replicationSinks = Collections.unmodifiableList(replicationSinks);
         this.clusterDefaultRefreshIntervalSupplier = clusterDefaultRefreshIntervalSupplier;
         // kick off async ops for the first shard in this index
         this.refreshTask = new AsyncRefreshTask(this);
@@ -347,6 +353,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
         IndicesFieldDataCache indicesFieldDataCache,
         List<SearchOperationListener> searchOperationListeners,
         List<IndexingOperationListener> indexingOperationListeners,
+        List<ReplicationSink> replicationSinks,
         NamedWriteableRegistry namedWriteableRegistry,
         BooleanSupplier idFieldDataEnabled,
         BooleanSupplier allowExpensiveQueries,
@@ -384,6 +391,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
             indicesFieldDataCache,
             searchOperationListeners,
             indexingOperationListeners,
+            replicationSinks,
             namedWriteableRegistry,
             idFieldDataEnabled,
             allowExpensiveQueries,
@@ -461,6 +469,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
             indicesFieldDataCache,
             searchOperationListeners,
             indexingOperationListeners,
+            Collections.emptyList(),
             namedWriteableRegistry,
             idFieldDataEnabled,
             allowExpensiveQueries,
@@ -740,6 +749,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
                 path
             );
             eventListener.onStoreCreated(shardId);
+
             indexShard = new IndexShard(
                 routing,
                 this.indexSettings,
@@ -758,6 +768,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
                 engineWarmer,
                 searchOperationListeners,
                 indexingOperationListeners,
+                replicationSinks,
                 () -> globalCheckpointSyncer.accept(shardId),
                 retentionLeaseSyncer,
                 circuitBreakerService,

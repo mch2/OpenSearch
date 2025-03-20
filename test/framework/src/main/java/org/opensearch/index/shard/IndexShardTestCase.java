@@ -331,6 +331,20 @@ public abstract class IndexShardTestCase extends OpenSearchTestCase {
         return newShard(shardRouting, settings, engineFactory);
     }
 
+    protected IndexShard newShard(boolean primary, final IndexingOperationListener... listeners) throws IOException {
+        final RecoverySource recoverySource = primary
+            ? RecoverySource.EmptyStoreRecoverySource.INSTANCE
+            : RecoverySource.PeerRecoverySource.INSTANCE;
+        final ShardRouting shardRouting = TestShardRouting.newShardRouting(
+            new ShardId("index", "_na_", 0),
+            randomAlphaOfLength(10),
+            primary,
+            ShardRoutingState.INITIALIZING,
+            recoverySource
+        );
+        return newShard(shardRouting, Settings.EMPTY, listeners);
+    }
+
     protected IndexShard newShard(ShardRouting shardRouting, final IndexingOperationListener... listeners) throws IOException {
         return newShard(shardRouting, Settings.EMPTY, listeners);
     }
@@ -706,6 +720,7 @@ public abstract class IndexShardTestCase extends OpenSearchTestCase {
                 warmer,
                 Collections.emptyList(),
                 Arrays.asList(listeners),
+                Collections.emptyList(),
                 globalCheckpointSyncer,
                 retentionLeaseSyncer,
                 breakerService,
