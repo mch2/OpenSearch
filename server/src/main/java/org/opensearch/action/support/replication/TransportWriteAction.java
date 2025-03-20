@@ -544,6 +544,12 @@ public abstract class TransportWriteAction<
                 assert pendingOps.get() > 0;
                 indexShard.sync(location, (ex) -> {
                     syncFailure.set(ex);
+
+                    // add upload listener here to our shard and wrap maybeFinish.
+                    // note - this doesn't prevent a doc from the batch from getting uploaded prior to the xlog sync
+                    // we could have concurrent bulk requests processed, where one of the requests arrives here
+                    // and begins uploading up-to the required seqNo to ack.  We will handle translog failure with a negative ack, but like
+                    // the index it could still get uploaded/indexed.  We would also handle upload failure with a negative ack that could span across batches
                     maybeFinish();
                 });
             }

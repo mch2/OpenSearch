@@ -32,6 +32,7 @@
 
 package org.opensearch.index.shard;
 
+import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.message.ParameterizedMessage;
 import org.apache.lucene.codecs.CodecUtil;
@@ -365,6 +366,8 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
     private DiscoveryNodes discoveryNodes;
     private final Function<ShardId, ReplicationStats> segmentReplicationStatsProvider;
 
+    private final BatchingIndexingOperationListener batchingListener;
+
     public IndexShard(
         final ShardRouting shardRouting,
         final IndexSettings indexSettings,
@@ -423,6 +426,10 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         this.internalIndexingStats = new InternalIndexingStats();
         final List<IndexingOperationListener> listenersList = new ArrayList<>(listeners);
         listenersList.add(internalIndexingStats);
+
+
+        batchingListener = new BatchingIndexingOperationListener(threadPool.getThreadContext());
+        listenersList.add(batchingListener);
         this.indexingOperationListeners = new IndexingOperationListener.CompositeListener(listenersList, logger);
         this.globalCheckpointSyncer = globalCheckpointSyncer;
         this.retentionLeaseSyncer = Objects.requireNonNull(retentionLeaseSyncer);
@@ -1171,6 +1178,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
 
         return index(engine, operation);
     }
+    private static final Logger logger = LogManager.getLogger(IndexShard.class);
 
     public static Engine.Index prepareIndex(
         DocumentMapperForType docMapper,
@@ -2048,6 +2056,11 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         indexShardOperationPermits.blockOperations(30, TimeUnit.MINUTES, () -> { resetEngineToGlobalCheckpoint(); });
     }
 
+
+    public BatchingIndexingOperationListener getBatchListener() {
+        return batchingListener;
+    }
+
     /**
      * Wrapper for a non-closing reader
      *
@@ -2698,6 +2711,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
     private void onNewEngine(Engine newEngine) {
         assert Thread.holdsLock(engineMutex);
         refreshListeners.setCurrentRefreshLocationSupplier(newEngine.translogManager()::getTranslogLastWriteLocation);
+        batchingListener.initializeSeqNoTracker(newEngine.getProcessedLocalCheckpoint());
     }
 
     /**

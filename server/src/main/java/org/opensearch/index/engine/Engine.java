@@ -1492,6 +1492,7 @@ public abstract class Engine implements LifecycleAware, Closeable {
      *
      * @opensearch.internal
      */
+    @PublicApi(since = "3.0.0")
     public abstract static class Operation {
 
         /**

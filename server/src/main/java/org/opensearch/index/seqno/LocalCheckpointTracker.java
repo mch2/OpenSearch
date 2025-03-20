@@ -163,6 +163,15 @@ public class LocalCheckpointTracker {
         processedCheckpoint.compareAndSet(currentProcessedCheckpoint, seqNo);
     }
 
+    public synchronized void fastForwardPersistedSeqNo(final long seqNo) {
+        advanceMaxSeqNo(seqNo);
+        final long currentPersistedCheckpoint = persistedCheckpoint.get();
+        if (seqNo <= currentPersistedCheckpoint) {
+            return;
+        }
+        persistedCheckpoint.compareAndSet(currentPersistedCheckpoint, seqNo);
+    }
+
     private void markSeqNo(final long seqNo, final AtomicLong checkPoint, final Map<Long, CountedBitSet> bitSetMap) {
         assert Thread.holdsLock(this);
         // make sure we track highest seen sequence number
