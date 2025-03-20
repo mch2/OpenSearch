@@ -691,14 +691,14 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
                 && currentRouting.relocating()
                 && replicationTracker.isRelocated()
                 && (newRouting.relocating() == false || newRouting.equalsIgnoringMetadata(currentRouting) == false)) {
-                    // if the shard is not in primary mode anymore (after primary relocation) we have to fail when any changes in shard
-                    // routing occur (e.g. due to recovery failure / cancellation). The reason is that at the moment we cannot safely
-                    // reactivate primary mode without risking two active primaries.
-                    throw new IndexShardRelocatedException(
-                        shardId(),
-                        "Shard is marked as relocated, cannot safely move to state " + newRouting.state()
-                    );
-                }
+                // if the shard is not in primary mode anymore (after primary relocation) we have to fail when any changes in shard
+                // routing occur (e.g. due to recovery failure / cancellation). The reason is that at the moment we cannot safely
+                // reactivate primary mode without risking two active primaries.
+                throw new IndexShardRelocatedException(
+                    shardId(),
+                    "Shard is marked as relocated, cannot safely move to state " + newRouting.state()
+                );
+            }
             assert newRouting.active() == false || state == IndexShardState.STARTED || state == IndexShardState.CLOSED
                 : "routing is active, but local shard state isn't. routing: " + newRouting + ", local state: " + state;
             persistMetadata(path, indexSettings, newRouting, currentRouting, logger);
@@ -844,10 +844,10 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
             this.shardRouting = newRouting;
 
             assert this.shardRouting.primary() == false || this.shardRouting.started() == false || // note that we use started and not
-            // active to avoid relocating shards
+                // active to avoid relocating shards
                 this.indexShardOperationPermits.isBlocked() || // if permits are blocked, we are still transitioning
                 this.replicationTracker.isPrimaryMode() : "a started primary with non-pending operation term must be in primary mode "
-                    + this.shardRouting;
+                + this.shardRouting;
             shardStateUpdated.countDown();
         }
         if (currentRouting.active() == false && newRouting.active()) {
@@ -2586,9 +2586,9 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         updateRetentionLeasesOnReplica(loadRetentionLeases());
         assert recoveryState.getRecoverySource().expectEmptyRetentionLeases() == false || getRetentionLeases().leases().isEmpty()
             : "expected empty set of retention leases with recovery source ["
-                + recoveryState.getRecoverySource()
-                + "] but got "
-                + getRetentionLeases();
+            + recoveryState.getRecoverySource()
+            + "] but got "
+            + getRetentionLeases();
         synchronized (engineMutex) {
             assert currentEngineReference.get() == null : "engine is running";
             verifyNotClosed();
@@ -3599,11 +3599,11 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
              */
             assert (state() != IndexShardState.POST_RECOVERY && state() != IndexShardState.STARTED)
                 || indexSettings.isAssignedOnRemoteNode() : "supposedly in-sync shard copy received a global checkpoint ["
-                    + globalCheckpoint
-                    + "] "
-                    + "that is higher than its local checkpoint ["
-                    + localCheckpoint
-                    + "]";
+                + globalCheckpoint
+                + "] "
+                + "that is higher than its local checkpoint ["
+                + localCheckpoint
+                + "]";
             return;
         }
         replicationTracker.updateGlobalCheckpointOnReplica(globalCheckpoint, reason);
@@ -3631,10 +3631,10 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         }
         assert getLocalCheckpoint() == primaryContext.getCheckpointStates().get(allocationId).getLocalCheckpoint()
             || indexSettings().getTranslogDurability() == Durability.ASYNC : "local checkpoint ["
-                + getLocalCheckpoint()
-                + "] does not match checkpoint from primary context ["
-                + primaryContext
-                + "]";
+            + getLocalCheckpoint()
+            + "] does not match checkpoint from primary context ["
+            + primaryContext
+            + "]";
         synchronized (mutex) {
             replicationTracker.activateWithPrimaryContext(primaryContext); // make changes to primaryMode flag only under mutex
         }
@@ -4053,7 +4053,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
          */
         boolean isReadOnlyReplica = indexSettings.isSegRepEnabledOrRemoteNode()
             && (shardRouting.primary() == false
-                || (shardRouting.isRelocationTarget() && recoveryState.getStage() != RecoveryState.Stage.FINALIZE));
+            || (shardRouting.isRelocationTarget() && recoveryState.getStage() != RecoveryState.Stage.FINALIZE));
 
         // For mixed mode, when relocating from doc rep to remote node, we use a writeable engine
         if (shouldSeedRemoteStore()) {
