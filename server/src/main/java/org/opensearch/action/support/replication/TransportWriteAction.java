@@ -55,6 +55,7 @@ import org.opensearch.index.engine.Engine;
 import org.opensearch.index.mapper.MapperParsingException;
 import org.opensearch.index.shard.IndexShard;
 import org.opensearch.index.shard.PrimaryShardClosedException;
+import org.opensearch.index.shard.ReplicationSinkException;
 import org.opensearch.index.translog.Translog;
 import org.opensearch.index.translog.Translog.Location;
 import org.opensearch.indices.IndicesService;
@@ -467,6 +468,7 @@ public abstract class TransportWriteAction<
         private final AtomicInteger pendingOps = new AtomicInteger(1);
         private final AtomicBoolean refreshed = new AtomicBoolean(false);
         private final AtomicReference<Exception> syncFailure = new AtomicReference<>(null);
+        private final AtomicReference<Exception> replicationFailure = new AtomicReference<>(null);
         private final RespondingWriteResult respond;
         private final IndexShard indexShard;
         private final WriteRequest<?> request;
@@ -503,6 +505,8 @@ public abstract class TransportWriteAction<
             this.location = location;
             if ((sync = indexShard.getTranslogDurability() == Translog.Durability.REQUEST && location != null)) {
                 pendingOps.incrementAndGet();
+                // increment twice here for our new listener
+                pendingOps.incrementAndGet();
             }
             this.logger = logger;
             assert pendingOps.get() >= 0 && pendingOps.get() <= 3 : "pendingOpts was: " + pendingOps.get();
@@ -514,6 +518,8 @@ public abstract class TransportWriteAction<
             if (numPending == 0) {
                 if (syncFailure.get() != null) {
                     respond.onFailure(syncFailure.get());
+                } if (replicationFailure.get() != null) {
+                    respond.onFailure(replicationFailure.get());
                 } else {
                     respond.onSuccess(refreshed.get());
                 }
@@ -544,12 +550,10 @@ public abstract class TransportWriteAction<
                 assert pendingOps.get() > 0;
                 indexShard.sync(location, (ex) -> {
                     syncFailure.set(ex);
-
-                    // add upload listener here to our shard and wrap maybeFinish.
-                    // note - this doesn't prevent a doc from the batch from getting uploaded prior to the xlog sync
-                    // we could have concurrent bulk requests processed, where one of the requests arrives here
-                    // and begins uploading up-to the required seqNo to ack.  We will handle translog failure with a negative ack, but like
-                    // the index it could still get uploaded/indexed.  We would also handle upload failure with a negative ack that could span across batches
+                    maybeFinish();
+                });
+                indexShard.addReplicationListener(location, (ex) -> {
+                    replicationFailure.set(ex);
                     maybeFinish();
                 });
             }

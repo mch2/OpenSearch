@@ -365,8 +365,8 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
     private final ShardMigrationState shardMigrationState;
     private DiscoveryNodes discoveryNodes;
     private final Function<ShardId, ReplicationStats> segmentReplicationStatsProvider;
-
-    private final BatchingIndexingOperationListener batchingListener;
+    private final ReplicationOperationListener replicationOperationListener;
+    private final List<ReplicationSink> sinks;
 
     public IndexShard(
         final ShardRouting shardRouting,
@@ -386,6 +386,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         final Engine.Warmer warmer,
         final List<SearchOperationListener> searchOperationListener,
         final List<IndexingOperationListener> listeners,
+        final List<ReplicationSink> sinks,
         final Runnable globalCheckpointSyncer,
         final RetentionLeaseSyncer retentionLeaseSyncer,
         final CircuitBreakerService circuitBreakerService,
@@ -426,10 +427,11 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         this.internalIndexingStats = new InternalIndexingStats();
         final List<IndexingOperationListener> listenersList = new ArrayList<>(listeners);
         listenersList.add(internalIndexingStats);
-
-
-        batchingListener = new BatchingIndexingOperationListener(threadPool.getThreadContext());
-        listenersList.add(batchingListener);
+        this.sinks = sinks;
+        replicationOperationListener = this.sinks.isEmpty() ? null : new ReplicationOperationListener(this, sinks, threadPool.getThreadContext());
+        if (this.routingEntry().primary()) {
+            listenersList.add(replicationOperationListener);
+        };
         this.indexingOperationListeners = new IndexingOperationListener.CompositeListener(listenersList, logger);
         this.globalCheckpointSyncer = globalCheckpointSyncer;
         this.retentionLeaseSyncer = Objects.requireNonNull(retentionLeaseSyncer);
@@ -2056,11 +2058,6 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         indexShardOperationPermits.blockOperations(30, TimeUnit.MINUTES, () -> { resetEngineToGlobalCheckpoint(); });
     }
 
-
-    public BatchingIndexingOperationListener getBatchListener() {
-        return batchingListener;
-    }
-
     /**
      * Wrapper for a non-closing reader
      *
@@ -2711,7 +2708,11 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
     private void onNewEngine(Engine newEngine) {
         assert Thread.holdsLock(engineMutex);
         refreshListeners.setCurrentRefreshLocationSupplier(newEngine.translogManager()::getTranslogLastWriteLocation);
-        batchingListener.initializeSeqNoTracker(newEngine.getProcessedLocalCheckpoint());
+        getReplicationOperationListener().ifPresent(l -> l.initializeSeqNoTracker(newEngine.getProcessedLocalCheckpoint()));
+    }
+
+    Optional<ReplicationOperationListener> getReplicationOperationListener() {
+        return Optional.ofNullable(replicationOperationListener);
     }
 
     /**
@@ -3166,6 +3167,28 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
 
     public IndexEventListener getIndexEventListener() {
         return indexEventListener;
+    }
+
+    public void addReplicationListener(Translog.Location location, Consumer<Exception> callback) {
+        verifyNotClosed();
+        if (routingEntry().primary() == false) {
+            callback.accept(null);
+            return;
+        }
+        getReplicationOperationListener().ifPresentOrElse((l) -> {
+            try {
+                final long seqNo = getEngine().translogManager().readOperation(location).seqNo();
+                l.addListener(seqNo, (e) -> {
+                    if (e == null || (e instanceof ReplicationSinkException rse && rse.getMaxReplicated() >= seqNo)) {
+                        callback.accept(null);
+                    } else {
+                        callback.accept(e);
+                    }
+                });
+            } catch (IOException e) {
+                callback.accept(e);
+            }
+        }, () -> callback.accept(null));
     }
 
     public void activateThrottling() {

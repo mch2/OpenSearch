@@ -707,6 +707,7 @@ public class IndexShardIT extends OpenSearchSingleNodeTestCase {
             null,
             Collections.emptyList(),
             Arrays.asList(listeners),
+            Arrays.asList(),
             () -> {},
             RetentionLeaseSyncer.EMPTY,
             cbs,
