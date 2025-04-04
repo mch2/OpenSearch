@@ -364,6 +364,9 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
     private final ShardMigrationState shardMigrationState;
     private DiscoveryNodes discoveryNodes;
 
+    private final ReplicationOperationListener replicationOperationListener;
+    private final List<ReplicationSink> sinks;
+
     public IndexShard(
         final ShardRouting shardRouting,
         final IndexSettings indexSettings,
@@ -382,6 +385,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         final Engine.Warmer warmer,
         final List<SearchOperationListener> searchOperationListener,
         final List<IndexingOperationListener> listeners,
+        final List<ReplicationSink> sinks,
         final Runnable globalCheckpointSyncer,
         final RetentionLeaseSyncer retentionLeaseSyncer,
         final CircuitBreakerService circuitBreakerService,
@@ -421,6 +425,11 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         this.internalIndexingStats = new InternalIndexingStats();
         final List<IndexingOperationListener> listenersList = new ArrayList<>(listeners);
         listenersList.add(internalIndexingStats);
+        this.sinks = sinks;
+        replicationOperationListener = this.sinks.isEmpty() ? null : new ReplicationOperationListener(this, sinks, threadPool.getThreadContext());
+        if (this.routingEntry().primary()) {
+            listenersList.add(replicationOperationListener);
+        };
         this.indexingOperationListeners = new IndexingOperationListener.CompositeListener(listenersList, logger);
         this.globalCheckpointSyncer = globalCheckpointSyncer;
         this.retentionLeaseSyncer = Objects.requireNonNull(retentionLeaseSyncer);
@@ -2678,6 +2687,43 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
     private void onNewEngine(Engine newEngine) {
         assert Thread.holdsLock(engineMutex);
         refreshListeners.setCurrentRefreshLocationSupplier(newEngine::getTranslogLastWriteLocation);
+        getReplicationOperationListener().ifPresent(l -> {
+            if (newEngine instanceof InternalEngine ie) {
+                l.initializeSeqNoTracker(ie.getProcessedLocalCheckpoint());
+            }
+        });
+    }
+
+    Optional<ReplicationOperationListener> getReplicationOperationListener() {
+        return Optional.ofNullable(replicationOperationListener);
+    }
+
+
+    public void addReplicationListener(Translog.Location location, Consumer<Exception> callback) {
+        verifyNotClosed();
+        Engine engine = getEngine();
+        if (engine instanceof InternalEngine ie) {
+            if (routingEntry().primary() == false) {
+                callback.accept(null);
+                return;
+            }
+            getReplicationOperationListener().ifPresentOrElse((l) -> {
+                try {
+                    final long seqNo = ie.translogManager().readOperation(location).seqNo();
+                    l.addListener(seqNo, (e) -> {
+                        if (e == null || (e instanceof ReplicationSinkException rse && rse.getMaxReplicated() >= seqNo)) {
+                            callback.accept(null);
+                        } else {
+                            callback.accept(e);
+                        }
+                    });
+                } catch (IOException e) {
+                    callback.accept(e);
+                }
+            }, () -> callback.accept(null));
+        } else {
+            callback.accept(new IllegalStateException("Wrong engine type"));
+        }
     }
 
     /**
