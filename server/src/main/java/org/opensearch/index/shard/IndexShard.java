@@ -2702,7 +2702,8 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
     public void addReplicationListener(Translog.Location location, Consumer<Exception> callback) {
         verifyNotClosed();
         Engine engine = getEngine();
-        if (engine instanceof InternalEngine ie) {
+        if (engine instanceof InternalEngine) {
+            InternalEngine ie = (InternalEngine) engine;
             if (routingEntry().primary() == false) {
                 callback.accept(null);
                 return;
@@ -2711,11 +2712,15 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
                 try {
                     final long seqNo = ie.translogManager().readOperation(location).seqNo();
                     l.addListener(seqNo, (e) -> {
-                        if (e == null || (e instanceof ReplicationSinkException rse && rse.getMaxReplicated() >= seqNo)) {
-                            callback.accept(null);
-                        } else {
-                            callback.accept(e);
+                        if (e == null) callback.accept(null);
+                        if (e instanceof ReplicationSinkException) {
+                            ReplicationSinkException rse = (ReplicationSinkException) e;
+                            if (rse.getMaxReplicated() >= seqNo) {
+                                callback.accept(null);
+                            }
                         }
+                        callback.accept(e);
+
                     });
                 } catch (IOException e) {
                     callback.accept(e);

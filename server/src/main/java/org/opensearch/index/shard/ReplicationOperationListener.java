@@ -208,10 +208,12 @@ public class ReplicationOperationListener implements IndexingOperationListener {
             OperationDetails finalOp = op;
             docIdToOperations.compute(op.docId(), (docId, existingOp) -> {
                 if (existingOp == null) return finalOp;
-                if (existingOp instanceof ReplicationSink.IndexingOperationDetails iod && finalOp instanceof ReplicationSink.IndexingOperationDetails fo) {
+                if (existingOp instanceof ReplicationSink.IndexingOperationDetails && finalOp instanceof ReplicationSink.IndexingOperationDetails) {
+                    ReplicationSink.IndexingOperationDetails existing = (ReplicationSink.IndexingOperationDetails) existingOp;
+                    ReplicationSink.IndexingOperationDetails fo = (ReplicationSink.IndexingOperationDetails) finalOp;
                     // in this case we have two index requests.  We need to merge the source & parsed documents recursively
                     // so that updates are reduced to a single view of the document.
-                    return merge(iod, fo);
+                    return merge(existing, fo);
                 } else {
                     return finalOp.seqNo() > existingOp.seqNo() ? finalOp : existingOp;
                 }
