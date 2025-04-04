@@ -10,6 +10,9 @@ package org.opensearch.index.shard;
 
 import org.opensearch.OpenSearchException;
 
+/**
+ * Error that can return a seqNo to indicate partial failures from a sink.
+ */
 public class ReplicationSinkException extends OpenSearchException {
 
     public long getMaxReplicated() {

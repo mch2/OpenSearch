@@ -16,9 +16,16 @@ import org.opensearch.index.mapper.ParsedDocument;
 
 import java.util.List;
 
+
+/**
+ * A Sink that will receive batches of recently indexed operations.
+ */
 @PublicApi(since = "3.0.0")
 public interface ReplicationSink {
 
+    /**
+     * Class wrapping an Operation indexed into the engine.
+     */
     @PublicApi(since = "3.0.0")
     abstract class OperationDetails {
         private String docId;
@@ -50,6 +57,9 @@ public interface ReplicationSink {
         }
     }
 
+    /**
+     * Index Operation
+     */
     @PublicApi(since = "3.0.0")
     class IndexingOperationDetails extends OperationDetails {
 
@@ -65,6 +75,9 @@ public interface ReplicationSink {
         }
     }
 
+    /**
+     * Delete Operation
+     */
     @PublicApi(since = "3.0.0")
     class DeleteOperationDetails extends OperationDetails {
         public DeleteOperationDetails(String docId, Term uId, long seqNo, long primaryTerm) {

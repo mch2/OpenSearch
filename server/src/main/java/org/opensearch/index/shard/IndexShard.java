@@ -2688,8 +2688,8 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         assert Thread.holdsLock(engineMutex);
         refreshListeners.setCurrentRefreshLocationSupplier(newEngine::getTranslogLastWriteLocation);
         getReplicationOperationListener().ifPresent(l -> {
-            if (newEngine instanceof InternalEngine ie) {
-                l.initializeSeqNoTracker(ie.getProcessedLocalCheckpoint());
+            if (newEngine instanceof InternalEngine) {
+                l.initializeSeqNoTracker(((InternalEngine) newEngine).getProcessedLocalCheckpoint());
             }
         });
     }
@@ -2712,15 +2712,18 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
                 try {
                     final long seqNo = ie.translogManager().readOperation(location).seqNo();
                     l.addListener(seqNo, (e) -> {
-                        if (e == null) callback.accept(null);
+                        if (e == null) {
+                            callback.accept(null);
+                            return;
+                        }
                         if (e instanceof ReplicationSinkException) {
                             ReplicationSinkException rse = (ReplicationSinkException) e;
                             if (rse.getMaxReplicated() >= seqNo) {
                                 callback.accept(null);
+                                return;
                             }
                         }
                         callback.accept(e);
-
                     });
                 } catch (IOException e) {
                     callback.accept(e);

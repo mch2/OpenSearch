@@ -40,6 +40,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
+import java.util.stream.Collectors;
 
 import static org.opensearch.index.seqno.SequenceNumbers.NO_OPS_PERFORMED;
 
@@ -167,7 +168,6 @@ public class ReplicationOperationListener implements IndexingOperationListener {
                 result.getTerm(),
                 index.parsedDoc()
             );
-            logger.info("Accepting {}", result.getSeqNo());
             operationsQueue.add(details);
         }
     }
@@ -219,9 +219,8 @@ public class ReplicationOperationListener implements IndexingOperationListener {
                 }
             });
         }
-        logger.info("Processed {} require {}", tracker.getProcessedCheckpoint(), requireProcessed);
         assert tracker.getProcessedCheckpoint() >= requireProcessed;
-        return docIdToOperations.values().stream().toList();
+        return new ArrayList<>(docIdToOperations.values());
     }
 
     private OperationDetails merge(ReplicationSink.IndexingOperationDetails iod, ReplicationSink.IndexingOperationDetails fo) {

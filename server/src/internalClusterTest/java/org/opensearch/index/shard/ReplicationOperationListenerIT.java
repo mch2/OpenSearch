@@ -74,7 +74,7 @@ public class ReplicationOperationListenerIT extends OpenSearchIntegTestCase {
         assertThat(refresh().getFailedShards(), equalTo(0));
 
         assertEquals(1, sink.getOps().size());
-        ReplicationSink.OperationDetails operationDetails = sink.getOps().get(sink.getOps().keySet().stream().findFirst().get()).getFirst();
+        ReplicationSink.OperationDetails operationDetails = sink.getOps().get(sink.getOps().keySet().stream().findFirst().get()).stream().findFirst().get();
         assertEquals(ReplicationSink.IndexingOperationDetails.class, operationDetails.getClass());
         ReplicationSink.IndexingOperationDetails op = (ReplicationSink.IndexingOperationDetails) operationDetails;
         Map<String, Object> sourceAsMap = SourceLookup.sourceAsMap(op.parsedDoc().source());
