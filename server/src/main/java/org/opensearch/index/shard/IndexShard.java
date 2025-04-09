@@ -3169,15 +3169,13 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         return indexEventListener;
     }
 
-    public void addReplicationListener(Translog.Location location, Consumer<Exception> callback) {
+    public void addReplicationListener(long seqNo, Consumer<Exception> callback) {
         verifyNotClosed();
-        if (routingEntry().primary() == false) {
+        if (routingEntry().primary() == false || seqNo <= NO_OPS_PERFORMED) {
             callback.accept(null);
             return;
         }
         getReplicationOperationListener().ifPresentOrElse((l) -> {
-            try {
-                final long seqNo = getEngine().translogManager().readOperation(location).seqNo();
                 l.addListener(seqNo, (e) -> {
                     if (e == null || (e instanceof ReplicationSinkException rse && rse.getMaxReplicated() >= seqNo)) {
                         callback.accept(null);
@@ -3185,9 +3183,6 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
                         callback.accept(e);
                     }
                 });
-            } catch (IOException e) {
-                callback.accept(e);
-            }
         }, () -> callback.accept(null));
     }
 

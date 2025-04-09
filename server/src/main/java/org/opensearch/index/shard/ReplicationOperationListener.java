@@ -167,7 +167,6 @@ public class ReplicationOperationListener implements IndexingOperationListener {
                 result.getTerm(),
                 index.parsedDoc()
             );
-            logger.info("Accepting {}", result.getSeqNo());
             operationsQueue.add(details);
         }
     }

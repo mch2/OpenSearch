@@ -154,6 +154,7 @@ public final class ShardGetService extends AbstractIndexShardComponent {
     }
 
     public GetResult getForUpdate(String id, long ifSeqNo, long ifPrimaryTerm) {
+        System.out.println("GetForUpdate");
         return get(
             id,
             new String[] { RoutingFieldMapper.NAME },
@@ -162,7 +163,8 @@ public final class ShardGetService extends AbstractIndexShardComponent {
             VersionType.INTERNAL,
             ifSeqNo,
             ifPrimaryTerm,
-            FetchSourceContext.FETCH_SOURCE
+//            FetchSourceContext.FETCH_SOURCE
+            new FetchSourceContext(true, null, new String[]{"field2"})
         );
     }
 
