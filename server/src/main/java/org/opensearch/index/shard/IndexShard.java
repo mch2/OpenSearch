@@ -238,6 +238,7 @@ import java.util.stream.StreamSupport;
 import static org.opensearch.index.seqno.RetentionLeaseActions.RETAIN_ALL;
 import static org.opensearch.index.seqno.SequenceNumbers.LOCAL_CHECKPOINT_KEY;
 import static org.opensearch.index.seqno.SequenceNumbers.MAX_SEQ_NO;
+import static org.opensearch.index.seqno.SequenceNumbers.NO_OPS_PERFORMED;
 import static org.opensearch.index.seqno.SequenceNumbers.UNASSIGNED_SEQ_NO;
 import static org.opensearch.index.shard.IndexShard.ShardMigrationState.REMOTE_MIGRATING_SEEDED;
 import static org.opensearch.index.shard.IndexShard.ShardMigrationState.REMOTE_MIGRATING_UNSEEDED;
@@ -2699,41 +2700,22 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
     }
 
 
-    public void addReplicationListener(Translog.Location location, Consumer<Exception> callback) {
+    public void addReplicationListener(long seqNo, Consumer<Exception> callback) {
         verifyNotClosed();
-        Engine engine = getEngine();
-        if (engine instanceof InternalEngine) {
-            InternalEngine ie = (InternalEngine) engine;
-            if (routingEntry().primary() == false) {
-                callback.accept(null);
-                return;
-            }
-            getReplicationOperationListener().ifPresentOrElse((l) -> {
-                try {
-                    final long seqNo = ie.translogManager().readOperation(location).seqNo();
-                    l.addListener(seqNo, (e) -> {
-                        if (e == null) {
-                            callback.accept(null);
-                            return;
-                        }
-                        if (e instanceof ReplicationSinkException) {
-                            ReplicationSinkException rse = (ReplicationSinkException) e;
-                            if (rse.getMaxReplicated() >= seqNo) {
-                                callback.accept(null);
-                                return;
-                            }
-                        }
-                        callback.accept(e);
-                    });
-                } catch (IOException e) {
+        if (routingEntry().primary() == false || seqNo <= NO_OPS_PERFORMED) {
+            callback.accept(null);
+            return;
+        }
+        getReplicationOperationListener().ifPresentOrElse((l) -> {
+            l.addListener(seqNo, (e) -> {
+                if (e == null || (e instanceof ReplicationSinkException rse && rse.getMaxReplicated() >= seqNo)) {
+                    callback.accept(null);
+                } else {
                     callback.accept(e);
                 }
-            }, () -> callback.accept(null));
-        } else {
-            callback.accept(new IllegalStateException("Wrong engine type"));
-        }
+            });
+        }, () -> callback.accept(null));
     }
-
     /**
      * called if recovery has to be restarted after network error / delay **
      */

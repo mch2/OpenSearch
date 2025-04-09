@@ -35,6 +35,9 @@ package org.opensearch.action.support.replication;
 import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.message.ParameterizedMessage;
 import org.opensearch.action.ActionRunnable;
+import org.opensearch.action.admin.indices.flush.FlushRequest;
+import org.opensearch.action.bulk.BulkItemResponse;
+import org.opensearch.action.bulk.BulkShardResponse;
 import org.opensearch.action.support.ActionFilters;
 import org.opensearch.action.support.TransportActions;
 import org.opensearch.action.support.WriteRequest;
@@ -53,6 +56,7 @@ import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.index.IndexingPressureService;
 import org.opensearch.index.engine.Engine;
 import org.opensearch.index.mapper.MapperParsingException;
+import org.opensearch.index.seqno.SequenceNumbers;
 import org.opensearch.index.shard.IndexShard;
 import org.opensearch.index.shard.PrimaryShardClosedException;
 import org.opensearch.index.shard.ReplicationSinkException;
@@ -69,6 +73,7 @@ import org.opensearch.telemetry.tracing.listener.TraceableActionListener;
 import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.TransportService;
 
+import java.util.Arrays;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -336,6 +341,7 @@ public abstract class TransportWriteAction<
         public final Location location;
         public final IndexShard primary;
         private final Logger logger;
+        private final long seqNo;
 
         public WritePrimaryResult(
             ReplicaRequest request,
@@ -346,6 +352,11 @@ public abstract class TransportWriteAction<
             Logger logger
         ) {
             super(request, finalResponse, operationFailure);
+            long seqNo = SequenceNumbers.NO_OPS_PERFORMED;
+            if (finalResponse instanceof BulkShardResponse bsr) {
+                seqNo = Arrays.stream(bsr.getResponses()).mapToLong(r -> r.getResponse().getSeqNo()).max().orElse(SequenceNumbers.NO_OPS_PERFORMED);
+            }
+            this.seqNo = seqNo;
             this.location = location;
             this.primary = primary;
             this.logger = logger;
@@ -366,7 +377,7 @@ public abstract class TransportWriteAction<
                  * We call this after replication because this might wait for a refresh and that can take a while.
                  * This way we wait for the refresh in parallel on the primary and on the replica.
                  */
-                new AsyncAfterWriteAction(primary, replicaRequest, location, new RespondingWriteResult() {
+                new AsyncAfterWriteAction(primary, replicaRequest, location, seqNo, new RespondingWriteResult() {
                     @Override
                     public void onSuccess(boolean forcedRefresh) {
                         finalResponseIfSuccessful.setForcedRefresh(forcedRefresh);
@@ -412,7 +423,7 @@ public abstract class TransportWriteAction<
             if (finalFailure != null) {
                 listener.onFailure(finalFailure);
             } else {
-                new AsyncAfterWriteAction(replica, request, location, new RespondingWriteResult() {
+                new AsyncAfterWriteAction(replica, request, location, SequenceNumbers.NO_OPS_PERFORMED, new RespondingWriteResult() {
                     @Override
                     public void onSuccess(boolean forcedRefresh) {
                         listener.onResponse(null);
@@ -473,11 +484,13 @@ public abstract class TransportWriteAction<
         private final IndexShard indexShard;
         private final WriteRequest<?> request;
         private final Logger logger;
+        private final long seqNo;
 
         AsyncAfterWriteAction(
             final IndexShard indexShard,
             final WriteRequest<?> request,
             @Nullable final Translog.Location location,
+            final long seqNo,
             final RespondingWriteResult respond,
             final Logger logger
         ) {
@@ -503,6 +516,7 @@ public abstract class TransportWriteAction<
             this.waitUntilRefresh = waitUntilRefresh;
             this.respond = respond;
             this.location = location;
+            this.seqNo = seqNo;
             if ((sync = indexShard.getTranslogDurability() == Translog.Durability.REQUEST && location != null)) {
                 pendingOps.incrementAndGet();
                 // increment twice here for our new listener
@@ -552,7 +566,11 @@ public abstract class TransportWriteAction<
                     syncFailure.set(ex);
                     maybeFinish();
                 });
-                indexShard.addReplicationListener(location, (ex) -> {
+                FlushRequest r = new FlushRequest();
+                r.force(true);
+                r.waitIfOngoing(true);
+                indexShard.flush(r);
+                indexShard.addReplicationListener(seqNo, (ex) -> {
                     replicationFailure.set(ex);
                     maybeFinish();
                 });
