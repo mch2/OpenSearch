@@ -39,6 +39,7 @@ import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
 import static org.opensearch.index.seqno.SequenceNumbers.NO_OPS_PERFORMED;
@@ -57,6 +58,10 @@ public class ReplicationOperationListener implements IndexingOperationListener {
 
     private static final Logger logger = LogManager.getLogger(ReplicationOperationListener.class);
     private final AsyncIOProcessor<Long> processor;
+
+    // the listener is wired up to any shard type as long as there are configured sinks on the index
+    // noop this listener if the shard is not primary.
+    private final AtomicBoolean active = new AtomicBoolean(false);
 
     /**
      * ReplicationOperationListener - IndexOperationListener implementation that batches operations post ingestion and hands off to a {@link ReplicationSink}.
@@ -78,6 +83,7 @@ public class ReplicationOperationListener implements IndexingOperationListener {
             @Override
             protected void write(List<Tuple<Long, Consumer<Exception>>> candidates) throws IOException {
                 assert candidates.isEmpty() == false;
+                assert active.get();
                 // find the max of the listeners
                 long maxSeqNo = candidates.stream().mapToLong(Tuple::v1).max().getAsLong();
                 if (tracker.getPersistedCheckpoint() >= maxSeqNo) {
@@ -143,8 +149,13 @@ public class ReplicationOperationListener implements IndexingOperationListener {
     }
 
     void initializeSeqNoTracker(long seqNo) {
-        tracker.fastForwardProcessedSeqNo(seqNo);
-        tracker.fastForwardPersistedSeqNo(seqNo);
+        assert active.get() == false;
+        assert operationsQueue.isEmpty();
+        if (shard.routingEntry().primary() && active.getAndSet(true) == false) {
+            logger.info("Initialing tracker with {}", seqNo);
+            tracker.fastForwardProcessedSeqNo(seqNo);
+            tracker.fastForwardPersistedSeqNo(seqNo);
+        }
     }
 
     long getSeenCheckpoint() {
@@ -159,7 +170,7 @@ public class ReplicationOperationListener implements IndexingOperationListener {
     // does parsedDoc contain the delta or whole doc - A: whole
     @Override
     public void postIndex(ShardId shardId, Engine.Index index, Engine.IndexResult result) {
-        if (result.isCreated() || result.getResultType() == Engine.Result.Type.SUCCESS) {
+        if (active.get() && result.isCreated() || result.getResultType() == Engine.Result.Type.SUCCESS) {
             OperationDetails details = new ReplicationSink.IndexingOperationDetails(
                 index.id(),
                 index.uid(),
@@ -168,12 +179,13 @@ public class ReplicationOperationListener implements IndexingOperationListener {
                 index.parsedDoc()
             );
             operationsQueue.add(details);
+            logger.info("Insert op for {}", details);
         }
     }
 
     @Override
     public void postDelete(ShardId shardId, Engine.Delete delete, Engine.DeleteResult result) {
-        if (result.getResultType() == Engine.Result.Type.SUCCESS) {
+        if (active.get() && result.getResultType() == Engine.Result.Type.SUCCESS) {
             OperationDetails details = new ReplicationSink.DeleteOperationDetails(
                 delete.id(),
                 delete.uid(),
@@ -181,6 +193,8 @@ public class ReplicationOperationListener implements IndexingOperationListener {
                 result.getTerm()
             );
             operationsQueue.add(details);
+            logger.info("Delete op for {}", details);
+
         }
     }
 
@@ -194,13 +208,22 @@ public class ReplicationOperationListener implements IndexingOperationListener {
         OperationDetails op;
         // maintain a map of the doc id to operation to be uploaded, until we process all required seqNos.
         Map<String, OperationDetails> docIdToOperations = new HashMap<>();
-
+        logger.info("Waiting for {}", requireProcessed);
         while (tracker.getProcessedCheckpoint() < requireProcessed) {
             // we could have a requireProcessed seqNo that is higher than anything that has hit our queue
             // this happens when we have a concurrent write that hasn't hit the listener yet, but the higher seqNo has.
             // in this case, continue until we poll the required op.
+            // TODO: this needs a timeout
             op = operationsQueue.poll();
-            if (op == null) continue;
+            if (op == null) {
+                try {
+                    logger.info("Operations queue is null, waiting for 1s");
+                    Thread.sleep(1000);
+                } catch (InterruptedException e) {
+                    throw new RuntimeException(e);
+                }
+                continue;
+            }
             tracker.markSeqNoAsProcessed(op.seqNo());
             // Only add the operation to the map if it has a higher seqNo than what's currently there
             // or if there's no operation yet for this document ID

@@ -74,6 +74,7 @@ import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.TransportService;
 
 import java.util.Arrays;
+import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -354,7 +355,9 @@ public abstract class TransportWriteAction<
             super(request, finalResponse, operationFailure);
             long seqNo = SequenceNumbers.NO_OPS_PERFORMED;
             if (finalResponse instanceof BulkShardResponse bsr) {
-                seqNo = Arrays.stream(bsr.getResponses()).mapToLong(r -> r.getResponse().getSeqNo()).max().orElse(SequenceNumbers.NO_OPS_PERFORMED);
+                seqNo = Arrays.stream(bsr.getResponses())
+                    .filter(Objects::nonNull)
+                    .mapToLong(r -> r.getResponse().getSeqNo()).max().orElse(SequenceNumbers.NO_OPS_PERFORMED);
             }
             this.seqNo = seqNo;
             this.location = location;

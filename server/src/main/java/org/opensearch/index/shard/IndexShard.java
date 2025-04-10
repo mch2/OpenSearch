@@ -429,9 +429,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         listenersList.add(internalIndexingStats);
         this.sinks = sinks;
         replicationOperationListener = this.sinks.isEmpty() ? null : new ReplicationOperationListener(this, sinks, threadPool.getThreadContext());
-        if (this.routingEntry().primary()) {
-            listenersList.add(replicationOperationListener);
-        };
+        getReplicationOperationListener().ifPresent(listenersList::add);
         this.indexingOperationListeners = new IndexingOperationListener.CompositeListener(listenersList, logger);
         this.globalCheckpointSyncer = globalCheckpointSyncer;
         this.retentionLeaseSyncer = Objects.requireNonNull(retentionLeaseSyncer);
@@ -789,12 +787,13 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
                             + newRouting;
                         assert getOperationPrimaryTerm() == newPrimaryTerm;
                         try {
+                            System.out.println("WHAT THE FUCK");
                             if (indexSettings.isSegRepEnabledOrRemoteNode()) {
                                 // this Shard's engine was read only, we need to update its engine before restoring local history from xlog.
                                 assert newRouting.primary() && currentRouting.primary() == false;
                                 ReplicationTimer timer = new ReplicationTimer();
                                 timer.start();
-                                logger.debug(
+                                logger.info(
                                     "Resetting engine on promotion of shard [{}] to primary, startTime {}\n",
                                     shardId,
                                     timer.startTime()
@@ -806,6 +805,8 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
                                 // trigger our refresh listener.
                                 // Force update the checkpoint post engine reset.
                                 updateReplicationCheckpoint();
+                            } else {
+                                logger.info("WTF not segrep?");
                             }
 
                             replicationTracker.activatePrimaryMode(getLocalCheckpoint());
@@ -3170,6 +3171,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
     }
 
     public void addReplicationListener(long seqNo, Consumer<Exception> callback) {
+        logger.info("Adding listener to wait for {}", seqNo);
         verifyNotClosed();
         if (routingEntry().primary() == false || seqNo <= NO_OPS_PERFORMED) {
             callback.accept(null);
