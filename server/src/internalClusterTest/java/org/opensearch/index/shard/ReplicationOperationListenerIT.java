@@ -16,31 +16,49 @@ import org.opensearch.action.bulk.BulkResponse;
 import org.opensearch.action.delete.DeleteRequestBuilder;
 import org.opensearch.action.get.GetResponse;
 import org.opensearch.action.index.IndexRequestBuilder;
+import org.opensearch.action.search.SearchRequestBuilder;
+import org.opensearch.action.search.SearchResponse;
 import org.opensearch.action.update.UpdateRequestBuilder;
+import org.opensearch.cluster.ClusterState;
+import org.opensearch.cluster.metadata.IndexMetadata;
+import org.opensearch.cluster.node.DiscoveryNode;
+import org.opensearch.cluster.routing.ShardRouting;
 import org.opensearch.common.settings.Settings;
+import org.opensearch.common.xcontent.XContentFactory;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.index.IndexModule;
+import org.opensearch.index.mapper.ParsedDocument;
+import org.opensearch.index.query.QueryBuilders;
+import org.opensearch.node.NodeClosedException;
 import org.opensearch.plugins.Plugin;
+import org.opensearch.remotestore.RemoteStoreBaseIntegTestCase;
+import org.opensearch.script.Script;
+import org.opensearch.script.ScriptType;
+import org.opensearch.search.SearchHit;
 import org.opensearch.search.lookup.SourceLookup;
 import org.opensearch.test.InternalTestCluster;
 import org.opensearch.test.OpenSearchIntegTestCase;
 
 import java.io.IOException;
-import java.util.Arrays;
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CyclicBarrier;
 
 import static org.hamcrest.Matchers.equalTo;
+import static org.opensearch.cluster.metadata.IndexMetadata.SETTING_NUMBER_OF_REPLICAS;
+import static org.opensearch.cluster.routing.UnassignedInfo.INDEX_DELAYED_NODE_LEFT_TIMEOUT_SETTING;
 import static org.opensearch.test.hamcrest.OpenSearchAssertions.assertHitCount;
 
 @OpenSearchIntegTestCase.ClusterScope(scope = OpenSearchIntegTestCase.Scope.TEST, numDataNodes = 0)
-public class ReplicationOperationListenerIT extends OpenSearchIntegTestCase {
+public class ReplicationOperationListenerIT extends RemoteStoreBaseIntegTestCase {
 
     @Before
     public void setUp() throws Exception {
@@ -60,12 +78,19 @@ public class ReplicationOperationListenerIT extends OpenSearchIntegTestCase {
 
     @Override
     public Settings indexSettings() {
-        return Settings.builder().put("index.number_of_shards", 1).put("index.number_of_replicas", 0).build();
+        return Settings.builder()
+            .put(super.indexSettings())
+            .put(IndexMetadata.SETTING_NUMBER_OF_SHARDS, 1)
+            .put(SETTING_NUMBER_OF_REPLICAS, 0)
+            .put(INDEX_DELAYED_NODE_LEFT_TIMEOUT_SETTING.getKey(), "0ms")
+            .build();
     }
 
     @Override
     protected Collection<Class<? extends Plugin>> nodePlugins() {
-        return Arrays.asList(TestPlugin.class);
+        Collection<Class<? extends Plugin>> plugins = new ArrayList<>(super.nodePlugins());
+        plugins.add(TestPlugin.class);
+        return plugins;
     }
 
     public void testUpdates() throws IOException {
@@ -91,10 +116,6 @@ public class ReplicationOperationListenerIT extends OpenSearchIntegTestCase {
 
         // for index-index, field1-field2 if diff field is added, will second request clobber first?
         // for index-update field1 and field2 will merge
-    }
-
-    private UpdateRequestBuilder prepareUpdate(String id, String field, String val) {
-        return client().prepareUpdate("test", id).setDoc(Map.of(field, val));
     }
 
     public void testDeleteLast() throws IOException {
@@ -129,11 +150,7 @@ public class ReplicationOperationListenerIT extends OpenSearchIntegTestCase {
                     return;
                 }
                 BulkRequestBuilder requestBuilder = client().prepareBulk();
-                try {
-                    addDocs(requestBuilder, threadID, 10);
-                } catch (IOException e) {
-                    Assert.fail();
-                }
+                addDocs(requestBuilder, threadID, 10);
                 responses[threadID] = requestBuilder.get();
                 if (randomBoolean()) {
                     client().admin().indices().flush(request);
@@ -157,7 +174,7 @@ public class ReplicationOperationListenerIT extends OpenSearchIntegTestCase {
         assertEquals(sink.getUniqueDocCount(), 300);
     }
 
-    public void testMultiThreaded_30UniqueDocs() throws InterruptedException {
+    public void testMultiThreaded_10UniqueDocids_WithConcurrentUpdates() throws InterruptedException {
         createIndex("test");
         ensureGreen();
         final BulkResponse[] responses = new BulkResponse[30];
@@ -175,12 +192,7 @@ public class ReplicationOperationListenerIT extends OpenSearchIntegTestCase {
                     return;
                 }
                 BulkRequestBuilder requestBuilder = client().prepareBulk();
-                try {
-                    // index the same docs n times
-                    addDocs(requestBuilder, 1, 10);
-                } catch (IOException e) {
-                    Assert.fail();
-                }
+                addDocs(requestBuilder, 1, 10);
                 responses[threadID] = requestBuilder.get();
                 if (randomBoolean()) {
                     client().admin().indices().flush(request);
@@ -200,47 +212,131 @@ public class ReplicationOperationListenerIT extends OpenSearchIntegTestCase {
                 Assert.fail();
             }
         }
-        assertHitCount(client().prepareSearch("test").setSize(0).get(), 30);
-        assertEquals(sink.getUniqueDocCount(), 30);
+        assertHitCount(client().prepareSearch("test").setSize(0).get(), 10);
+        assertEquals(sink.getUniqueDocCount(), 10);
     }
 
-    public void testReplicaFailover() throws IOException {
-        createIndex("test", Settings.builder().put(indexSettings()).put("index.number_of_replicas", 1).build());
-        String primary = internalCluster().getDataNodeNames().stream().findFirst().get();
+    public void testConcurrentWritesWithPrimaryFailover() throws IOException, InterruptedException {
+        createIndex("test", Settings.builder().put(indexSettings())
+            .put(SETTING_NUMBER_OF_REPLICAS, 1)
+            .build());
+        internalCluster().startClusterManagerOnlyNode();
+        ensureYellow("test");
+        DiscoveryNode primaryNode = getNodeContainingPrimaryShard();
+        String primary = primaryNode.getName();
         String replica = internalCluster().startDataOnlyNode();
         ensureGreen();
+        int requestCount = randomIntBetween(2, 10);
+        int batchSize = randomIntBetween(1, 100);
+        final BulkResponse[] responses = new BulkResponse[requestCount];
+        final CyclicBarrier cyclicBarrier = new CyclicBarrier(responses.length);
+        Thread[] threads = new Thread[responses.length];
+        FlushRequest request = new FlushRequest("test"); // <1>
+        request.waitIfOngoing(true); // <1>
+        request.force(true); // <1>
+        for (int i = 0; i < responses.length; i++) {
+            final int threadID = i;
+            threads[threadID] = new Thread(() -> {
+                try {
+                    cyclicBarrier.await();
+                } catch (Exception e) {
+                    return;
+                }
+                BulkRequestBuilder requestBuilder = client().prepareBulk();
+                addDocs(requestBuilder, threadID, batchSize);
+                // randomly delete something
+                if (threadID > 0 && randomIntBetween(0, 10) == 1) {
+                    requestBuilder.add(prepareDelete("val-" + (threadID - 1)));
+                }
+                try {
+                    responses[threadID] = requestBuilder.get();
+                } catch (NodeClosedException nce) {
+                    // do nothing we expect this could happen.
+                }
+                if (randomBoolean()) {
+                    client().admin().indices().flush(request);
+                }
+            });
+            threads[threadID].start();
+        }
+        internalCluster().stopRandomNode(InternalTestCluster.nameFilter(primary));
+        // index 10 more after failover
         BulkRequestBuilder requestBuilder = client().prepareBulk();
-        addDocs(requestBuilder, 1, 10);
+        addDocs(requestBuilder, requestCount, batchSize);
         BulkResponse bulk = requestBuilder.get();
         assertFalse(bulk.buildFailureMessage(), bulk.hasFailures());
         assertThat(refresh().getFailedShards(), equalTo(0));
 
-        internalCluster().stopRandomNode(InternalTestCluster.nameFilter(primary));
+        for (int i = 0; i < threads.length; i++) {
+            threads[i].join();
+        }
 
-        // index 10 more after failover
-        requestBuilder = client().prepareBulk();
-        addDocs(requestBuilder, 2, 10);
-        bulk = requestBuilder.get();
-        assertFalse(bulk.buildFailureMessage(), bulk.hasFailures());
-        assertThat(refresh().getFailedShards(), equalTo(0));
+        client().admin().indices().prepareRefresh("test").get();
 
-    }
+        SearchResponse searchResponse = client().prepareSearch()
+            .setSize(10000)
+            .setTrackTotalHits(true)
+            .setQuery(QueryBuilders.matchAllQuery())
+            .setIndices("test").get();
 
-    private void addDocs(BulkRequestBuilder requestBuilder, int offset, int count) throws IOException {
-        for (int i = offset * count; i < (offset * count) + count; i++) {
-            logger.info("Indexing {}", offset);
-            requestBuilder.add(
-                prepareIndex("val-" + i, "field1", "val-" + i)
-            );
+        assertEquals(sink.getUniqueDocCount(), searchResponse.getHits().getTotalHits().value());
+
+        Map<String, ParsedDocument> latestCopy = sink.getLatestCopy();
+        for (SearchHit hit : searchResponse.getHits().getHits()) {
+            ParsedDocument document = latestCopy.get(hit.getId());
+            assertEquals(document.source(), hit.getSourceRef());
+            logger.info("SOURCE MAPS {} {}", SourceLookup.sourceAsMap(document.source()), hit.getSourceAsMap());
         }
     }
 
-
-    private IndexRequestBuilder prepareIndex(String id, String field, String val) throws IOException {
-        return client().prepareIndex("test").setId(id).setSource(field, val);
+    protected DiscoveryNode getNodeContainingPrimaryShard() {
+        final ClusterState state = getClusterState();
+        final ShardRouting primaryShard = state.routingTable().index("test").shard(0).primaryShard();
+        return state.nodes().resolveNode(primaryShard.currentNodeId());
     }
 
-    private DeleteRequestBuilder prepareDelete(String id) throws IOException {
+    private void addDocs(BulkRequestBuilder requestBuilder, int offset, int count) {
+        for (int i = offset * count; i < (offset * count) + count; i++) {
+            Map<String, Object> sourceAsMap = new HashMap<>();
+            for (int j = 0; j < randomIntBetween(1, 5); j++) {
+                sourceAsMap.put("field-" + j, UUID.randomUUID().toString());
+            }
+            String id = "val-" + i;
+            if (randomBoolean()) {
+                requestBuilder.add(
+                    prepareIndex(id, sourceAsMap)
+                );
+            } else {
+                try {
+                    // randomly do update vs insert
+                    if (i > 0 && randomBoolean()) {
+                        id = "val-" + (i - 1);
+                    }
+                    requestBuilder.add(
+                        client().prepareUpdate("test", id).setId(id)
+                            .setUpsert(XContentFactory.jsonBuilder().startObject().field("bar", "baz").endObject())
+                            .setDoc(Requests.INDEX_CONTENT_TYPE, "field", "value2"));
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            }
+        }
+    }
+
+    private IndexRequestBuilder prepareIndex(String id, Object... source) {
+        return client().prepareIndex("test").setId(id).setSource(source);
+    }
+
+    private IndexRequestBuilder prepareIndex(String id, Map<String, ?> source) {
+        return client().prepareIndex("test").setId(id).setSource(source);
+    }
+
+    private UpdateRequestBuilder prepareUpdate(String id, String field, String val) {
+        return client().prepareUpdate("test", id).setDoc(Map.of(field, val));
+    }
+
+
+    private DeleteRequestBuilder prepareDelete(String id) {
         return client().prepareDelete("test", id);
     }
 
@@ -261,21 +357,46 @@ public class ReplicationOperationListenerIT extends OpenSearchIntegTestCase {
             return docs.size();
         }
 
+        public Map<String, ParsedDocument> getLatestCopy() {
+            return latestCopy;
+        }
+
+        // docs per batch processed
         private Map<Integer, List<ReplicationSink.OperationDetails>> ops = new HashMap<>();
+
+        // all unique docs seen
         private Set<String> docs = new HashSet<>();
 
+        // latest copy of each doc - can include deletes
+        private Map<String, ParsedDocument> latestCopy = new HashMap<>();
 
         @Override
         public void acceptBatch(ShardId shardId, List<OperationDetails> operationDetails, ActionListener<Long> listener) {
-//            if (operationDetails == null) {
-//                Assert.fail();
-//            }
-//            ops.put(counter, operationDetails);
-//            for (OperationDetails operationDetail : operationDetails) {
-//                docs.add(operationDetail.docId());
-//            }
-//            counter++;
-//            listener.onResponse(operationDetails.stream().mapToLong(OperationDetails::seqNo).max().getAsLong());
+            System.out.println("THE FUCK");
+            System.out.println(ops);
+            if (operationDetails == null) {
+                Assert.fail();
+            }
+            if (operationDetails.isEmpty()) {
+                System.out.println("ITS EMPTY");
+                Assert.fail();
+            }
+            ops.put(counter, operationDetails);
+            for (OperationDetails operationDetail : operationDetails) {
+                ParsedDocument document = null;
+                if (operationDetail instanceof IndexingOperationDetails iod) {
+                    document = iod.parsedDoc();
+                    System.out.println("ADD: " + operationDetail.docId());
+                    docs.add(operationDetail.docId());
+                } else {
+                    System.out.println("REMOVE: " + operationDetail.docId());
+                    docs.remove(operationDetail.docId());
+                }
+                System.out.println("Doc id added " + operationDetail.docId());
+                latestCopy.put(operationDetail.docId(), document);
+            }
+            counter++;
+            listener.onResponse(operationDetails.stream().mapToLong(OperationDetails::seqNo).max().getAsLong());
         }
     }
 }

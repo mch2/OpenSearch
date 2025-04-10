@@ -428,9 +428,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         listenersList.add(internalIndexingStats);
         this.sinks = sinks;
         replicationOperationListener = this.sinks.isEmpty() ? null : new ReplicationOperationListener(this, sinks, threadPool.getThreadContext());
-        if (this.routingEntry().primary()) {
-            listenersList.add(replicationOperationListener);
-        };
+        getReplicationOperationListener().ifPresent(listenersList::add);
         this.indexingOperationListeners = new IndexingOperationListener.CompositeListener(listenersList, logger);
         this.globalCheckpointSyncer = globalCheckpointSyncer;
         this.retentionLeaseSyncer = Objects.requireNonNull(retentionLeaseSyncer);
