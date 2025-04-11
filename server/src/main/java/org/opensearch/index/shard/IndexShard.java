@@ -2706,11 +2706,17 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         }
         getReplicationOperationListener().ifPresentOrElse((l) -> {
             l.addListener(seqNo, (e) -> {
-                if (e == null || (e instanceof ReplicationSinkException rse && rse.getMaxReplicated() >= seqNo)) {
+                if (e == null) {
                     callback.accept(null);
-                } else {
-                    callback.accept(e);
                 }
+                if (e instanceof ReplicationSinkException) {
+                    ReplicationSinkException rse = (ReplicationSinkException) e;
+                    if (rse.getMaxReplicated() >= seqNo) {
+                        callback.accept(null);
+                        return;
+                    }
+                }
+                callback.accept(e);
             });
         }, () -> callback.accept(null));
     }

@@ -354,7 +354,8 @@ public abstract class TransportWriteAction<
         ) {
             super(request, finalResponse, operationFailure);
             long seqNo = SequenceNumbers.NO_OPS_PERFORMED;
-            if (finalResponse instanceof BulkShardResponse bsr) {
+            if (finalResponse instanceof BulkShardResponse) {
+                BulkShardResponse bsr = (BulkShardResponse) finalResponse;
                 seqNo = Arrays.stream(bsr.getResponses())
                     .filter(Objects::nonNull)
                     .mapToLong(r -> r.getResponse().getSeqNo()).max().orElse(SequenceNumbers.NO_OPS_PERFORMED);
