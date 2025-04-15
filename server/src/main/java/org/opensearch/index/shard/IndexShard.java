@@ -2708,6 +2708,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
             l.addListener(seqNo, (e) -> {
                 if (e == null) {
                     callback.accept(null);
+                    return;
                 }
                 if (e instanceof ReplicationSinkException) {
                     ReplicationSinkException rse = (ReplicationSinkException) e;

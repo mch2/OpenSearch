@@ -527,6 +527,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
                         context.getBulkShardRequest(),
                         context.buildShardResponse(),
                         context.getLocationToSync(),
+                        context.getMaxSeqNoWritten(),
                         null,
                         context.getPrimary(),
                         logger
@@ -567,11 +568,9 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         final DocWriteRequest.OpType opType = context.getCurrent().opType();
 
         final UpdateHelper.Result updateResult;
-        final Set<String> updatedFields;
         if (opType == DocWriteRequest.OpType.UPDATE) {
             final UpdateRequest updateRequest = (UpdateRequest) context.getCurrent();
             try {
-                updatedFields = updateRequest.doc().sourceAsMap().keySet();
                 updateResult = updateHelper.prepare(updateRequest, context.getPrimary(), nowInMillisSupplier);
             } catch (Exception failure) {
                 // we may fail translating a update to index or delete operation

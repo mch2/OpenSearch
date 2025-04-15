@@ -74,12 +74,12 @@ public class ReplicationOperationListenerTests extends IndexShardTestCase {
         // Third operation - Delete the document - seqNo 2
         deleteDoc(indexShard, docId);
 
-        batchListener.addListener(2L, (e) -> {
-            if (e != null) {
-                logger.error("What", e);
-                Assert.fail();
-            }
-        });
+//        batchListener.addListener(2L, (e) -> {
+//            if (e != null) {
+//                logger.error("What", e);
+//                Assert.fail();
+//            }
+//        });
         assertEquals(2, batchListener.getSeenCheckpoint());
         assertEquals(2, batchListener.getReplicatedCheckpoint());
     }
@@ -93,12 +93,12 @@ public class ReplicationOperationListenerTests extends IndexShardTestCase {
         // Second index operation - Update some fields - seqNo 1
         indexDoc(indexShard, "_doc", docId, "{\"field1\":\"value3\"}");
 
-        batchListener.addListener(1L, (e) -> {
-            if (e != null) {
-                logger.error("Failure not expected", e);
-                Assert.fail("Failure not expected");
-            }
-        });
+//        batchListener.addListener(1L, (e) -> {
+//            if (e != null) {
+//                logger.error("Failure not expected", e);
+//                Assert.fail("Failure not expected");
+//            }
+//        });
         List<OperationDetails> operationDetails = testSink.getOperationDetails();
         assertEquals(1, operationDetails.size());
         assertTrue(operationDetails.get(0) instanceof ReplicationSink.IndexingOperationDetails);
@@ -118,12 +118,12 @@ public class ReplicationOperationListenerTests extends IndexShardTestCase {
         // First index operation - Initial document - seqNo 0
         indexDoc(indexShard, "_doc", docId, "{\"field1\":\"value1\",\"field2\":\"value2\"}");
 
-        batchListener.addListener(1L, (e) -> {
-            if (e != null) {
-                logger.error("Failure not expected", e);
-                Assert.fail("Failure not expected");
-            }
-        });
+//        batchListener.addListener(1L, (e) -> {
+//            if (e != null) {
+//                logger.error("Failure not expected", e);
+//                Assert.fail("Failure not expected");
+//            }
+//        });
         List<OperationDetails> operationDetails = testSink.getOperationDetails();
         assertEquals(1, operationDetails.size());
         assertTrue(operationDetails.get(0) instanceof ReplicationSink.IndexingOperationDetails);

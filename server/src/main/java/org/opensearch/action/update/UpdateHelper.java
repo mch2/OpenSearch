@@ -88,8 +88,6 @@ public class UpdateHelper {
      */
     public Result prepare(UpdateRequest request, IndexShard indexShard, LongSupplier nowInMillis) {
         final GetResult getResult = indexShard.getService().getForUpdate(request.id(), request.ifSeqNo(), request.ifPrimaryTerm());
-        System.out.println("SOURCE AS MAP");
-        System.out.println(getResult.sourceAsMap());
         return prepare(indexShard.shardId(), request, getResult, nowInMillis);
     }
 

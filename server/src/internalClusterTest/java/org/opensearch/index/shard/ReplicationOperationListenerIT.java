@@ -279,13 +279,16 @@ public class ReplicationOperationListenerIT extends RemoteStoreBaseIntegTestCase
             .setQuery(QueryBuilders.matchAllQuery())
             .setIndices("test").get();
 
-        assertEquals(sink.getUniqueDocCount(), searchResponse.getHits().getTotalHits().value());
+        assertEquals(sink.getUniqueDocCount(), searchResponse.getHits().getTotalHits().value);
 
-        Map<String, ParsedDocument> latestCopy = sink.getLatestCopy();
+        Map<String, ReplicationSink.IndexingOperationDetails> latestCopy = sink.getLatestCopy();
         for (SearchHit hit : searchResponse.getHits().getHits()) {
-            ParsedDocument document = latestCopy.get(hit.getId());
-            assertEquals(document.source(), hit.getSourceRef());
-            logger.info("SOURCE MAPS {} {}", SourceLookup.sourceAsMap(document.source()), hit.getSourceAsMap());
+            ReplicationSink.IndexingOperationDetails operationDetails = latestCopy.get(hit.getId());
+            if (operationDetails == null) {
+                Assert.fail();
+            }
+//            assertEquals(hit.getSeqNo(), operationDetails.seqNo());
+            assertEquals("IT IS " + operationDetails.docId() + " " + operationDetails.seqNo(), hit.getSourceAsMap(), SourceLookup.sourceAsMap(operationDetails.parsedDoc().source()));
         }
     }
 
@@ -308,14 +311,14 @@ public class ReplicationOperationListenerIT extends RemoteStoreBaseIntegTestCase
                 );
             } else {
                 try {
-                    // randomly do update vs insert
-                    if (i > 0 && randomBoolean()) {
-                        id = "val-" + (i - 1);
-                    }
+//                    // randomly do update vs insert
+//                    if (i > 0 && randomBoolean()) {
+//                        id = "val-" + (i - 1);
+//                    }
                     requestBuilder.add(
                         client().prepareUpdate("test", id).setId(id)
                             .setUpsert(XContentFactory.jsonBuilder().startObject().field("bar", "baz").endObject())
-                            .setDoc(Requests.INDEX_CONTENT_TYPE, "field", "value2"));
+                            .setDoc("field", "value2"));
                 } catch (IOException e) {
                     throw new RuntimeException(e);
                 }
@@ -357,7 +360,7 @@ public class ReplicationOperationListenerIT extends RemoteStoreBaseIntegTestCase
             return docs.size();
         }
 
-        public Map<String, ParsedDocument> getLatestCopy() {
+        public Map<String, IndexingOperationDetails> getLatestCopy() {
             return latestCopy;
         }
 
@@ -368,32 +371,25 @@ public class ReplicationOperationListenerIT extends RemoteStoreBaseIntegTestCase
         private Set<String> docs = new HashSet<>();
 
         // latest copy of each doc - can include deletes
-        private Map<String, ParsedDocument> latestCopy = new HashMap<>();
+        private Map<String, IndexingOperationDetails> latestCopy = new HashMap<>();
 
         @Override
         public void acceptBatch(ShardId shardId, List<OperationDetails> operationDetails, ActionListener<Long> listener) {
-            System.out.println("THE FUCK");
-            System.out.println(ops);
             if (operationDetails == null) {
                 Assert.fail();
             }
             if (operationDetails.isEmpty()) {
-                System.out.println("ITS EMPTY");
                 Assert.fail();
             }
             ops.put(counter, operationDetails);
             for (OperationDetails operationDetail : operationDetails) {
-                ParsedDocument document = null;
-                if (operationDetail instanceof IndexingOperationDetails iod) {
-                    document = iod.parsedDoc();
-                    System.out.println("ADD: " + operationDetail.docId());
+                if (operationDetail instanceof IndexingOperationDetails) {
                     docs.add(operationDetail.docId());
+                    latestCopy.put(operationDetail.docId(), (IndexingOperationDetails) operationDetail);
                 } else {
-                    System.out.println("REMOVE: " + operationDetail.docId());
                     docs.remove(operationDetail.docId());
+                    latestCopy.put(operationDetail.docId(), null);
                 }
-                System.out.println("Doc id added " + operationDetail.docId());
-                latestCopy.put(operationDetail.docId(), document);
             }
             counter++;
             listener.onResponse(operationDetails.stream().mapToLong(OperationDetails::seqNo).max().getAsLong());

@@ -14,7 +14,7 @@ import org.apache.logging.log4j.message.ParameterizedMessage;
 import org.opensearch.action.LatchedActionListener;
 import org.opensearch.common.annotation.PublicApi;
 import org.opensearch.common.collect.Tuple;
-import org.opensearch.common.util.concurrent.AsyncIOProcessor;
+import org.opensearch.common.util.concurrent.BufferedAsyncIOProcessor;
 import org.opensearch.common.util.concurrent.ThreadContext;
 import org.opensearch.common.xcontent.XContentHelper;
 import org.opensearch.core.action.ActionListener;
@@ -28,8 +28,8 @@ import org.opensearch.index.mapper.SourceToParse;
 import org.opensearch.index.seqno.LocalCheckpointTracker;
 import org.opensearch.index.seqno.SequenceNumbers;
 import org.opensearch.index.shard.ReplicationSink.OperationDetails;
+import org.opensearch.threadpool.ThreadPool;
 
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -58,7 +58,7 @@ public class ReplicationOperationListener implements IndexingOperationListener {
     private final LocalCheckpointTracker tracker;
 
     private static final Logger logger = LogManager.getLogger(ReplicationOperationListener.class);
-    private final AsyncIOProcessor<Long> processor;
+    private final BufferedAsyncIOProcessor<Long> processor;
 
     // the listener is wired up to any shard type as long as there are configured sinks on the index
     // noop this listener if the shard is not primary.
@@ -80,9 +80,15 @@ public class ReplicationOperationListener implements IndexingOperationListener {
         // processed = staged for upload
         // persisted = uploaded
         this.tracker = new LocalCheckpointTracker(NO_OPS_PERFORMED, NO_OPS_PERFORMED);
-        this.processor = new AsyncIOProcessor<>(logger, 12345, threadContext) {
+        this.processor = new BufferedAsyncIOProcessor<>(logger, 102400, threadContext, shard.getThreadPool(), () -> shard.getRemoteStoreSettings().getClusterRemoteTranslogBufferInterval()) {
+
             @Override
-            protected void write(List<Tuple<Long, Consumer<Exception>>> candidates) throws IOException {
+            protected String getBufferProcessThreadPoolName() {
+                return ThreadPool.Names.REPLICATION_SINKS;
+            }
+
+            @Override
+            protected void write(List<Tuple<Long, Consumer<Exception>>> candidates) {
                 assert candidates.isEmpty() == false;
                 assert active.get();
                 // find the max of the listeners
@@ -96,7 +102,8 @@ public class ReplicationOperationListener implements IndexingOperationListener {
                 final CountDownLatch latch = new CountDownLatch(sinks.size());
                 List<ReplicationSinkException> exceptionList = new ArrayList<>();
                 LatchedActionListener<Long> latchedActionListener = new LatchedActionListener<>(
-                    ActionListener.wrap(l -> {}, ex -> {
+                    ActionListener.wrap(l -> {
+                    }, ex -> {
                         assert ex instanceof ReplicationSinkException;
                         logger.error(
                             () -> new ParameterizedMessage(
@@ -109,6 +116,9 @@ public class ReplicationOperationListener implements IndexingOperationListener {
                     }),
                     latch
                 );
+
+                List<Long> listenerList = candidates.stream().map(Tuple::v1).sorted().collect(Collectors.toList());
+                logger.info("Passing {} operations to sinks for listeners {}", operationDetails.size(), listenerList);
 
                 // we should spawn threads here for this so a bad impl can't block
                 for (ReplicationSink sink : sinks) {
@@ -255,6 +265,11 @@ public class ReplicationOperationListener implements IndexingOperationListener {
             // no changes just take the final op.
             return fo;
         }
+//        if (lowMap.containsKey("bar") || highMap.containsKey("bar")) {
+//            logger.info("DOC ID IS {}", iod.docId());
+//            logger.info("LOW {}", lowMap);
+//            logger.info("HIGH {}", highMap);
+//        }
         try {
             XContentBuilder builder = MediaTypeRegistry.contentBuilder(low.parsedDoc().getMediaType());
             builder.map(lowMap);
@@ -274,7 +289,7 @@ public class ReplicationOperationListener implements IndexingOperationListener {
     }
 
     // wait until a seqNo has been uploaded, or notified of a problem
-    public void addListener(Long seqNo, Consumer<Exception> callback) {
-        processor.put(seqNo, callback);
+    public void addListener(Long seqNo, Consumer<Exception> listener) {
+        processor.put(seqNo, listener);
     }
 }

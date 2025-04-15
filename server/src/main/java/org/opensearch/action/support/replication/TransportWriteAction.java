@@ -35,6 +35,7 @@ package org.opensearch.action.support.replication;
 import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.message.ParameterizedMessage;
 import org.opensearch.action.ActionRunnable;
+import org.opensearch.action.DocWriteResponse;
 import org.opensearch.action.admin.indices.flush.FlushRequest;
 import org.opensearch.action.bulk.BulkItemResponse;
 import org.opensearch.action.bulk.BulkShardResponse;
@@ -64,6 +65,7 @@ import org.opensearch.index.translog.Translog;
 import org.opensearch.index.translog.Translog.Location;
 import org.opensearch.indices.IndicesService;
 import org.opensearch.indices.SystemIndices;
+import org.opensearch.indices.replication.common.ReplicationTimer;
 import org.opensearch.ratelimitting.admissioncontrol.enums.AdmissionControlActionType;
 import org.opensearch.telemetry.tracing.Span;
 import org.opensearch.telemetry.tracing.SpanBuilder;
@@ -75,8 +77,10 @@ import org.opensearch.transport.TransportService;
 
 import java.util.Arrays;
 import java.util.Objects;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 
@@ -344,6 +348,7 @@ public abstract class TransportWriteAction<
         private final Logger logger;
         private final long seqNo;
 
+
         public WritePrimaryResult(
             ReplicaRequest request,
             @Nullable Response finalResponse,
@@ -352,15 +357,20 @@ public abstract class TransportWriteAction<
             IndexShard primary,
             Logger logger
         ) {
+            this(request, finalResponse, location, SequenceNumbers.NO_OPS_PERFORMED, operationFailure, primary, logger);
+        }
+
+        public WritePrimaryResult(
+            ReplicaRequest request,
+            @Nullable Response finalResponse,
+            @Nullable Location location,
+            @Nullable long maxSeqNo,
+            @Nullable Exception operationFailure,
+            IndexShard primary,
+            Logger logger
+        ) {
             super(request, finalResponse, operationFailure);
-            long seqNo = SequenceNumbers.NO_OPS_PERFORMED;
-            if (finalResponse instanceof BulkShardResponse) {
-                BulkShardResponse bsr = (BulkShardResponse) finalResponse;
-                seqNo = Arrays.stream(bsr.getResponses())
-                    .filter(Objects::nonNull)
-                    .mapToLong(r -> r.getResponse().getSeqNo()).max().orElse(SequenceNumbers.NO_OPS_PERFORMED);
-            }
-            this.seqNo = seqNo;
+            this.seqNo = maxSeqNo;
             this.location = location;
             this.primary = primary;
             this.logger = logger;
@@ -489,6 +499,9 @@ public abstract class TransportWriteAction<
         private final WriteRequest<?> request;
         private final Logger logger;
         private final long seqNo;
+        private final ReplicationTimer timer;
+        AtomicLong translogTime = new AtomicLong();
+        AtomicLong replicationTime = new AtomicLong();
 
         AsyncAfterWriteAction(
             final IndexShard indexShard,
@@ -528,6 +541,7 @@ public abstract class TransportWriteAction<
             }
             this.logger = logger;
             assert pendingOps.get() >= 0 && pendingOps.get() <= 3 : "pendingOpts was: " + pendingOps.get();
+            this.timer = new ReplicationTimer();
         }
 
         /** calls the response listener if all pending operations have returned otherwise it just decrements the pending opts counter.*/
@@ -541,6 +555,7 @@ public abstract class TransportWriteAction<
                 } else {
                     respond.onSuccess(refreshed.get());
                 }
+                logger.info("Request finished with translog time --- {} --- replication seqNo: {} time: {}", translogTime.get(), seqNo, replicationTime.get());
             }
             assert numPending >= 0 && numPending <= 2 : "numPending must either 2, 1 or 0 but was " + numPending;
         }
@@ -564,17 +579,19 @@ public abstract class TransportWriteAction<
                     maybeFinish();
                 });
             }
+
+            timer.start();
             if (sync) {
                 assert pendingOps.get() > 0;
                 indexShard.sync(location, (ex) -> {
+                    translogTime.set(timer.time());
+//                    logger.info("[{}] Translog sync time --- {}", id, timer.time());
                     syncFailure.set(ex);
                     maybeFinish();
                 });
-                FlushRequest r = new FlushRequest();
-                r.force(true);
-                r.waitIfOngoing(true);
-                indexShard.flush(r);
                 indexShard.addReplicationListener(seqNo, (ex) -> {
+                    replicationTime.set(timer.time());
+//                    logger.info("[{}] Replication Listener time --- {}", id, timer.time());
                     replicationFailure.set(ex);
                     maybeFinish();
                 });
