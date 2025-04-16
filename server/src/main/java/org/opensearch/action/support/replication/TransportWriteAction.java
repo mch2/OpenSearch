@@ -499,9 +499,8 @@ public abstract class TransportWriteAction<
         private final WriteRequest<?> request;
         private final Logger logger;
         private final long seqNo;
-        private final ReplicationTimer timer;
-        AtomicLong translogTime = new AtomicLong();
-        AtomicLong replicationTime = new AtomicLong();
+        private final ReplicationTimer replicationTimer;
+        private final ReplicationTimer translogTimer;
 
         AsyncAfterWriteAction(
             final IndexShard indexShard,
@@ -541,7 +540,8 @@ public abstract class TransportWriteAction<
             }
             this.logger = logger;
             assert pendingOps.get() >= 0 && pendingOps.get() <= 3 : "pendingOpts was: " + pendingOps.get();
-            this.timer = new ReplicationTimer();
+            this.replicationTimer = new ReplicationTimer();
+            this.translogTimer = new ReplicationTimer();
         }
 
         /** calls the response listener if all pending operations have returned otherwise it just decrements the pending opts counter.*/
@@ -555,7 +555,7 @@ public abstract class TransportWriteAction<
                 } else {
                     respond.onSuccess(refreshed.get());
                 }
-                logger.info("Request finished with translog time --- {} --- replication seqNo: {} time: {}", translogTime.get(), seqNo, replicationTime.get());
+                logger.info("Request finished with translog time --- {} --- replication seqNo: {} time: {}", translogTimer.time(), seqNo, replicationTimer.time());
             }
             assert numPending >= 0 && numPending <= 2 : "numPending must either 2, 1 or 0 but was " + numPending;
         }
@@ -580,17 +580,18 @@ public abstract class TransportWriteAction<
                 });
             }
 
-            timer.start();
             if (sync) {
                 assert pendingOps.get() > 0;
+                translogTimer.start();
                 indexShard.sync(location, (ex) -> {
-                    translogTime.set(timer.time());
+                    translogTimer.stop();
 //                    logger.info("[{}] Translog sync time --- {}", id, timer.time());
                     syncFailure.set(ex);
                     maybeFinish();
                 });
+                replicationTimer.start();
                 indexShard.addReplicationListener(seqNo, (ex) -> {
-                    replicationTime.set(timer.time());
+                    replicationTimer.stop();
 //                    logger.info("[{}] Replication Listener time --- {}", id, timer.time());
                     replicationFailure.set(ex);
                     maybeFinish();
