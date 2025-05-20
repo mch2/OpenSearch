@@ -84,12 +84,11 @@ import org.opensearch.index.query.QueryShardContext;
 import org.opensearch.index.query.SearchIndexNameMatcher;
 import org.opensearch.index.remote.RemoteStoreStatsTrackerFactory;
 import org.opensearch.index.seqno.RetentionLeaseSyncer;
+import org.opensearch.index.shard.BatchIndexingOperationListener;
 import org.opensearch.index.shard.IndexEventListener;
 import org.opensearch.index.shard.IndexShard;
 import org.opensearch.index.shard.IndexShardClosedException;
 import org.opensearch.index.shard.IndexingOperationListener;
-import org.opensearch.index.shard.ReplicationOperationListener;
-import org.opensearch.index.shard.ReplicationSink;
 import org.opensearch.index.shard.SearchOperationListener;
 import org.opensearch.index.shard.ShardNotFoundException;
 import org.opensearch.index.shard.ShardNotInPrimaryModeException;
@@ -173,7 +172,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
     private final IndexSettings indexSettings;
     private final List<SearchOperationListener> searchOperationListeners;
     private final List<IndexingOperationListener> indexingOperationListeners;
-    private final List<ReplicationSink> replicationSinks;
+    private final List<BatchIndexingOperationListener.Sink> sinks;
     private final BooleanSupplier allowExpensiveQueries;
     private volatile AsyncRefreshTask refreshTask;
     private volatile AsyncTranslogFSync fsyncTask;
@@ -227,7 +226,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
         IndicesFieldDataCache indicesFieldDataCache,
         List<SearchOperationListener> searchOperationListeners,
         List<IndexingOperationListener> indexingOperationListeners,
-        List<ReplicationSink> replicationSinks,
+        List<BatchIndexingOperationListener.Sink> sinks,
         NamedWriteableRegistry namedWriteableRegistry,
         BooleanSupplier idFieldDataEnabled,
         BooleanSupplier allowExpensiveQueries,
@@ -309,7 +308,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
         this.readerWrapper = wrapperFactory.apply(this);
         this.searchOperationListeners = Collections.unmodifiableList(searchOperationListeners);
         this.indexingOperationListeners = Collections.unmodifiableList(indexingOperationListeners);
-        this.replicationSinks = Collections.unmodifiableList(replicationSinks);
+        this.sinks = Collections.unmodifiableList(sinks);
         this.clusterDefaultRefreshIntervalSupplier = clusterDefaultRefreshIntervalSupplier;
         // kick off async ops for the first shard in this index
         this.refreshTask = new AsyncRefreshTask(this);
@@ -353,7 +352,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
         IndicesFieldDataCache indicesFieldDataCache,
         List<SearchOperationListener> searchOperationListeners,
         List<IndexingOperationListener> indexingOperationListeners,
-        List<ReplicationSink> replicationSinks,
+        List<BatchIndexingOperationListener.Sink> sinks,
         NamedWriteableRegistry namedWriteableRegistry,
         BooleanSupplier idFieldDataEnabled,
         BooleanSupplier allowExpensiveQueries,
@@ -391,7 +390,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
             indicesFieldDataCache,
             searchOperationListeners,
             indexingOperationListeners,
-            replicationSinks,
+            sinks,
             namedWriteableRegistry,
             idFieldDataEnabled,
             allowExpensiveQueries,
@@ -749,6 +748,13 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
                 path
             );
             eventListener.onStoreCreated(shardId);
+            List<IndexingOperationListener> operationListeners;
+            if (sinks.isEmpty() == false) {
+                operationListeners = new ArrayList<>(indexingOperationListeners);
+                operationListeners.add(new BatchIndexingOperationListener(routing.shardId(), sinks, threadPool, remoteStoreSettings));
+            } else {
+                operationListeners = indexingOperationListeners;
+            }
 
             indexShard = new IndexShard(
                 routing,
@@ -767,8 +773,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
                 bigArrays,
                 engineWarmer,
                 searchOperationListeners,
-                indexingOperationListeners,
-                replicationSinks,
+                operationListeners,
                 () -> globalCheckpointSyncer.accept(shardId),
                 retentionLeaseSyncer,
                 circuitBreakerService,

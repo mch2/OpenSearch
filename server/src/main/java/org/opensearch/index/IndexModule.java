@@ -72,11 +72,10 @@ import org.opensearch.index.engine.Engine;
 import org.opensearch.index.engine.EngineConfigFactory;
 import org.opensearch.index.engine.EngineFactory;
 import org.opensearch.index.mapper.MapperService;
-import org.opensearch.index.shard.ReplicationOperationListener;
+import org.opensearch.index.shard.BatchIndexingOperationListener;
 import org.opensearch.index.shard.IndexEventListener;
 import org.opensearch.index.shard.IndexShard;
 import org.opensearch.index.shard.IndexingOperationListener;
-import org.opensearch.index.shard.ReplicationSink;
 import org.opensearch.index.shard.SearchOperationListener;
 import org.opensearch.index.similarity.SimilarityService;
 import org.opensearch.index.store.FsDirectoryFactory;
@@ -318,7 +317,7 @@ public final class IndexModule {
     private final SetOnce<BiFunction<IndexSettings, IndicesQueryCache, QueryCache>> forceQueryCacheProvider = new SetOnce<>();
     private final List<SearchOperationListener> searchOperationListeners = new ArrayList<>();
     private final List<IndexingOperationListener> indexOperationListeners = new ArrayList<>();
-    private final List<ReplicationSink> replicationSinks = new ArrayList<>();
+    private final List<BatchIndexingOperationListener.Sink> sinks = new ArrayList<>();
     private final IndexNameExpressionResolver expressionResolver;
     private final AtomicBoolean frozen = new AtomicBoolean(false);
     private final BooleanSupplier allowExpensiveQueries;
@@ -524,15 +523,15 @@ public final class IndexModule {
         this.indexOperationListeners.add(listener);
     }
 
-    public void addIndexingOperationSink(ReplicationSink sink) {
+    public void addIndexingOperationSink(BatchIndexingOperationListener.Sink sink) {
         ensureNotFrozen();
         if (sink == null) {
             throw new IllegalArgumentException("Sink must not be null");
         }
-        if (replicationSinks.contains(sink)) {
+        if (sinks.contains(sink)) {
             throw new IllegalArgumentException("Sink already added");
         }
-        replicationSinks.add(sink);
+        sinks.add(sink);
     }
 
     /**
@@ -843,7 +842,7 @@ public final class IndexModule {
                 indicesFieldDataCache,
                 searchOperationListeners,
                 indexOperationListeners,
-                replicationSinks,
+                sinks,
                 namedWriteableRegistry,
                 idFieldDataEnabled,
                 allowExpensiveQueries,

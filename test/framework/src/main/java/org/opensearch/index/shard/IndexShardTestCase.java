@@ -720,7 +720,6 @@ public abstract class IndexShardTestCase extends OpenSearchTestCase {
                 warmer,
                 Collections.emptyList(),
                 Arrays.asList(listeners),
-                Collections.emptyList(),
                 globalCheckpointSyncer,
                 retentionLeaseSyncer,
                 breakerService,

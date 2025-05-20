@@ -253,6 +253,26 @@ public class LocalCheckpointTracker {
         }
     }
 
+    public boolean hasPersisted(final long seqNo) {
+        assert seqNo >= 0 : "invalid seq_no=" + seqNo;
+        if (seqNo >= nextSeqNo.get()) {
+            return false;
+        }
+        if (seqNo <= persistedCheckpoint.get()) {
+            return true;
+        }
+        final long bitSetKey = getBitSetKey(seqNo);
+        final int bitSetOffset = seqNoToBitSetOffset(seqNo);
+        synchronized (this) {
+            // check again under lock
+            if (seqNo <= persistedCheckpoint.get()) {
+                return true;
+            }
+            final CountedBitSet bitSet = persistedSeqNo.get(bitSetKey);
+            return bitSet != null && bitSet.get(bitSetOffset);
+        }
+    }
+
     /**
      * Moves the checkpoint to the last consecutively processed sequence number. This method assumes that the sequence number
      * following the current checkpoint is processed.

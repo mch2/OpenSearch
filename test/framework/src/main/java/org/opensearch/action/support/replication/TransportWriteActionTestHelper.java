@@ -34,10 +34,10 @@ package org.opensearch.action.support.replication;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.action.support.WriteRequest;
 import org.opensearch.common.Nullable;
-import org.opensearch.index.seqno.SequenceNumbers;
 import org.opensearch.index.shard.IndexShard;
 import org.opensearch.index.translog.Translog;
 
+import java.util.Collections;
 import java.util.concurrent.CountDownLatch;
 
 public abstract class TransportWriteActionTestHelper {
@@ -60,7 +60,8 @@ public abstract class TransportWriteActionTestHelper {
                 throw new AssertionError(ex);
             }
         };
-        new TransportWriteAction.AsyncAfterWriteAction(indexShard, request, location, SequenceNumbers.NO_OPS_PERFORMED, writerResult, logger).run();
+        new TransportWriteAction.AsyncAfterWriteAction(indexShard, request, location, Collections.emptySortedSet(), writerResult, logger)
+            .run();
         try {
             latch.await();
         } catch (InterruptedException e) {

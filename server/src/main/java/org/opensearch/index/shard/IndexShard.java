@@ -219,6 +219,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.SortedSet;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -238,7 +239,6 @@ import java.util.stream.StreamSupport;
 import static org.opensearch.index.seqno.RetentionLeaseActions.RETAIN_ALL;
 import static org.opensearch.index.seqno.SequenceNumbers.LOCAL_CHECKPOINT_KEY;
 import static org.opensearch.index.seqno.SequenceNumbers.MAX_SEQ_NO;
-import static org.opensearch.index.seqno.SequenceNumbers.NO_OPS_PERFORMED;
 import static org.opensearch.index.seqno.SequenceNumbers.UNASSIGNED_SEQ_NO;
 import static org.opensearch.index.shard.IndexShard.ShardMigrationState.REMOTE_MIGRATING_SEEDED;
 import static org.opensearch.index.shard.IndexShard.ShardMigrationState.REMOTE_MIGRATING_UNSEEDED;
@@ -365,8 +365,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
     private final ShardMigrationState shardMigrationState;
     private DiscoveryNodes discoveryNodes;
 
-    private final ReplicationOperationListener replicationOperationListener;
-    private final List<ReplicationSink> sinks;
+    private final BatchIndexingOperationListener batchIndexingOperationListener;
 
     public IndexShard(
         final ShardRouting shardRouting,
@@ -386,7 +385,6 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         final Engine.Warmer warmer,
         final List<SearchOperationListener> searchOperationListener,
         final List<IndexingOperationListener> listeners,
-        final List<ReplicationSink> sinks,
         final Runnable globalCheckpointSyncer,
         final RetentionLeaseSyncer retentionLeaseSyncer,
         final CircuitBreakerService circuitBreakerService,
@@ -426,9 +424,11 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         this.internalIndexingStats = new InternalIndexingStats();
         final List<IndexingOperationListener> listenersList = new ArrayList<>(listeners);
         listenersList.add(internalIndexingStats);
-        this.sinks = sinks;
-        replicationOperationListener = this.sinks.isEmpty() ? null : new ReplicationOperationListener(this, sinks, threadPool.getThreadContext());
-        getReplicationOperationListener().ifPresent(listenersList::add);
+        batchIndexingOperationListener = listenersList.stream()
+            .filter(l -> l instanceof BatchIndexingOperationListener)
+            .map(l -> (BatchIndexingOperationListener) l)
+            .findAny()
+            .orElse(null);
         this.indexingOperationListeners = new IndexingOperationListener.CompositeListener(listenersList, logger);
         this.globalCheckpointSyncer = globalCheckpointSyncer;
         this.retentionLeaseSyncer = Objects.requireNonNull(retentionLeaseSyncer);
@@ -699,14 +699,14 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
                 && currentRouting.relocating()
                 && replicationTracker.isRelocated()
                 && (newRouting.relocating() == false || newRouting.equalsIgnoringMetadata(currentRouting) == false)) {
-                // if the shard is not in primary mode anymore (after primary relocation) we have to fail when any changes in shard
-                // routing occur (e.g. due to recovery failure / cancellation). The reason is that at the moment we cannot safely
-                // reactivate primary mode without risking two active primaries.
-                throw new IndexShardRelocatedException(
-                    shardId(),
-                    "Shard is marked as relocated, cannot safely move to state " + newRouting.state()
-                );
-            }
+                    // if the shard is not in primary mode anymore (after primary relocation) we have to fail when any changes in shard
+                    // routing occur (e.g. due to recovery failure / cancellation). The reason is that at the moment we cannot safely
+                    // reactivate primary mode without risking two active primaries.
+                    throw new IndexShardRelocatedException(
+                        shardId(),
+                        "Shard is marked as relocated, cannot safely move to state " + newRouting.state()
+                    );
+                }
             assert newRouting.active() == false || state == IndexShardState.STARTED || state == IndexShardState.CLOSED
                 : "routing is active, but local shard state isn't. routing: " + newRouting + ", local state: " + state;
             persistMetadata(path, indexSettings, newRouting, currentRouting, logger);
@@ -852,10 +852,10 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
             this.shardRouting = newRouting;
 
             assert this.shardRouting.primary() == false || this.shardRouting.started() == false || // note that we use started and not
-                // active to avoid relocating shards
+            // active to avoid relocating shards
                 this.indexShardOperationPermits.isBlocked() || // if permits are blocked, we are still transitioning
                 this.replicationTracker.isPrimaryMode() : "a started primary with non-pending operation term must be in primary mode "
-                + this.shardRouting;
+                    + this.shardRouting;
             shardStateUpdated.countDown();
         }
         if (currentRouting.active() == false && newRouting.active()) {
@@ -2594,9 +2594,9 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         updateRetentionLeasesOnReplica(loadRetentionLeases());
         assert recoveryState.getRecoverySource().expectEmptyRetentionLeases() == false || getRetentionLeases().leases().isEmpty()
             : "expected empty set of retention leases with recovery source ["
-            + recoveryState.getRecoverySource()
-            + "] but got "
-            + getRetentionLeases();
+                + recoveryState.getRecoverySource()
+                + "] but got "
+                + getRetentionLeases();
         synchronized (engineMutex) {
             assert currentEngineReference.get() == null : "engine is running";
             verifyNotClosed();
@@ -2686,41 +2686,26 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
     private void onNewEngine(Engine newEngine) {
         assert Thread.holdsLock(engineMutex);
         refreshListeners.setCurrentRefreshLocationSupplier(newEngine::getTranslogLastWriteLocation);
-        getReplicationOperationListener().ifPresent(l -> {
+        batchOperationListener().ifPresent(l -> {
             if (newEngine instanceof InternalEngine) {
-                l.initializeSeqNoTracker(((InternalEngine) newEngine).getProcessedLocalCheckpoint());
+                l.initializeReplicationOperationListener(((InternalEngine) newEngine).getProcessedLocalCheckpoint());
             }
         });
     }
 
-    Optional<ReplicationOperationListener> getReplicationOperationListener() {
-        return Optional.ofNullable(replicationOperationListener);
+    Optional<BatchIndexingOperationListener> batchOperationListener() {
+        return Optional.ofNullable(batchIndexingOperationListener);
     }
 
-
-    public void addReplicationListener(long seqNo, Consumer<Exception> callback) {
+    public void addBatchListener(SortedSet<Long> sequenceNumbers, Consumer<Exception> callback) {
         verifyNotClosed();
-        if (routingEntry().primary() == false || seqNo <= NO_OPS_PERFORMED) {
+        if (routingEntry().primary() == false || sequenceNumbers == null || sequenceNumbers.isEmpty()) {
             callback.accept(null);
             return;
         }
-        getReplicationOperationListener().ifPresentOrElse((l) -> {
-            l.addListener(seqNo, (e) -> {
-                if (e == null) {
-                    callback.accept(null);
-                    return;
-                }
-                if (e instanceof ReplicationSinkException) {
-                    ReplicationSinkException rse = (ReplicationSinkException) e;
-                    if (rse.getMaxReplicated() >= seqNo) {
-                        callback.accept(null);
-                        return;
-                    }
-                }
-                callback.accept(e);
-            });
-        }, () -> callback.accept(null));
+        batchOperationListener().ifPresentOrElse((l) -> l.addListener(sequenceNumbers, callback), () -> callback.accept(null));
     }
+
     /**
      * called if recovery has to be restarted after network error / delay **
      */
@@ -3640,11 +3625,11 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
              */
             assert (state() != IndexShardState.POST_RECOVERY && state() != IndexShardState.STARTED)
                 || indexSettings.isAssignedOnRemoteNode() : "supposedly in-sync shard copy received a global checkpoint ["
-                + globalCheckpoint
-                + "] "
-                + "that is higher than its local checkpoint ["
-                + localCheckpoint
-                + "]";
+                    + globalCheckpoint
+                    + "] "
+                    + "that is higher than its local checkpoint ["
+                    + localCheckpoint
+                    + "]";
             return;
         }
         replicationTracker.updateGlobalCheckpointOnReplica(globalCheckpoint, reason);
@@ -3672,10 +3657,10 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         }
         assert getLocalCheckpoint() == primaryContext.getCheckpointStates().get(allocationId).getLocalCheckpoint()
             || indexSettings().getTranslogDurability() == Durability.ASYNC : "local checkpoint ["
-            + getLocalCheckpoint()
-            + "] does not match checkpoint from primary context ["
-            + primaryContext
-            + "]";
+                + getLocalCheckpoint()
+                + "] does not match checkpoint from primary context ["
+                + primaryContext
+                + "]";
         synchronized (mutex) {
             replicationTracker.activateWithPrimaryContext(primaryContext); // make changes to primaryMode flag only under mutex
         }
@@ -4094,7 +4079,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
          */
         boolean isReadOnlyReplica = indexSettings.isSegRepEnabledOrRemoteNode()
             && (shardRouting.primary() == false
-            || (shardRouting.isRelocationTarget() && recoveryState.getStage() != RecoveryState.Stage.FINALIZE));
+                || (shardRouting.isRelocationTarget() && recoveryState.getStage() != RecoveryState.Stage.FINALIZE));
 
         // For mixed mode, when relocating from doc rep to remote node, we use a writeable engine
         if (shouldSeedRemoteStore()) {
