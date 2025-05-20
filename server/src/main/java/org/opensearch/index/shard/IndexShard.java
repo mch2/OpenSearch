@@ -2697,6 +2697,11 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         return Optional.ofNullable(batchIndexingOperationListener);
     }
 
+    /**
+     * Wait until all given sequenceNumbers have been processed by our {@link BatchIndexingOperationListener} if registered.
+     * @param sequenceNumbers {@link SortedSet<Long>} sequenceNumbers to wait on
+     * @param callback {@link Consumer<Exception>} callback, returns null if all operations processed successfully
+     */
     public void addBatchListener(SortedSet<Long> sequenceNumbers, Consumer<Exception> callback) {
         verifyNotClosed();
         if (routingEntry().primary() == false || sequenceNumbers == null || sequenceNumbers.isEmpty()) {

@@ -50,7 +50,7 @@ import static org.opensearch.index.seqno.SequenceNumbers.NO_OPS_PERFORMED;
  * {@link Sink}s.
  * <p>
  * Write requests register a callback to get alerted when all operations in the request have been processed by sinks exactly once.
- * If any operation fails to be processesd a
+ * If any operation fails to be processed by a sink, all requests in the batch will fail if they have a seqNo at or lower than the first failed operation in the batch.
  */
 @PublicApi(since = "3.0.0")
 public class BatchIndexingOperationListener implements IndexingOperationListener {
