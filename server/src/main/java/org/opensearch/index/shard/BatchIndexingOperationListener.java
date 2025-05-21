@@ -342,10 +342,8 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
         assert Objects.equals(existingOp.docId(), op.docId());
 
         if (op.seqNo() > existingOp.seqNo()) {
-            tracker.markSeqNoAsPersisted(existingOp.seqNo());
             return op;
         }
-        tracker.markSeqNoAsPersisted(op.seqNo());
         return existingOp;
     }
 

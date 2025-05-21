@@ -9,6 +9,9 @@
 package org.opensearch.index.shard;
 
 import org.apache.lucene.index.Term;
+import org.junit.After;
+import org.junit.Assert;
+import org.junit.Before;
 import org.opensearch.cluster.routing.RecoverySource;
 import org.opensearch.cluster.routing.ShardRouting;
 import org.opensearch.cluster.routing.ShardRoutingState;
@@ -24,9 +27,6 @@ import org.opensearch.index.seqno.SequenceNumbers;
 import org.opensearch.index.shard.BatchIndexingOperationListener.OperationDetails;
 import org.opensearch.indices.DefaultRemoteStoreSettings;
 import org.opensearch.search.lookup.SourceLookup;
-import org.junit.After;
-import org.junit.Assert;
-import org.junit.Before;
 
 import java.io.IOException;
 import java.util.Collections;
@@ -204,9 +204,8 @@ public class BatchIndexingOperationListenerIndexShardTests extends IndexShardTes
         assertEquals(1L, listener.getCompletedCheckpoint());
     }
 
-    public void testDedupeOnSameDocId_WithFailureAndDedupe() throws Exception {
-        // this is the same as the previous test but with additional docs per request.
-        // r1
+    public void testDedupeOnSameDocId_WithFailureAndDedupe_FirstRequestArrivesLast() throws Exception {
+        // this is the same as the previous test but with additional docs per request, and r2 is finished before r1
         indexDoc(0L);
         String docId = "mydoc";
         Engine.IndexResult doc = indexDoc(indexShard, MediaTypeRegistry.JSON.type(), docId);// seqno 1
@@ -224,12 +223,16 @@ public class BatchIndexingOperationListenerIndexShardTests extends IndexShardTes
 
         testSink.setFailureAfter(3L);
 
-        // 0 gets deduped by 1L, but both ops come from separate requests.
-        // deduplication occurs *before* we hand off to the sink
-        // in this case we expect *both* requests to fail because the deduped op can not be ack'd.
-        Tuple<Set<Long>, Boolean> r1 = new Tuple<>(new TreeSet<>(Set.of(0L, 1L, 2L)), false);
-        Tuple<Set<Long>, Boolean> r2 = new Tuple<>(new TreeSet<>(Set.of(3L, 4L, 5L)), false);
-        waitAndAssert(List.of(r1, r2));
+        // 1L (R1) is deduped by 4L (R2), R2 is processed first.
+        // in this case we expect *both* requests to fail, but r1 is received after r2
+        waitAndAssert(Set.of(3L, 4L, 5L), e -> assertNotNull("R2 [3, 4, 5] should fail", e)); // r2
+        assertEquals("1L is not yet completed", 0L, listener.getCompletedCheckpoint());
+        assertFalse("1L has not been completed", listener.hasCompleted(1L));
+        assertTrue("3L has been completed", listener.hasCompleted(3L));
+        assertTrue("4L has been completed", listener.hasCompleted(4L));
+
+        assertEquals(5L, listener.getSeenCheckpoint());
+        waitAndAssert(Set.of(0L, 1L, 2L), e -> assertNotNull("R1 [0, 1, 2] should fail", e)); // r1
 
         assertTrue(listener.hasProcessed(0L));
         assertEquals(Set.of(0L, 2L, 3L, 4L, 5L), testSink.lastestReceivedSequenceNumbers());
@@ -239,6 +242,8 @@ public class BatchIndexingOperationListenerIndexShardTests extends IndexShardTes
             5L,
             listener.getCompletedCheckpoint()
         );
+        assertEquals(5L, listener.getCompletedCheckpoint());
+        assertEquals(5L, listener.getSeenCheckpoint());
     }
 
     public void testSinkThrowsRandomException() throws InterruptedException {
