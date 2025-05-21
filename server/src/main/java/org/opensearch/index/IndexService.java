@@ -134,6 +134,7 @@ import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
+import java.util.stream.Collectors;
 
 import static java.util.Collections.emptyMap;
 import static java.util.Collections.unmodifiableMap;
@@ -749,9 +750,16 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
             );
             eventListener.onStoreCreated(shardId);
             List<IndexingOperationListener> operationListeners;
-            if (sinks.isEmpty() == false) {
+
+            final Set<BatchIndexingOperationListener.Sink> filteredSinks = sinks.stream()
+                .filter(s -> s.supportsIndex(this.indexSettings))
+                .collect(Collectors.toSet());
+
+            if (routing.isSearchOnly() == false && filteredSinks.isEmpty() == false) {
                 operationListeners = new ArrayList<>(indexingOperationListeners);
-                operationListeners.add(new BatchIndexingOperationListener(routing.shardId(), sinks, threadPool, remoteStoreSettings));
+                operationListeners.add(
+                    new BatchIndexingOperationListener(routing.shardId(), filteredSinks, threadPool, remoteStoreSettings)
+                );
             } else {
                 operationListeners = indexingOperationListeners;
             }

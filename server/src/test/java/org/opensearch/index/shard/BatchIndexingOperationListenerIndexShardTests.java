@@ -46,12 +46,13 @@ public class BatchIndexingOperationListenerIndexShardTests extends IndexShardTes
     private IndexShard indexShard;
     private BatchIndexingOperationListener listener;
     TestSink testSink;
+    ShardRouting shardRouting;
 
     @Before
     public void setUp() throws Exception {
         super.setUp();
         testSink = new TestSink();
-        final ShardRouting shardRouting = TestShardRouting.newShardRouting(
+        shardRouting = TestShardRouting.newShardRouting(
             new ShardId("index", "_na_", 0),
             randomAlphaOfLength(10),
             true,
@@ -60,7 +61,7 @@ public class BatchIndexingOperationListenerIndexShardTests extends IndexShardTes
         );
         listener = new BatchIndexingOperationListener(
             shardRouting.shardId(),
-            List.of(testSink),
+            Set.of(testSink),
             threadPool,
             DefaultRemoteStoreSettings.INSTANCE
         );
@@ -184,8 +185,10 @@ public class BatchIndexingOperationListenerIndexShardTests extends IndexShardTes
         // in this case we have a dedupe in the batch and a failure occurs, in this instance we
         // fail all reqs that were part of the batch, even if they don't include that deduped operation.
         String docId = "mydoc";
-        indexDoc(indexShard, MediaTypeRegistry.JSON.type(), docId);
-        indexDoc(indexShard, MediaTypeRegistry.JSON.type(), docId, "{\"field1\":\"value1\"}");
+        Engine.IndexResult doc = indexDoc(indexShard, MediaTypeRegistry.JSON.type(), docId);// seqno 0
+        assertEquals(0L, doc.getSeqNo());
+        doc = indexDoc(indexShard, MediaTypeRegistry.JSON.type(), docId, "{\"field1\":\"1L\"}");// seqno 1 dedupe
+        assertEquals(1L, doc.getSeqNo());
         testSink.setFailureAfter(0L);
 
         // 0 gets deduped by 1L, but both ops come from separate requests.
@@ -199,6 +202,75 @@ public class BatchIndexingOperationListenerIndexShardTests extends IndexShardTes
         assertEquals(Set.of(1L), testSink.lastestReceivedSequenceNumbers());
         assertEquals(1L, listener.getSeenCheckpoint());
         assertEquals(1L, listener.getCompletedCheckpoint());
+    }
+
+    public void testDedupeOnSameDocId_WithFailureAndDedupe() throws Exception {
+        // this is the same as the previous test but with additional docs per request.
+        // r1
+        indexDoc(0L);
+        String docId = "mydoc";
+        Engine.IndexResult doc = indexDoc(indexShard, MediaTypeRegistry.JSON.type(), docId);// seqno 1
+        assertEquals(1L, doc.getSeqNo());
+        indexDoc(2L);
+
+        // r2
+        indexDoc(3L);
+        doc = indexDoc(indexShard, MediaTypeRegistry.JSON.type(), docId, "{\"field1\":\"1234\"}");// seqno 4 dedupe
+        if (doc.getFailure() != null) {
+            throw doc.getFailure();
+        }
+        assertEquals(4L, doc.getSeqNo());
+        indexDoc(5L);
+
+        testSink.setFailureAfter(3L);
+
+        // 0 gets deduped by 1L, but both ops come from separate requests.
+        // deduplication occurs *before* we hand off to the sink
+        // in this case we expect *both* requests to fail because the deduped op can not be ack'd.
+        Tuple<Set<Long>, Boolean> r1 = new Tuple<>(new TreeSet<>(Set.of(0L, 1L, 2L)), false);
+        Tuple<Set<Long>, Boolean> r2 = new Tuple<>(new TreeSet<>(Set.of(3L, 4L, 5L)), false);
+        waitAndAssert(List.of(r1, r2));
+
+        assertTrue(listener.hasProcessed(0L));
+        assertEquals(Set.of(0L, 2L, 3L, 4L, 5L), testSink.lastestReceivedSequenceNumbers());
+        assertEquals(5L, listener.getSeenCheckpoint());
+        assertEquals(
+            "Even with failure, every failed seqNo is part of a received request, so this advances",
+            5L,
+            listener.getCompletedCheckpoint()
+        );
+    }
+
+    public void testSinkThrowsRandomException() throws InterruptedException {
+        LongStream.range(0, 4).forEach(this::indexDoc);
+        // 0, 1, 2, 3 are all in the queue when the listener arrives
+
+        // mark ops after 1L as failed
+        testSink.setFailureAfter(1L, new RuntimeException("Failed"));
+
+        TreeSet<Long> r1 = new TreeSet<>(Set.of(0L, 2L));
+        final TreeSet<Long> expectedSeqNosSentToSink = new TreeSet<>(Set.of(0L, 1L, 2L));
+        waitAndAssert(r1, (e) -> {
+            assertNotNull(e);
+            assertEquals(expectedSeqNosSentToSink, testSink.lastestReceivedSequenceNumbers());
+            assertEquals(3, testSink.operationDetails.size());
+            assertEquals(2L, listener.getSeenCheckpoint());
+        });
+
+        // assert all ops in first req were marked persisted, but completed cp has
+        // not passed 1L
+        assertEquals("First req failed, all of its seqNos are marked persisted", 0L, listener.getCompletedCheckpoint());
+        assertEquals(2L, listener.getSeenCheckpoint());
+
+        TreeSet<Long> r2 = new TreeSet<>(Set.of(1L, 3L));
+        // request fails, we received an exception from the sink
+        waitAndAssert(r2, Assert::assertNotNull);
+        // nothing sent to the sink in second req, first batch fails which included 1L, so we don't bother sending 3L.
+        assertEquals(expectedSeqNosSentToSink, testSink.lastestReceivedSequenceNumbers());
+        assertTrue(listener.hasCompleted(0L));
+        assertTrue(listener.hasCompleted(1L));
+        assertTrue(listener.hasCompleted(2L));
+        assertTrue(listener.hasCompleted(3L));
     }
 
     public void testFailureAcrossRequests_secondRequestSucceeds() throws InterruptedException {
@@ -409,6 +481,7 @@ public class BatchIndexingOperationListenerIndexShardTests extends IndexShardTes
         private long failAfterSeqNo = SequenceNumbers.NO_OPS_PERFORMED;
 
         private SortedSet<OperationDetails> operationDetails = new TreeSet<>();
+        private RuntimeException toThrow;
 
         public SortedSet<OperationDetails> getOperationDetails() {
             return operationDetails;
@@ -422,6 +495,11 @@ public class BatchIndexingOperationListenerIndexShardTests extends IndexShardTes
 
         public void setFailureAfter(long seqNo) {
             failAfterSeqNo = seqNo;
+        }
+
+        public void setFailureAfter(long seqNo, RuntimeException toThrow) {
+            failAfterSeqNo = seqNo;
+            this.toThrow = toThrow;
         }
 
         @Override
@@ -442,6 +520,12 @@ public class BatchIndexingOperationListenerIndexShardTests extends IndexShardTes
             if (failAfterSeqNo != SequenceNumbers.NO_OPS_PERFORMED) {
                 long failAfter = failAfterSeqNo;
                 failAfterSeqNo = SequenceNumbers.NO_OPS_PERFORMED;
+
+                if (toThrow != null) {
+                    RuntimeException e = toThrow;
+                    toThrow = null;
+                    throw e;
+                }
                 return failAfter;
             } else {
                 return operationDetails.stream()

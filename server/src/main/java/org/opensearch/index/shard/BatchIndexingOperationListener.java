@@ -15,6 +15,7 @@ import org.opensearch.common.annotation.PublicApi;
 import org.opensearch.common.collect.Tuple;
 import org.opensearch.common.util.concurrent.BufferedAsyncIOProcessor;
 import org.opensearch.core.index.shard.ShardId;
+import org.opensearch.index.IndexSettings;
 import org.opensearch.index.engine.Engine;
 import org.opensearch.index.mapper.ParsedDocument;
 import org.opensearch.index.seqno.LocalCheckpointTracker;
@@ -52,12 +53,16 @@ import static org.opensearch.index.seqno.SequenceNumbers.NO_OPS_PERFORMED;
  * Write requests register a callback to get alerted when all operations in the request have been processed by sinks exactly once.
  * If any operation fails to be processed by a sink, all requests in the batch will fail if they have a seqNo at or lower than the first failed operation in the batch.
  */
-@PublicApi(since = "3.0.0")
 public class BatchIndexingOperationListener implements IndexingOperationListener {
     private final Queue<OperationDetails> operationsQueue;
-    private final List<Sink> sinks;
+    private final Set<Sink> sinks;
     private final ShardId shardId;
 
+    // We use a LocalCheckpointTracker to track incoming operations.
+    // processed means we have polled the operation from the queue and attempted to pass it to a sink ie. Seen the seqNo.
+    // persisted means the operation either was handled by the sink successfully or part of a failed batch *and* was part of a request
+    // passed to BufferedAsyncIOProcessor#Write method. ie. Completed. This allows us to track across batches if a seqNo
+    // was uploaded from a prior batch, but the req waiting on the seqNo is passed to write in a future batch.
     private final LocalCheckpointTracker tracker;
 
     private static final Logger logger = LogManager.getLogger(BatchIndexingOperationListener.class);
@@ -75,7 +80,7 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
      */
     public BatchIndexingOperationListener(
         ShardId shardId,
-        List<Sink> sinks,
+        Set<Sink> sinks,
         ThreadPool threadPool,
         RemoteStoreSettings remoteStoreSettings
     ) {
@@ -154,7 +159,7 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
      * @param listener {@link Consumer<Exception>} callback invoked when all operations have been processed.
      */
     public void addListener(SortedSet<Long> seqNos, Consumer<Exception> listener) {
-        processor.put(seqNos, e -> listener.accept(didRequestSucceed(seqNos.last(), e) ? null : e));
+        processor.put(seqNos, e -> listener.accept(didRequestSucceed(seqNos, e) ? null : e));
     }
 
     /**
@@ -181,13 +186,15 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
      * @param e   - Error
      * @return
      */
-    private boolean didRequestSucceed(long req, Exception e) {
+    private boolean didRequestSucceed(SortedSet<Long> req, Exception e) {
         if (e == null) return true;
         if (e instanceof ReplicationSinkException) {
             ReplicationSinkException rse = (ReplicationSinkException) e;
-            return rse.getFailed().contains(req) == false;
+            return rse.getFailed().contains(req.last()) == false;
         }
-        // if failed for any other reason
+        // if failed for any other reason, mark the seqNos as persisted even if
+        // they have not been polled from the queue.
+        req.forEach(tracker::markSeqNoAsPersisted);
         return false;
     }
 
@@ -297,10 +304,9 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
      * @param requireProcessed max seqNo that must be included in the batch
      * @return Sorted set of batches, each containing OperationDetails objects
      */
-    private Tuple<Collection<OperationDetails>, Boolean> pollUntil(Long requireProcessed) {
+    Tuple<Collection<OperationDetails>, Boolean> pollUntil(Long requireProcessed) {
         // maintain a map of the doc id to operation to be uploaded, until we process all required seqNos.
         Map<String, OperationDetails> docIdToOperations = new HashMap<>();
-
         // we can assert the queue is either empty or we've already processed all ops off the queue.
         assert operationsQueue.isEmpty() == false || tracker.getProcessedCheckpoint() >= requireProcessed
             : "Queue should never run empty until we've polled all expected ops processed cp: "
@@ -312,8 +318,13 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
             final OperationDetails op = operationsQueue.poll();
             assert op != null;
             tracker.markSeqNoAsProcessed(op.seqNo());
-            // if the operation getting removed from the queue has already been marked completed ignore it.
-            // this happens when the operation is part of a req split across batches that we know will already fail.
+
+            // If the operation removed from the queue has already been marked completed ignore it and do not send to sink.
+            // this happens when the operation is part of a req split across batches that we know will already fail, before
+            // The first step of write is to check for failed requests and mark all of their ops as persisted before polling from the queue.
+            // Example: Queue = [ R1(1,2,3), R2(4,5,6), R1 (7,8,9)] and the previous call to write processed only R2,
+            // and say 3-6 fails. later when write is called with R1, we know that R1 already has failed ops in the previous call to write,
+            // so we mark 7,8,9 as persisted and result in not being sent to sink.
             if (tracker.hasPersisted(op.seqNo())) continue;
             if (docIdToOperations.containsKey(op.docId())) {
                 deduped = true;
@@ -433,6 +444,10 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
          * @return seqNo up to which all operations successfully processed by the sink inclusive.
          */
         long acceptBatch(ShardId shardId, SortedSet<OperationDetails> operationDetails);
+
+        default boolean supportsIndex(IndexSettings indexSettings) {
+            return true;
+        }
     }
 
     /**
