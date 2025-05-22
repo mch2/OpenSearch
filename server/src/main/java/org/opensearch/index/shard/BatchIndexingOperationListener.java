@@ -29,7 +29,6 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Queue;
 import java.util.Set;
 import java.util.SortedSet;
@@ -258,7 +257,7 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
         }
 
         // poll the next batch from the queue
-        Tuple<Collection<OperationDetails>, Boolean> result = pollUntil(batch.last());
+        Tuple<Collection<OperationDetails>, Set<Long>> result = pollUntil(batch.last());
         final SortedSet<OperationDetails> operationDetails = new TreeSet<>(result.v1());
         assert operationDetails.isEmpty() == false
             || batch.stream().allMatch(seqNo -> tracker.hasProcessed(seqNo) && tracker.hasPersisted(seqNo))
@@ -275,10 +274,10 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
         List<Tuple<SortedSet<Long>, Consumer<Exception>>> requests,
         final long completedUpTo,
         SortedSet<OperationDetails> operationDetails,
-        Tuple<Collection<OperationDetails>, Boolean> result,
+        Tuple<Collection<OperationDetails>, Set<Long>> result,
         SortedSet<Long> batch
     ) {
-        // mark every op that was polled off the queue and successful as persisted
+        // mark every op that was sent to the sink and successful as persisted (this intentionally does not include deduped away operations)
         operationDetails.stream().filter(op -> op.seqNo() <= completedUpTo).forEach(op -> tracker.markSeqNoAsPersisted(op.seqNo()));
 
         // mark any operation that is part of the request batch (set of incoming requests to the asyncIO write) as persisted.
@@ -286,7 +285,7 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
 
         // if we failed to process all ops check for failed requests
         if (completedUpTo < batch.last()) {
-            if (result.v2()) {
+            if (result.v2().isEmpty() == false) {
                 // if we had to dedupe by docId across requests, we need to fail all the requests
                 // this ensures the deduped away req is also negatively ack'd.
                 return requests.stream().map(tuple -> tuple.v1().last()).collect(Collectors.toSet());
@@ -294,7 +293,8 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
             // filter out reqs that passed (highest seqNo in the req is lte than completedUpTo)
             return requests.stream().map(tuple -> tuple.v1().last()).filter(last -> last > completedUpTo).collect(Collectors.toSet());
         }
-        // everything passed
+        // everything passed, mark the deduped away numbers as completed
+        result.v2().forEach(tracker::markSeqNoAsPersisted);
         return Collections.emptySet();
     }
 
@@ -304,7 +304,7 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
      * @param requireProcessed max seqNo that must be included in the batch
      * @return Sorted set of batches, each containing OperationDetails objects
      */
-    Tuple<Collection<OperationDetails>, Boolean> pollUntil(Long requireProcessed) {
+    Tuple<Collection<OperationDetails>, Set<Long>> pollUntil(Long requireProcessed) {
         // maintain a map of the doc id to operation to be uploaded, until we process all required seqNos.
         Map<String, OperationDetails> docIdToOperations = new HashMap<>();
         // we can assert the queue is either empty or we've already processed all ops off the queue.
@@ -313,7 +313,7 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
                 + tracker.getProcessedCheckpoint()
                 + " required: "
                 + requireProcessed;
-        boolean deduped = false;
+        Set<Long> deduped = new HashSet<>();
         while (tracker.getProcessedCheckpoint() < requireProcessed) {
             final OperationDetails op = operationsQueue.poll();
             assert op != null;
@@ -326,25 +326,27 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
             // and say 3-6 fails. later when write is called with R1, we know that R1 already has failed ops in the previous call to write,
             // so we mark 7,8,9 as persisted and result in not being sent to sink.
             if (tracker.hasPersisted(op.seqNo())) continue;
-            if (docIdToOperations.containsKey(op.docId())) {
-                deduped = true;
-            }
-            docIdToOperations.merge(op.docId(), op, this::dedupe);
+            // if we have to dedupe, keep track of which op was deduped away in case of failure.
+            // in the event of failure we do *not* want to mark the deduped away ops as persisted
+            // they will only be marked persisted later if the request batch included the seqno.
+            docIdToOperations.compute(op.docId(), (docId, existing) -> {
+                if (existing == null) {
+                    return op;
+                }
+                if (op.seqNo() > existing.seqNo()) {
+                    deduped.add(existing.seqNo());
+                    return op;
+                } else {
+                    deduped.add(op.seqNo());
+                    return existing;
+                }
+            });
         }
         assert tracker.getProcessedCheckpoint() >= requireProcessed : "Expected "
             + tracker.getProcessedCheckpoint()
             + " to be at least "
             + requireProcessed;
         return new Tuple<>(docIdToOperations.values(), deduped);
-    }
-
-    private OperationDetails dedupe(OperationDetails op, OperationDetails existingOp) {
-        assert Objects.equals(existingOp.docId(), op.docId());
-
-        if (op.seqNo() > existingOp.seqNo()) {
-            return op;
-        }
-        return existingOp;
     }
 
     private void completeRequest(Set<Long> failedRequests) {

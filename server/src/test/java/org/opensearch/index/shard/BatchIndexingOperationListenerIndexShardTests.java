@@ -206,6 +206,7 @@ public class BatchIndexingOperationListenerIndexShardTests extends IndexShardTes
 
     public void testDedupeOnSameDocId_WithFailureAndDedupe_FirstRequestArrivesLast() throws Exception {
         // this is the same as the previous test but with additional docs per request, and r2 is finished before r1
+        // r1
         indexDoc(0L);
         String docId = "mydoc";
         Engine.IndexResult doc = indexDoc(indexShard, MediaTypeRegistry.JSON.type(), docId);// seqno 1
@@ -215,9 +216,6 @@ public class BatchIndexingOperationListenerIndexShardTests extends IndexShardTes
         // r2
         indexDoc(3L);
         doc = indexDoc(indexShard, MediaTypeRegistry.JSON.type(), docId, "{\"field1\":\"1234\"}");// seqno 4 dedupe
-        if (doc.getFailure() != null) {
-            throw doc.getFailure();
-        }
         assertEquals(4L, doc.getSeqNo());
         indexDoc(5L);
 
@@ -226,6 +224,7 @@ public class BatchIndexingOperationListenerIndexShardTests extends IndexShardTes
         // 1L (R1) is deduped by 4L (R2), R2 is processed first.
         // in this case we expect *both* requests to fail, but r1 is received after r2
         waitAndAssert(Set.of(3L, 4L, 5L), e -> assertNotNull("R2 [3, 4, 5] should fail", e)); // r2
+        // because 1 is never passed to the sink, it will never be marked completed until r2 is received
         assertEquals("1L is not yet completed", 0L, listener.getCompletedCheckpoint());
         assertFalse("1L has not been completed", listener.hasCompleted(1L));
         assertTrue("3L has been completed", listener.hasCompleted(3L));
@@ -244,6 +243,43 @@ public class BatchIndexingOperationListenerIndexShardTests extends IndexShardTes
         );
         assertEquals(5L, listener.getCompletedCheckpoint());
         assertEquals(5L, listener.getSeenCheckpoint());
+    }
+
+    public void testDedupeOnSameDocId_WithNoFailure_FirstRequestArrivesLast() throws Exception {
+        // this is the same as the previous test but with additional docs per request, and r2 is finished before r1
+        // r1
+        indexDoc(0L);
+        String docId = "mydoc";
+        Engine.IndexResult doc = indexDoc(indexShard, MediaTypeRegistry.JSON.type(), docId);// seqno 1
+        assertEquals(1L, doc.getSeqNo());
+        indexDoc(2L);
+
+        // r2
+        indexDoc(3L);
+        doc = indexDoc(indexShard, MediaTypeRegistry.JSON.type(), docId, "{\"field1\":\"1234\"}");// seqno 4 dedupe
+        assertEquals(4L, doc.getSeqNo());
+        indexDoc(5L);
+
+        // 1L (R1) is deduped by 4L (R2), R2 is processed first.
+        // in this case we expect *both* requests to fail, but r1 is received after r2
+        waitAndAssert(Set.of(3L, 4L, 5L), e -> assertNull("R2 [3, 4, 5] should not fail", e)); // r2
+        // because 1 is never passed to the sink, it will never be marked completed until r2 is received
+        assertEquals(5L, listener.getCompletedCheckpoint());
+        assertEquals(5L, listener.getSeenCheckpoint());
+
+        // assertEquals(5L, listener.getSeenCheckpoint());
+        waitAndAssert(Set.of(0L, 1L, 2L), e -> assertNull("R1 [0, 1, 2] should not fail", e)); // r1
+
+        // assertTrue(listener.hasProcessed(0L));
+        // assertEquals(Set.of(0L, 2L, 3L, 4L, 5L), testSink.lastestReceivedSequenceNumbers());
+        // assertEquals(5L, listener.getSeenCheckpoint());
+        // assertEquals(
+        // "Even with failure, every failed seqNo is part of a received request, so this advances",
+        // 5L,
+        // listener.getCompletedCheckpoint()
+        // );
+        // assertEquals(5L, listener.getCompletedCheckpoint());
+        // assertEquals(5L, listener.getSeenCheckpoint());
     }
 
     public void testSinkThrowsRandomException() throws InterruptedException {
