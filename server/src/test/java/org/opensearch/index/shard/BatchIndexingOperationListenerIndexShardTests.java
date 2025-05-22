@@ -9,9 +9,6 @@
 package org.opensearch.index.shard;
 
 import org.apache.lucene.index.Term;
-import org.junit.After;
-import org.junit.Assert;
-import org.junit.Before;
 import org.opensearch.cluster.routing.RecoverySource;
 import org.opensearch.cluster.routing.ShardRouting;
 import org.opensearch.cluster.routing.ShardRoutingState;
@@ -27,6 +24,9 @@ import org.opensearch.index.seqno.SequenceNumbers;
 import org.opensearch.index.shard.BatchIndexingOperationListener.OperationDetails;
 import org.opensearch.indices.DefaultRemoteStoreSettings;
 import org.opensearch.search.lookup.SourceLookup;
+import org.junit.After;
+import org.junit.Assert;
+import org.junit.Before;
 
 import java.io.IOException;
 import java.util.Collections;
