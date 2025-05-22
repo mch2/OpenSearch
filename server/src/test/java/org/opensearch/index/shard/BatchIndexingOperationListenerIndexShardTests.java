@@ -261,7 +261,7 @@ public class BatchIndexingOperationListenerIndexShardTests extends IndexShardTes
         indexDoc(5L);
 
         // 1L (R1) is deduped by 4L (R2), R2 is processed first.
-        // in this case we expect *both* requests to fail, but r1 is received after r2
+        // in this case we expect *both* requests to pass, but r1 is received after r2
         waitAndAssert(Set.of(3L, 4L, 5L), e -> assertNull("R2 [3, 4, 5] should not fail", e)); // r2
         // because 1 is never passed to the sink, it will never be marked completed until r2 is received
         assertEquals(5L, listener.getCompletedCheckpoint());
@@ -269,17 +269,6 @@ public class BatchIndexingOperationListenerIndexShardTests extends IndexShardTes
 
         // assertEquals(5L, listener.getSeenCheckpoint());
         waitAndAssert(Set.of(0L, 1L, 2L), e -> assertNull("R1 [0, 1, 2] should not fail", e)); // r1
-
-        // assertTrue(listener.hasProcessed(0L));
-        // assertEquals(Set.of(0L, 2L, 3L, 4L, 5L), testSink.lastestReceivedSequenceNumbers());
-        // assertEquals(5L, listener.getSeenCheckpoint());
-        // assertEquals(
-        // "Even with failure, every failed seqNo is part of a received request, so this advances",
-        // 5L,
-        // listener.getCompletedCheckpoint()
-        // );
-        // assertEquals(5L, listener.getCompletedCheckpoint());
-        // assertEquals(5L, listener.getSeenCheckpoint());
     }
 
     public void testSinkThrowsRandomException() throws InterruptedException {
