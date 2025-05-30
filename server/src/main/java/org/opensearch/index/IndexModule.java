@@ -529,7 +529,7 @@ public final class IndexModule {
             throw new IllegalArgumentException("Sink must not be null");
         }
         if (sinks.contains(sink)) {
-            throw new IllegalArgumentException("Sink already added");
+            throw new IllegalArgumentException("Sink " + sink + " already added");
         }
         sinks.add(sink);
     }

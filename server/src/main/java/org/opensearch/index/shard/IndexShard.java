@@ -2702,13 +2702,15 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
      * @param sequenceNumbers {@link SortedSet<Long>} sequenceNumbers to wait on
      * @param callback {@link Consumer<Exception>} callback, returns null if all operations processed successfully
      */
-    public void addBatchListener(SortedSet<Long> sequenceNumbers, Consumer<Exception> callback) {
+    public void waitForBatchCompletion(SortedSet<Long> sequenceNumbers, Consumer<Exception> callback) {
         verifyNotClosed();
-        if (routingEntry().primary() == false || sequenceNumbers == null || sequenceNumbers.isEmpty()) {
-            callback.accept(null);
-            return;
-        }
-        batchOperationListener().ifPresentOrElse((l) -> l.addListener(sequenceNumbers, callback), () -> callback.accept(null));
+        batchOperationListener().ifPresentOrElse((l) -> {
+            if (routingEntry().primary() == false || sequenceNumbers == null || sequenceNumbers.isEmpty()) {
+                callback.accept(null);
+            } else {
+                l.addListener(sequenceNumbers, callback);
+            }
+        }, () -> callback.accept(null));
     }
 
     /**

@@ -118,7 +118,7 @@ public class BatchIndexingOperationListenerIndexShardTests extends IndexShardTes
         // Third operation - Delete the document - seqNo 2
         Engine.DeleteResult deleteResult = deleteDoc(indexShard, docId);
 
-        indexShard.addBatchListener(new TreeSet<>(Collections.singleton(deleteResult.getSeqNo())), (e) -> {
+        indexShard.waitForBatchCompletion(new TreeSet<>(Collections.singleton(deleteResult.getSeqNo())), (e) -> {
             assertEquals(Set.of(deleteResult.getSeqNo()), testSink.lastestReceivedSequenceNumbers());
         });
     }
@@ -132,7 +132,7 @@ public class BatchIndexingOperationListenerIndexShardTests extends IndexShardTes
         // Second index operation - Update some fields - seqNo 1
         Engine.IndexResult doc = indexDoc(indexShard, "_doc", docId, "{\"field1\":\"value3\"}");
 
-        indexShard.addBatchListener(new TreeSet<>(Collections.singleton(doc.getSeqNo())), (e) -> {
+        indexShard.waitForBatchCompletion(new TreeSet<>(Collections.singleton(doc.getSeqNo())), (e) -> {
             assertEquals(Set.of(doc.getSeqNo()), testSink.lastestReceivedSequenceNumbers());
             SortedSet<OperationDetails> operationDetails = testSink.getOperationDetails();
             BatchIndexingOperationListener.IndexOperationDetails op =
@@ -153,7 +153,7 @@ public class BatchIndexingOperationListenerIndexShardTests extends IndexShardTes
         // Second index operation - Update some fields - seqNo 1
         Engine.IndexResult doc = indexDoc(indexShard, "_doc", docId, "{\"field1\":\"value3\",\"field2\":\"value2\"}");
 
-        indexShard.addBatchListener(new TreeSet<>(Collections.singleton(doc.getSeqNo())), (e) -> {
+        indexShard.waitForBatchCompletion(new TreeSet<>(Collections.singleton(doc.getSeqNo())), (e) -> {
             SortedSet<OperationDetails> operationDetails = testSink.getOperationDetails();
             assertEquals(1, operationDetails.size());
             BatchIndexingOperationListener.IndexOperationDetails op =
@@ -372,10 +372,10 @@ public class BatchIndexingOperationListenerIndexShardTests extends IndexShardTes
 
     public void testFailureAcrossRequests_singleBatch_partialSuccess() throws InterruptedException {
         LongStream.range(0, 4).forEach(this::indexDoc);
-        // mark failure after 3 as failed, this should fail 5
+        // mark failure after 1 as failed, this should fail 2 and 3
         testSink.setFailureAfter(1L);
 
-        // both requests are part of the same batch
+        // all requests are part of the same batch
         Tuple<Set<Long>, Boolean> r1 = new Tuple<>(new TreeSet<>(Set.of(0L)), true);
         Tuple<Set<Long>, Boolean> r2 = new Tuple<>(new TreeSet<>(Set.of(1L)), true);
         Tuple<Set<Long>, Boolean> r3 = new Tuple<>(new TreeSet<>(Set.of(2L)), false);
@@ -465,7 +465,7 @@ public class BatchIndexingOperationListenerIndexShardTests extends IndexShardTes
     // wait and assert multiple reqs in a single batch with extra assertions in the callback.
     private void waitAndAssert(Set<Long> seqNos, Consumer<Exception> assertions) throws InterruptedException {
         final CountDownLatch latch = new CountDownLatch(1);
-        indexShard.addBatchListener(new TreeSet<>(seqNos), (e) -> {
+        indexShard.waitForBatchCompletion(new TreeSet<>(seqNos), (e) -> {
             assertions.accept(e);
             latch.countDown();
         });
@@ -477,7 +477,7 @@ public class BatchIndexingOperationListenerIndexShardTests extends IndexShardTes
         final CountDownLatch latch = new CountDownLatch(list.size());
         for (Tuple<Set<Long>, Boolean> tuple : list) {
             TreeSet<Long> req = new TreeSet<>(tuple.v1());
-            indexShard.addBatchListener(req, (e) -> {
+            indexShard.waitForBatchCompletion(req, (e) -> {
                 if (tuple.v2()) {
                     assertNull("Expected request [" + tuple.v1() + "] to succeed", e);
                 } else {

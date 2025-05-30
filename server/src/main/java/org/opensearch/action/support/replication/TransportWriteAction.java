@@ -523,10 +523,10 @@ public abstract class TransportWriteAction<
             this.sequenceNumbers = sequenceNumbers;
             if ((sync = indexShard.getTranslogDurability() == Translog.Durability.REQUEST && location != null)) {
                 pendingOps.incrementAndGet();
-                // increment twice here for our new listener
-                pendingOps.incrementAndGet();
             }
             this.logger = logger;
+            // increment pendingOps for batch completion
+            pendingOps.incrementAndGet();
             assert pendingOps.get() >= 0 && pendingOps.get() <= 3 : "pendingOpts was: " + pendingOps.get();
         }
 
@@ -536,8 +536,7 @@ public abstract class TransportWriteAction<
             if (numPending == 0) {
                 if (syncFailure.get() != null) {
                     respond.onFailure(syncFailure.get());
-                }
-                if (replicationFailure.get() != null) {
+                } else if (replicationFailure.get() != null) {
                     respond.onFailure(replicationFailure.get());
                 } else {
                     respond.onSuccess(refreshed.get());
@@ -572,11 +571,11 @@ public abstract class TransportWriteAction<
                     syncFailure.set(ex);
                     maybeFinish();
                 });
-                indexShard.addBatchListener(sequenceNumbers, (ex) -> {
-                    replicationFailure.set(ex);
-                    maybeFinish();
-                });
             }
+            indexShard.waitForBatchCompletion(sequenceNumbers, (ex) -> {
+                replicationFailure.set(ex);
+                maybeFinish();
+            });
         }
     }
 

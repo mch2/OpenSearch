@@ -103,8 +103,9 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
             @Override
             protected void write(List<Tuple<SortedSet<Long>, Consumer<Exception>>> requests) {
                 assert requests.isEmpty() == false;
-                assert active.get();
                 assert tracker.getPersistedCheckpoint() <= tracker.getProcessedCheckpoint();
+
+                logger.trace("Batch includes {}", requests);
 
                 // check if a prior batch has failed that impacts the incoming batch. Any incoming req containing a seqNo that has
                 // previously failed should be marked as failed and included in this set.
@@ -125,25 +126,27 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
 
     @Override
     public void postIndex(ShardId shardId, Engine.Index index, Engine.IndexResult result) {
-        assert active.get();
-        if (result.getResultType() == Engine.Result.Type.SUCCESS) {
-            OperationDetails details = new IndexOperationDetails(index.id(), result.getSeqNo(), result.getTerm(), index.parsedDoc());
-            operationsQueue.add(details);
-            logger.trace("Queueing Index op for {} {}", details.seqNo(), details.docId());
-        } else {
-            handleDocumentFailure(result);
+        if (active.get()) {
+            if (result.getResultType() == Engine.Result.Type.SUCCESS) {
+                OperationDetails details = new IndexOperationDetails(index.id(), result.getSeqNo(), result.getTerm(), index.parsedDoc());
+                operationsQueue.add(details);
+                logger.trace("Queueing Index op for {} {}", details.seqNo(), details.docId());
+            } else {
+                handleDocumentFailure(result);
+            }
         }
     }
 
     @Override
     public void postDelete(ShardId shardId, Engine.Delete delete, Engine.DeleteResult result) {
-        assert active.get();
-        if (result.getResultType() == Engine.Result.Type.SUCCESS) {
-            OperationDetails details = new DeleteOperationDetails(delete.id(), result.getSeqNo(), result.getTerm());
-            operationsQueue.add(details);
-            logger.trace("Queueing Delete op for {} {}", details.seqNo(), details.docId());
-        } else {
-            handleDocumentFailure(result);
+        if (active.get()) {
+            if (result.getResultType() == Engine.Result.Type.SUCCESS) {
+                OperationDetails details = new DeleteOperationDetails(delete.id(), result.getSeqNo(), result.getTerm());
+                operationsQueue.add(details);
+                logger.trace("Queueing Delete op for {} {}", details.seqNo(), details.docId());
+            } else {
+                handleDocumentFailure(result);
+            }
         }
     }
 
@@ -171,7 +174,7 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
         assert active.get() == false;
         assert operationsQueue.isEmpty();
         if (active.getAndSet(true) == false) {
-            logger.trace("Initialing tracker with {}", seqNo);
+            logger.trace("Initializing tracker with {}", seqNo);
             tracker.fastForwardProcessedSeqNo(seqNo);
             tracker.fastForwardPersistedSeqNo(seqNo);
         }
@@ -194,6 +197,7 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
         // if failed for any other reason, mark the seqNos as persisted even if
         // they have not been polled from the queue.
         req.forEach(tracker::markSeqNoAsPersisted);
+        logger.error("Failure to process batch", e);
         return false;
     }
 
@@ -244,6 +248,8 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
             .flatMap(Collection::stream)
             .collect(Collectors.toCollection(TreeSet::new));
 
+        assert batch.isEmpty() == false : " Batch should not be empty";
+
         // assert any op going forward in the batch has either never been seen or is already completed
         assert batch.stream().allMatch(seqNo -> tracker.hasProcessed(seqNo) == false || tracker.hasPersisted(seqNo))
             : "Expected All seqNos in the request to be new or already marked completed"
@@ -251,22 +257,31 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
                     .filter(seqNo -> tracker.hasProcessed(seqNo) == false || tracker.hasPersisted(seqNo))
                     .collect(Collectors.toSet());
 
-        // already completed all seqNos in the batch, complete early.
+        // already completed all seqNos in the request batch, complete early.
         if (batch.last() <= tracker.getPersistedCheckpoint()) {
             return Collections.emptySet();
         }
 
         // poll the next batch from the queue
-        Tuple<Collection<OperationDetails>, Set<Long>> result = pollUntil(batch.last());
+        Tuple<Collection<OperationDetails>, Set<Long>> result = pollUntil(batch);
+
         final SortedSet<OperationDetails> operationDetails = new TreeSet<>(result.v1());
         assert operationDetails.isEmpty() == false
             || batch.stream().allMatch(seqNo -> tracker.hasProcessed(seqNo) && tracker.hasPersisted(seqNo))
             : "new batch should either all be persisted or empty: " + batch;
 
-        long completedUpTo = batch.last(); // assume everything succeeds unless told otherwise.
+        // Nothing to do, return
+        if (operationDetails.isEmpty()) {
+            return Collections.emptySet();
+        }
+
+        long completedUpTo = operationDetails.last().seqNo; // assume everything succeeds unless told otherwise, this needs to be the max
+                                                            // seqno in the ops sent to the sink, the highest seqno in this batch could be
+                                                            // for a req that has not yet been received.
         for (Sink sink : sinks) {
             completedUpTo = Math.min(sink.acceptBatch(shardId, operationDetails), completedUpTo);
         }
+        logger.trace("Sinks Completed up to seqNo: {}", completedUpTo);
         return handleResult(requests, completedUpTo, operationDetails, result, batch);
     }
 
@@ -295,16 +310,18 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
         }
         // everything passed, mark the deduped away numbers as completed
         result.v2().forEach(tracker::markSeqNoAsPersisted);
+        logger.trace("Completed all requests up to seqNo: {}", completedUpTo);
         return Collections.emptySet();
     }
 
     /**
      * Polls operations from the queue until a given seqNo or the queue is empty.
      *
-     * @param requireProcessed max seqNo that must be included in the batch
+     * @param batch max seqNo that must be included in the batch
      * @return Sorted set of batches, each containing OperationDetails objects
      */
-    Tuple<Collection<OperationDetails>, Set<Long>> pollUntil(Long requireProcessed) {
+    Tuple<Collection<OperationDetails>, Set<Long>> pollUntil(SortedSet<Long> batch) {
+        long requireProcessed = batch.last();
         // maintain a map of the doc id to operation to be uploaded, until we process all required seqNos.
         Map<String, OperationDetails> docIdToOperations = new HashMap<>();
         // we can assert the queue is either empty or we've already processed all ops off the queue.
@@ -314,9 +331,15 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
                 + " required: "
                 + requireProcessed;
         Set<Long> deduped = new HashSet<>();
-        while (tracker.getProcessedCheckpoint() < requireProcessed) {
+        Set<Long> before = operationsQueue.stream().map(OperationDetails::seqNo).collect(Collectors.toSet());
+        while (operationsQueue.isEmpty() == false && tracker.getProcessedCheckpoint() < requireProcessed) {
             final OperationDetails op = operationsQueue.poll();
-            assert op != null;
+            assert op != null : "Queue is empty but needed to poll to "
+                + requireProcessed
+                + "before polling"
+                + before
+                + " processed "
+                + tracker.getProcessedCheckpoint();
             tracker.markSeqNoAsProcessed(op.seqNo());
 
             // If the operation removed from the queue has already been marked completed ignore it and do not send to sink.
@@ -325,7 +348,9 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
             // Example: Queue = [ R1(1,2,3), R2(4,5,6), R1 (7,8,9)] and the previous call to write processed only R2,
             // and say 3-6 fails. later when write is called with R1, we know that R1 already has failed ops in the previous call to write,
             // so we mark 7,8,9 as persisted and result in not being sent to sink.
-            if (tracker.hasPersisted(op.seqNo())) continue;
+            if (tracker.hasPersisted(op.seqNo())) {
+                continue;
+            }
             // if we have to dedupe, keep track of which op was deduped away in case of failure.
             // in the event of failure we do *not* want to mark the deduped away ops as persisted
             // they will only be marked persisted later if the request batch included the seqno.
@@ -342,10 +367,16 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
                 }
             });
         }
-        assert tracker.getProcessedCheckpoint() >= requireProcessed : "Expected "
-            + tracker.getProcessedCheckpoint()
-            + " to be at least "
-            + requireProcessed;
+
+        // check that we polled at least all ops in the request batch
+        assert tracker.getProcessedCheckpoint() >= requireProcessed || batch.stream().allMatch(tracker::hasProcessed)
+            : "Expected to have processed up to "
+                + requireProcessed
+                + "or for all requested ops to have processed"
+                + "Processed checkpoint: "
+                + tracker.getProcessedCheckpoint()
+                + " Batch: "
+                + batch;
         return new Tuple<>(docIdToOperations.values(), deduped);
     }
 
@@ -402,6 +433,11 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
         public int compareTo(OperationDetails o) {
             return Long.compare(this.seqNo, o.seqNo);
         }
+
+        @Override
+        public String toString() {
+            return "OperationDetails{" + "docId='" + docId + '\'' + ", seqNo=" + seqNo + ", primaryTerm=" + primaryTerm + '}';
+        }
     }
 
     /**
@@ -420,6 +456,11 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
         public ParsedDocument parsedDoc() {
             return parsedDoc;
         }
+
+        @Override
+        public String toString() {
+            return "IndexOperationDetails{}";
+        }
     }
 
     /**
@@ -429,6 +470,11 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
     public static class DeleteOperationDetails extends OperationDetails {
         public DeleteOperationDetails(String docId, long seqNo, long primaryTerm) {
             super(docId, seqNo, primaryTerm);
+        }
+
+        @Override
+        public String toString() {
+            return "DeleteOperationDetails{}";
         }
     }
 
