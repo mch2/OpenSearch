@@ -28,7 +28,6 @@ import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.index.IndexModule;
 import org.opensearch.index.query.QueryBuilders;
 import org.opensearch.index.seqno.SequenceNumbers;
-import org.opensearch.node.NodeClosedException;
 import org.opensearch.plugins.Plugin;
 import org.opensearch.remotestore.RemoteStoreBaseIntegTestCase;
 import org.opensearch.search.SearchHit;
@@ -179,15 +178,14 @@ public class BatchIndexingOperationListenerIT extends RemoteStoreBaseIntegTestCa
         String primary = primaryNode.getName();
         String replica = internalCluster().startDataOnlyNode();
         ensureGreen();
-        int requestCount = randomIntBetween(2, 2);
-        int batchSize = randomIntBetween(10, 10);
+        int requestCount = randomIntBetween(2, 10);
+        int batchSize = randomIntBetween(2, 100);
         final BulkResponse[] responses = new BulkResponse[requestCount];
         final CyclicBarrier cyclicBarrier = new CyclicBarrier(responses.length);
         Thread[] threads = new Thread[responses.length];
         FlushRequest request = new FlushRequest("test");
         request.waitIfOngoing(true);
         request.force(true);
-        Set<String> failed = new HashSet<>();
         for (int i = 0; i < responses.length; i++) {
             final int threadID = i;
             threads[threadID] = new Thread(() -> {
@@ -202,13 +200,8 @@ public class BatchIndexingOperationListenerIT extends RemoteStoreBaseIntegTestCa
                 if (threadID > 0 && randomIntBetween(0, 10) == 1) {
                     requestBuilder.add(prepareDelete("val-" + (threadID - 1)));
                 }
-                try {
-                    BulkResponse bulkItemResponses = requestBuilder.get();
-                    responses[threadID] = bulkItemResponses;
-                } catch (NodeClosedException nce) {
-                    // do nothing we expect this could happen.
-                    logger.error("WHAT", nce);
-                }
+                BulkResponse bulkItemResponses = requestBuilder.get();
+                responses[threadID] = bulkItemResponses;
                 if (randomBoolean()) {
                     client().admin().indices().flush(request);
                 }

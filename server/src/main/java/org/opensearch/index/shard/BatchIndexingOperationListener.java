@@ -126,27 +126,25 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
 
     @Override
     public void postIndex(ShardId shardId, Engine.Index index, Engine.IndexResult result) {
-        if (active.get()) {
-            if (result.getResultType() == Engine.Result.Type.SUCCESS) {
-                OperationDetails details = new IndexOperationDetails(index.id(), result.getSeqNo(), result.getTerm(), index.parsedDoc());
-                operationsQueue.add(details);
-                logger.trace("Queueing Index op for {} {}", details.seqNo(), details.docId());
-            } else {
-                handleDocumentFailure(result);
-            }
+        assert active.get();
+        if (result.getResultType() == Engine.Result.Type.SUCCESS) {
+            OperationDetails details = new IndexOperationDetails(index.id(), result.getSeqNo(), result.getTerm(), index.parsedDoc());
+            operationsQueue.add(details);
+            logger.trace("Queueing Index op for {} {}", details.seqNo(), details.docId());
+        } else {
+            handleDocumentFailure(result);
         }
     }
 
     @Override
     public void postDelete(ShardId shardId, Engine.Delete delete, Engine.DeleteResult result) {
-        if (active.get()) {
-            if (result.getResultType() == Engine.Result.Type.SUCCESS) {
-                OperationDetails details = new DeleteOperationDetails(delete.id(), result.getSeqNo(), result.getTerm());
-                operationsQueue.add(details);
-                logger.trace("Queueing Delete op for {} {}", details.seqNo(), details.docId());
-            } else {
-                handleDocumentFailure(result);
-            }
+        assert active.get();
+        if (result.getResultType() == Engine.Result.Type.SUCCESS) {
+            OperationDetails details = new DeleteOperationDetails(delete.id(), result.getSeqNo(), result.getTerm());
+            operationsQueue.add(details);
+            logger.trace("Queueing Delete op for {} {}", details.seqNo(), details.docId());
+        } else {
+            handleDocumentFailure(result);
         }
     }
 
@@ -276,8 +274,8 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
         }
 
         long completedUpTo = operationDetails.last().seqNo; // assume everything succeeds unless told otherwise, this needs to be the max
-                                                            // seqno in the ops sent to the sink, the highest seqno in this batch could be
-                                                            // for a req that has not yet been received.
+        // seqno in the ops sent to the sink, the highest seqno in this batch could be
+        // for a req that has not yet been received.
         for (Sink sink : sinks) {
             completedUpTo = Math.min(sink.acceptBatch(shardId, operationDetails), completedUpTo);
         }
@@ -317,8 +315,8 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
     /**
      * Polls operations from the queue until a given seqNo or the queue is empty.
      *
-     * @param batch max seqNo that must be included in the batch
-     * @return Sorted set of batches, each containing OperationDetails objects
+     * @param batch sorted set of sequence numbers in the request
+     * @return Tuple where v1 is the operations to send to the sink, and v2 is the set of deduped docs
      */
     Tuple<Collection<OperationDetails>, Set<Long>> pollUntil(SortedSet<Long> batch) {
         long requireProcessed = batch.last();
