@@ -13,7 +13,9 @@ import org.apache.logging.log4j.Logger;
 import org.opensearch.OpenSearchException;
 import org.opensearch.common.annotation.PublicApi;
 import org.opensearch.common.collect.Tuple;
+import org.opensearch.common.unit.TimeValue;
 import org.opensearch.common.util.concurrent.BufferedAsyncIOProcessor;
+import org.opensearch.common.util.concurrent.ConcurrentCollections;
 import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.index.IndexSettings;
 import org.opensearch.index.engine.Engine;
@@ -29,11 +31,11 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Queue;
 import java.util.Set;
 import java.util.SortedSet;
 import java.util.TreeSet;
-import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
@@ -53,7 +55,7 @@ import static org.opensearch.index.seqno.SequenceNumbers.NO_OPS_PERFORMED;
  * If any operation fails to be processed by a sink, all requests in the batch will fail if they have a seqNo at or lower than the first failed operation in the batch.
  */
 public class BatchIndexingOperationListener implements IndexingOperationListener {
-    private final Queue<OperationDetails> operationsQueue;
+    private final BlockingQueue<OperationDetails> operationsQueue;
     private final Set<Sink> sinks;
     private final ShardId shardId;
 
@@ -70,6 +72,7 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
     // the listener is wired up to any shard type as long as there are configured sinks on the index
     // noop this listener if the shard is not primary.
     private final AtomicBoolean active = new AtomicBoolean(false);
+    private final TimeValue operationsQueueTimeout;
 
     /**
      * ReplicationOperationListener - IndexOperationListener implementation that batches operations post ingestion and hands off to a {@link Sink}.
@@ -81,12 +84,14 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
         ShardId shardId,
         Set<Sink> sinks,
         ThreadPool threadPool,
+        TimeValue operationQueueTimeout,
         RemoteStoreSettings remoteStoreSettings
     ) {
         this.shardId = shardId;
-        this.operationsQueue = new ConcurrentLinkedQueue<>();
+        this.operationsQueue = ConcurrentCollections.newBlockingQueue();
         this.sinks = sinks;
         this.tracker = new LocalCheckpointTracker(NO_OPS_PERFORMED, NO_OPS_PERFORMED);
+        this.operationsQueueTimeout = operationQueueTimeout;
         this.processor = new BufferedAsyncIOProcessor<>(
             logger,
             102400,
@@ -184,18 +189,18 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
      *
      * @param req - max seqNo in the request
      * @param e   - Error
-     * @return
+     * @return if the request succeeded
      */
     private boolean didRequestSucceed(SortedSet<Long> req, Exception e) {
         if (e == null) return true;
-        if (e instanceof ReplicationSinkException) {
-            ReplicationSinkException rse = (ReplicationSinkException) e;
+        if (e instanceof SinkException) {
+            SinkException rse = (SinkException) e;
             return rse.getFailed().contains(req.last()) == false;
         }
         // if failed for any other reason, mark the seqNos as persisted even if
         // they have not been polled from the queue.
         req.forEach(tracker::markSeqNoAsPersisted);
-        logger.error("Failure to process batch", e);
+        logger.error("Failure to process batch: " + req, e);
         return false;
     }
 
@@ -330,14 +335,22 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
                 + requireProcessed;
         Set<Long> deduped = new HashSet<>();
         Set<Long> before = operationsQueue.stream().map(OperationDetails::seqNo).collect(Collectors.toSet());
-        while (operationsQueue.isEmpty() == false && tracker.getProcessedCheckpoint() < requireProcessed) {
-            final OperationDetails op = operationsQueue.poll();
-            assert op != null : "Queue is empty but needed to poll to "
-                + requireProcessed
-                + "before polling"
-                + before
-                + " processed "
-                + tracker.getProcessedCheckpoint();
+        while (tracker.getProcessedCheckpoint() < requireProcessed) {
+            final OperationDetails op;
+            try {
+                op = operationsQueue.poll(operationsQueueTimeout.millis(), TimeUnit.MILLISECONDS);
+            } catch (InterruptedException e) {
+                logger.error("DID YOU INTERRUPT", e);
+                throw new OpenSearchException("BatchIndexingOperationListener timed out waiting for new operations", e);
+            }
+            if (op == null) throw new OpenSearchException(
+                "Queue is empty but needed to poll to "
+                    + requireProcessed
+                    + "before polling"
+                    + before
+                    + " processed "
+                    + tracker.getProcessedCheckpoint()
+            );
             tracker.markSeqNoAsProcessed(op.seqNo());
 
             // If the operation removed from the queue has already been marked completed ignore it and do not send to sink.
@@ -383,7 +396,7 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
         if (failedRequests.isEmpty() == false) {
             // honor a partial failure allowing a subset of listeners in requests to complete if possible.
             // in this case we wrap the min in an exception and rely on callers to unpack the min completed number
-            throw new ReplicationSinkException("Failed to process requests ending with seqNo: " + failedRequests, failedRequests);
+            throw new SinkException("Failed to process requests ending with seqNo: " + failedRequests, failedRequests);
         }
     }
 
@@ -497,10 +510,10 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
     /**
      * Error that can return a seqNo to indicate partial failures from a sink.
      */
-    static class ReplicationSinkException extends OpenSearchException {
+    static class SinkException extends OpenSearchException {
         private final Set<Long> failed;
 
-        public ReplicationSinkException(String message, Set<Long> failed) {
+        public SinkException(String message, Set<Long> failed) {
             super(message);
             this.failed = failed;
         }

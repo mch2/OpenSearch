@@ -14,6 +14,7 @@ import org.opensearch.cluster.routing.ShardRouting;
 import org.opensearch.cluster.routing.ShardRoutingState;
 import org.opensearch.cluster.routing.TestShardRouting;
 import org.opensearch.common.collect.Tuple;
+import org.opensearch.common.unit.TimeValue;
 import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.core.xcontent.MediaTypeRegistry;
 import org.opensearch.index.engine.Engine;
@@ -63,6 +64,7 @@ public class BatchIndexingOperationListenerIndexShardTests extends IndexShardTes
             shardRouting.shardId(),
             Set.of(testSink),
             threadPool,
+            TimeValue.timeValueMillis(5000),
             DefaultRemoteStoreSettings.INSTANCE
         );
         indexShard = newStartedShard(p -> newShard(p, listener), true);
@@ -439,6 +441,48 @@ public class BatchIndexingOperationListenerIndexShardTests extends IndexShardTes
         waitAndAssert(List.of(r2, r3, r4));
     }
 
+    public void testMultipleBatchesToProcessor_operationsNeverArrive_blockingqueueReturnsNull() throws InterruptedException, IOException {
+        listener = new BatchIndexingOperationListener(
+            shardRouting.shardId(),
+            Set.of(testSink),
+            threadPool,
+            TimeValue.timeValueMillis(1),
+            DefaultRemoteStoreSettings.INSTANCE
+        );
+        closeShards(indexShard);
+        indexShard = newStartedShard(p -> newShard(p, listener), true);
+        LongStream.range(0, 1).forEach(this::indexDoc); // only insert two ops
+        Tuple<Set<Long>, Boolean> r1 = new Tuple<>(Set.of(0L, 1L, 2L, 7L, 8L), false);
+        Tuple<Set<Long>, Boolean> r2 = new Tuple<>(Set.of(3L, 4L, 5L), false);
+        waitAndAssert(List.of(r1, r2));
+    }
+
+    public void testMultipleBatchesToProcessor_operationsNeverArrive_WithGaps() throws InterruptedException, IOException {
+        listener = new BatchIndexingOperationListener(
+            shardRouting.shardId(),
+            Set.of(testSink),
+            threadPool,
+            TimeValue.timeValueMillis(1),
+            DefaultRemoteStoreSettings.INSTANCE
+        );
+        closeShards(indexShard);
+        indexShard = newStartedShard(p -> newShard(p, listener), true);
+        LongStream.range(0, 5).forEach(this::simulatePostIndex);
+        LongStream.range(6, 9).forEach(this::simulatePostIndex);
+        Tuple<Set<Long>, Boolean> r1 = new Tuple<>(Set.of(0L, 1L, 2L, 6L, 7L, 8L), false); // r1 fails because 0,1,2 are pulled from the
+                                                                                           // queue
+        // when r2 listener is added but but never persisted because of interrupt.
+        Tuple<Set<Long>, Boolean> r2 = new Tuple<>(Set.of(3L, 4L, 5L), false);
+        waitAndAssert(List.of(r2));
+        simulatePostIndex(5); // 5 finally arrives
+        waitAndAssert(List.of(r1));
+    }
+
+    private void simulatePostIndex(long seqNo) {
+        Engine.IndexResult response = new Engine.IndexResult(1L, 1L, seqNo, true);
+        listener.postIndex(indexShard.shardId, buildIndexRequest("0L"), response);
+    }
+
     public void testFailureAcrossRequests_AllSeqNosInBatchAlreadyFailed() throws InterruptedException {
         LongStream.range(0, 4).forEach(this::indexDoc);
         // set first batch to poll until 3L, but fail after 1L
@@ -450,7 +494,7 @@ public class BatchIndexingOperationListenerIndexShardTests extends IndexShardTes
             assertEquals(new TreeSet<>(Set.of(0L, 1L, 2L)), testSink.lastestReceivedSequenceNumbers());
             assertEquals(3, testSink.operationDetails.size());
             assertEquals(2L, listener.getSeenCheckpoint());
-            BatchIndexingOperationListener.ReplicationSinkException rse = (BatchIndexingOperationListener.ReplicationSinkException) e;
+            BatchIndexingOperationListener.SinkException rse = (BatchIndexingOperationListener.SinkException) e;
         });
 
         assertEquals(0L, listener.getCompletedCheckpoint());
