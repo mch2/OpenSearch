@@ -478,6 +478,41 @@ public class BatchIndexingOperationListenerIndexShardTests extends IndexShardTes
         waitAndAssert(List.of(r1));
     }
 
+    public void testMultipleBatchesToProcessor_operationsOutOfOrderPollHigherThanRequired() throws InterruptedException, IOException {
+        listener = new BatchIndexingOperationListener(
+            shardRouting.shardId(),
+            Set.of(testSink),
+            threadPool,
+            TimeValue.timeValueMillis(1000),
+            DefaultRemoteStoreSettings.INSTANCE
+        );
+        closeShards(indexShard);
+        indexShard = newStartedShard(p -> newShard(p, listener), true);
+        LongStream.range(0, 5).forEach(this::simulatePostIndex);
+        LongStream.range(6, 9).forEach(this::simulatePostIndex);
+        simulatePostIndex(9); // higher than our required two batches
+        simulatePostIndex(10); // higher than our required two batch
+
+        Tuple<Set<Long>, Boolean> r1 = new Tuple<>(Set.of(0L, 1L, 2L, 6L, 7L, 8L), false);
+        Tuple<Set<Long>, Boolean> r2 = new Tuple<>(Set.of(3L, 4L, 5L), false);
+        waitAndAssert(List.of(r2));
+        assertFalse(listener.hasProcessed(6L));
+        assertFalse(listener.hasProcessed(7L));
+        assertFalse(listener.hasProcessed(8L));
+        assertFalse(listener.hasProcessed(9));
+        assertFalse(listener.hasProcessed(10));
+        simulatePostIndex(5); // 5 shows up
+        waitAndAssert(List.of(r1));
+        assertTrue(listener.hasProcessed(6L));
+        assertTrue(listener.hasProcessed(7L));
+        assertTrue(listener.hasProcessed(8L));
+        assertFalse(listener.hasProcessed(9));
+        assertFalse(listener.hasProcessed(10));
+        waitAndAssert(Set.of(9L, 10L), true);
+        assertTrue(listener.hasProcessed(9));
+        assertTrue(listener.hasProcessed(10));
+    }
+
     private void simulatePostIndex(long seqNo) {
         Engine.IndexResult response = new Engine.IndexResult(1L, 1L, seqNo, true);
         listener.postIndex(indexShard.shardId, buildIndexRequest("0L"), response);

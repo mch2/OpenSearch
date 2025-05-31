@@ -15,7 +15,6 @@ import org.opensearch.common.annotation.PublicApi;
 import org.opensearch.common.collect.Tuple;
 import org.opensearch.common.unit.TimeValue;
 import org.opensearch.common.util.concurrent.BufferedAsyncIOProcessor;
-import org.opensearch.common.util.concurrent.ConcurrentCollections;
 import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.index.IndexSettings;
 import org.opensearch.index.engine.Engine;
@@ -34,7 +33,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.SortedSet;
 import java.util.TreeSet;
-import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.BlockingDeque;
+import java.util.concurrent.LinkedBlockingDeque;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
@@ -55,7 +55,7 @@ import static org.opensearch.index.seqno.SequenceNumbers.NO_OPS_PERFORMED;
  * If any operation fails to be processed by a sink, all requests in the batch will fail if they have a seqNo at or lower than the first failed operation in the batch.
  */
 public class BatchIndexingOperationListener implements IndexingOperationListener {
-    private final BlockingQueue<OperationDetails> operationsQueue;
+    private final BlockingDeque<OperationDetails> operationsQueue;
     private final Set<Sink> sinks;
     private final ShardId shardId;
 
@@ -88,7 +88,7 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
         RemoteStoreSettings remoteStoreSettings
     ) {
         this.shardId = shardId;
-        this.operationsQueue = ConcurrentCollections.newBlockingQueue();
+        this.operationsQueue = new LinkedBlockingDeque<>();
         this.sinks = sinks;
         this.tracker = new LocalCheckpointTracker(NO_OPS_PERFORMED, NO_OPS_PERFORMED);
         this.operationsQueueTimeout = operationQueueTimeout;
@@ -109,8 +109,6 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
             protected void write(List<Tuple<SortedSet<Long>, Consumer<Exception>>> requests) {
                 assert requests.isEmpty() == false;
                 assert tracker.getPersistedCheckpoint() <= tracker.getProcessedCheckpoint();
-
-                logger.trace("Batch includes {}", requests);
 
                 // check if a prior batch has failed that impacts the incoming batch. Any incoming req containing a seqNo that has
                 // previously failed should be marked as failed and included in this set.
@@ -260,13 +258,15 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
                     .filter(seqNo -> tracker.hasProcessed(seqNo) == false || tracker.hasPersisted(seqNo))
                     .collect(Collectors.toSet());
 
+        // poll the next batch from the queue
+        Tuple<Collection<OperationDetails>, Set<Long>> result = pollUntil(batch);
+
         // already completed all seqNos in the request batch, complete early.
+        // this must be after we poll however because there could be ops still in the queue already
+        // marked for failure
         if (batch.last() <= tracker.getPersistedCheckpoint()) {
             return Collections.emptySet();
         }
-
-        // poll the next batch from the queue
-        Tuple<Collection<OperationDetails>, Set<Long>> result = pollUntil(batch);
 
         final SortedSet<OperationDetails> operationDetails = new TreeSet<>(result.v1());
         assert operationDetails.isEmpty() == false
@@ -324,34 +324,31 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
      * @return Tuple where v1 is the operations to send to the sink, and v2 is the set of deduped docs
      */
     Tuple<Collection<OperationDetails>, Set<Long>> pollUntil(SortedSet<Long> batch) {
-        long requireProcessed = batch.last();
+        long targetSequenceNumber = batch.last();
         // maintain a map of the doc id to operation to be uploaded, until we process all required seqNos.
         Map<String, OperationDetails> docIdToOperations = new HashMap<>();
-        // we can assert the queue is either empty or we've already processed all ops off the queue.
-        assert operationsQueue.isEmpty() == false || tracker.getProcessedCheckpoint() >= requireProcessed
-            : "Queue should never run empty until we've polled all expected ops processed cp: "
-                + tracker.getProcessedCheckpoint()
-                + " required: "
-                + requireProcessed;
-        Set<Long> deduped = new HashSet<>();
-        Set<Long> before = operationsQueue.stream().map(OperationDetails::seqNo).collect(Collectors.toSet());
-        while (tracker.getProcessedCheckpoint() < requireProcessed) {
-            final OperationDetails op;
-            try {
-                op = operationsQueue.poll(operationsQueueTimeout.millis(), TimeUnit.MILLISECONDS);
-            } catch (InterruptedException e) {
-                logger.error("DID YOU INTERRUPT", e);
-                throw new OpenSearchException("BatchIndexingOperationListener timed out waiting for new operations", e);
+        Set<Long> dedupedSequenceNumbers = new HashSet<>(); // keep track of ops deduped by docId
+        Set<OperationDetails> futureOperations = new HashSet<>(); // set of ops polled higher than requireProcessed, will be added back to
+                                                                  // front of queue.
+        while (tracker.getProcessedCheckpoint() < targetSequenceNumber) {
+            final OperationDetails nextOp = pollOperation();
+            // if op is null here poll() was interrupted by timeout
+            if (nextOp == null) {
+                // put back any ops that with higher seqNo than requireProcessed and throw.
+                futureOperations.forEach(operationsQueue::addFirst);
+                throw new OpenSearchException(
+                    "OperationQueue poll interrupted waiting to poll to seqNo: "
+                        + targetSequenceNumber
+                        + " only processed to: "
+                        + tracker.getProcessedCheckpoint()
+                );
             }
-            if (op == null) throw new OpenSearchException(
-                "Queue is empty but needed to poll to "
-                    + requireProcessed
-                    + "before polling"
-                    + before
-                    + " processed "
-                    + tracker.getProcessedCheckpoint()
-            );
-            tracker.markSeqNoAsProcessed(op.seqNo());
+
+            if (nextOp.seqNo() > targetSequenceNumber) {
+                futureOperations.add(nextOp);
+                continue;
+            }
+            tracker.markSeqNoAsProcessed(nextOp.seqNo());
 
             // If the operation removed from the queue has already been marked completed ignore it and do not send to sink.
             // this happens when the operation is part of a req split across batches that we know will already fail, before
@@ -359,36 +356,55 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
             // Example: Queue = [ R1(1,2,3), R2(4,5,6), R1 (7,8,9)] and the previous call to write processed only R2,
             // and say 3-6 fails. later when write is called with R1, we know that R1 already has failed ops in the previous call to write,
             // so we mark 7,8,9 as persisted and result in not being sent to sink.
-            if (tracker.hasPersisted(op.seqNo())) {
+            if (tracker.hasPersisted(nextOp.seqNo())) {
                 continue;
             }
             // if we have to dedupe, keep track of which op was deduped away in case of failure.
             // in the event of failure we do *not* want to mark the deduped away ops as persisted
             // they will only be marked persisted later if the request batch included the seqno.
-            docIdToOperations.compute(op.docId(), (docId, existing) -> {
+            docIdToOperations.compute(nextOp.docId(), (docId, existing) -> {
                 if (existing == null) {
-                    return op;
+                    return nextOp;
                 }
-                if (op.seqNo() > existing.seqNo()) {
-                    deduped.add(existing.seqNo());
-                    return op;
+                if (nextOp.seqNo() > existing.seqNo()) {
+                    dedupedSequenceNumbers.add(existing.seqNo());
+                    return nextOp;
                 } else {
-                    deduped.add(op.seqNo());
+                    dedupedSequenceNumbers.add(nextOp.seqNo());
                     return existing;
                 }
             });
         }
 
+        // put back any ops that with higher seqNo than requireProcessed
+        futureOperations.forEach(operationsQueue::addFirst);
+
         // check that we polled at least all ops in the request batch
-        assert tracker.getProcessedCheckpoint() >= requireProcessed || batch.stream().allMatch(tracker::hasProcessed)
+        assert tracker.getProcessedCheckpoint() >= targetSequenceNumber || batch.stream().allMatch(tracker::hasProcessed)
             : "Expected to have processed up to "
-                + requireProcessed
+                + targetSequenceNumber
                 + "or for all requested ops to have processed"
                 + "Processed checkpoint: "
                 + tracker.getProcessedCheckpoint()
                 + " Batch: "
                 + batch;
-        return new Tuple<>(docIdToOperations.values(), deduped);
+        assert docIdToOperations.isEmpty()
+            || docIdToOperations.values()
+                .stream()
+                .map(OperationDetails::seqNo)
+                .collect(Collectors.toCollection(TreeSet::new))
+                .last() == targetSequenceNumber;
+        return new Tuple<>(docIdToOperations.values(), dedupedSequenceNumbers);
+    }
+
+    private OperationDetails pollOperation() {
+        try {
+            return operationsQueue.poll(operationsQueueTimeout.millis(), TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            // our impl of the blockingDeque will return null on timeout, but to safely handle
+            // this checked exception catch and return null.
+            return null;
+        }
     }
 
     private void completeRequest(Set<Long> failedRequests) {
@@ -467,11 +483,6 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
         public ParsedDocument parsedDoc() {
             return parsedDoc;
         }
-
-        @Override
-        public String toString() {
-            return "IndexOperationDetails{}";
-        }
     }
 
     /**
@@ -481,11 +492,6 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
     public static class DeleteOperationDetails extends OperationDetails {
         public DeleteOperationDetails(String docId, long seqNo, long primaryTerm) {
             super(docId, seqNo, primaryTerm);
-        }
-
-        @Override
-        public String toString() {
-            return "DeleteOperationDetails{}";
         }
     }
 
