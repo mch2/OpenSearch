@@ -77,8 +77,11 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
     /**
      * ReplicationOperationListener - IndexOperationListener implementation that batches operations post ingestion and hands off to a {@link Sink}.
      *
-     * @param sinks      - {@link List< Sink >}
-     * @param threadPool - {@link ThreadPool}
+     * @param shardId               - {@link ShardId} - Shard Id
+     * @param sinks                 - {@link List<Sink>} list of sinks to consume batches of operations.
+     * @param threadPool            - {@link ThreadPool} Used for AsyncIOProcessor configuration/
+     * @param operationQueueTimeout - {@link TimeValue} Maximum time to block and wait for a missing operation to arrive in our operationsQueue.
+     * @param remoteStoreSettings   - {@link RemoteStoreSettings} Settings used to configure buffer interval or our IO processor.
      */
     public BatchIndexingOperationListener(
         ShardId shardId,
@@ -264,7 +267,7 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
         // already completed all seqNos in the request batch, complete early.
         // this must be after we poll however because there could be ops still in the queue already
         // marked for failure
-        if (batch.last() <= tracker.getPersistedCheckpoint()) {
+        if (result.v1().isEmpty() || batch.last() <= tracker.getPersistedCheckpoint()) {
             return Collections.emptySet();
         }
 
@@ -273,14 +276,9 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
             || batch.stream().allMatch(seqNo -> tracker.hasProcessed(seqNo) && tracker.hasPersisted(seqNo))
             : "new batch should either all be persisted or empty: " + batch;
 
-        // Nothing to do, return
-        if (operationDetails.isEmpty()) {
-            return Collections.emptySet();
-        }
-
-        long completedUpTo = operationDetails.last().seqNo; // assume everything succeeds unless told otherwise, this needs to be the max
-        // seqno in the ops sent to the sink, the highest seqno in this batch could be
-        // for a req that has not yet been received.
+        long completedUpTo = operationDetails.last().seqNo;
+        // assume everything succeeds unless told otherwise, this needs to be the max
+        // seqNo in the ops sent to the sink.
         for (Sink sink : sinks) {
             completedUpTo = Math.min(sink.acceptBatch(shardId, operationDetails), completedUpTo);
         }
@@ -329,7 +327,7 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
         Map<String, OperationDetails> docIdToOperations = new HashMap<>();
         Set<Long> dedupedSequenceNumbers = new HashSet<>(); // keep track of ops deduped by docId
         Set<OperationDetails> futureOperations = new HashSet<>(); // set of ops polled higher than requireProcessed, will be added back to
-                                                                  // front of queue.
+        // front of queue.
         while (tracker.getProcessedCheckpoint() < targetSequenceNumber) {
             final OperationDetails nextOp = pollOperation();
             // if op is null here poll() was interrupted by timeout
@@ -434,9 +432,9 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
      */
     @PublicApi(since = "3.0.0")
     public abstract static class OperationDetails implements Comparable<OperationDetails> {
-        private String docId;
-        private long seqNo;
-        private long primaryTerm;
+        private final String docId;
+        private final long seqNo;
+        private final long primaryTerm;
 
         public OperationDetails(String docId, long seqNo, long primaryTerm) {
             this.docId = docId;
@@ -473,7 +471,7 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
     @PublicApi(since = "3.0.0")
     public static class IndexOperationDetails extends OperationDetails {
 
-        private ParsedDocument parsedDoc;
+        private final ParsedDocument parsedDoc;
 
         public IndexOperationDetails(String docId, long seqNo, long primaryTerm, ParsedDocument parsedDoc) {
             super(docId, seqNo, primaryTerm);

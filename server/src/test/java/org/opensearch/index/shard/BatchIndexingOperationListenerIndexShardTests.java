@@ -513,6 +513,42 @@ public class BatchIndexingOperationListenerIndexShardTests extends IndexShardTes
         assertTrue(listener.hasProcessed(10));
     }
 
+    public void testMultipleBatchesToProcessor_EmptySetReturnedFromPolling() throws InterruptedException, IOException {
+        listener = new BatchIndexingOperationListener(
+            shardRouting.shardId(),
+            Set.of(testSink),
+            threadPool,
+            TimeValue.timeValueMillis(1000),
+            DefaultRemoteStoreSettings.INSTANCE
+        );
+        closeShards(indexShard);
+        indexShard = newStartedShard(p -> newShard(p, listener), true);
+        simulatePostIndex(0L);
+        simulatePostIndex(1L);
+        simulatePostIndex(2L);
+        simulatePostIndex(4L);
+        simulatePostIndex(5L);
+        Tuple<Set<Long>, Boolean> r1 = new Tuple<>(Set.of(2L), false);
+        Tuple<Set<Long>, Boolean> r3 = new Tuple<>(Set.of(4L), false);
+        Tuple<Set<Long>, Boolean> r4 = new Tuple<>(Set.of(1L), false);
+
+        // 4L comes in first (polls 0, 1, 2, 4, 5 (to put back))
+        waitAndAssert(List.of(r3));
+
+        assertTrue(listener.hasProcessed(1L));
+        assertTrue(listener.hasProcessed(2L));
+        assertTrue(listener.hasProcessed(4L));
+        assertEquals(-1, listener.getCompletedCheckpoint());
+        assertEquals(2, listener.getSeenCheckpoint());
+        assertFalse(listener.hasCompleted(1L));
+        assertFalse(listener.hasCompleted(2L));
+        // in this case 1 and 2 are already processed, polling here returns empty set.
+        waitAndAssert(List.of(r1, r4));
+        // 1,2 should now be completed as req came in.
+        assertTrue(listener.hasCompleted(1L));
+        assertTrue(listener.hasCompleted(2L));
+    }
+
     private void simulatePostIndex(long seqNo) {
         Engine.IndexResult response = new Engine.IndexResult(1L, 1L, seqNo, true);
         listener.postIndex(indexShard.shardId, buildIndexRequest("0L"), response);
