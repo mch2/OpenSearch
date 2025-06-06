@@ -11,10 +11,13 @@ package org.opensearch.index.shard;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.OpenSearchException;
+import org.opensearch.common.Nullable;
 import org.opensearch.common.annotation.PublicApi;
 import org.opensearch.common.collect.Tuple;
 import org.opensearch.common.unit.TimeValue;
 import org.opensearch.common.util.concurrent.BufferedAsyncIOProcessor;
+import org.opensearch.common.xcontent.XContentHelper;
+import org.opensearch.core.common.bytes.BytesReference;
 import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.index.IndexSettings;
 import org.opensearch.index.engine.Engine;
@@ -134,7 +137,18 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
     public void postIndex(ShardId shardId, Engine.Index index, Engine.IndexResult result) {
         assert active.get();
         if (result.getResultType() == Engine.Result.Type.SUCCESS) {
-            OperationDetails details = new IndexOperationDetails(index.id(), result.getSeqNo(), result.getTerm(), index.parsedDoc());
+            OperationDetails details;
+            if (index.getUpdateRequestSource() == null) {
+                details = new IndexOperationDetails(index.id(), result.getSeqNo(), result.getTerm(), index.parsedDoc());
+            } else {
+                details = new UpdateOperationDetails(
+                    index.id(),
+                    result.getSeqNo(),
+                    result.getTerm(),
+                    index.parsedDoc(),
+                    index.getUpdateRequestSource()
+                );
+            }
             operationsQueue.add(details);
             logger.trace("Queueing Index op for {} {}", details.seqNo(), details.docId());
         } else {
@@ -480,6 +494,32 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
 
         public ParsedDocument parsedDoc() {
             return parsedDoc;
+        }
+
+        public Map<String, Object> getSourceAsMap() {
+            return XContentHelper.convertToMap(parsedDoc.source(), false, parsedDoc.getMediaType()).v2();
+        }
+    }
+
+    @PublicApi(since = "3.0.0")
+    public static class UpdateOperationDetails extends IndexOperationDetails {
+
+        private final BytesReference updateRequestSource;
+
+        public UpdateOperationDetails(
+            String docId,
+            long seqNo,
+            long primaryTerm,
+            ParsedDocument parsedDoc,
+            @Nullable BytesReference updateRequestSource
+        ) {
+            super(docId, seqNo, primaryTerm, parsedDoc);
+            this.updateRequestSource = updateRequestSource;
+        }
+
+        @Override
+        public Map<String, Object> getSourceAsMap() {
+            return XContentHelper.convertToMap(updateRequestSource, false, this.parsedDoc().getMediaType()).v2();
         }
     }
 

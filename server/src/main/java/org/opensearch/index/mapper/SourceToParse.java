@@ -56,9 +56,20 @@ public class SourceToParse {
 
     private final @Nullable String routing;
 
+    // non null only for update requests, contains source passed in the original update request.
+    @Nullable
+    private final BytesReference updateRequestSource;
+
     private final MediaType mediaType;
 
-    public SourceToParse(String index, String id, BytesReference source, MediaType mediaType, @Nullable String routing) {
+    public SourceToParse(
+        String index,
+        String id,
+        BytesReference source,
+        MediaType mediaType,
+        @Nullable String routing,
+        @Nullable BytesReference updateRequestSource
+    ) {
         this.index = Objects.requireNonNull(index);
         this.id = Objects.requireNonNull(id);
         // we always convert back to byte array, since we store it and Field only supports bytes..
@@ -66,6 +77,11 @@ public class SourceToParse {
         this.source = new BytesArray(Objects.requireNonNull(source).toBytesRef());
         this.mediaType = Objects.requireNonNull(mediaType);
         this.routing = routing;
+        this.updateRequestSource = updateRequestSource;
+    }
+
+    public SourceToParse(String index, String id, BytesReference source, MediaType mediaType, @Nullable String routing) {
+        this(index, id, source, mediaType, routing, null);
     }
 
     public SourceToParse(String index, String id, BytesReference source, MediaType mediaType) {
@@ -90,6 +106,11 @@ public class SourceToParse {
 
     public MediaType getMediaType() {
         return this.mediaType;
+    }
+
+    @Nullable
+    public BytesReference getUpdateRequestSource() {
+        return updateRequestSource;
     }
 
     /**

@@ -107,10 +107,35 @@ public class BatchIndexingOperationListenerIT extends RemoteStoreBaseIntegTestCa
             .stream()
             .findFirst()
             .get();
-        assertEquals(BatchIndexingOperationListener.IndexOperationDetails.class, operationDetails.getClass());
-        BatchIndexingOperationListener.IndexOperationDetails op = (BatchIndexingOperationListener.IndexOperationDetails) operationDetails;
-        Map<String, Object> sourceAsMap = SourceLookup.sourceAsMap(op.parsedDoc().source());
-        assertEquals(Map.of("field1", "three", "field2", "two"), sourceAsMap);
+        assertEquals(BatchIndexingOperationListener.UpdateOperationDetails.class, operationDetails.getClass());
+        assertEquals(
+            Map.of("field1", "three"),
+            ((BatchIndexingOperationListener.UpdateOperationDetails) operationDetails).getSourceAsMap()
+        );
+    }
+
+    public void testUpdates_nestedObject() throws IOException {
+        createIndex("test");
+        ensureGreen();
+        Map<String, Object> field1Object = Map.of("subfield1", "subvalue1", "subfield2", "subvalue2");
+        Map<String, Object> updateObject = Map.of("subfield1", "subvalue3");
+
+        BulkResponse bulk = client().prepareBulk()
+            .add(client().prepareIndex("test").setId("doc1").setSource("field1", field1Object)) // add
+            .add(client().prepareUpdate("test", "doc1").setDoc("field1", updateObject)) // update field1
+            .get();
+        assertFalse(bulk.buildFailureMessage(), bulk.hasFailures());
+        assertThat(refresh().getFailedShards(), equalTo(0));
+        assertEquals(1, sink.getOps().size());
+        BatchIndexingOperationListener.OperationDetails operationDetails = sink.getOps()
+            .get(sink.getOps().keySet().stream().findFirst().get())
+            .stream()
+            .findFirst()
+            .get();
+        assertEquals(BatchIndexingOperationListener.UpdateOperationDetails.class, operationDetails.getClass());
+        BatchIndexingOperationListener.UpdateOperationDetails op = (BatchIndexingOperationListener.UpdateOperationDetails) operationDetails;
+        Map<String, Object> expected = Map.of("subfield1", "subvalue3");
+        assertEquals(Map.of("field1", expected), op.getSourceAsMap());
     }
 
     public void testDeleteLast() throws IOException {

@@ -15,8 +15,10 @@ import org.opensearch.cluster.routing.ShardRoutingState;
 import org.opensearch.cluster.routing.TestShardRouting;
 import org.opensearch.common.collect.Tuple;
 import org.opensearch.common.unit.TimeValue;
+import org.opensearch.core.common.bytes.BytesArray;
 import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.core.xcontent.MediaTypeRegistry;
+import org.opensearch.index.VersionType;
 import org.opensearch.index.engine.Engine;
 import org.opensearch.index.engine.InternalEngineTests;
 import org.opensearch.index.mapper.ParsedDocument;
@@ -24,7 +26,6 @@ import org.opensearch.index.mapper.Uid;
 import org.opensearch.index.seqno.SequenceNumbers;
 import org.opensearch.index.shard.BatchIndexingOperationListener.OperationDetails;
 import org.opensearch.indices.DefaultRemoteStoreSettings;
-import org.opensearch.search.lookup.SourceLookup;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
@@ -92,6 +93,36 @@ public class BatchIndexingOperationListenerIndexShardTests extends IndexShardTes
         assertEquals(Collections.emptySet(), testSink.operationDetails);
     }
 
+    public void testUpdateOperationDetails() throws InterruptedException {
+        ParsedDocument doc = InternalEngineTests.createParsedDoc("id", null);
+        BytesArray updateSource = new BytesArray("{ \"value\" : \"updated\" }");
+        long seqNo = 0L;
+        Engine.Index idx = new Engine.Index(
+            new Term("_id", Uid.encodeId(doc.id())),
+            doc,
+            seqNo,
+            primaryTerm,
+            randomLong(),
+            VersionType.INTERNAL,
+            Engine.Operation.Origin.PRIMARY,
+            randomNonNegativeLong(),
+            randomNonNegativeLong(),
+            false,
+            0L,
+            0L,
+            updateSource
+        );
+
+        // doesn't reach engine so no seqNo
+        Engine.IndexResult response = new Engine.IndexResult(1L, 1L, seqNo, true);
+        listener.postIndex(indexShard.shardId, idx, response);
+        waitAndAssert(Set.of(seqNo), true);
+        assertEquals(1, testSink.getOperationDetails().size());
+        OperationDetails first = testSink.getOperationDetails().first();
+        assertEquals(BatchIndexingOperationListener.UpdateOperationDetails.class, first.getClass());
+        assertEquals(Map.of("value", "updated"), ((BatchIndexingOperationListener.UpdateOperationDetails) first).getSourceAsMap());
+    }
+
     public void testDocumentFailure_DeleteOperation() {
         Engine.Delete doc = buildDeleteRequest("doc");
         long seqNo = 0L;
@@ -141,8 +172,7 @@ public class BatchIndexingOperationListenerIndexShardTests extends IndexShardTes
                 (BatchIndexingOperationListener.IndexOperationDetails) operationDetails.first();
             assertEquals(op.getClass(), BatchIndexingOperationListener.IndexOperationDetails.class);
             assertEquals(docId, op.docId());
-            Map<String, Object> sourceAsMap = SourceLookup.sourceAsMap(op.parsedDoc().source());
-            assertEquals(Map.of("field1", "value3"), sourceAsMap);
+            assertEquals(Map.of("field1", "value3"), op.getSourceAsMap());
         });
     }
 
@@ -162,8 +192,7 @@ public class BatchIndexingOperationListenerIndexShardTests extends IndexShardTes
                 (BatchIndexingOperationListener.IndexOperationDetails) operationDetails.first();
             assertEquals(op.getClass(), BatchIndexingOperationListener.IndexOperationDetails.class);
             assertEquals(docId, op.docId());
-            Map<String, Object> sourceAsMap = SourceLookup.sourceAsMap(op.parsedDoc().source());
-            assertEquals(Map.of("field1", "value3", "field2", "value2"), sourceAsMap);
+            assertEquals(Map.of("field1", "value3", "field2", "value2"), op.getSourceAsMap());
         });
     }
 
