@@ -138,16 +138,16 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
         assert active.get();
         if (result.getResultType() == Engine.Result.Type.SUCCESS) {
             OperationDetails details;
-            if (index.getUpdateRequestSource() == null) {
-                details = new IndexOperationDetails(index.id(), result.getSeqNo(), result.getTerm(), index.parsedDoc());
-            } else {
+            if (index instanceof Engine.Update) {
                 details = new UpdateOperationDetails(
                     index.id(),
                     result.getSeqNo(),
                     result.getTerm(),
                     index.parsedDoc(),
-                    index.getUpdateRequestSource()
+                    ((Engine.Update) index).getUpdateRequestSource()
                 );
+            } else {
+                details = new IndexOperationDetails(index.id(), result.getSeqNo(), result.getTerm(), index.parsedDoc());
             }
             operationsQueue.add(details);
             logger.trace("Queueing Index op for {} {}", details.seqNo(), details.docId());

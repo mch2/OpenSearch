@@ -97,7 +97,7 @@ public class BatchIndexingOperationListenerIndexShardTests extends IndexShardTes
         ParsedDocument doc = InternalEngineTests.createParsedDoc("id", null);
         BytesArray updateSource = new BytesArray("{ \"value\" : \"updated\" }");
         long seqNo = 0L;
-        Engine.Index idx = new Engine.Index(
+        Engine.Update idx = new Engine.Update(
             new Term("_id", Uid.encodeId(doc.id())),
             doc,
             seqNo,
