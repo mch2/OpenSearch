@@ -37,6 +37,7 @@ import java.util.Set;
 import java.util.SortedSet;
 import java.util.TreeSet;
 import java.util.concurrent.BlockingDeque;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingDeque;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -135,7 +136,6 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
 
     @Override
     public void postIndex(ShardId shardId, Engine.Index index, Engine.IndexResult result) {
-        assert active.get();
         if (result.getResultType() == Engine.Result.Type.SUCCESS) {
             OperationDetails details;
             if (index instanceof Engine.Update) {
@@ -158,7 +158,6 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
 
     @Override
     public void postDelete(ShardId shardId, Engine.Delete delete, Engine.DeleteResult result) {
-        assert active.get();
         if (result.getResultType() == Engine.Result.Type.SUCCESS) {
             OperationDetails details = new DeleteOperationDetails(delete.id(), result.getSeqNo(), result.getTerm());
             operationsQueue.add(details);
@@ -188,11 +187,10 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
      *
      * @param seqNo - starting seqNo
      */
-    void initializeReplicationOperationListener(long seqNo) {
-        assert active.get() == false;
-        assert operationsQueue.isEmpty();
+    void initialize(long seqNo) {
+        drain();
         if (active.getAndSet(true) == false) {
-            logger.trace("Initializing tracker with {}", seqNo);
+            logger.info("Initializing BatchIndexingOperationListener with seqNo: {}", seqNo);
             tracker.fastForwardProcessedSeqNo(seqNo);
             tracker.fastForwardPersistedSeqNo(seqNo);
         }
@@ -438,6 +436,55 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
         if (result.getSeqNo() != SequenceNumbers.UNASSIGNED_SEQ_NO) {
             tracker.markSeqNoAsProcessed(result.getSeqNo());
             tracker.markSeqNoAsPersisted(result.getSeqNo());
+        }
+    }
+
+    public void drain() {
+        if (operationsQueue.isEmpty()) return;
+        logger.info("Draining {} operations", operationsQueue.size());
+        final TreeSet<Long> seqNosToPoll = operationsQueue.stream()
+            .map(OperationDetails::seqNo)
+            .collect(Collectors.toCollection(TreeSet::new));
+
+        // Ensure we have initialized at least to 0, this can happen if drain is invoked
+        // before initialization from prior commit.
+        if (getSeenCheckpoint() < 0) {
+            tracker.fastForwardProcessedSeqNo(0);
+            tracker.fastForwardPersistedSeqNo(0);
+        }
+
+        fillSeqNoGaps(seqNosToPoll);
+        CountDownLatch latch = new CountDownLatch(1);
+        addListener(seqNosToPoll, (e) -> latch.countDown());
+        try {
+            latch.await(1, TimeUnit.MINUTES);
+        } catch (InterruptedException e) {
+            throw new OpenSearchException("Timed out waiting to drain BatchIndexingOperationListener", e);
+        }
+    }
+
+    // mark all seqNos that are missing within range min/max of the sorted set as processed.
+    // SeqNo gaps can occur if there are outstanding requests on a primary that dies and a req containing a higher seqNo has already been
+    // ack'd.
+    // Example:
+    // R1 - 1, 2, 3, 4. Where 4 is generated but the op never hits translog.
+    // R2 - 5 - generated after 4 and immediately ack'd.
+    // Primary dies - new primary replays from translog 1-3 and 5 with 4 missing.
+    // in this case we fill these gaps by marking the gapped seqnos as processed/persisted. The doc that is missing will be retried
+    // and assigned a higher seqno.
+    private void fillSeqNoGaps(TreeSet<Long> sortedSet) {
+        long min = sortedSet.first();
+        long max = sortedSet.last();
+
+        if (sortedSet.size() <= 1) {
+            return;
+        }
+
+        for (long i = min; i <= max; i++) {
+            if (!sortedSet.contains(i)) {
+                tracker.markSeqNoAsProcessed(i);
+                tracker.markSeqNoAsPersisted(i);
+            }
         }
     }
 

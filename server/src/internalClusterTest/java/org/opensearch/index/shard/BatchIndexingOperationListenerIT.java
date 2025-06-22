@@ -39,15 +39,18 @@ import org.junit.Before;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.SortedSet;
 import java.util.UUID;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 import static org.opensearch.cluster.metadata.IndexMetadata.SETTING_NUMBER_OF_REPLICAS;
 import static org.opensearch.cluster.routing.UnassignedInfo.INDEX_DELAYED_NODE_LEFT_TIMEOUT_SETTING;
@@ -70,6 +73,7 @@ public class BatchIndexingOperationListenerIT extends RemoteStoreBaseIntegTestCa
 
         @Override
         public void onIndexModule(IndexModule indexModule) {
+            indexModule.addIndexEventListener(sink);
             indexModule.addIndexingOperationSink(sink);
         }
     }
@@ -194,7 +198,6 @@ public class BatchIndexingOperationListenerIT extends RemoteStoreBaseIntegTestCa
         assertEquals(sink.getUniqueDocCount(), 300);
     }
 
-    @AwaitsFix(bugUrl = "") // TODO: Need to fix count assertion
     public void testConcurrentWritesWithPrimaryStopped() throws Exception {
         createIndex("test", Settings.builder().put(indexSettings()).put(SETTING_NUMBER_OF_REPLICAS, 1).build());
         internalCluster().startClusterManagerOnlyNode();
@@ -204,13 +207,14 @@ public class BatchIndexingOperationListenerIT extends RemoteStoreBaseIntegTestCa
         String replica = internalCluster().startDataOnlyNode();
         ensureGreen();
         int requestCount = randomIntBetween(2, 10);
-        int batchSize = randomIntBetween(2, 100);
+        int batchSize = randomIntBetween(1, 100);
         final BulkResponse[] responses = new BulkResponse[requestCount];
         final CyclicBarrier cyclicBarrier = new CyclicBarrier(responses.length);
         Thread[] threads = new Thread[responses.length];
         FlushRequest request = new FlushRequest("test");
         request.waitIfOngoing(true);
         request.force(true);
+        Set<String> docIds = new HashSet<>();
         for (int i = 0; i < responses.length; i++) {
             final int threadID = i;
             threads[threadID] = new Thread(() -> {
@@ -219,13 +223,23 @@ public class BatchIndexingOperationListenerIT extends RemoteStoreBaseIntegTestCa
                 } catch (Exception e) {
                     return;
                 }
-                BulkRequestBuilder requestBuilder = client().prepareBulk();
-                addDocs(requestBuilder, threadID, batchSize);
+                BulkRequestBuilder requestBuilder = client(replica).prepareBulk();
+                docIds.addAll(addDocs(requestBuilder, threadID, batchSize));
                 // randomly delete something
                 if (threadID > 0 && randomIntBetween(0, 10) == 1) {
-                    requestBuilder.add(prepareDelete("val-" + (threadID - 1)));
+                    String id = "val-" + (threadID - 1);
+                    docIds.remove(id);
+                    requestBuilder.add(prepareDelete(id));
                 }
                 BulkResponse bulkItemResponses = requestBuilder.get();
+                bulkItemResponses.forEach(bulkItemResponse -> {
+                    if (bulkItemResponse.getFailure() != null) {
+                        logger.info("It FAILED {}", bulkItemResponse.getId());
+                        logger.error(bulkItemResponse.getFailureMessage());
+                    } else {
+                        logger.info("It SUCCESS {} {}", bulkItemResponse.getResponse().getId(), bulkItemResponse.getResponse().getSeqNo());
+                    }
+                });
                 responses[threadID] = bulkItemResponses;
                 if (randomBoolean()) {
                     client().admin().indices().flush(request);
@@ -252,34 +266,37 @@ public class BatchIndexingOperationListenerIT extends RemoteStoreBaseIntegTestCa
 
         client().admin().indices().prepareFlush("test").setForce(true).get();
 
-        assertBusy(() -> {
-            assertThat(refresh().getFailedShards(), equalTo(0));
-            SearchResponse searchResponse = client().prepareSearch()
-                .setSize(10000)
-                .setTrackTotalHits(true)
-                .setQuery(QueryBuilders.matchAllQuery())
-                .setIndices("test")
-                .seqNoAndPrimaryTerm(true)
-                .get();
+        assertThat(refresh().getFailedShards(), equalTo(0));
+        SearchResponse searchResponse = client().prepareSearch()
+            .setSize(10000)
+            .setTrackTotalHits(true)
+            .setQuery(QueryBuilders.matchAllQuery())
+            .setIndices("test")
+            .seqNoAndPrimaryTerm(true)
+            .get();
 
-            assertEquals("Sink count does not match hit count", sink.getUniqueDocCount(), searchResponse.getHits().getTotalHits().value);
+        logger.info("Sink'd {}", sink.docs);
+        assertEquals("Sink count does not match hit count", sink.getUniqueDocCount(), searchResponse.getHits().getTotalHits().value);
 
-            Map<String, BatchIndexingOperationListener.IndexOperationDetails> latestCopy = sink.getLatestCopy();
-            for (SearchHit hit : searchResponse.getHits().getHits()) {
-                BatchIndexingOperationListener.IndexOperationDetails operationDetails = latestCopy.get(hit.getId());
-                if (operationDetails == null) {
-                    Assert.fail("Difference between Index and Sink");
-                }
-                assertEquals(
-                    "source for " + operationDetails.docId() + " " + operationDetails.seqNo(),
-                    hit.getSourceAsMap(),
-                    SourceLookup.sourceAsMap(operationDetails.parsedDoc().source())
-                );
+        // ensure the sink has an entry for each indexed document.
+        Map<String, BatchIndexingOperationListener.IndexOperationDetails> latestCopy = sink.getLatestCopy();
+        for (SearchHit hit : searchResponse.getHits().getHits()) {
+            BatchIndexingOperationListener.IndexOperationDetails operationDetails = latestCopy.get(hit.getId());
+            if (operationDetails == null) {
+                Assert.fail("Difference between Index and Sink");
             }
-        });
+            assertEquals(
+                "source for " + operationDetails.docId() + " " + operationDetails.seqNo(),
+                hit.getSourceAsMap(),
+                SourceLookup.sourceAsMap(operationDetails.parsedDoc().source())
+            );
+        }
+        Set<String> hits = Arrays.stream(searchResponse.getHits().getHits()).map(SearchHit::getId).collect(Collectors.toSet());
+        for (String docId : docIds) {
+            assertTrue("Missing expected doc: " + docId + " Actual: " + hits, hits.contains(docId));
+        }
     }
 
-    @AwaitsFix(bugUrl = "")
     public void testConcurrentWritesWithPrimaryRelocation() throws Exception {
         createIndex("test", Settings.builder().put(indexSettings()).put(SETTING_NUMBER_OF_REPLICAS, 1).build());
         internalCluster().startClusterManagerOnlyNode();
@@ -378,15 +395,19 @@ public class BatchIndexingOperationListenerIT extends RemoteStoreBaseIntegTestCa
         return state.nodes().resolveNode(primaryShard.currentNodeId());
     }
 
-    private void addDocs(BulkRequestBuilder requestBuilder, int offset, int count) {
+    private List<String> addDocs(BulkRequestBuilder requestBuilder, int offset, int count) {
+        List<String> docIds = new ArrayList<>();
         for (int i = offset * count; i < (offset * count) + count; i++) {
             Map<String, Object> sourceAsMap = new HashMap<>();
             for (int j = 0; j < randomIntBetween(1, 5); j++) {
                 sourceAsMap.put("field-" + j, UUID.randomUUID().toString());
             }
             String id = "val-" + i + "-" + offset;
+            docIds.add(id);
+            logger.info("making request for {} {}", id, sourceAsMap);
             requestBuilder.add(prepareIndex(id, sourceAsMap));
         }
+        return docIds;
     }
 
     private IndexRequestBuilder prepareIndex(String id, Object... source) {
@@ -405,13 +426,14 @@ public class BatchIndexingOperationListenerIT extends RemoteStoreBaseIntegTestCa
         return client().prepareDelete("test", id);
     }
 
-    static class TestSink implements BatchIndexingOperationListener.Sink {
+    static class TestSink implements BatchIndexingOperationListener.Sink, IndexEventListener {
         int counter = 0;
 
         public void clear() {
             this.ops.clear();
             this.docs.clear();
             this.counter = 0;
+            this.seqNos.clear();
         }
 
         // counter of gen with list of ops
@@ -436,15 +458,31 @@ public class BatchIndexingOperationListenerIT extends RemoteStoreBaseIntegTestCa
         // latest copy of each doc - can include deletes
         private Map<String, BatchIndexingOperationListener.IndexOperationDetails> latestCopy = new HashMap<>();
 
+        // docs mapped to their seqno - to check for dupes with diff docId.
+        private Map<Long, BatchIndexingOperationListener.OperationDetails> seqNos = new HashMap<>();
+
         @Override
         public long acceptBatch(ShardId shardId, SortedSet<BatchIndexingOperationListener.OperationDetails> operationDetails) {
-            if (operationDetails == null) {
-                Assert.fail();
-            }
             if (operationDetails.isEmpty()) {
                 Assert.fail();
             }
             ops.put(counter, operationDetails);
+            operationDetails.stream().forEach((op) -> {
+                if (seqNos.containsKey(op.seqNo())) {
+                    BatchIndexingOperationListener.OperationDetails existing = seqNos.get(op.seqNo());
+                    if (existing.primaryTerm() == op.primaryTerm()) {
+                        assertEquals(
+                            "Operation sent to the sink with the same sequence number but different doc ID: " + op + " " + existing,
+                            op.docId(),
+                            existing.docId()
+                        );
+                    } else {
+                        // this is ok across pterms, this means a req mid flight was rerouted to the new primary where the old had
+                        // previously assigned a seqno to an op that hit the sink before the req was ack'd.
+                    }
+                }
+                seqNos.put(op.seqNo(), op);
+            });
             for (BatchIndexingOperationListener.OperationDetails operationDetail : operationDetails) {
                 if (operationDetail instanceof BatchIndexingOperationListener.IndexOperationDetails) {
                     docs.add(operationDetail.docId());

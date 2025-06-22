@@ -822,6 +822,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
                              */
                             engine.rollTranslogGeneration();
                             engine.fillSeqNoGaps(newPrimaryTerm);
+                            batchOperationListener().ifPresent(l -> l.initialize(getProcessedLocalCheckpoint()));
                             replicationTracker.updateLocalCheckpoint(currentRouting.allocationId().getId(), getLocalCheckpoint());
                             primaryReplicaSyncer.accept(this, new ActionListener<ResyncTask>() {
                                 @Override
@@ -953,6 +954,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
                 assert indexShardOperationPermits.getActiveOperationsCount() == OPERATIONS_BLOCKED
                     : "in-flight operations in progress while moving shard state to relocated";
 
+                batchOperationListener().ifPresent(BatchIndexingOperationListener::drain);
                 performSegRep.run();
 
                 /*
@@ -2704,8 +2706,8 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         assert Thread.holdsLock(engineMutex);
         refreshListeners.setCurrentRefreshLocationSupplier(newEngine::getTranslogLastWriteLocation);
         batchOperationListener().ifPresent(l -> {
-            if (newEngine instanceof InternalEngine) {
-                l.initializeReplicationOperationListener(((InternalEngine) newEngine).getProcessedLocalCheckpoint());
+            if (newEngine instanceof InternalEngine && routingEntry().primary()) {
+                l.initialize(((InternalEngine) newEngine).getProcessedLocalCheckpoint());
             }
         });
     }
@@ -5075,6 +5077,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
             : globalCheckpoint;
         newEngineReference.get().recoverFromTranslog(translogRunner, recoverUpto);
         newEngineReference.get().refresh("reset_engine");
+        batchOperationListener().ifPresent(BatchIndexingOperationListener::drain);
         synchronized (engineMutex) {
             verifyNotClosed();
             IOUtils.close(currentEngineReference.getAndSet(newEngineReference.get()));
