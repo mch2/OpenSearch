@@ -449,17 +449,19 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
         CountDownLatch latch = new CountDownLatch(1);
         addListener(seqNosToPoll, (e) -> latch.countDown());
         try {
-            latch.await(1, TimeUnit.MINUTES);
+            boolean await = latch.await(1, TimeUnit.MINUTES);
+            if (await == false) {
+                throw new OpenSearchException("Timed out waiting to drain BatchIndexingOperationListener");
+            }
         } catch (InterruptedException e) {
             throw new OpenSearchException("Timed out waiting to drain BatchIndexingOperationListener", e);
         }
     }
 
-    // mark all seqNos that are missing within range min/max of the sorted set as processed.
+    // mark all seqNos missing within range [processed seqNo to max of the sorted set] as processed.
     // SeqNo gaps can occur if there are outstanding requests on a primary that dies and a req containing a higher seqNo has already been
-    // ack'd.
-    // Example:
-    // R1 - 1, 2, 3, 4. Where 4 is generated but the op never hits translog.
+    // ack'd. Example:
+    // R1 - 1, 2, 3, 4. Where 4 is generated but the op never hits translog. (req negative ack'd).
     // R2 - 5 - generated after 4 and immediately ack'd.
     // Primary dies - new primary replays from translog 1-3 and 5 with 4 missing.
     // in this case we fill these gaps by marking the gapped seqnos as processed/persisted. The doc that is missing will be retried
