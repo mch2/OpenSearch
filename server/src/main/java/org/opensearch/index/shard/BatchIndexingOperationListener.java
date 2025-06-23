@@ -188,7 +188,6 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
      * @param seqNo - starting seqNo
      */
     void initialize(long seqNo) {
-        drain();
         if (active.getAndSet(true) == false) {
             logger.info("Initializing BatchIndexingOperationListener with seqNo: {}", seqNo);
             tracker.fastForwardProcessedSeqNo(seqNo);
@@ -446,13 +445,6 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
             .map(OperationDetails::seqNo)
             .collect(Collectors.toCollection(TreeSet::new));
 
-        // Ensure we have initialized at least to 0, this can happen if drain is invoked
-        // before initialization from prior commit.
-        if (getSeenCheckpoint() < 0) {
-            tracker.fastForwardProcessedSeqNo(0);
-            tracker.fastForwardPersistedSeqNo(0);
-        }
-
         fillSeqNoGaps(seqNosToPoll);
         CountDownLatch latch = new CountDownLatch(1);
         addListener(seqNosToPoll, (e) -> latch.countDown());
@@ -473,14 +465,9 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
     // in this case we fill these gaps by marking the gapped seqnos as processed/persisted. The doc that is missing will be retried
     // and assigned a higher seqno.
     private void fillSeqNoGaps(TreeSet<Long> sortedSet) {
-        long min = sortedSet.first();
         long max = sortedSet.last();
 
-        if (sortedSet.size() <= 1) {
-            return;
-        }
-
-        for (long i = min; i <= max; i++) {
+        for (long i = tracker.getProcessedCheckpoint(); i <= max; i++) {
             if (!sortedSet.contains(i)) {
                 tracker.markSeqNoAsProcessed(i);
                 tracker.markSeqNoAsPersisted(i);

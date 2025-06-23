@@ -234,10 +234,7 @@ public class BatchIndexingOperationListenerIT extends RemoteStoreBaseIntegTestCa
                 BulkResponse bulkItemResponses = requestBuilder.get();
                 bulkItemResponses.forEach(bulkItemResponse -> {
                     if (bulkItemResponse.getFailure() != null) {
-                        logger.info("It FAILED {}", bulkItemResponse.getId());
                         logger.error(bulkItemResponse.getFailureMessage());
-                    } else {
-                        logger.info("It SUCCESS {} {}", bulkItemResponse.getResponse().getId(), bulkItemResponse.getResponse().getSeqNo());
                     }
                 });
                 responses[threadID] = bulkItemResponses;
