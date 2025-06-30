@@ -785,6 +785,10 @@ public final class ClusterSettings extends AbstractScopedSettings {
                 RemoteStoreSettings.CLUSTER_REMOTE_STORE_PINNED_TIMESTAMP_ENABLED,
                 RemoteStoreSettings.CLUSTER_REMOTE_STORE_SEGMENTS_PATH_PREFIX,
                 RemoteStoreSettings.CLUSTER_REMOTE_STORE_TRANSLOG_PATH_PREFIX,
+                // BatchIndexingOperationListener settings
+                RemoteStoreSettings.CLUSTER_BATCH_OPERATION_LISTENER_BUFFER_INTERVAL_SETTING,
+                RemoteStoreSettings.CLUSTER_BATCH_OPERATION_LISTENER_POLL_TIMEOUT_SETTING,
+                RemoteStoreSettings.CLUSTER_BATCH_OPERATION_LISTENER_DRAIN_TIMEOUT_SETTING,
 
                 // Snapshot related Settings
                 BlobStoreRepository.SNAPSHOT_SHARD_PATH_PREFIX_SETTING,

@@ -184,6 +184,46 @@ public class RemoteStoreSettings {
         Property.Final
     );
 
+    /**
+     * Used to specify the default batch operation listener buffer interval on BufferedAsyncIOProcessor.
+     */
+    public static final Setting<TimeValue> CLUSTER_BATCH_OPERATION_LISTENER_BUFFER_INTERVAL_SETTING = Setting.timeSetting(
+        "cluster.batch.listener.buffer_interval",
+        IndexSettings.DEFAULT_REMOTE_TRANSLOG_BUFFER_INTERVAL,
+        IndexSettings.MINIMUM_REMOTE_TRANSLOG_BUFFER_INTERVAL,
+        Property.NodeScope,
+        Property.Dynamic
+    );
+
+    /**
+     * Used to specify the default batch operation listener poll timeout. BatchIndexingOperationListener is backed by a
+     * blocking queue and operations must be polled in seqNo order.
+     */
+    public static final Setting<TimeValue> CLUSTER_BATCH_OPERATION_LISTENER_POLL_TIMEOUT_SETTING = Setting.timeSetting(
+        "cluster.batch.listener.poll.timeout",
+        TimeValue.timeValueSeconds(30),
+        TimeValue.timeValueSeconds(5),
+        Property.NodeScope,
+        Property.Dynamic
+    );
+
+    /**
+     * Used to specify the default batch operation listener drain timeout.  This specifies the amount of time to wait for all
+     * queued operations to drain.  Drain is invoked on failover and relocation handoff to finish processing ops indexed
+     * outside _bulk.
+     */
+    public static final Setting<TimeValue> CLUSTER_BATCH_OPERATION_LISTENER_DRAIN_TIMEOUT_SETTING = Setting.timeSetting(
+        "cluster.batch.listener.drain.timeout",
+        TimeValue.timeValueMinutes(1),
+        TimeValue.timeValueSeconds(30),
+        Property.NodeScope,
+        Property.Dynamic
+    );
+
+    private volatile TimeValue clusterBatchOperationListenerBufferInterval;
+    private volatile TimeValue clusterBatchOperationListenerPollTimeout;
+    private volatile TimeValue clusterBatchOperationListenerDrainTimeout;
+
     private volatile TimeValue clusterRemoteTranslogBufferInterval;
     private volatile int minRemoteSegmentMetadataFiles;
     private volatile TimeValue clusterRemoteTranslogTransferTimeout;
@@ -241,6 +281,26 @@ public class RemoteStoreSettings {
 
         translogPathFixedPrefix = CLUSTER_REMOTE_STORE_TRANSLOG_PATH_PREFIX.get(settings);
         segmentsPathFixedPrefix = CLUSTER_REMOTE_STORE_SEGMENTS_PATH_PREFIX.get(settings);
+
+        // BatchAsyncIOProcessor settings
+
+        clusterBatchOperationListenerBufferInterval = CLUSTER_BATCH_OPERATION_LISTENER_BUFFER_INTERVAL_SETTING.get(settings);
+        clusterSettings.addSettingsUpdateConsumer(
+            CLUSTER_BATCH_OPERATION_LISTENER_BUFFER_INTERVAL_SETTING,
+            this::setClusterBatchOperationListenerBufferIntervalSetting
+        );
+
+        clusterBatchOperationListenerPollTimeout = CLUSTER_BATCH_OPERATION_LISTENER_POLL_TIMEOUT_SETTING.get(settings);
+        clusterSettings.addSettingsUpdateConsumer(
+            CLUSTER_BATCH_OPERATION_LISTENER_POLL_TIMEOUT_SETTING,
+            this::setClusterBatchOperationListenerPollTimeoutSetting
+        );
+
+        clusterBatchOperationListenerDrainTimeout = CLUSTER_BATCH_OPERATION_LISTENER_DRAIN_TIMEOUT_SETTING.get(settings);
+        clusterSettings.addSettingsUpdateConsumer(
+            CLUSTER_BATCH_OPERATION_LISTENER_DRAIN_TIMEOUT_SETTING,
+            this::setClusterBatchOperationListenerDrainTimeoutSetting
+        );
     }
 
     public TimeValue getClusterRemoteTranslogBufferInterval() {
@@ -249,6 +309,30 @@ public class RemoteStoreSettings {
 
     private void setClusterRemoteTranslogBufferInterval(TimeValue clusterRemoteTranslogBufferInterval) {
         this.clusterRemoteTranslogBufferInterval = clusterRemoteTranslogBufferInterval;
+    }
+
+    public TimeValue getClusterBatchOperationListenerBufferInterval() {
+        return clusterBatchOperationListenerBufferInterval;
+    }
+
+    public TimeValue getClusterBatchOperationListenerPollTimeout() {
+        return clusterBatchOperationListenerPollTimeout;
+    }
+
+    public TimeValue getClusterBatchOperationListenerDrainTimeout() {
+        return clusterBatchOperationListenerDrainTimeout;
+    }
+
+    private void setClusterBatchOperationListenerBufferIntervalSetting(TimeValue interval) {
+        this.clusterBatchOperationListenerBufferInterval = interval;
+    }
+
+    private void setClusterBatchOperationListenerPollTimeoutSetting(TimeValue timeout) {
+        this.clusterBatchOperationListenerPollTimeout = timeout;
+    }
+
+    private void setClusterBatchOperationListenerDrainTimeoutSetting(TimeValue timeout) {
+        this.clusterBatchOperationListenerDrainTimeout = timeout;
     }
 
     private void setMinRemoteSegmentMetadataFiles(int minRemoteSegmentMetadataFiles) {

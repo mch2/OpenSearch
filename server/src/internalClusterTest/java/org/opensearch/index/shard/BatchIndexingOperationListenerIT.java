@@ -9,6 +9,7 @@
 package org.opensearch.index.shard;
 
 import org.opensearch.action.admin.cluster.health.ClusterHealthResponse;
+import org.opensearch.action.admin.cluster.settings.ClusterUpdateSettingsRequest;
 import org.opensearch.action.admin.indices.flush.FlushRequest;
 import org.opensearch.action.bulk.BulkRequestBuilder;
 import org.opensearch.action.bulk.BulkResponse;
@@ -49,11 +50,16 @@ import java.util.Set;
 import java.util.SortedSet;
 import java.util.UUID;
 import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 import static org.opensearch.cluster.metadata.IndexMetadata.SETTING_NUMBER_OF_REPLICAS;
 import static org.opensearch.cluster.routing.UnassignedInfo.INDEX_DELAYED_NODE_LEFT_TIMEOUT_SETTING;
+import static org.opensearch.indices.RemoteStoreSettings.CLUSTER_BATCH_OPERATION_LISTENER_BUFFER_INTERVAL_SETTING;
+import static org.opensearch.indices.RemoteStoreSettings.CLUSTER_BATCH_OPERATION_LISTENER_DRAIN_TIMEOUT_SETTING;
+import static org.opensearch.indices.RemoteStoreSettings.CLUSTER_BATCH_OPERATION_LISTENER_POLL_TIMEOUT_SETTING;
+import static org.opensearch.test.hamcrest.OpenSearchAssertions.assertAcked;
 import static org.opensearch.test.hamcrest.OpenSearchAssertions.assertHitCount;
 import static org.hamcrest.Matchers.equalTo;
 
@@ -495,5 +501,32 @@ public class BatchIndexingOperationListenerIT extends RemoteStoreBaseIntegTestCa
                 .max()
                 .orElse(SequenceNumbers.NO_OPS_PERFORMED);
         }
+    }
+
+    public void testSettingUpdates() throws ExecutionException, InterruptedException {
+        createIndex("test");
+        ensureGreen();
+        DiscoveryNode primaryNode = getNodeContainingPrimaryShard();
+        String primary = primaryNode.getName();
+        IndexShard shard = getIndexShard(primary, "test");
+
+        // defaults
+        assertEquals(650, shard.getRemoteStoreSettings().getClusterBatchOperationListenerBufferInterval().millis());
+        assertEquals(30000, shard.getRemoteStoreSettings().getClusterBatchOperationListenerPollTimeout().millis());
+        assertEquals(60000, shard.getRemoteStoreSettings().getClusterBatchOperationListenerDrainTimeout().millis());
+
+        // buffer interval
+        ClusterUpdateSettingsRequest updateSettingsRequest = new ClusterUpdateSettingsRequest();
+        updateSettingsRequest.persistentSettings(
+            Settings.builder()
+                .put(CLUSTER_BATCH_OPERATION_LISTENER_BUFFER_INTERVAL_SETTING.getKey(), "0ms")
+                .put(CLUSTER_BATCH_OPERATION_LISTENER_POLL_TIMEOUT_SETTING.getKey(), "5s")
+                .put(CLUSTER_BATCH_OPERATION_LISTENER_DRAIN_TIMEOUT_SETTING.getKey(), "30s")
+        );
+        assertAcked(client().admin().cluster().updateSettings(updateSettingsRequest).actionGet());
+
+        assertEquals(0, shard.getRemoteStoreSettings().getClusterBatchOperationListenerBufferInterval().millis());
+        assertEquals(5000, shard.getRemoteStoreSettings().getClusterBatchOperationListenerPollTimeout().millis());
+        assertEquals(30000, shard.getRemoteStoreSettings().getClusterBatchOperationListenerDrainTimeout().millis());
     }
 }

@@ -758,13 +758,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
             if (routing.isSearchOnly() == false && filteredSinks.isEmpty() == false) {
                 operationListeners = new ArrayList<>(indexingOperationListeners);
                 operationListeners.add(
-                    new BatchIndexingOperationListener(
-                        routing.shardId(),
-                        filteredSinks,
-                        threadPool,
-                        TimeValue.timeValueMillis(30000),
-                        remoteStoreSettings
-                    )
+                    new BatchIndexingOperationListener(routing.shardId(), filteredSinks, threadPool, remoteStoreSettings)
                 );
             } else {
                 operationListeners = indexingOperationListeners;

@@ -26,6 +26,7 @@ import org.opensearch.index.mapper.Uid;
 import org.opensearch.index.seqno.SequenceNumbers;
 import org.opensearch.index.shard.BatchIndexingOperationListener.OperationDetails;
 import org.opensearch.indices.DefaultRemoteStoreSettings;
+import org.opensearch.indices.RemoteStoreSettings;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
@@ -42,6 +43,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 import java.util.stream.LongStream;
+
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 public class BatchIndexingOperationListenerIndexShardTests extends IndexShardTestCase {
 
@@ -65,7 +69,6 @@ public class BatchIndexingOperationListenerIndexShardTests extends IndexShardTes
             shardRouting.shardId(),
             Set.of(testSink),
             threadPool,
-            TimeValue.timeValueMillis(5000),
             DefaultRemoteStoreSettings.INSTANCE
         );
         indexShard = newStartedShard(p -> newShard(p, listener), true);
@@ -471,13 +474,9 @@ public class BatchIndexingOperationListenerIndexShardTests extends IndexShardTes
     }
 
     public void testMultipleBatchesToProcessor_operationsNeverArrive_blockingqueueReturnsNull() throws InterruptedException, IOException {
-        listener = new BatchIndexingOperationListener(
-            shardRouting.shardId(),
-            Set.of(testSink),
-            threadPool,
-            TimeValue.timeValueMillis(1),
-            DefaultRemoteStoreSettings.INSTANCE
-        );
+        RemoteStoreSettings remoteStoreSettings = mock(RemoteStoreSettings.class);
+        when(remoteStoreSettings.getClusterBatchOperationListenerPollTimeout()).thenReturn(TimeValue.timeValueMillis(1));
+        listener = new BatchIndexingOperationListener(shardRouting.shardId(), Set.of(testSink), threadPool, remoteStoreSettings);
         closeShards(indexShard);
         indexShard = newStartedShard(p -> newShard(p, listener), true);
         LongStream.range(0, 1).forEach(this::indexDoc); // only insert two ops
@@ -487,13 +486,9 @@ public class BatchIndexingOperationListenerIndexShardTests extends IndexShardTes
     }
 
     public void testMultipleBatchesToProcessor_operationsNeverArrive_WithGaps() throws InterruptedException, IOException {
-        listener = new BatchIndexingOperationListener(
-            shardRouting.shardId(),
-            Set.of(testSink),
-            threadPool,
-            TimeValue.timeValueMillis(1),
-            DefaultRemoteStoreSettings.INSTANCE
-        );
+        RemoteStoreSettings remoteStoreSettings = mock(RemoteStoreSettings.class);
+        when(remoteStoreSettings.getClusterBatchOperationListenerPollTimeout()).thenReturn(TimeValue.timeValueMillis(1));
+        listener = new BatchIndexingOperationListener(shardRouting.shardId(), Set.of(testSink), threadPool, remoteStoreSettings);
         closeShards(indexShard);
         indexShard = newStartedShard(p -> newShard(p, listener), true);
         LongStream.range(0, 5).forEach(this::simulatePostIndex);
@@ -508,13 +503,11 @@ public class BatchIndexingOperationListenerIndexShardTests extends IndexShardTes
     }
 
     public void testMultipleBatchesToProcessor_operationsOutOfOrderPollHigherThanRequired() throws InterruptedException, IOException {
-        listener = new BatchIndexingOperationListener(
-            shardRouting.shardId(),
-            Set.of(testSink),
-            threadPool,
-            TimeValue.timeValueMillis(1000),
-            DefaultRemoteStoreSettings.INSTANCE
-        );
+        RemoteStoreSettings remoteStoreSettings = mock(RemoteStoreSettings.class);
+        when(remoteStoreSettings.getClusterBatchOperationListenerPollTimeout()).thenReturn(TimeValue.timeValueMillis(1000));
+        when(remoteStoreSettings.getClusterBatchOperationListenerBufferInterval()).thenReturn(TimeValue.timeValueMillis(650));
+
+        listener = new BatchIndexingOperationListener(shardRouting.shardId(), Set.of(testSink), threadPool, remoteStoreSettings);
         closeShards(indexShard);
         indexShard = newStartedShard(p -> newShard(p, listener), true);
         LongStream.range(0, 5).forEach(this::simulatePostIndex);
@@ -543,13 +536,11 @@ public class BatchIndexingOperationListenerIndexShardTests extends IndexShardTes
     }
 
     public void testMultipleBatchesToProcessor_EmptySetReturnedFromPolling() throws InterruptedException, IOException {
-        listener = new BatchIndexingOperationListener(
-            shardRouting.shardId(),
-            Set.of(testSink),
-            threadPool,
-            TimeValue.timeValueMillis(1000),
-            DefaultRemoteStoreSettings.INSTANCE
-        );
+        RemoteStoreSettings remoteStoreSettings = mock(RemoteStoreSettings.class);
+        when(remoteStoreSettings.getClusterBatchOperationListenerPollTimeout()).thenReturn(TimeValue.timeValueMillis(1000));
+        when(remoteStoreSettings.getClusterBatchOperationListenerBufferInterval()).thenReturn(TimeValue.timeValueMillis(650));
+
+        listener = new BatchIndexingOperationListener(shardRouting.shardId(), Set.of(testSink), threadPool, remoteStoreSettings);
         closeShards(indexShard);
         indexShard = newStartedShard(p -> newShard(p, listener), true);
         simulatePostIndex(0L);

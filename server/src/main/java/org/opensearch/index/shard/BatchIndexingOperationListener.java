@@ -14,7 +14,6 @@ import org.opensearch.OpenSearchException;
 import org.opensearch.common.Nullable;
 import org.opensearch.common.annotation.PublicApi;
 import org.opensearch.common.collect.Tuple;
-import org.opensearch.common.unit.TimeValue;
 import org.opensearch.common.util.concurrent.BufferedAsyncIOProcessor;
 import org.opensearch.common.xcontent.XContentHelper;
 import org.opensearch.core.common.bytes.BytesReference;
@@ -76,7 +75,7 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
     // the listener is wired up to any shard type as long as there are configured sinks on the index
     // noop this listener if the shard is not primary.
     private final AtomicBoolean active = new AtomicBoolean(false);
-    private final TimeValue operationsQueueTimeout;
+    private final RemoteStoreSettings remoteStoreSettings;
 
     /**
      * ReplicationOperationListener - IndexOperationListener implementation that batches operations post ingestion and hands off to a {@link Sink}.
@@ -84,27 +83,25 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
      * @param shardId               - {@link ShardId} - Shard Id
      * @param sinks                 - {@link List<Sink>} list of sinks to consume batches of operations.
      * @param threadPool            - {@link ThreadPool} Used for AsyncIOProcessor configuration/
-     * @param operationQueueTimeout - {@link TimeValue} Maximum time to block and wait for a missing operation to arrive in our operationsQueue.
      * @param remoteStoreSettings   - {@link RemoteStoreSettings} Settings used to configure buffer interval or our IO processor.
      */
     public BatchIndexingOperationListener(
         ShardId shardId,
         Set<Sink> sinks,
         ThreadPool threadPool,
-        TimeValue operationQueueTimeout,
         RemoteStoreSettings remoteStoreSettings
     ) {
         this.shardId = shardId;
         this.operationsQueue = new LinkedBlockingDeque<>();
         this.sinks = sinks;
         this.tracker = new LocalCheckpointTracker(NO_OPS_PERFORMED, NO_OPS_PERFORMED);
-        this.operationsQueueTimeout = operationQueueTimeout;
+        this.remoteStoreSettings = remoteStoreSettings;
         this.processor = new BufferedAsyncIOProcessor<>(
             logger,
             102400,
             threadPool.getThreadContext(),
             threadPool,
-            remoteStoreSettings::getClusterRemoteTranslogBufferInterval
+            remoteStoreSettings::getClusterBatchOperationListenerBufferInterval
         ) {
 
             @Override
@@ -408,7 +405,7 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
 
     private OperationDetails pollOperation() {
         try {
-            return operationsQueue.poll(operationsQueueTimeout.millis(), TimeUnit.MILLISECONDS);
+            return operationsQueue.poll(remoteStoreSettings.getClusterBatchOperationListenerPollTimeout().millis(), TimeUnit.MILLISECONDS);
         } catch (InterruptedException e) {
             // our impl of the blockingDeque will return null on timeout, but to safely handle
             // this checked exception catch and return null.
@@ -449,7 +446,7 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
         CountDownLatch latch = new CountDownLatch(1);
         addListener(seqNosToPoll, (e) -> latch.countDown());
         try {
-            boolean await = latch.await(1, TimeUnit.MINUTES);
+            boolean await = latch.await(remoteStoreSettings.getClusterBatchOperationListenerDrainTimeout().millis(), TimeUnit.MILLISECONDS);
             if (await == false) {
                 throw new OpenSearchException("Timed out waiting to drain BatchIndexingOperationListener");
             }
