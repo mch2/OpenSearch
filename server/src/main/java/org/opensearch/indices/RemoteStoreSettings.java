@@ -202,7 +202,7 @@ public class RemoteStoreSettings {
     public static final Setting<TimeValue> CLUSTER_BATCH_OPERATION_LISTENER_POLL_TIMEOUT_SETTING = Setting.timeSetting(
         "cluster.batch.listener.poll.timeout",
         TimeValue.timeValueSeconds(30),
-        TimeValue.timeValueSeconds(5),
+        TimeValue.timeValueSeconds(1),
         Property.NodeScope,
         Property.Dynamic
     );
@@ -215,7 +215,7 @@ public class RemoteStoreSettings {
     public static final Setting<TimeValue> CLUSTER_BATCH_OPERATION_LISTENER_DRAIN_TIMEOUT_SETTING = Setting.timeSetting(
         "cluster.batch.listener.drain.timeout",
         TimeValue.timeValueMinutes(1),
-        TimeValue.timeValueSeconds(30),
+        TimeValue.timeValueSeconds(1),
         Property.NodeScope,
         Property.Dynamic
     );
