@@ -133,6 +133,13 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
 
     @Override
     public void postIndex(ShardId shardId, Engine.Index index, Engine.IndexResult result) {
+        if (index.origin() == Engine.Operation.Origin.PEER_RECOVERY) {
+            // Discard any operation that has been sent by an old primary during peer recovery.
+            // These operations are sent before relocation handoff occurs which up to that point
+            // the old primary is indexing and uploading operations. During relocation handoff we
+            // ensure the old primary's listener is drained, ensuring only one writer.
+            return;
+        }
         if (result.getResultType() == Engine.Result.Type.SUCCESS) {
             OperationDetails details;
             if (index instanceof Engine.Update) {
@@ -155,6 +162,9 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
 
     @Override
     public void postDelete(ShardId shardId, Engine.Delete delete, Engine.DeleteResult result) {
+        if (delete.origin() == Engine.Operation.Origin.PEER_RECOVERY) {
+            return;
+        }
         if (result.getResultType() == Engine.Result.Type.SUCCESS) {
             OperationDetails details = new DeleteOperationDetails(delete.id(), result.getSeqNo(), result.getTerm());
             operationsQueue.add(details);
@@ -339,6 +349,7 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
         while (tracker.getProcessedCheckpoint() < targetSequenceNumber) {
             final OperationDetails nextOp = pollOperation();
             // if op is null here poll() was interrupted by timeout
+
             if (nextOp == null) {
                 // put back any ops that with higher seqNo than requireProcessed and throw.
                 futureOperations.forEach(operationsQueue::addFirst);
