@@ -29,12 +29,15 @@ import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.index.IndexModule;
 import org.opensearch.index.query.QueryBuilders;
 import org.opensearch.index.seqno.SequenceNumbers;
+import org.opensearch.indices.recovery.PeerRecoveryTargetService;
 import org.opensearch.plugins.Plugin;
 import org.opensearch.remotestore.RemoteStoreBaseIntegTestCase;
 import org.opensearch.search.SearchHit;
 import org.opensearch.search.lookup.SourceLookup;
 import org.opensearch.test.InternalTestCluster;
 import org.opensearch.test.OpenSearchIntegTestCase;
+import org.opensearch.test.transport.MockTransportService;
+import org.opensearch.transport.TransportService;
 import org.junit.Assert;
 import org.junit.Before;
 
@@ -49,10 +52,12 @@ import java.util.Map;
 import java.util.Set;
 import java.util.SortedSet;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static org.opensearch.cluster.metadata.IndexMetadata.SETTING_NUMBER_OF_REPLICAS;
 import static org.opensearch.cluster.routing.UnassignedInfo.INDEX_DELAYED_NODE_LEFT_TIMEOUT_SETTING;
@@ -96,9 +101,8 @@ public class BatchIndexingOperationListenerIT extends RemoteStoreBaseIntegTestCa
 
     @Override
     protected Collection<Class<? extends Plugin>> nodePlugins() {
-        Collection<Class<? extends Plugin>> plugins = new ArrayList<>(super.nodePlugins());
-        plugins.add(TestPlugin.class);
-        return plugins;
+        return Stream.concat(super.nodePlugins().stream(), Stream.of(MockTransportService.TestPlugin.class, TestPlugin.class))
+            .collect(Collectors.toList());
     }
 
     public void testUpdates() throws IOException {
@@ -301,13 +305,13 @@ public class BatchIndexingOperationListenerIT extends RemoteStoreBaseIntegTestCa
     }
 
     public void testConcurrentWritesWithPrimaryRelocation() throws Exception {
-        createIndex("test", Settings.builder().put(indexSettings()).put(SETTING_NUMBER_OF_REPLICAS, 1).build());
         internalCluster().startClusterManagerOnlyNode();
-        ensureYellow("test");
-        DiscoveryNode primaryNode = getNodeContainingPrimaryShard();
-        String primary = primaryNode.getName();
-        String replica = internalCluster().startDataOnlyNode();
+        String oldPrimary = internalCluster().startDataOnlyNodes(1).get(0);
+        createIndex("test", remoteStoreIndexSettings(0));
+        // ensureYellow("test");
+        // String primary = primaryNode.getName();
         ensureGreen();
+        System.out.println(oldPrimary);
         final String newPrimary = internalCluster().startDataOnlyNode();
         int requestCount = randomIntBetween(2, 10);
         int batchSize = randomIntBetween(1, 10);
@@ -343,7 +347,39 @@ public class BatchIndexingOperationListenerIT extends RemoteStoreBaseIntegTestCa
         // wait until sink has something in it from old primary
         assertBusy(() -> assertTrue(sink.counter > 0));
         logger.info("--> relocate the shard");
-        client().admin().cluster().prepareReroute().add(new MoveAllocationCommand("test", 0, primary, newPrimary)).execute().actionGet();
+
+        // block the relocation by delaying the translog step, this allows us to issue more writes during this phase and ensure they are
+        // discarded by the target primary
+        MockTransportService primaryTransportService = ((MockTransportService) internalCluster().getInstance(
+            TransportService.class,
+            oldPrimary
+        ));
+        CountDownLatch startLatch = new CountDownLatch(1);
+
+        primaryTransportService.addSendBehavior((connection, requestId, action, req, options) -> {
+            if (action.equals(PeerRecoveryTargetService.Actions.TRANSLOG_OPS)) {
+                if (newPrimary.equals(connection.getNode().getName())) {
+                    startLatch.countDown();
+                }
+            }
+            connection.sendRequest(requestId, action, req, options);
+        });
+
+        client().admin().cluster().prepareReroute().add(new MoveAllocationCommand("test", 0, oldPrimary, newPrimary)).execute().actionGet();
+
+        startLatch.await();
+        // index 10 more in translog phase
+        BulkRequestBuilder requestBuilder = client().prepareBulk();
+        addDocs(requestBuilder, requestCount, batchSize);
+        BulkResponse bulk = requestBuilder.get();
+        assertFalse(bulk.buildFailureMessage(), bulk.hasFailures());
+        assertThat(refresh().getFailedShards(), equalTo(0));
+
+        for (int i = 0; i < threads.length; i++) {
+            threads[i].join();
+        }
+        IndexShard test = getIndexShard(newPrimary, "test");
+        assertEquals(test.batchOperationListener().get().size(), 0);
         ClusterHealthResponse clusterHealthResponse = client().admin()
             .cluster()
             .prepareHealth()
@@ -356,10 +392,10 @@ public class BatchIndexingOperationListenerIT extends RemoteStoreBaseIntegTestCa
 
         ensureYellowAndNoInitializingShards("test");
 
-        // index 10 more after failover
-        BulkRequestBuilder requestBuilder = client().prepareBulk();
+        // index 10 more after relocation
+        requestBuilder = client().prepareBulk();
         addDocs(requestBuilder, requestCount, batchSize);
-        BulkResponse bulk = requestBuilder.get();
+        bulk = requestBuilder.get();
         assertFalse(bulk.buildFailureMessage(), bulk.hasFailures());
         assertThat(refresh().getFailedShards(), equalTo(0));
 

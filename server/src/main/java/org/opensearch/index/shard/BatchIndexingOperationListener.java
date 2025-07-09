@@ -103,7 +103,6 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
             threadPool,
             remoteStoreSettings::getClusterBatchOperationListenerBufferInterval
         ) {
-
             @Override
             protected String getBufferProcessThreadPoolName() {
                 return ThreadPool.Names.REPLICATION_SINKS;
@@ -133,8 +132,10 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
 
     @Override
     public void postIndex(ShardId shardId, Engine.Index index, Engine.IndexResult result) {
-        if (index.origin() == Engine.Operation.Origin.PEER_RECOVERY) {
+        if (index.origin() == Engine.Operation.Origin.PEER_RECOVERY || index.origin() == Engine.Operation.Origin.REPLICA) {
             // Discard any operation that has been sent by an old primary during peer recovery.
+            // Translog ops for operation based recovrey have an origin of PEER_RECOVERY.
+            // New writes received during this phase have an origin of REPLICA.
             // These operations are sent before relocation handoff occurs which up to that point
             // the old primary is indexing and uploading operations. During relocation handoff we
             // ensure the old primary's listener is drained, ensuring only one writer.
@@ -162,7 +163,7 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
 
     @Override
     public void postDelete(ShardId shardId, Engine.Delete delete, Engine.DeleteResult result) {
-        if (delete.origin() == Engine.Operation.Origin.PEER_RECOVERY) {
+        if (delete.origin() == Engine.Operation.Origin.PEER_RECOVERY || delete.origin() == Engine.Operation.Origin.REPLICA) {
             return;
         }
         if (result.getResultType() == Engine.Result.Type.SUCCESS) {
@@ -483,6 +484,10 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
                 tracker.markSeqNoAsPersisted(i);
             }
         }
+    }
+
+    public int size() {
+        return operationsQueue.size();
     }
 
     /**
