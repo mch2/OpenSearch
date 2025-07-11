@@ -2491,7 +2491,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         logger.info("Recovering ops from translog {}", snapshot.totalOperations());
         while ((operation = snapshot.next()) != null) {
             try {
-                logger.trace("[translog] recover op {}", operation);
+                logger.info("[translog] recover op {}", operation);
                 // validate batch queue is not full, validation needs to be here or request
                 // will not get neg ack'd. CompositeIndexingOperationListener swallows any
                 // exception from listeners.

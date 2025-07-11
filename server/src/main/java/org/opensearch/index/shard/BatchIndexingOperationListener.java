@@ -298,7 +298,10 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
 
             if (hasFailedOp) {
                 // Mark all sequence numbers as persisted if any failed, we don't want to pass those to the sink
-                candidate.v1().forEach(tracker::markSeqNoAsPersisted);
+                candidate.v1().forEach((l) -> {
+                    logger.info("Marking {} as persisted due to already errored request", l);
+                    tracker.markSeqNoAsPersisted(l);
+                });
             }
             return hasFailedOp;
         }).map(candidate -> candidate.v1().last()).collect(Collectors.toSet());
@@ -484,13 +487,16 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
     }
 
     private boolean failedInPreviousBatch(Long seqNo) {
-        return tracker.hasProcessed(seqNo) && tracker.hasPersisted(seqNo) == false;
+        boolean b = tracker.hasProcessed(seqNo) && tracker.hasPersisted(seqNo) == false;
+        logger.info("{} failed in a previous batch", seqNo);
+        return b;
     }
 
     private void handleDocumentFailure(Engine.Result result) {
         // document failure, just mark it done if there is an assigned seqno (it reached the engine)
         // so that we aren't left with gaps in our tracker.
         if (result.getSeqNo() != SequenceNumbers.UNASSIGNED_SEQ_NO) {
+            logger.info("Doc was not successful marking done {}", result.getSeqNo());
             tracker.markSeqNoAsProcessed(result.getSeqNo());
             tracker.markSeqNoAsPersisted(result.getSeqNo());
         }

@@ -583,6 +583,29 @@ public class BatchIndexingOperationListenerIT extends RemoteStoreBaseIntegTestCa
         assertEquals(30000, shard.getRemoteStoreSettings().getClusterBatchOperationListenerDrainTimeout().millis());
     }
 
+    public void testUpdates() throws IOException {
+        createIndex("test");
+        ensureGreen();
+        BulkResponse bulk = client().prepareBulk()
+            .add(prepareIndex("multibulk1", "field1", "one")) // add
+            .add(prepareIndex("multibulk1", "field2", "two")) // add new field
+            .add(prepareUpdate("multibulk1", "field1", "three")) // update field 1
+            .get();
+        assertFalse(bulk.buildFailureMessage(), bulk.hasFailures());
+        assertThat(refresh().getFailedShards(), equalTo(0));
+        assertEquals(1, sink.getOps().size());
+        BatchIndexingOperationListener.OperationDetails operationDetails = sink.getOps()
+            .get(sink.getOps().keySet().stream().findFirst().get())
+            .stream()
+            .findFirst()
+            .get();
+        assertEquals(BatchIndexingOperationListener.UpdateOperationDetails.class, operationDetails.getClass());
+        assertEquals(
+            Map.of("field1", "three"),
+            ((BatchIndexingOperationListener.UpdateOperationDetails) operationDetails).getSourceAsMap()
+        );
+    }
+
     public void testLocalResetWithFullOpsQueueAndSinkFailureOnDrain() throws Exception {
         sink.failWriteOnTranslog = true;
         createIndex(
