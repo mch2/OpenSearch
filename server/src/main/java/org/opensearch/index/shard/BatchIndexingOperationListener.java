@@ -11,6 +11,8 @@ package org.opensearch.index.shard;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.OpenSearchException;
+import org.opensearch.action.admin.cluster.batchoperationlistener.stats.BatchOperationListenerInternalStats;
+import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.common.Nullable;
 import org.opensearch.common.annotation.PublicApi;
 import org.opensearch.common.collect.Tuple;
@@ -31,6 +33,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.SortedSet;
@@ -40,6 +43,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingDeque;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
@@ -61,6 +65,7 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
     private final BlockingDeque<OperationDetails> operationsQueue;
     private final Set<Sink> sinks;
     private final ShardId shardId;
+    private final BatchOperationListenerInternalStats stats;
 
     // We use a LocalCheckpointTracker to track incoming operations.
     // processed means we have polled the operation from the queue and attempted to pass it to a sink ie. Seen the seqNo.
@@ -80,10 +85,10 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
     /**
      * ReplicationOperationListener - IndexOperationListener implementation that batches operations post ingestion and hands off to a {@link Sink}.
      *
-     * @param shardId               - {@link ShardId} - Shard Id
-     * @param sinks                 - {@link List<Sink>} list of sinks to consume batches of operations.
-     * @param threadPool            - {@link ThreadPool} Used for AsyncIOProcessor configuration/
-     * @param remoteStoreSettings   - {@link RemoteStoreSettings} Settings used to configure buffer interval or our IO processor.
+     * @param shardId             - {@link ShardId} - Shard Id
+     * @param sinks               - {@link List<Sink>} list of sinks to consume batches of operations.
+     * @param threadPool          - {@link ThreadPool} Used for AsyncIOProcessor configuration/
+     * @param remoteStoreSettings - {@link RemoteStoreSettings} Settings used to configure buffer interval or our IO processor.
      */
     public BatchIndexingOperationListener(
         ShardId shardId,
@@ -93,6 +98,7 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
     ) {
         this.shardId = shardId;
         this.operationsQueue = new LinkedBlockingDeque<>();
+        this.stats = new BatchOperationListenerInternalStats();
         this.sinks = sinks;
         this.tracker = new LocalCheckpointTracker(NO_OPS_PERFORMED, NO_OPS_PERFORMED);
         this.remoteStoreSettings = remoteStoreSettings;
@@ -110,6 +116,7 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
 
             @Override
             protected void write(List<Tuple<SortedSet<Long>, Consumer<Exception>>> requests) {
+                long startTime = System.nanoTime();
                 assert requests.isEmpty() == false;
                 assert tracker.getPersistedCheckpoint() <= tracker.getProcessedCheckpoint();
 
@@ -125,9 +132,35 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
 
                 failed.addAll(processNewBatch(requests));
 
+                stats.addTotalRequestTimeInMillis(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTime));
+                stats.addRequestsProcessed(requests.size());
+
                 completeRequest(failed);
             }
         };
+    }
+
+    public void validateQueueSizeOnBulkWrite(int batchSize) {
+        if (operationsQueue.size() + batchSize >= remoteStoreSettings.getClusterBatchOperationListenerQueueLimit()) {
+            stats.incrementOperationQueueLimitReached();
+            throw new OpenSearchException(
+                String.format(
+                    Locale.ROOT,
+                    "Rejected bulk request on shard [%s] with [%s] items: queue size [%d] exceeds limit [%d]",
+                    shardId,
+                    batchSize,
+                    operationsQueue.size(),
+                    remoteStoreSettings.getClusterBatchOperationListenerQueueLimit()
+                )
+            );
+        }
+    }
+
+    void validateQueueSizeOnTranslogRecovery() {
+        if (operationsQueue.size() >= remoteStoreSettings.getClusterBatchOperationListenerQueueLimit()) {
+            stats.incrementOperationQueueLimitReached();
+            drain();
+        }
     }
 
     @Override
@@ -148,11 +181,12 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
                     index.id(),
                     result.getSeqNo(),
                     result.getTerm(),
+                    index.origin(),
                     index.parsedDoc(),
                     ((Engine.Update) index).getUpdateRequestSource()
                 );
             } else {
-                details = new IndexOperationDetails(index.id(), result.getSeqNo(), result.getTerm(), index.parsedDoc());
+                details = new IndexOperationDetails(index.id(), result.getSeqNo(), result.getTerm(), index.origin(), index.parsedDoc());
             }
             operationsQueue.add(details);
             logger.trace("Queueing Index op for {} {}", details.seqNo(), details.docId());
@@ -173,6 +207,14 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
         } else {
             handleDocumentFailure(result);
         }
+    }
+
+    protected int size() {
+        return operationsQueue.size();
+    }
+
+    protected BatchOperationListenerInternalStats getStats() {
+        return stats;
     }
 
     /**
@@ -301,7 +343,7 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
         for (Sink sink : sinks) {
             completedUpTo = Math.min(sink.acceptBatch(shardId, operationDetails), completedUpTo);
         }
-        logger.trace("Sinks Completed up to seqNo: {}", completedUpTo);
+        logger.info("Sinks Completed up to seqNo: {}", completedUpTo);
         return handleResult(requests, completedUpTo, operationDetails, result, batch);
     }
 
@@ -321,6 +363,7 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
         // if we failed to process all ops check for failed requests
         if (completedUpTo < batch.last()) {
             if (result.v2().isEmpty() == false) {
+
                 // if we had to dedupe by docId across requests, we need to fail all the requests
                 // this ensures the deduped away req is also negatively ack'd.
                 return requests.stream().map(tuple -> tuple.v1().last()).collect(Collectors.toSet());
@@ -352,6 +395,7 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
             // if op is null here poll() was interrupted by timeout
 
             if (nextOp == null) {
+                stats.incrementPollOperationTimeout();
                 // put back any ops that with higher seqNo than requireProcessed and throw.
                 futureOperations.forEach(operationsQueue::addFirst);
                 throw new OpenSearchException(
@@ -406,12 +450,8 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
                 + tracker.getProcessedCheckpoint()
                 + " Batch: "
                 + batch;
-        assert docIdToOperations.isEmpty()
-            || docIdToOperations.values()
-                .stream()
-                .map(OperationDetails::seqNo)
-                .collect(Collectors.toCollection(TreeSet::new))
-                .last() == targetSequenceNumber;
+        Long last = docIdToOperations.values().stream().map(OperationDetails::seqNo).collect(Collectors.toCollection(TreeSet::new)).last();
+        assert docIdToOperations.isEmpty() || last == targetSequenceNumber : " failed " + last + " target: " + targetSequenceNumber;
         return new Tuple<>(docIdToOperations.values(), dedupedSequenceNumbers);
     }
 
@@ -428,6 +468,10 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
     private void completeRequest(Set<Long> failedRequests) {
         // check if all ops in the batch completed properly.
         if (failedRequests.isEmpty() == false) {
+
+            // Increment the failed request count in the sink
+            stats.addFailedRequestCount(failedRequests.size());
+
             // honor a partial failure allowing a subset of listeners in requests to complete if possible.
             // in this case we wrap the min in an exception and rely on callers to unpack the min completed number
             throw new SinkException("Failed to process requests ending with seqNo: " + failedRequests, failedRequests);
@@ -450,20 +494,31 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
     public void drain() {
         if (operationsQueue.isEmpty()) return;
         logger.info("Draining {} operations", operationsQueue.size());
+        stats.addDrainQueueCount(operationsQueue.size());
         final TreeSet<Long> seqNosToPoll = operationsQueue.stream()
             .map(OperationDetails::seqNo)
             .collect(Collectors.toCollection(TreeSet::new));
 
         fillSeqNoGaps(seqNosToPoll);
         CountDownLatch latch = new CountDownLatch(1);
-        addListener(seqNosToPoll, (e) -> latch.countDown());
+        final AtomicReference<Exception> failure = new AtomicReference<>();
+        addListener(seqNosToPoll, (e) -> {
+            if (e != null) {
+                failure.set(e);
+            }
+            latch.countDown();
+        });
         try {
             boolean await = latch.await(remoteStoreSettings.getClusterBatchOperationListenerDrainTimeout().millis(), TimeUnit.MILLISECONDS);
             if (await == false) {
+                stats.incrementDrainQueueTimeout();
                 throw new OpenSearchException("Timed out waiting to drain BatchIndexingOperationListener");
             }
         } catch (InterruptedException e) {
             throw new OpenSearchException("Timed out waiting to drain BatchIndexingOperationListener", e);
+        }
+        if (failure.get() != null) {
+            throw new OpenSearchException("Failure while draining BatchIndexingOperationListener", failure.get());
         }
     }
 
@@ -486,10 +541,6 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
         }
     }
 
-    public int size() {
-        return operationsQueue.size();
-    }
-
     /**
      * Class wrapping an Operation indexed into the engine.
      */
@@ -499,10 +550,17 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
         private final long seqNo;
         private final long primaryTerm;
 
-        public OperationDetails(String docId, long seqNo, long primaryTerm) {
+        public Engine.Operation.Origin getOrigin() {
+            return origin;
+        }
+
+        private final Engine.Operation.Origin origin;
+
+        public OperationDetails(String docId, long seqNo, long primaryTerm, Engine.Operation.Origin origin) {
             this.docId = docId;
             this.seqNo = seqNo;
             this.primaryTerm = primaryTerm;
+            this.origin = origin;
         }
 
         public String docId() {
@@ -536,8 +594,8 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
 
         private final ParsedDocument parsedDoc;
 
-        public IndexOperationDetails(String docId, long seqNo, long primaryTerm, ParsedDocument parsedDoc) {
-            super(docId, seqNo, primaryTerm);
+        public IndexOperationDetails(String docId, long seqNo, long primaryTerm, Engine.Operation.Origin origin, ParsedDocument parsedDoc) {
+            super(docId, seqNo, primaryTerm, origin);
             this.parsedDoc = parsedDoc;
         }
 
@@ -550,6 +608,9 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
         }
     }
 
+    /**
+     * Update Operation
+     */
     @PublicApi(since = "3.0.0")
     public static class UpdateOperationDetails extends IndexOperationDetails {
 
@@ -559,10 +620,11 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
             String docId,
             long seqNo,
             long primaryTerm,
+            Engine.Operation.Origin origin,
             ParsedDocument parsedDoc,
             @Nullable BytesReference updateRequestSource
         ) {
-            super(docId, seqNo, primaryTerm, parsedDoc);
+            super(docId, seqNo, primaryTerm, origin, parsedDoc);
             this.updateRequestSource = updateRequestSource;
         }
 
@@ -578,7 +640,7 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
     @PublicApi(since = "3.0.0")
     public static class DeleteOperationDetails extends OperationDetails {
         public DeleteOperationDetails(String docId, long seqNo, long primaryTerm) {
-            super(docId, seqNo, primaryTerm);
+            super(docId, seqNo, primaryTerm, Engine.Operation.Origin.PRIMARY);
         }
     }
 
@@ -595,7 +657,7 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
          */
         long acceptBatch(ShardId shardId, SortedSet<OperationDetails> operationDetails);
 
-        default boolean supportsIndex(IndexSettings indexSettings) {
+        default boolean supportsIndex(IndexSettings indexSettings, IndexMetadata indexMetadata) {
             return true;
         }
     }

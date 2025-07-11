@@ -75,7 +75,7 @@ public class RemoteStoreSettings {
     @ExperimentalApi
     public static final Setting<RemoteStoreEnums.PathType> CLUSTER_REMOTE_STORE_PATH_TYPE_SETTING = new Setting<>(
         "cluster.remote_store.index.path.type",
-        RemoteStoreEnums.PathType.FIXED.toString(),
+        RemoteStoreEnums.PathType.HASHED_PREFIX.toString(),
         RemoteStoreEnums.PathType::parseString,
         Property.NodeScope,
         Property.Dynamic
@@ -169,7 +169,7 @@ public class RemoteStoreSettings {
      */
     public static final Setting<String> CLUSTER_REMOTE_STORE_TRANSLOG_PATH_PREFIX = Setting.simpleString(
         "cluster.remote_store.translog.path.prefix",
-        "",
+        ".",
         Property.NodeScope,
         Property.Final
     );
@@ -179,7 +179,7 @@ public class RemoteStoreSettings {
      */
     public static final Setting<String> CLUSTER_REMOTE_STORE_SEGMENTS_PATH_PREFIX = Setting.simpleString(
         "cluster.remote_store.segments.path.prefix",
-        "",
+        ".",
         Property.NodeScope,
         Property.Final
     );
@@ -220,9 +220,23 @@ public class RemoteStoreSettings {
         Property.Dynamic
     );
 
+    private static final int DEFAULT_BATCH_OPERATION_QUEUE_LIMIT = 10000;
+
+    /**
+     * Used to specify the default batch operation listener poll timeout. BatchIndexingOperationListener is backed by a
+     * blocking queue and operations must be polled in seqNo order.
+     */
+    public static final Setting<Long> CLUSTER_BATCH_OPERATION_QUEUE_LIMIT_SETTING = Setting.longSetting(
+        "cluster.batch.listener.queue.limit",
+        DEFAULT_BATCH_OPERATION_QUEUE_LIMIT,
+        Property.NodeScope,
+        Property.Dynamic
+    );
+
     private volatile TimeValue clusterBatchOperationListenerBufferInterval;
     private volatile TimeValue clusterBatchOperationListenerPollTimeout;
     private volatile TimeValue clusterBatchOperationListenerDrainTimeout;
+    private volatile Long clusterBatchOperationListenerQueueLimit;
 
     private volatile TimeValue clusterRemoteTranslogBufferInterval;
     private volatile int minRemoteSegmentMetadataFiles;
@@ -301,6 +315,13 @@ public class RemoteStoreSettings {
             CLUSTER_BATCH_OPERATION_LISTENER_DRAIN_TIMEOUT_SETTING,
             this::setClusterBatchOperationListenerDrainTimeoutSetting
         );
+
+        clusterBatchOperationListenerQueueLimit = CLUSTER_BATCH_OPERATION_QUEUE_LIMIT_SETTING.get(settings);
+        clusterSettings.addSettingsUpdateConsumer(
+            CLUSTER_BATCH_OPERATION_QUEUE_LIMIT_SETTING,
+            this::setClusterBatchOperationListenerQueueLimitSetting
+        );
+
     }
 
     public TimeValue getClusterRemoteTranslogBufferInterval() {
@@ -319,6 +340,10 @@ public class RemoteStoreSettings {
         return clusterBatchOperationListenerPollTimeout;
     }
 
+    public long getClusterBatchOperationListenerQueueLimit() {
+        return clusterBatchOperationListenerQueueLimit;
+    }
+
     public TimeValue getClusterBatchOperationListenerDrainTimeout() {
         return clusterBatchOperationListenerDrainTimeout;
     }
@@ -333,6 +358,10 @@ public class RemoteStoreSettings {
 
     private void setClusterBatchOperationListenerDrainTimeoutSetting(TimeValue timeout) {
         this.clusterBatchOperationListenerDrainTimeout = timeout;
+    }
+
+    private void setClusterBatchOperationListenerQueueLimitSetting(long limit) {
+        this.clusterBatchOperationListenerQueueLimit = limit;
     }
 
     private void setMinRemoteSegmentMetadataFiles(int minRemoteSegmentMetadataFiles) {

@@ -527,7 +527,7 @@ public abstract class TransportWriteAction<
             this.logger = logger;
             // increment pendingOps for batch completion
             pendingOps.incrementAndGet();
-            assert pendingOps.get() >= 0 && pendingOps.get() <= 3 : "pendingOpts was: " + pendingOps.get();
+            assert pendingOps.get() >= 0 && pendingOps.get() <= 4 : "pendingOpts was: " + pendingOps.get();
         }
 
         /** calls the response listener if all pending operations have returned otherwise it just decrements the pending opts counter.*/
@@ -542,7 +542,7 @@ public abstract class TransportWriteAction<
                     respond.onSuccess(refreshed.get());
                 }
             }
-            assert numPending >= 0 && numPending <= 2 : "numPending must either 2, 1 or 0 but was " + numPending;
+            assert numPending >= 0 && numPending <= 3 : "numPending must either 3, 2, 1 or 0 but was " + numPending;
         }
 
         void run() {

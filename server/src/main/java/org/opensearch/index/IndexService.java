@@ -125,7 +125,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.SortedSet;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -753,12 +752,15 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
             List<IndexingOperationListener> operationListeners;
 
             final Set<BatchIndexingOperationListener.Sink> filteredSinks = sinks.stream()
-                .filter(s -> s.supportsIndex(this.indexSettings))
+                .filter(s -> s.supportsIndex(this.indexSettings, this.indexSettings.getIndexMetadata()))
                 .collect(Collectors.toSet());
 
-            if (routing.isSearchOnly() == false) {
+            if (routing.isSearchOnly() == false && filteredSinks.isEmpty() == false) {
                 operationListeners = new ArrayList<>(indexingOperationListeners);
-                BatchIndexingOperationListener.Sink e1 = (shardId1, operationDetails) -> operationDetails.last().seqNo();
+                // BatchIndexingOperationListener.Sink e1 = (shardId1, operationDetails) -> {
+                // logger.info("sink received ops {}", operationDetails);
+                // return operationDetails.last().seqNo();
+                // };
                 operationListeners.add(
                     new BatchIndexingOperationListener(routing.shardId(), filteredSinks, threadPool, remoteStoreSettings)
                 );

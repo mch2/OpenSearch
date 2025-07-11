@@ -1272,6 +1272,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
                 );
             }
             indexingOperationListeners.postIndex(shardId, index, e);
+            logger.error("Rethrowing e", e);
             throw e;
         }
         indexingOperationListeners.postIndex(shardId, index, result);
@@ -2490,6 +2491,10 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         while ((operation = snapshot.next()) != null) {
             try {
                 logger.trace("[translog] recover op {}", operation);
+                // validate batch queue is not full, validation needs to be here or request
+                // will not get neg ack'd. CompositeIndexingOperationListener swallows any
+                // exception from listeners.
+                batchOperationListener().ifPresent(BatchIndexingOperationListener::validateQueueSizeOnTranslogRecovery);
                 Engine.Result result = applyTranslogOperation(engine, operation, origin);
                 switch (result.getResultType()) {
                     case FAILURE:
@@ -2714,6 +2719,10 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
 
     Optional<BatchIndexingOperationListener> batchOperationListener() {
         return Optional.ofNullable(batchIndexingOperationListener);
+    }
+
+    public void validateBatchQueueSizeOnBulkWrite(int batchSize) {
+        batchOperationListener().ifPresent(l -> l.validateQueueSizeOnBulkWrite(batchSize));
     }
 
     /**

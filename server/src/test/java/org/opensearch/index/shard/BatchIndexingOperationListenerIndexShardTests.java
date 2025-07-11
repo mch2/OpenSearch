@@ -40,6 +40,8 @@ import java.util.SortedSet;
 import java.util.TreeSet;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 import java.util.stream.LongStream;
@@ -77,6 +79,94 @@ public class BatchIndexingOperationListenerIndexShardTests extends IndexShardTes
     @After
     public void afterTest() throws IOException {
         closeShards(indexShard);
+    }
+
+    public void testDrainMethodThreadSafety() throws Exception {
+        // Setup
+        RemoteStoreSettings remoteStoreSettings = mock(RemoteStoreSettings.class);
+        when(remoteStoreSettings.getClusterBatchOperationListenerDrainTimeout()).thenReturn(TimeValue.timeValueSeconds(5));
+        when(remoteStoreSettings.getClusterBatchOperationListenerPollTimeout()).thenReturn(TimeValue.timeValueMillis(100));
+
+        listener = new BatchIndexingOperationListener(shardRouting.shardId(), Set.of(testSink), threadPool, remoteStoreSettings);
+        closeShards(indexShard);
+        indexShard = newStartedShard(p -> newShard(p, listener), true);
+
+        // Add some initial operations to the queue
+        LongStream.range(0, 100).forEach(this::indexDoc);
+
+        // Create a flag to control when the concurrent modification should stop
+        AtomicBoolean shouldStop = new AtomicBoolean(false);
+        AtomicReference<Exception> caughtException = new AtomicReference<>();
+        CountDownLatch drainStarted = new CountDownLatch(1);
+        CountDownLatch concurrentModificationStarted = new CountDownLatch(1);
+
+        // Thread 1: Continuously calls drain()
+        Thread drainThread = new Thread(() -> {
+            try {
+                drainStarted.countDown();
+                // Wait for concurrent modification to start
+                concurrentModificationStarted.await(5, TimeUnit.SECONDS);
+
+                // Call drain which internally does operationsQueue.stream()
+                listener.drain();
+
+            } catch (Exception e) {
+                caughtException.set(e);
+            }
+        });
+
+        // Thread 2: Continuously adds operations to the queue during drain
+        Thread modificationThread = new Thread(() -> {
+            try {
+                // Wait for drain to start
+                drainStarted.await(5, TimeUnit.SECONDS);
+                concurrentModificationStarted.countDown();
+
+                // Continuously add operations while drain is happening
+                for (int i = 100; i < 200 && !shouldStop.get(); i++) {
+                    indexDoc(i);
+                    // Small delay to increase chance of concurrent modification during stream iteration
+                    Thread.sleep(1);
+                }
+            } catch (Exception e) {
+                caughtException.set(e);
+            }
+        });
+
+        // Start both threads
+        drainThread.start();
+        modificationThread.start();
+
+        // Wait for both threads to complete
+        drainThread.join(10000); // 10 second timeout
+        shouldStop.set(true);
+        modificationThread.join(5000); // 5 second timeout
+
+        // Check if we caught the expected exception
+        Exception exception = caughtException.get();
+        if (exception != null) {
+            throw exception;
+            // // We expect either ConcurrentModificationException or other threading issues
+            // assertTrue(
+            // "Expected ConcurrentModificationException or similar threading issue, but got: " + exception.getClass().getSimpleName(),
+            // exception instanceof ConcurrentModificationException ||
+            // exception.getCause() instanceof ConcurrentModificationException ||
+            // exception instanceof IllegalStateException ||
+            // // The stream operation might also fail in other ways due to concurrent modification
+            // exception.getMessage().contains("concurrent") ||
+            // exception.getMessage().contains("modification")
+            // );
+            //
+            // System.out.println("Successfully caught expected exception: " + exception.getClass().getSimpleName() +
+            // " - " + exception.getMessage());
+        } else {
+            // If no exception was caught, the test might need to be run multiple times
+            // or the timing wasn't right. This is common with concurrency tests.
+            System.out.println(
+                "No exception caught - this can happen due to timing in concurrent tests. "
+                    + "The thread safety issue still exists even if not triggered in this run."
+            );
+        }
     }
 
     public void testDocumentFailure_IndexOperation() {

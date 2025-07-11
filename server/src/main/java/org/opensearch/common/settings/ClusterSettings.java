@@ -789,6 +789,7 @@ public final class ClusterSettings extends AbstractScopedSettings {
                 RemoteStoreSettings.CLUSTER_BATCH_OPERATION_LISTENER_BUFFER_INTERVAL_SETTING,
                 RemoteStoreSettings.CLUSTER_BATCH_OPERATION_LISTENER_POLL_TIMEOUT_SETTING,
                 RemoteStoreSettings.CLUSTER_BATCH_OPERATION_LISTENER_DRAIN_TIMEOUT_SETTING,
+                RemoteStoreSettings.CLUSTER_BATCH_OPERATION_QUEUE_LIMIT_SETTING,
 
                 // Snapshot related Settings
                 BlobStoreRepository.SNAPSHOT_SHARD_PATH_PREFIX_SETTING,
