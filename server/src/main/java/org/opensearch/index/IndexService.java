@@ -766,7 +766,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
                     @Override
                     public long acceptBatch(ShardId shardId, SortedSet<BatchIndexingOperationListener.OperationDetails> operationDetails) {
                         ops.addAndGet(operationDetails.size());
-                        logger.info("Sink listener has seen {} ops");
+                        logger.info("Sink Incoming batch: {} has seen total: {} ops", operationDetails.size(), ops.get());
                         return operationDetails.last().seqNo();
                     }
                 };

@@ -419,6 +419,7 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
             // and say 3-6 fails. later when write is called with R1, we know that R1 already has failed ops in the previous call to write,
             // so we mark 7,8,9 as persisted and result in not being sent to sink.
             if (tracker.hasPersisted(nextOp.seqNo())) {
+                logger.info("Discarding operation {} as already persisted", nextOp.seqNo());
                 continue;
             }
             // if we have to dedupe, keep track of which op was deduped away in case of failure.
@@ -539,6 +540,7 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
 
         for (long i = tracker.getProcessedCheckpoint(); i <= max; i++) {
             if (!sortedSet.contains(i)) {
+                logger.info("Filling sequence number gap {}", i);
                 tracker.markSeqNoAsProcessed(i);
                 tracker.markSeqNoAsPersisted(i);
             }
