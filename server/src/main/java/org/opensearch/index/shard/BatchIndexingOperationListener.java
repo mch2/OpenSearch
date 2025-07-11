@@ -450,8 +450,12 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
                 + tracker.getProcessedCheckpoint()
                 + " Batch: "
                 + batch;
-        Long last = docIdToOperations.values().stream().map(OperationDetails::seqNo).collect(Collectors.toCollection(TreeSet::new)).last();
-        assert docIdToOperations.isEmpty() || last == targetSequenceNumber : " failed " + last + " target: " + targetSequenceNumber;
+        assert docIdToOperations.isEmpty()
+            || docIdToOperations.values()
+            .stream()
+            .map(OperationDetails::seqNo)
+            .collect(Collectors.toCollection(TreeSet::new))
+            .last() == targetSequenceNumber;
         return new Tuple<>(docIdToOperations.values(), dedupedSequenceNumbers);
     }
 

@@ -125,9 +125,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.SortedSet;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiFunction;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
@@ -757,12 +759,19 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
 
             if (routing.isSearchOnly() == false) {
                 operationListeners = new ArrayList<>(indexingOperationListeners);
-                 BatchIndexingOperationListener.Sink e1 = (shardId1, operationDetails) -> {
-                 logger.info("sink received ops {}", operationDetails);
-                 return operationDetails.last().seqNo();
-                 };
+                BatchIndexingOperationListener.Sink s = new BatchIndexingOperationListener.Sink() {
+
+                    AtomicLong ops = new AtomicLong();
+
+                    @Override
+                    public long acceptBatch(ShardId shardId, SortedSet<BatchIndexingOperationListener.OperationDetails> operationDetails) {
+                        ops.addAndGet(operationDetails.size());
+                        logger.info("Sink listener has seen {} ops");
+                        return operationDetails.last().seqNo();
+                    }
+                };
                 operationListeners.add(
-                    new BatchIndexingOperationListener(routing.shardId(), Set.of(e1), threadPool, remoteStoreSettings)
+                    new BatchIndexingOperationListener(routing.shardId(), Set.of(s), threadPool, remoteStoreSettings)
                 );
             } else {
                 operationListeners = indexingOperationListeners;
