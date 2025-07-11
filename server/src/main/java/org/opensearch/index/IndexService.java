@@ -755,14 +755,14 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
                 .filter(s -> s.supportsIndex(this.indexSettings, this.indexSettings.getIndexMetadata()))
                 .collect(Collectors.toSet());
 
-            if (routing.isSearchOnly() == false && filteredSinks.isEmpty() == false) {
+            if (routing.isSearchOnly() == false) {
                 operationListeners = new ArrayList<>(indexingOperationListeners);
-                // BatchIndexingOperationListener.Sink e1 = (shardId1, operationDetails) -> {
-                // logger.info("sink received ops {}", operationDetails);
-                // return operationDetails.last().seqNo();
-                // };
+                 BatchIndexingOperationListener.Sink e1 = (shardId1, operationDetails) -> {
+                 logger.info("sink received ops {}", operationDetails);
+                 return operationDetails.last().seqNo();
+                 };
                 operationListeners.add(
-                    new BatchIndexingOperationListener(routing.shardId(), filteredSinks, threadPool, remoteStoreSettings)
+                    new BatchIndexingOperationListener(routing.shardId(), Set.of(e1), threadPool, remoteStoreSettings)
                 );
             } else {
                 operationListeners = indexingOperationListeners;
