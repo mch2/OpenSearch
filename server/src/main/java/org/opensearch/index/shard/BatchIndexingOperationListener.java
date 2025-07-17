@@ -85,10 +85,10 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
     /**
      * ReplicationOperationListener - IndexOperationListener implementation that batches operations post ingestion and hands off to a {@link Sink}.
      *
-     * @param shardId             - {@link ShardId} - Shard Id
-     * @param sinks               - {@link List<Sink>} list of sinks to consume batches of operations.
-     * @param threadPool          - {@link ThreadPool} Used for AsyncIOProcessor configuration/
-     * @param remoteStoreSettings - {@link RemoteStoreSettings} Settings used to configure buffer interval or our IO processor.
+     * @param shardId               - {@link ShardId} - Shard Id
+     * @param sinks                 - {@link List<Sink>} list of sinks to consume batches of operations.
+     * @param threadPool            - {@link ThreadPool} Used for AsyncIOProcessor configuration/
+     * @param remoteStoreSettings   - {@link RemoteStoreSettings} Settings used to configure buffer interval or our IO processor.
      */
     public BatchIndexingOperationListener(
         ShardId shardId,
@@ -181,12 +181,11 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
                     index.id(),
                     result.getSeqNo(),
                     result.getTerm(),
-                    index.origin(),
                     index.parsedDoc(),
                     ((Engine.Update) index).getUpdateRequestSource()
                 );
             } else {
-                details = new IndexOperationDetails(index.id(), result.getSeqNo(), result.getTerm(), index.origin(), index.parsedDoc());
+                details = new IndexOperationDetails(index.id(), result.getSeqNo(), result.getTerm(), index.parsedDoc());
             }
             operationsQueue.add(details);
             logger.trace("Queueing Index op for {} {}", details.seqNo(), details.docId());
@@ -298,10 +297,7 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
 
             if (hasFailedOp) {
                 // Mark all sequence numbers as persisted if any failed, we don't want to pass those to the sink
-                candidate.v1().forEach((l) -> {
-                    logger.info("Marking {} as persisted due to already errored request", l);
-                    tracker.markSeqNoAsPersisted(l);
-                });
+                candidate.v1().forEach(tracker::markSeqNoAsPersisted);
             }
             return hasFailedOp;
         }).map(candidate -> candidate.v1().last()).collect(Collectors.toSet());
@@ -321,9 +317,9 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
         // assert any op going forward in the batch has either never been seen or is already completed
         assert batch.stream().allMatch(seqNo -> tracker.hasProcessed(seqNo) == false || tracker.hasPersisted(seqNo))
             : "Expected All seqNos in the request to be new or already marked completed"
-                + batch.stream()
-                    .filter(seqNo -> tracker.hasProcessed(seqNo) == false || tracker.hasPersisted(seqNo))
-                    .collect(Collectors.toSet());
+            + batch.stream()
+            .filter(seqNo -> tracker.hasProcessed(seqNo) == false || tracker.hasPersisted(seqNo))
+            .collect(Collectors.toSet());
 
         // poll the next batch from the queue
         Tuple<Collection<OperationDetails>, Set<Long>> result = pollUntil(batch);
@@ -346,7 +342,7 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
         for (Sink sink : sinks) {
             completedUpTo = Math.min(sink.acceptBatch(shardId, operationDetails), completedUpTo);
         }
-        logger.info("Sinks Completed up to seqNo: {}", completedUpTo);
+        logger.trace("Sinks Completed up to seqNo: {}", completedUpTo);
         return handleResult(requests, completedUpTo, operationDetails, result, batch);
     }
 
@@ -366,7 +362,6 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
         // if we failed to process all ops check for failed requests
         if (completedUpTo < batch.last()) {
             if (result.v2().isEmpty() == false) {
-
                 // if we had to dedupe by docId across requests, we need to fail all the requests
                 // this ensures the deduped away req is also negatively ack'd.
                 return requests.stream().map(tuple -> tuple.v1().last()).collect(Collectors.toSet());
@@ -422,7 +417,6 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
             // and say 3-6 fails. later when write is called with R1, we know that R1 already has failed ops in the previous call to write,
             // so we mark 7,8,9 as persisted and result in not being sent to sink.
             if (tracker.hasPersisted(nextOp.seqNo())) {
-                logger.info("Discarding operation {} as already persisted", nextOp.seqNo());
                 continue;
             }
             // if we have to dedupe, keep track of which op was deduped away in case of failure.
@@ -448,12 +442,12 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
         // check that we polled at least all ops in the request batch
         assert tracker.getProcessedCheckpoint() >= targetSequenceNumber || batch.stream().allMatch(tracker::hasProcessed)
             : "Expected to have processed up to "
-                + targetSequenceNumber
-                + "or for all requested ops to have processed"
-                + "Processed checkpoint: "
-                + tracker.getProcessedCheckpoint()
-                + " Batch: "
-                + batch;
+            + targetSequenceNumber
+            + "or for all requested ops to have processed"
+            + "Processed checkpoint: "
+            + tracker.getProcessedCheckpoint()
+            + " Batch: "
+            + batch;
         assert docIdToOperations.isEmpty()
             || docIdToOperations.values()
             .stream()
@@ -487,16 +481,13 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
     }
 
     private boolean failedInPreviousBatch(Long seqNo) {
-        boolean b = tracker.hasProcessed(seqNo) && tracker.hasPersisted(seqNo) == false;
-        logger.info("{} failed in a previous batch", seqNo);
-        return b;
+        return tracker.hasProcessed(seqNo) && tracker.hasPersisted(seqNo) == false;
     }
 
     private void handleDocumentFailure(Engine.Result result) {
         // document failure, just mark it done if there is an assigned seqno (it reached the engine)
         // so that we aren't left with gaps in our tracker.
         if (result.getSeqNo() != SequenceNumbers.UNASSIGNED_SEQ_NO) {
-            logger.info("Doc was not successful marking done {}", result.getSeqNo());
             tracker.markSeqNoAsProcessed(result.getSeqNo());
             tracker.markSeqNoAsPersisted(result.getSeqNo());
         }
@@ -509,7 +500,6 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
         final TreeSet<Long> seqNosToPoll = operationsQueue.stream()
             .map(OperationDetails::seqNo)
             .collect(Collectors.toCollection(TreeSet::new));
-
         fillSeqNoGaps(seqNosToPoll);
         CountDownLatch latch = new CountDownLatch(1);
         final AtomicReference<Exception> failure = new AtomicReference<>();
@@ -546,7 +536,6 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
 
         for (long i = tracker.getProcessedCheckpoint(); i <= max; i++) {
             if (!sortedSet.contains(i)) {
-                logger.info("Filling sequence number gap {}", i);
                 tracker.markSeqNoAsProcessed(i);
                 tracker.markSeqNoAsPersisted(i);
             }
@@ -562,17 +551,10 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
         private final long seqNo;
         private final long primaryTerm;
 
-        public Engine.Operation.Origin getOrigin() {
-            return origin;
-        }
-
-        private final Engine.Operation.Origin origin;
-
-        public OperationDetails(String docId, long seqNo, long primaryTerm, Engine.Operation.Origin origin) {
+        public OperationDetails(String docId, long seqNo, long primaryTerm) {
             this.docId = docId;
             this.seqNo = seqNo;
             this.primaryTerm = primaryTerm;
-            this.origin = origin;
         }
 
         public String docId() {
@@ -604,10 +586,10 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
     @PublicApi(since = "3.0.0")
     public static class IndexOperationDetails extends OperationDetails {
 
-        private final ParsedDocument parsedDoc;
+        protected final ParsedDocument parsedDoc;
 
-        public IndexOperationDetails(String docId, long seqNo, long primaryTerm, Engine.Operation.Origin origin, ParsedDocument parsedDoc) {
-            super(docId, seqNo, primaryTerm, origin);
+        public IndexOperationDetails(String docId, long seqNo, long primaryTerm, ParsedDocument parsedDoc) {
+            super(docId, seqNo, primaryTerm);
             this.parsedDoc = parsedDoc;
         }
 
@@ -632,17 +614,20 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
             String docId,
             long seqNo,
             long primaryTerm,
-            Engine.Operation.Origin origin,
             ParsedDocument parsedDoc,
             @Nullable BytesReference updateRequestSource
         ) {
-            super(docId, seqNo, primaryTerm, origin, parsedDoc);
+            super(docId, seqNo, primaryTerm, parsedDoc);
             this.updateRequestSource = updateRequestSource;
         }
 
         @Override
         public Map<String, Object> getSourceAsMap() {
-            return XContentHelper.convertToMap(updateRequestSource, false, this.parsedDoc().getMediaType()).v2();
+            return XContentHelper.convertToMap(
+                updateRequestSource == null ? parsedDoc.source() : updateRequestSource,
+                false,
+                this.parsedDoc().getMediaType()
+            ).v2();
         }
     }
 
@@ -652,7 +637,7 @@ public class BatchIndexingOperationListener implements IndexingOperationListener
     @PublicApi(since = "3.0.0")
     public static class DeleteOperationDetails extends OperationDetails {
         public DeleteOperationDetails(String docId, long seqNo, long primaryTerm) {
-            super(docId, seqNo, primaryTerm, Engine.Operation.Origin.PRIMARY);
+            super(docId, seqNo, primaryTerm);
         }
     }
 

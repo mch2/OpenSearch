@@ -571,7 +571,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         BytesReference updateRequestSource = null;
         if (opType == DocWriteRequest.OpType.UPDATE) {
             final UpdateRequest updateRequest = (UpdateRequest) context.getCurrent();
-            updateRequestSource = updateRequest.docAsUpsert() == false ? updateRequest.doc().source() : null;
+            updateRequestSource = updateRequest.doc() != null ? updateRequest.doc().source() : null;
             try {
                 updateResult = updateHelper.prepare(updateRequest, context.getPrimary(), nowInMillisSupplier);
             } catch (Exception failure) {
