@@ -84,6 +84,8 @@ import java.io.IOException;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.Locale;
+import java.util.Set;
+import java.util.SortedSet;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -127,6 +129,11 @@ public class TransportWriteActionTests extends OpenSearchTestCase {
     @Before
     public void initCommonMocks() {
         indexShard = mock(IndexShard.class);
+        doAnswer(invocation -> {
+            Consumer<Exception> callback = (Consumer<Exception>) invocation.getArguments()[1];
+            callback.accept(null);
+            return null;
+        }).when(indexShard).waitForBatchCompletion(any(SortedSet.class), any());
         location = mock(Translog.Location.class);
         clusterService = createClusterService(threadPool);
     }
@@ -189,8 +196,9 @@ public class TransportWriteActionTests extends OpenSearchTestCase {
         testAction.dispatchedShardOperationOnPrimary(request, indexShard, ActionTestUtils.assertNoFailureListener(result -> {
             CapturingActionListener<TestResponse> listener = new CapturingActionListener<>();
             result.runPostReplicationActions(ActionListener.map(listener, ignore -> result.finalResponseIfSuccessful));
-            assertNotNull(listener.response);
+            System.out.println(listener.failure);
             assertNull(listener.failure);
+            assertNotNull(listener.response);
             assertTrue(listener.response.forcedRefresh);
             verify(indexShard).refresh("refresh_flag_index");
             verify(indexShard, never()).addRefreshListener(any(), any());
@@ -586,6 +594,11 @@ public class TransportWriteActionTests extends OpenSearchTestCase {
 
     private IndexShard mockIndexShard(ShardId shardId, ClusterService clusterService) {
         final IndexShard indexShard = mock(IndexShard.class);
+        doAnswer(invocation -> {
+            Consumer<Exception> callback = (Consumer<Exception>) invocation.getArguments()[0];
+            callback.accept(null);
+            return null;
+        }).when(indexShard).waitForBatchCompletion(any(SortedSet.class), any());
         doAnswer(invocation -> {
             ActionListener<Releasable> callback = (ActionListener<Releasable>) invocation.getArguments()[0];
             count.incrementAndGet();
