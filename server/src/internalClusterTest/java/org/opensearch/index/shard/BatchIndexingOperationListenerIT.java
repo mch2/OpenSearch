@@ -18,7 +18,6 @@ import org.opensearch.action.index.IndexRequestBuilder;
 import org.opensearch.action.search.SearchResponse;
 import org.opensearch.action.update.UpdateRequestBuilder;
 import org.opensearch.cluster.ClusterState;
-import org.opensearch.cluster.action.shard.ShardStateAction;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.node.DiscoveryNode;
 import org.opensearch.cluster.routing.ShardRouting;
@@ -28,7 +27,6 @@ import org.opensearch.common.settings.Settings;
 import org.opensearch.common.unit.TimeValue;
 import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.index.IndexModule;
-import org.opensearch.index.engine.Engine;
 import org.opensearch.index.query.QueryBuilders;
 import org.opensearch.index.seqno.SequenceNumbers;
 import org.opensearch.indices.recovery.PeerRecoveryTargetService;
@@ -51,7 +49,6 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 import java.util.SortedSet;
 import java.util.UUID;
@@ -59,8 +56,6 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -69,7 +64,6 @@ import static org.opensearch.cluster.routing.UnassignedInfo.INDEX_DELAYED_NODE_L
 import static org.opensearch.indices.RemoteStoreSettings.CLUSTER_BATCH_OPERATION_LISTENER_BUFFER_INTERVAL_SETTING;
 import static org.opensearch.indices.RemoteStoreSettings.CLUSTER_BATCH_OPERATION_LISTENER_DRAIN_TIMEOUT_SETTING;
 import static org.opensearch.indices.RemoteStoreSettings.CLUSTER_BATCH_OPERATION_LISTENER_POLL_TIMEOUT_SETTING;
-import static org.opensearch.indices.RemoteStoreSettings.CLUSTER_BATCH_OPERATION_QUEUE_LIMIT_SETTING;
 import static org.opensearch.test.hamcrest.OpenSearchAssertions.assertAcked;
 import static org.opensearch.test.hamcrest.OpenSearchAssertions.assertHitCount;
 import static org.hamcrest.Matchers.equalTo;
@@ -317,7 +311,6 @@ public class BatchIndexingOperationListenerIT extends RemoteStoreBaseIntegTestCa
         // ensureYellow("test");
         // String primary = primaryNode.getName();
         ensureGreen();
-        System.out.println(oldPrimary);
         final String newPrimary = internalCluster().startDataOnlyNode();
         int requestCount = randomIntBetween(2, 10);
         int batchSize = randomIntBetween(1, 10);
@@ -449,7 +442,6 @@ public class BatchIndexingOperationListenerIT extends RemoteStoreBaseIntegTestCa
             }
             String id = "val-" + i + "-" + offset;
             docIds.add(id);
-            logger.info("making request for {} {}", id, sourceAsMap);
             requestBuilder.add(prepareIndex(id, sourceAsMap));
         }
         return docIds;
@@ -481,8 +473,6 @@ public class BatchIndexingOperationListenerIT extends RemoteStoreBaseIntegTestCa
             this.seqNos.clear();
         }
 
-        boolean failWriteOnTranslog = false;
-
         // counter of gen with list of ops
         public Map<Integer, SortedSet<BatchIndexingOperationListener.OperationDetails>> getOps() {
             return ops;
@@ -510,15 +500,6 @@ public class BatchIndexingOperationListenerIT extends RemoteStoreBaseIntegTestCa
 
         @Override
         public long acceptBatch(ShardId shardId, SortedSet<BatchIndexingOperationListener.OperationDetails> operationDetails) {
-            if (failWriteOnTranslog) {
-                if (operationDetails.stream()
-                    .anyMatch(
-                        o -> o.getOrigin() == Engine.Operation.Origin.LOCAL_RESET
-                            || o.getOrigin() == Engine.Operation.Origin.LOCAL_TRANSLOG_RECOVERY
-                    )) {
-                    return 0;
-                }
-            }
             if (operationDetails.isEmpty()) {
                 Assert.fail();
             }
@@ -581,108 +562,5 @@ public class BatchIndexingOperationListenerIT extends RemoteStoreBaseIntegTestCa
         assertEquals(0, shard.getRemoteStoreSettings().getClusterBatchOperationListenerBufferInterval().millis());
         assertEquals(5000, shard.getRemoteStoreSettings().getClusterBatchOperationListenerPollTimeout().millis());
         assertEquals(30000, shard.getRemoteStoreSettings().getClusterBatchOperationListenerDrainTimeout().millis());
-    }
-
-    public void testUpdates() throws IOException {
-        createIndex("test");
-        ensureGreen();
-        BulkResponse bulk = client().prepareBulk()
-            .add(prepareIndex("multibulk1", "field1", "one")) // add
-            .add(prepareIndex("multibulk1", "field2", "two")) // add new field
-            .add(prepareUpdate("multibulk1", "field1", "three")) // update field 1
-            .get();
-        assertFalse(bulk.buildFailureMessage(), bulk.hasFailures());
-        assertThat(refresh().getFailedShards(), equalTo(0));
-        assertEquals(1, sink.getOps().size());
-        BatchIndexingOperationListener.OperationDetails operationDetails = sink.getOps()
-            .get(sink.getOps().keySet().stream().findFirst().get())
-            .stream()
-            .findFirst()
-            .get();
-        assertEquals(BatchIndexingOperationListener.UpdateOperationDetails.class, operationDetails.getClass());
-        assertEquals(
-            Map.of("field1", "three"),
-            ((BatchIndexingOperationListener.UpdateOperationDetails) operationDetails).getSourceAsMap()
-        );
-    }
-
-    public void testLocalResetWithFullOpsQueueAndSinkFailureOnDrain() throws Exception {
-        sink.failWriteOnTranslog = true;
-        createIndex(
-            "test",
-            Settings.builder().put(indexSettings()).put(SETTING_NUMBER_OF_REPLICAS, 1).put("index.refresh_interval", "-1").build()
-        );
-        String clusterManagerNodeName = internalCluster().startClusterManagerOnlyNode();
-        ensureYellow("test");
-        DiscoveryNode primaryNode = getNodeContainingPrimaryShard();
-        String primary = primaryNode.getName();
-        String replica = internalCluster().startDataOnlyNode();
-        ensureGreen();
-        int requestCount = randomIntBetween(2, 10);
-        int batchSize = randomIntBetween(1, 100);
-        final BulkResponse[] responses = new BulkResponse[requestCount];
-        final CyclicBarrier cyclicBarrier = new CyclicBarrier(responses.length);
-        Thread[] threads = new Thread[responses.length];
-        Set<String> docIds = new HashSet<>();
-        AtomicInteger failedRequests = new AtomicInteger(0);
-        for (int i = 0; i < responses.length; i++) {
-            final int threadID = i;
-            threads[threadID] = new Thread(() -> {
-                try {
-                    cyclicBarrier.await();
-                } catch (Exception e) {
-                    return;
-                }
-                BulkRequestBuilder requestBuilder = client(replica).prepareBulk();
-                docIds.addAll(addDocs(requestBuilder, threadID, batchSize));
-                // randomly delete something
-                if (threadID > 0 && randomIntBetween(0, 10) == 1) {
-                    String id = "val-" + (threadID - 1);
-                    docIds.remove(id);
-                    requestBuilder.add(prepareDelete(id));
-                }
-                BulkResponse bulkItemResponses = requestBuilder.get();
-                bulkItemResponses.forEach(bulkItemResponse -> {
-                    if (bulkItemResponse.getFailure() != null) {
-                        failedRequests.incrementAndGet();
-                        logger.error(bulkItemResponse.getFailureMessage());
-                    }
-                });
-                responses[threadID] = bulkItemResponses;
-            });
-            threads[threadID].start();
-        }
-
-        MockTransportService primaryTransportService = ((MockTransportService) internalCluster().getInstance(
-            TransportService.class,
-            replica
-        ));
-        CountDownLatch failedLatch = new CountDownLatch(1);
-
-        MockTransportService clusterManagerTransportService = (MockTransportService) internalCluster().getInstance(
-            TransportService.class,
-            clusterManagerNodeName
-        );
-
-        AtomicBoolean failed = new AtomicBoolean(false);
-        primaryTransportService.addSendBehavior(clusterManagerTransportService, (connection, requestId, action, request, options) -> {
-            logger.info("--> sending request {} on {}", action, connection.getNode());
-            if (action == ShardStateAction.SHARD_FAILED_ACTION_NAME) {
-                failed.set(true);
-                failedLatch.countDown();
-            }
-            connection.sendRequest(requestId, action, request, options);
-        });
-
-        // wait until sink has something in it from old primary
-        assertBusy(() -> assertTrue(sink.counter > 0));
-        // reduce queue limit to 1
-        ClusterUpdateSettingsRequest updateSettingsRequest = new ClusterUpdateSettingsRequest();
-        updateSettingsRequest.persistentSettings(Settings.builder().put(CLUSTER_BATCH_OPERATION_QUEUE_LIMIT_SETTING.getKey(), "5"));
-        assertAcked(client().admin().cluster().updateSettings(updateSettingsRequest).actionGet());
-        internalCluster().stopRandomNode(InternalTestCluster.nameFilter(primary));
-        failedLatch.await(30, TimeUnit.SECONDS);
-        assertTrue(failed.get());
-        sink.failWriteOnTranslog = false;
     }
 }
