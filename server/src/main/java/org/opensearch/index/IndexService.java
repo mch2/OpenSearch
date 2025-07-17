@@ -771,7 +771,7 @@ public class IndexService extends AbstractIndexComponent implements IndicesClust
                     }
                 };
                 operationListeners.add(
-                    new BatchIndexingOperationListener(routing.shardId(), Set.of(s), threadPool, remoteStoreSettings)
+                    new BatchIndexingOperationListener(routing.shardId(), filteredSinks, threadPool, remoteStoreSettings)
                 );
             } else {
                 operationListeners = indexingOperationListeners;
