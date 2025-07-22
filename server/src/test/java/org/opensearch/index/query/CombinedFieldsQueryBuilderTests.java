@@ -17,9 +17,9 @@ import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.IndexWriterConfig;
+import org.apache.lucene.sandbox.search.CombinedFieldQuery;
 import org.apache.lucene.search.BooleanClause;
 import org.apache.lucene.search.BooleanQuery;
-import org.apache.lucene.search.CombinedFieldQuery;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.MatchAllDocsQuery;
 import org.apache.lucene.search.MatchNoDocsQuery;
@@ -246,7 +246,7 @@ public class CombinedFieldsQueryBuilderTests extends AbstractQueryTestCase<Combi
 
         BooleanQuery booleanQuery = (BooleanQuery) query;
         booleanQuery.clauses().forEach(clause -> {
-            assertEquals("All clauses should be SHOULD for OR operator", BooleanClause.Occur.SHOULD, clause.occur());
+            assertEquals("All clauses should be SHOULD for OR operator", BooleanClause.Occur.SHOULD, clause.getOccur());
         });
 
         assertThat("Should have clauses for multi-term query", booleanQuery.clauses().size(), notNullValue());
@@ -394,7 +394,7 @@ public class CombinedFieldsQueryBuilderTests extends AbstractQueryTestCase<Combi
 
         // Should match documents with at least 2 of the 3 terms
         // The documents should be: "machine learning algorithms" (3 terms), "machine learning" (2 terms), "learning algorithms" (2 terms)
-        assertTrue("Should match documents with at least 2 terms", resultsMin2.totalHits.value() == 3);
+        assertTrue("Should match documents with at least 2 terms", resultsMin2.totalHits.value == 3);
 
         // Test with minimum_should_match = "75%" (75% of terms, rounded down, so 2 terms)
         CombinedFieldsQueryBuilder queryWithMin75 = new CombinedFieldsQueryBuilder("machine learning algorithms", "content").operator(
@@ -406,7 +406,7 @@ public class CombinedFieldsQueryBuilderTests extends AbstractQueryTestCase<Combi
 
         // 75% of 3 terms = 2.25, rounded up to 3 terms required
         // This should match fewer documents than the "2" minimum_should_match
-        assertTrue("Should match documents with 75% of terms", resultsMin75.totalHits.value() == 3);
+        assertTrue("Should match documents with 75% of terms", resultsMin75.totalHits.value == 3);
 
         reader.close();
         dir.close();
@@ -547,13 +547,13 @@ public class CombinedFieldsQueryBuilderTests extends AbstractQueryTestCase<Combi
         CombinedFieldsQueryBuilder andQuery = new CombinedFieldsQueryBuilder("machine learning", "content").operator(Operator.AND);
         Query luceneAndQuery = andQuery.toQuery(createShardContext());
         TopDocs andResults = searcher.search(luceneAndQuery, 10);
-        assertEquals("AND operator should match only complete phrase", 1, andResults.totalHits.value());
+        assertEquals("AND operator should match only complete phrase", 1, andResults.totalHits.value);
 
         // Test OR operator - should match all documents
         CombinedFieldsQueryBuilder orQuery = new CombinedFieldsQueryBuilder("machine learning", "content").operator(Operator.OR);
         Query luceneOrQuery = orQuery.toQuery(createShardContext());
         TopDocs orResults = searcher.search(luceneOrQuery, 10);
-        assertEquals("OR operator should match all documents", 3, orResults.totalHits.value());
+        assertEquals("OR operator should match all documents", 3, orResults.totalHits.value);
 
         reader.close();
         dir.close();

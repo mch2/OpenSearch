@@ -11,9 +11,9 @@ package org.opensearch.index.query;
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.analysis.TokenStream;
 import org.apache.lucene.index.Term;
+import org.apache.lucene.sandbox.search.CombinedFieldQuery;
 import org.apache.lucene.search.BooleanClause;
 import org.apache.lucene.search.BooleanQuery;
-import org.apache.lucene.search.CombinedFieldQuery;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.QueryBuilder;
@@ -374,9 +374,10 @@ public class CombinedFieldsQueryBuilder extends AbstractQueryBuilder<CombinedFie
             BooleanClause.Occur occur = this.operator.toBooleanClauseOccur();
 
             for (TermAndBoost termAndBoost : terms) {
-                BytesRef term = termAndBoost.term();
+                BytesRef term = termAndBoost.term;
 
-                CombinedFieldQuery.Builder combinedFieldBuilder = new CombinedFieldQuery.Builder(term);
+                CombinedFieldQuery.Builder combinedFieldBuilder = new CombinedFieldQuery.Builder();
+                combinedFieldBuilder.addTerm(term);
                 for (Map.Entry<String, Float> entry : mappedFieldToWeight.entrySet()) {
                     combinedFieldBuilder.addField(entry.getKey(), entry.getValue());
                 }
