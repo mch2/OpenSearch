@@ -107,8 +107,7 @@ public class RecordBatchStream {
                 // Reached end of stream
                 result.complete(false);
             } else {
-                try {
-                    ArrowArray arrowArray = ArrowArray.wrap(arrowArrayAddress);
+                try (ArrowArray arrowArray = ArrowArray.wrap(arrowArrayAddress)) {
                     Data.importIntoVectorSchemaRoot(allocator, arrowArray, vectorSchemaRoot, dictionaryProvider);
                     result.complete(true);
                 } catch (Exception e) {
