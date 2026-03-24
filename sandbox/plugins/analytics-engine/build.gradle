@@ -34,18 +34,30 @@ repositories {
 // (Calcite API exposes ImmutableList, Predicate). Bypass via custom config.
 configurations {
   calciteTestCompile
+  calciteCompile
   compileClasspath { exclude group: 'com.google.guava' }
   testCompileClasspath { exclude group: 'com.google.guava' }
 }
+sourceSets.main.compileClasspath += configurations.calciteCompile
 sourceSets.test.compileClasspath += configurations.calciteTestCompile
 
 dependencies {
-  // Shared types and SPI interfaces (QueryPlanExecutor, EngineBridge, AnalyticsBackEndPlugin, etc.)
+  // Shared types and SPI interfaces (QueryPlanExecutor, EngineBridge, AnalyticsSearchBackendPlugin, etc.)
   // Also provides calcite-core transitively via api.
   api project(':sandbox:libs:analytics-framework')
 
   // Guava for test compilation — Calcite API exposes guava types
   calciteTestCompile "com.google.guava:guava:${versions.guava}"
+
+  // Guava for main compilation — Calcite's TableScan/TableFunctionScan constructors
+  // reference ImmutableList/ImmutableSet at the class-file level; without this the
+  // compiler cannot resolve those types when compiling our custom operators.
+  calciteCompile "com.google.guava:guava:${versions.guava}"
+
+  // Immutables: annotation processor generates ImmutableAggSplitRuleConfig at build time.
+  // value-annotations is compileOnly (just the @Value.* annotations); value is the processor.
+  compileOnly 'org.immutables:value-annotations:2.10.1'
+  annotationProcessor 'org.immutables:value:2.10.1'
 
   // Calcite code generation (optional in calcite-core POM, needed at runtime for Enumerable pipeline)
   testRuntimeOnly "org.codehaus.janino:janino:3.1.12"
@@ -68,6 +80,10 @@ dependencies {
   // Calcite bytecode references @Immutable from immutables — resolve at test compile time
   testCompileOnly 'org.immutables:value-annotations:2.8.8'
 }
+
+// OpenSearch's build plugin adds -proc:none by default; override it so the Immutables
+// annotation processor can generate ImmutableAggSplitRuleConfig at compile time.
+compileJava.options.compilerArgs += ['-processor', 'org.immutables.processor.ProxyProcessor']
 
 configurations.all {
   // okhttp-aws-signer is a transitive dep of unified-query-common (via unified-query-core),
@@ -97,6 +113,7 @@ configurations.all {
     force "org.apache.httpcomponents.client5:httpclient5:5.6"
     force "org.apache.httpcomponents.core5:httpcore5:5.4"
     force "com.squareup.okhttp3:okhttp:4.12.0"
+    force 'org.immutables:value-annotations:2.10.1'
     force "org.jetbrains.kotlin:kotlin-stdlib:1.8.21"
     force "org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.8.21"
     force "org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.21"

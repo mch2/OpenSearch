@@ -8,8 +8,6 @@
 
 package org.opensearch.be.datafusion.jni;
 
-import org.opensearch.analytics.backend.jni.NativeHandle;
-
 /**
  * Type-safe handle for a native DataFusion result stream.
  * Wraps the stream pointer returned by {@link NativeBridge#executeQuery}.

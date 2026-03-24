@@ -23,7 +23,6 @@ import org.opensearch.index.engine.exec.WriterFileSet;
 import org.opensearch.index.mapper.MappedFieldType;
 import org.opensearch.index.mapper.MapperService;
 import org.opensearch.index.shard.ShardPath;
-import org.opensearch.search.SearchExecutionContext;
 import org.opensearch.search.SearchShardTarget;
 import org.opensearch.search.internal.ShardSearchRequest;
 import org.opensearch.test.OpenSearchTestCase;

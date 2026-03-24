@@ -15,7 +15,7 @@ import org.opensearch.index.engine.exec.CatalogSnapshot;
 import org.opensearch.index.engine.exec.DataFormatAwareEngineFactory;
 import org.opensearch.index.engine.exec.EngineReaderManager;
 import org.opensearch.index.engine.exec.IndexFilterProvider;
-import org.opensearch.index.engine.exec.SearchExecEngine;
+//import org.opensearch.analytics.backend.SearchExecEngine;
 import org.opensearch.index.engine.exec.SourceProvider;
 
 import java.io.Closeable;
@@ -38,9 +38,6 @@ import java.util.Map;
 public class DataFormatAwareEngine implements Closeable {
 
     private final Map<DataFormat, EngineReaderManager<?>> readerManagers;
-    private final Map<DataFormat, CheckedSupplier<SearchExecEngine<?, ?, ?>, IOException>> engineSuppliers;
-    private final Map<DataFormat, CheckedSupplier<IndexFilterProvider<?, ?, ?>, IOException>> indexFilterProviderSuppliers;
-    private final Map<DataFormat, CheckedSupplier<SourceProvider<?, ?, ?>, IOException>> sourceProviderSuppliers;
     private volatile CatalogSnapshot latestSnapshot;
 
     /**
@@ -48,40 +45,12 @@ public class DataFormatAwareEngine implements Closeable {
      * Prefer using {@link DataFormatAwareEngineFactory#create()}.
      */
     public DataFormatAwareEngine(
-        Map<DataFormat, EngineReaderManager<?>> readerManagers,
-        Map<DataFormat, CheckedSupplier<SearchExecEngine<?, ?, ?>, IOException>> engineSuppliers,
-        Map<DataFormat, CheckedSupplier<IndexFilterProvider<?, ?, ?>, IOException>> indexFilterProviderSuppliers,
-        Map<DataFormat, CheckedSupplier<SourceProvider<?, ?, ?>, IOException>> sourceProviderSuppliers
-    ) {
+        Map<DataFormat, EngineReaderManager<?>> readerManagers) {
         this.readerManagers = readerManagers;
-        this.engineSuppliers = engineSuppliers;
-        this.indexFilterProviderSuppliers = indexFilterProviderSuppliers;
-        this.sourceProviderSuppliers = sourceProviderSuppliers;
     }
 
     public EngineReaderManager<?> getReaderManager(DataFormat format) {
         return readerManagers.get(format);
-    }
-
-    public SearchExecEngine<?, ?, ?> getSearchExecEngine(DataFormat format) throws IOException {
-        return getFromSupplier(engineSuppliers, format, "search exec engine");
-    }
-
-    public IndexFilterProvider<?, ?, ?> getIndexFilterProvider(DataFormat format) throws IOException {
-        return getFromSupplier(indexFilterProviderSuppliers, format, "index filter provider");
-    }
-
-    public SourceProvider<?, ?, ?> getSourceProvider(DataFormat format) throws IOException {
-        return getFromSupplier(sourceProviderSuppliers, format, "source provider");
-    }
-
-    private <T> T getFromSupplier(Map<DataFormat, CheckedSupplier<T, IOException>> suppliers, DataFormat format, String label)
-        throws IOException {
-        CheckedSupplier<T, IOException> supplier = suppliers.get(format);
-        if (supplier == null) {
-            throw new IllegalArgumentException("No " + label + " registered for format: " + format.name());
-        }
-        return supplier.get();
     }
 
     /**
@@ -160,9 +129,6 @@ public class DataFormatAwareEngine implements Closeable {
     @Override
     public void close() throws IOException {
         List<Exception> exceptions = new ArrayList<>();
-        closeSupplierInstances(engineSuppliers.values(), exceptions);
-        closeSupplierInstances(indexFilterProviderSuppliers.values(), exceptions);
-        closeSupplierInstances(sourceProviderSuppliers.values(), exceptions);
         for (EngineReaderManager<?> rm : readerManagers.values()) {
             if (rm instanceof Closeable) {
                 try {

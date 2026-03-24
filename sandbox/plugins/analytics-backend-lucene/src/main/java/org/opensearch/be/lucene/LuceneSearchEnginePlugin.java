@@ -9,14 +9,15 @@
 package org.opensearch.be.lucene;
 
 import org.apache.calcite.sql.SqlOperatorTable;
-import org.opensearch.analytics.backend.EngineBridge;
-import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
+import org.opensearch.analytics.backend.SearchExecEngine;
 import org.opensearch.common.annotation.ExperimentalApi;
+import org.opensearch.index.engine.DataFormatAwareEngine;
 import org.opensearch.index.engine.dataformat.DataFormat;
 import org.opensearch.index.engine.exec.EngineReaderManager;
 import org.opensearch.index.engine.exec.IndexFilterProvider;
 import org.opensearch.index.engine.exec.SourceProvider;
 import org.opensearch.index.shard.ShardPath;
+import org.opensearch.plugins.ReaderManagerProvider;
 
 import java.io.IOException;
 import java.util.List;
@@ -27,7 +28,7 @@ import java.util.List;
  * @opensearch.experimental
  */
 @ExperimentalApi
-public class LuceneSearchEnginePlugin implements AnalyticsSearchBackendPlugin {
+public class LuceneSearchEnginePlugin implements ReaderManagerProvider {
 
     @Override
     public String name() {
@@ -35,32 +36,12 @@ public class LuceneSearchEnginePlugin implements AnalyticsSearchBackendPlugin {
     }
 
     @Override
-    public EngineBridge<?, ?, ?> bridge() {
-        return null;
-    }
-
-    @Override
-    public SqlOperatorTable operatorTable() {
-        return null;
+    public List<DataFormat> getSupportedFormats() {
+        return List.of();
     }
 
     @Override
     public EngineReaderManager<?> createReaderManager(DataFormat format, ShardPath shardPath) throws IOException {
         return new LuceneReaderManager(format);
-    }
-
-    @Override
-    public IndexFilterProvider<?, ?, ?> createIndexFilterProvider(DataFormat format, ShardPath shardPath) throws IOException {
-        return new LuceneIndexFilterProvider();
-    }
-
-    @Override
-    public SourceProvider<?, ?, ?> createSourceProvider(DataFormat format, ShardPath shardPath) throws IOException {
-        return new LuceneSourceProvider();
-    }
-
-    @Override
-    public List<DataFormat> getSupportedFormats() {
-        return List.of();
     }
 }

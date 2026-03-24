@@ -15,7 +15,6 @@ import org.apache.lucene.search.Query;
 import org.apache.lucene.search.ScoreMode;
 import org.apache.lucene.search.Weight;
 import org.opensearch.common.annotation.ExperimentalApi;
-import org.opensearch.index.engine.exec.EngineSearcher;
 
 import java.io.IOException;
 import java.util.List;
@@ -28,22 +27,13 @@ import java.util.List;
  * @opensearch.experimental
  */
 @ExperimentalApi
-public class LuceneEngineSearcher implements EngineSearcher<LuceneSearchContext> {
-
-    private final IndexSearcher indexSearcher;
-    private final DirectoryReader directoryReader;
-
-    public LuceneEngineSearcher(IndexSearcher indexSearcher, DirectoryReader directoryReader) {
-        this.indexSearcher = indexSearcher;
-        this.directoryReader = directoryReader;
-    }
+public record LuceneEngineSearcher(IndexSearcher indexSearcher, DirectoryReader directoryReader) {
 
     /**
      * Execute: create a Weight from the query, register it on the
      * context's lifecycle manager, and store the key + segment metadata
      * on the context for JNI callbacks.
      */
-    @Override
     public void search(LuceneSearchContext context) throws IOException {
         Query query = context.getQuery();
         if (query == null) {
@@ -55,15 +45,4 @@ public class LuceneEngineSearcher implements EngineSearcher<LuceneSearchContext>
         // TODO : Complete the wiring for search execution
 
     }
-
-    public IndexSearcher getIndexSearcher() {
-        return indexSearcher;
-    }
-
-    public DirectoryReader getDirectoryReader() {
-        return directoryReader;
-    }
-
-    @Override
-    public void close() {}
 }

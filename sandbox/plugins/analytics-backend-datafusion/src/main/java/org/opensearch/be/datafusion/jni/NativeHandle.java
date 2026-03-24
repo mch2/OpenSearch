@@ -6,7 +6,7 @@
  * compatible open source license.
  */
 
-package org.opensearch.analytics.backend.jni;
+package org.opensearch.be.datafusion.jni;
 
 import java.lang.ref.Cleaner;
 import java.util.concurrent.atomic.AtomicBoolean;

@@ -17,14 +17,14 @@ import org.opensearch.index.engine.dataformat.DataFormat;
 import org.opensearch.index.mapper.MapperService;
 import org.opensearch.index.shard.ShardPath;
 import org.opensearch.plugins.PluginsService;
-import org.opensearch.plugins.SearchBackEndPlugin;
+import org.opensearch.plugins.ReaderManagerProvider;
 
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Factory that discovers {@link SearchBackEndPlugin}s via
+ * Factory that discovers {@link ReaderManagerProvider}s via
  * {@link PluginsService} and builds the per-format reader managers and
  * memoizing suppliers consumed by {@link DataFormatAwareEngine}.
  * <p>
@@ -36,11 +36,6 @@ import java.util.Map;
 public class DataFormatAwareEngineFactory {
 
     private final Map<DataFormat, EngineReaderManager<?>> readerManagers = new HashMap<>();
-    private final Map<DataFormat, CheckedSupplier<SearchExecEngine<?, ?, ?>, IOException>> engineSuppliers = new HashMap<>();
-    private final Map<DataFormat, CheckedSupplier<IndexFilterProvider<?, ?, ?>, IOException>> indexFilterProviderSuppliers =
-        new HashMap<>();
-    private final Map<DataFormat, CheckedSupplier<SourceProvider<?, ?, ?>, IOException>> sourceProviderSuppliers = new HashMap<>();
-
     private final IndexFileDeleter indexFileDeleter;
 
     public DataFormatAwareEngineFactory(
@@ -49,13 +44,10 @@ public class DataFormatAwareEngineFactory {
         MapperService mapperService,
         IndexSettings indexSettings
     ) throws IOException {
-        for (SearchBackEndPlugin plugin : pluginsService.filterPlugins(SearchBackEndPlugin.class)) {
+        for (ReaderManagerProvider plugin : pluginsService.filterPlugins(ReaderManagerProvider.class)) {
             for (DataFormat format : plugin.getSupportedFormats()) {
                 // TODO: use mapperService and indexSettings to filter formats relevant to this index
                 readerManagers.put(format, plugin.createReaderManager(format, shardPath));
-                engineSuppliers.put(format, memoize(format, f -> plugin.createSearchExecEngine(f, shardPath)));
-                indexFilterProviderSuppliers.put(format, memoize(format, f -> plugin.createIndexFilterProvider(f, shardPath)));
-                sourceProviderSuppliers.put(format, memoize(format, f -> plugin.createSourceProvider(f, shardPath)));
             }
         }
         this.indexFileDeleter = new IndexFileDeleter(null, shardPath);
@@ -93,7 +85,7 @@ public class DataFormatAwareEngineFactory {
      * reader managers and memoizing suppliers.
      */
     public DataFormatAwareEngine create() {
-        return new DataFormatAwareEngine(readerManagers, engineSuppliers, indexFilterProviderSuppliers, sourceProviderSuppliers);
+        return new DataFormatAwareEngine(readerManagers);
     }
 
     /**

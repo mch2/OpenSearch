@@ -8,8 +8,6 @@
 
 package org.opensearch.be.datafusion.jni;
 
-import org.opensearch.analytics.backend.jni.NativeHandle;
-
 /**
  * Type-safe handle for native reader.
  */

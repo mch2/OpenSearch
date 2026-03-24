@@ -48,16 +48,11 @@ public class DataFusionService extends AbstractLifecycleComponent {
 
     @Override
     protected void doStart() {
-        logger.info("Starting DataFusion service — loading native library [{}]", NATIVE_LIBRARY_NAME);
-        try {
-            System.loadLibrary(NATIVE_LIBRARY_NAME);
-        } catch (UnsatisfiedLinkError e) {
-            throw new IllegalStateException("Failed to load native library: " + NATIVE_LIBRARY_NAME, e);
-        }
-
-        // TODO: initialize Tokio runtime and memory pool via NativeBridge
+        logger.info("Starting DataFusion service (mock mode — native library not loaded)");
+        // TODO: load native library and initialize Tokio runtime via NativeBridge
+        // System.loadLibrary(NATIVE_LIBRARY_NAME);
         // long ptr = NativeBridge.createGlobalRuntime(memoryPoolLimit, spillDirectory, spillMemoryLimit);
-        long ptr = 1L; // placeholder until NativeBridge is wired
+        long ptr = 1L; // mock handle — no native runtime
         this.runtimeHandle = new NativeRuntimeHandle(ptr);
         logger.info("DataFusion service started");
     }

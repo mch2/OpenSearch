@@ -11,10 +11,10 @@ package org.opensearch.be.datafusion;
 import org.opensearch.be.datafusion.jni.StreamHandle;
 import org.opensearch.common.annotation.ExperimentalApi;
 import org.opensearch.index.engine.IndexFilterTree;
-import org.opensearch.search.SearchExecutionContext;
 import org.opensearch.search.SearchShardTarget;
 import org.opensearch.search.internal.ShardSearchRequest;
 
+import java.io.Closeable;
 import java.io.IOException;
 
 /**
@@ -26,36 +26,19 @@ import java.io.IOException;
  * @opensearch.experimental
  */
 @ExperimentalApi
-public class DatafusionContext implements SearchExecutionContext {
+public class DatafusionContext implements Closeable {
 
-    private final ShardSearchRequest request;
-    private final SearchShardTarget shardTarget;
     private final DatafusionSearcher engineSearcher;
     private final NativeRuntimeHandle nativeRuntime;
     private DatafusionQuery datafusionQuery;
-    private IndexFilterTree filterTree;
     private StreamHandle streamHandle;
 
     public DatafusionContext(
-        ShardSearchRequest request,
-        SearchShardTarget shardTarget,
         DatafusionReader reader,
         NativeRuntimeHandle nativeRuntime
-    ) throws IOException {
-        this.request = request;
-        this.shardTarget = shardTarget;
+    ) {
         this.engineSearcher = new DatafusionSearcher(reader.getReaderHandle());
         this.nativeRuntime = nativeRuntime;
-    }
-
-    @Override
-    public ShardSearchRequest request() {
-        return request;
-    }
-
-    @Override
-    public SearchShardTarget shardTarget() {
-        return shardTarget;
     }
 
     @Override
@@ -66,13 +49,7 @@ public class DatafusionContext implements SearchExecutionContext {
                 streamHandle = null;
             }
         } finally {
-            try {
-                if (filterTree != null) {
-                    filterTree.close();
-                }
-            } finally {
-                engineSearcher.close();
-            }
+            engineSearcher.close();
         }
     }
 
@@ -95,14 +72,6 @@ public class DatafusionContext implements SearchExecutionContext {
 
     public void setDatafusionQuery(DatafusionQuery query) {
         this.datafusionQuery = query;
-    }
-
-    public IndexFilterTree getFilterTree() {
-        return filterTree;
-    }
-
-    public void setFilterTree(IndexFilterTree filterTree) {
-        this.filterTree = filterTree;
     }
 
     /**

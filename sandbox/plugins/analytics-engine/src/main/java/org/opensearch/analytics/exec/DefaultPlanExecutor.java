@@ -8,32 +8,38 @@
 
 package org.opensearch.analytics.exec;
 
+import org.apache.calcite.jdbc.JavaTypeFactoryImpl;
+import org.apache.calcite.plan.RelOptCluster;
+import org.apache.calcite.plan.hep.HepPlanner;
+import org.apache.calcite.plan.hep.HepProgramBuilder;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.TableScan;
+import org.apache.calcite.rex.RexBuilder;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.opensearch.analytics.plan.DefaultQueryPlanner;
+import org.opensearch.analytics.plan.FieldCapabilityResolver;
+import org.opensearch.analytics.plan.QueryPlanningException;
+import org.opensearch.analytics.plan.ResolvedPlan;
+import org.opensearch.analytics.plan.registry.BackendCapabilityRegistry;
 import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.service.ClusterService;
+import org.opensearch.common.inject.Inject;
 import org.opensearch.index.IndexService;
-import org.opensearch.index.engine.DataFormatAwareEngine;
-import org.opensearch.index.engine.dataformat.DataFormat;
-import org.opensearch.index.engine.exec.SearchExecEngine;
 import org.opensearch.index.shard.IndexShard;
 import org.opensearch.indices.IndicesService;
 
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
- * {@link QueryPlanExecutor} default implementation.
- * <p>
- * Acquires a {@link DataFormatAwareEngine.DataFormatAwareReader} on the latest catalog snapshot,
- * then routes plan fragments to the appropriate {@link SearchExecEngine} per data format.
- * The composite reader holds the snapshot reference alive for the duration of the search.
+ * Coordinator-level plan executor. Plans the query and delegates shard-level
+ * execution to {@link AnalyticsQueryService}.
  */
 public class DefaultPlanExecutor implements QueryPlanExecutor<RelNode, Iterable<Object[]>> {
 
@@ -41,45 +47,74 @@ public class DefaultPlanExecutor implements QueryPlanExecutor<RelNode, Iterable<
     private final Map<String, AnalyticsSearchBackendPlugin> backEnds;
     private final IndicesService indicesService;
     private final ClusterService clusterService;
+    private final DefaultQueryPlanner queryPlanner;
+    // TODO: - move out as data node side service
+    private final AnalyticsQueryService queryService;
 
-    public DefaultPlanExecutor(List<AnalyticsSearchBackendPlugin> plugins, IndicesService indicesService, ClusterService clusterService) {
+    @Inject
+    public DefaultPlanExecutor(
+        List<AnalyticsSearchBackendPlugin> plugins,
+        IndicesService indicesService,
+        ClusterService clusterService
+    ) {
+        this.indicesService = indicesService;
+        this.clusterService = clusterService;
+
         this.backEnds = new LinkedHashMap<>();
         for (AnalyticsSearchBackendPlugin plugin : plugins) {
             this.backEnds.put(plugin.name(), plugin);
         }
-        this.indicesService = indicesService;
-        this.clusterService = clusterService;
+
+        // Build BackendCapabilityRegistry from plugins
+        BackendCapabilityRegistry registry = new BackendCapabilityRegistry();
+        for (AnalyticsSearchBackendPlugin plugin : plugins) {
+            Set<Class<? extends RelNode>> ops = plugin.supportedOperators();
+            Set<String> fns = extractFunctionNames(plugin);
+            registry.register(plugin.name(), ops, fns, plugin);
+        }
+
+        // Build cluster for HepPlanner (used by DefaultQueryPlanner internally)
+        RexBuilder rexBuilder = new RexBuilder(new JavaTypeFactoryImpl());
+        HepPlanner hepPlanner = new HepPlanner(new HepProgramBuilder().build());
+        RelOptCluster cluster = RelOptCluster.create(hepPlanner, rexBuilder);
+
+        FieldCapabilityResolver fieldCapabilityResolver =
+            new FieldCapabilityResolver(indicesService, clusterService);
+
+        this.queryPlanner = new DefaultQueryPlanner(registry, cluster, fieldCapabilityResolver);
+        this.queryService = new AnalyticsQueryService(backEnds);
     }
 
-    @SuppressWarnings("unchecked")
+    private static Set<String> extractFunctionNames(AnalyticsSearchBackendPlugin plugin) {
+        if (plugin.operatorTable() == null) return Set.of();
+        return plugin.operatorTable().getOperatorList().stream()
+            .map(op -> op.getName().toUpperCase(Locale.ROOT))
+            .collect(Collectors.toUnmodifiableSet());
+    }
+
     @Override
     public Iterable<Object[]> execute(RelNode logicalFragment, Object context) {
-        // TODO : wire this properly , this is just to give an idea of flow
-        AnalyticsSearchBackendPlugin plugin = selectBackEnd();
+        // --- Coordinator: plan ---
         String tableName = extractTableName(logicalFragment);
-        DataFormatAwareEngine dataFormatAwareEngine = resolveCompositeEngine(tableName);
-
-        List<DataFormat> formats = plugin.getSupportedFormats();
-        DataFormat format = formats.get(0);
-
-        // Acquire composite reader — incRefs the latest catalog snapshot.
-        // Closing the reader decRefs the snapshot, allowing file cleanup.
-        try (DataFormatAwareEngine.DataFormatAwareReader dataFormatAwareReader = dataFormatAwareEngine.acquireReader()) {
-            Object reader = dataFormatAwareReader.getReader(format);
-            SearchExecEngine searchEngine = dataFormatAwareEngine.getSearchExecEngine(format);
-            Object plan = searchEngine.convertFragment(logicalFragment);
-            var engineContext = searchEngine.createContext(reader, plan, null, null, null);
-            Object result = searchEngine.execute(engineContext);
-
-            // TODO: consume result stream into rows
-            logger.info("[DefaultPlanExecutor] Executed via [{}]", plugin.name());
-            return new ArrayList<>();
-        } catch (Exception e) {
-            throw new RuntimeException("Execution failed for [" + plugin.name() + "]", e);
+        IndexMetadata indexMetadata = clusterService.state().metadata().index(tableName);
+        if (indexMetadata == null) {
+            throw new IllegalArgumentException("Index [" + tableName + "] not found in cluster state");
         }
+        int shardCount = indexMetadata.getNumberOfShards();
+
+        ResolvedPlan plan = queryPlanner.plan(logicalFragment, shardCount);
+
+        if ("unresolved".equals(plan.getPrimaryBackend())) {
+            throw new IllegalStateException(
+                "Planning did not resolve backend assignment for plan root");
+        }
+
+        logger.info("[DefaultPlanExecutor] Plan resolved to backend [{}]", plan.getPrimaryBackend());
+
+        IndexShard shard = resolveShard(tableName);
+        return queryService.execute(plan, shard);
     }
 
-    // TODO: Placeholder logic
     static String extractTableName(RelNode node) {
         if (node instanceof TableScan) {
             List<String> qn = node.getTable().getQualifiedName();
@@ -92,8 +127,7 @@ public class DefaultPlanExecutor implements QueryPlanExecutor<RelNode, Iterable<
         throw new IllegalArgumentException("No TableScan found in plan fragment");
     }
 
-    // TODO: Placeholder logic
-    private DataFormatAwareEngine resolveCompositeEngine(String indexName) {
+    private IndexShard resolveShard(String indexName) {
         IndexMetadata meta = clusterService.state().metadata().index(indexName);
         if (meta == null) throw new IllegalArgumentException("Index [" + indexName + "] not found");
         IndexService indexService = indicesService.indexService(meta.getIndex());
@@ -102,14 +136,6 @@ public class DefaultPlanExecutor implements QueryPlanExecutor<RelNode, Iterable<
         if (shardIds.isEmpty()) throw new IllegalStateException("No shards for [" + indexName + "]");
         IndexShard shard = indexService.getShardOrNull(shardIds.iterator().next());
         if (shard == null) throw new IllegalStateException("Shard not found");
-        DataFormatAwareEngine ce = shard.getCompositeEngine();
-        if (ce == null) throw new IllegalStateException("No CompositeEngine on shard");
-        return ce;
-    }
-
-    // TODO: Placeholder logic
-    private AnalyticsSearchBackendPlugin selectBackEnd() {
-        if (backEnds.isEmpty()) throw new IllegalStateException("No back-end plugins registered");
-        return backEnds.values().iterator().next();
+        return shard;
     }
 }

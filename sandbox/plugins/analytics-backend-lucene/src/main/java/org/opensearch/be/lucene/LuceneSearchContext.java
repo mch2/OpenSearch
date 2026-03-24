@@ -9,76 +9,80 @@
 package org.opensearch.be.lucene;
 
 import org.apache.lucene.index.DirectoryReader;
+import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.Query;
+import org.apache.lucene.search.ScoreMode;
+import org.apache.lucene.search.Weight;
 import org.opensearch.common.annotation.ExperimentalApi;
-import org.opensearch.search.SearchExecutionContext;
-import org.opensearch.search.SearchShardTarget;
-import org.opensearch.search.internal.ShardSearchRequest;
 
 import java.io.IOException;
+import java.util.List;
 
 /**
- * Lucene-specific search execution context.
+ * Lucene-specific search context. Holds the reader, query, and lazily-prepared
+ * Weight/leaves. Shared between {@link LuceneSearchExecEngine} (execute mode)
+ * and {@link LuceneFilterDelegationTarget} (delegation mode).
  *
  * @opensearch.experimental
  */
 @ExperimentalApi
-public class LuceneSearchContext implements SearchExecutionContext {
-
-    private final ShardSearchRequest request;
-    private final SearchShardTarget shardTarget;
+public class LuceneSearchContext {
 
     private final DirectoryReader reader;
-    private final LuceneEngineSearcher searcher;
+    private final IndexSearcher indexSearcher;
     private Query query;
+    private Weight weight;
+    private List<LeafReaderContext> leaves;
 
-    public LuceneSearchContext(ShardSearchRequest request, SearchShardTarget shardTarget, DirectoryReader reader) throws IOException {
+    public LuceneSearchContext(DirectoryReader reader) {
         this.reader = reader;
-        IndexSearcher indexSearcher = new IndexSearcher(reader);
-        this.searcher = new LuceneEngineSearcher(indexSearcher, reader);
-        this.request = request;
-        this.shardTarget = shardTarget;
-    }
-
-    public Query getQuery() {
-        return query;
+        this.indexSearcher = new IndexSearcher(reader);
     }
 
     public DirectoryReader getReader() {
         return reader;
     }
 
+    public Query getQuery() {
+        return query;
+    }
+
     public void setQuery(Query query) {
         this.query = query;
+        // Reset prepared state when query changes
+        this.weight = null;
+        this.leaves = null;
     }
 
     /**
-     * Returns the number of segments for the registered weight.
+     * Lazily prepares the Weight and leaf contexts from the current query.
+     * Safe to call multiple times — only prepares once per query.
      */
-    public int getSegmentCount() {
-        return -1;
+    public void ensureWeightPrepared() throws IOException {
+        if (weight == null) {
+            if (query == null) {
+                throw new IllegalStateException("No query set on LuceneSearchContext");
+            }
+            Query rewritten = indexSearcher.rewrite(query);
+            this.weight = indexSearcher.createWeight(rewritten, ScoreMode.COMPLETE_NO_SCORES, 1.0f);
+            this.leaves = reader.leaves();
+        }
     }
 
-    /**
-     * Returns the max doc array for all segments of the registered weight.
-     */
-    public int[] getSegmentMaxDocs() {
-        return null;
+    public Weight getWeight() {
+        return weight;
     }
 
-    @Override
-    public ShardSearchRequest request() {
-        return request;
+    public List<LeafReaderContext> getLeaves() {
+        return leaves;
     }
 
-    @Override
-    public SearchShardTarget shardTarget() {
-        return shardTarget;
+    public IndexSearcher getIndexSearcher() {
+        return indexSearcher;
     }
 
-    @Override
     public void close() throws IOException {
-        searcher.close();
+        // Reader lifecycle is owned by the ReaderManager, not the context
     }
 }

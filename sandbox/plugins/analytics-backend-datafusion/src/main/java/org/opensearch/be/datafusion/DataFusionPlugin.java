@@ -8,11 +8,8 @@
 
 package org.opensearch.be.datafusion;
 
-import org.apache.calcite.sql.SqlOperatorTable;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.opensearch.analytics.backend.EngineBridge;
-import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
 import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.settings.Setting;
@@ -23,9 +20,9 @@ import org.opensearch.env.Environment;
 import org.opensearch.env.NodeEnvironment;
 import org.opensearch.index.engine.dataformat.DataFormat;
 import org.opensearch.index.engine.exec.EngineReaderManager;
-import org.opensearch.index.engine.exec.SearchExecEngine;
 import org.opensearch.index.shard.ShardPath;
 import org.opensearch.plugins.Plugin;
+import org.opensearch.plugins.ReaderManagerProvider;
 import org.opensearch.repositories.RepositoriesService;
 import org.opensearch.script.ScriptService;
 import org.opensearch.threadpool.ThreadPool;
@@ -43,9 +40,9 @@ import java.util.function.Supplier;
  * <p>
  * Initializes the {@link DataFusionService} at node startup and creates
  * per-shard {@link DatafusionSearchExecEngine} instances via the
- * {@link AnalyticsSearchBackendPlugin} SPI.
+ * {@link DataFusionSearchBackend} SPI adapter.
  */
-public class DataFusionPlugin extends Plugin implements AnalyticsSearchBackendPlugin {
+public class DataFusionPlugin extends Plugin implements ReaderManagerProvider {
 
     private static final Logger logger = LogManager.getLogger(DataFusionPlugin.class);
 
@@ -97,19 +94,21 @@ public class DataFusionPlugin extends Plugin implements AnalyticsSearchBackendPl
         return Collections.singletonList(dataFusionService);
     }
 
+    /** Returns the DataFusionService for use by the SPI adapter. */
+    DataFusionService getDataFusionService() {
+        return dataFusionService;
+    }
+
+    // ---- ReaderManagerProvider (discovered by DataFormatAwareEngineFactory via filterPlugins) ----
+
     @Override
     public String name() {
         return "datafusion";
     }
 
     @Override
-    public EngineBridge<?, ?, ?> bridge() {
-        return null; // TODO decide between bridge and SearchExecEngine
-    }
-
-    @Override
-    public SqlOperatorTable operatorTable() {
-        return null;
+    public List<DataFormat> getSupportedFormats() {
+        return null; // TODO: return parquet DataFormat instance
     }
 
     @Override
@@ -117,20 +116,13 @@ public class DataFusionPlugin extends Plugin implements AnalyticsSearchBackendPl
         return new DatafusionReaderManager(format, shardPath);
     }
 
-    @Override
-    public SearchExecEngine<?, ?, ?> createSearchExecEngine(DataFormat format, ShardPath shardPath) throws IOException {
-        if (dataFusionService == null) {
-            throw new IllegalStateException("DataFusionPlugin.createComponents() has not been called yet");
-        }
-        return new DatafusionSearchExecEngine(dataFusionService.getNativeRuntime(), format);
-    }
-
-    /**
-     * Data formats this plugin can handle. Used by CompositeEngine to route queries.
-     */
-    public List<DataFormat> getSupportedFormats() {
-        return null; // TODO : List.of("parquet");
-    }
+//    @Override
+//    public SearchExecEngine<?, ?, ?> createSearchExecEngine(DataFormat format, ShardPath shardPath) throws IOException {
+//        if (dataFusionService == null) {
+//            throw new IllegalStateException("DataFusionPlugin.createComponents() has not been called yet");
+//        }
+//        return new DatafusionSearchExecEngine(dataFusionService.getNativeRuntime(), format);
+//    }
 
     @Override
     public void close() throws IOException {

@@ -8,56 +8,54 @@
 
 package org.opensearch.be.datafusion;
 
-import org.opensearch.action.search.SearchShardTask;
+import org.apache.calcite.rel.RelNode;
+import org.opensearch.analytics.delegation.DelegationContext;
+import org.opensearch.analytics.backend.EngineResultStream;
+import org.opensearch.analytics.backend.ExecutionContext;
+import org.opensearch.analytics.backend.SearchExecEngine;
 import org.opensearch.common.annotation.ExperimentalApi;
-import org.opensearch.index.engine.dataformat.DataFormat;
-import org.opensearch.index.engine.exec.SearchExecEngine;
-import org.opensearch.search.SearchShardTarget;
-import org.opensearch.search.internal.ShardSearchRequest;
 
 import java.io.IOException;
 
 /**
  * DataFusion-backed search execution engine.
  * <p>
- * Converts logical plan fragments to Substrait, executes them via the native
- * DataFusion runtime, and returns results as a {@link DatafusionResultStream}.
+ * Delegates Substrait conversion to {@link SubstraitConverter} and execution
+ * to the native DataFusion runtime via {@link DatafusionSearcher}.
  *
  * @opensearch.experimental
  */
 @ExperimentalApi
-public class DatafusionSearchExecEngine implements SearchExecEngine<DatafusionContext, byte[], DatafusionResultStream> {
+public class DatafusionSearchExecEngine implements SearchExecEngine {
 
-    private final NativeRuntimeHandle nativeRuntime;
+    private final DatafusionContext context;
 
-    public DatafusionSearchExecEngine(NativeRuntimeHandle nativeRuntime, DataFormat dataFormat) {
-        this.nativeRuntime = nativeRuntime;
+    public DatafusionSearchExecEngine(DatafusionContext context) {
+        this.context = context;
     }
 
     @Override
-    public byte[] convertFragment(Object fragment) {
-        // TODO: wire Substrait conversion (RelNode → Substrait bytes)
-        throw new UnsupportedOperationException("Substrait conversion not yet wired");
+    public void prepare(ExecutionContext requestContext) {
+        RelNode prepared = SubstraitConverter.rewriteHybridFilters(requestContext.plan().getRoot());
+        byte[] substraitBytes = SubstraitConverter.convert(prepared);
+
+        if (requestContext.hasDelegation()) {
+            DelegationContext delegation = requestContext.getDelegationContext();
+            substraitBytes = SubstraitConverter.embedDelegation(
+                substraitBytes, delegation.getId(), null, "lucene-analytics-backend");
+        }
+        context.setDatafusionQuery(new DatafusionQuery(requestContext.getTableName(), substraitBytes));
     }
 
     @Override
-    public DatafusionContext createContext(
-        Object reader,
-        byte[] plan,
-        ShardSearchRequest request,
-        SearchShardTarget shardTarget,
-        SearchShardTask task
-    ) throws IOException {
-        DatafusionReader dfReader = (DatafusionReader) reader;
-        DatafusionContext context = new DatafusionContext(request, shardTarget, dfReader, nativeRuntime);
-        context.setDatafusionQuery(new DatafusionQuery("", plan));
-        return context;
-    }
-
-    @Override
-    public DatafusionResultStream execute(DatafusionContext context) throws IOException {
+    public EngineResultStream execute(ExecutionContext requestContext) throws IOException {
         DatafusionSearcher searcher = context.getEngineSearcher();
         searcher.search(context);
         return new DatafusionResultStream(context.getStreamHandle());
+    }
+
+    @Override
+    public void close() throws IOException {
+        context.close();
     }
 }

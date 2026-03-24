@@ -1,7 +1,8 @@
 .claude
 CLAUDE.md
 .cursor*
-
+.kiro/
+**/target/**
 # intellij files
 .idea/
 *.iml

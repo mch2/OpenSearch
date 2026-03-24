@@ -12,7 +12,6 @@ import org.opensearch.be.datafusion.jni.NativeBridge;
 import org.opensearch.be.datafusion.jni.ReaderHandle;
 import org.opensearch.be.datafusion.jni.StreamHandle;
 import org.opensearch.common.annotation.ExperimentalApi;
-import org.opensearch.index.engine.exec.EngineSearcher;
 
 import java.io.IOException;
 
@@ -35,18 +34,6 @@ public class DatafusionSearcher implements EngineSearcher<DatafusionContext> {
 
     @Override
     public void search(DatafusionContext context) throws IOException {
-        if (context.getFilterTree() == null) {
-            searchVanilla(context);
-        } else {
-            searchWithFilterTree(context);
-        }
-    }
-
-    private void searchWithFilterTree(DatafusionContext context) {
-        throw new UnsupportedOperationException("Indexed query path not yet wired");
-    }
-
-    private void searchVanilla(DatafusionContext context) throws IOException {
         DatafusionQuery query = context.getDatafusionQuery();
         if (query == null) {
             throw new IllegalStateException("DatafusionQuery must be set before search");
@@ -58,15 +45,6 @@ public class DatafusionSearcher implements EngineSearcher<DatafusionContext> {
             context.getRuntimePtr()
         );
         context.setStreamHandle(new StreamHandle(streamPtr, context.getRuntimePtr()));
-    }
-
-    /**
-     * Returns the type-safe handle to the native reader.
-     * Call {@link ReaderHandle#getPointer()} only at JNI invocation time
-     * to get the raw pointer with a liveness check.
-     */
-    public ReaderHandle getReaderHandle() {
-        return readerHandle;
     }
 
     @Override
