@@ -465,11 +465,12 @@ public class PlanWalkerAsyncTests extends OpenSearchTestCase {
         // Pre-populate stageOutputs with the PartitionManifest for child stage 0
         Field stageOutputsField = PlanWalker.class.getDeclaredField("stageOutputs");
         stageOutputsField.setAccessible(true);
-        Map<Integer, Object> stageOutputs = (Map<Integer, Object>) stageOutputsField.get(walker);
+        @SuppressWarnings("unchecked")
+        Map<Integer, PlanWalker.StageOutput> stageOutputs = (Map<Integer, PlanWalker.StageOutput>) stageOutputsField.get(walker);
         stageOutputs.put(0, new PlanWalker.StageOutput.PartitionManifest(manifestData));
 
-        // Call resolveTargets on the parent stage (package-private method)
-        List<PlanWalker.TargetShard> targets = walker.resolveTargets(parentStage);
+        // Call resolveTargets via TargetResolver
+        List<PlanWalker.TargetShard> targets = TargetResolver.resolveTargets(parentStage, clusterService, stageOutputs);
 
         // Should have one TargetShard per partition
         assertEquals("Should have one target per partition", numPartitions, targets.size());
@@ -517,7 +518,9 @@ public class PlanWalkerAsyncTests extends OpenSearchTestCase {
         PlanWalker walker = new PlanWalker(dag, clusterService, Runnable::run, null);
 
         // stageOutputs is empty — no manifest for child stage 0
-        IllegalStateException ex = expectThrows(IllegalStateException.class, () -> walker.resolveTargets(parentStage));
+        Map<Integer, PlanWalker.StageOutput> emptyOutputs = new HashMap<>();
+        IllegalStateException ex = expectThrows(IllegalStateException.class,
+            () -> TargetResolver.resolveTargets(parentStage, clusterService, emptyOutputs));
         assertTrue("Exception message should reference the stage ID", ex.getMessage().contains("No partition manifest found for stage 1"));
     }
 

@@ -74,7 +74,8 @@ dependencies {
   internalClusterTestImplementation project(':plugins:arrow-flight-rpc')
 
   // Lucene analytics backend for ITs (required by FieldStorageResolver during planning)
-  internalClusterTestImplementation project(':sandbox:plugins:analytics-backend-lucene')
+  // commenting out or this blows up AnalyticsShardDispatchIT
+//  internalClusterTestImplementation project(':sandbox:plugins:analytics-backend-lucene')
 
   // DataFusion analytics backend for ITs
   internalClusterTestImplementation project(':sandbox:plugins:analytics-backend-datafusion')

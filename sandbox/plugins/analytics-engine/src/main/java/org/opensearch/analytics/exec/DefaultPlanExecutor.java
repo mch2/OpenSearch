@@ -15,7 +15,6 @@ import org.opensearch.action.ActionRequest;
 import org.opensearch.action.support.ActionFilters;
 import org.opensearch.action.support.HandledTransportAction;
 import org.opensearch.action.support.PlainActionFuture;
-import org.opensearch.analytics.AnalyticsEngineService;
 import org.opensearch.analytics.EngineContext;
 import org.opensearch.analytics.planner.CapabilityRegistry;
 import org.opensearch.analytics.planner.PlannerContext;
@@ -40,9 +39,9 @@ import java.util.concurrent.Executor;
  * so that Guice injects all dependencies ({@link TransportService},
  * {@link ClusterService}, {@link ThreadPool}, etc.) automatically.
  *
- * <p>The SQL plugin invokes {@link #execute(RelNode, Object)} directly via
- * {@link AnalyticsEngineService} — the transport path ({@code doExecute}) is
- * reserved for future remote query invocation.
+ * <p>The SQL plugin resolves this class from the Node's Guice injector and invokes
+ * {@link #execute(RelNode, Object)} directly. The transport path ({@code doExecute})
+ * is reserved for future remote query invocation.
  *
  * @opensearch.internal
  */
@@ -74,9 +73,6 @@ public class DefaultPlanExecutor extends HandledTransportAction<ActionRequest, A
         this.searchExecutor = threadPool.executor(ThreadPool.Names.SEARCH);
         this.taskManager = transportService.getTaskManager();
         this.scheduler = new Scheduler(transportService, 5);
-
-        // Set the singleton so front-end plugins (SQL/PPL) can access the executor
-        AnalyticsEngineService.setInstance(new AnalyticsEngineService(engineContext, this));
     }
 
     @Override
