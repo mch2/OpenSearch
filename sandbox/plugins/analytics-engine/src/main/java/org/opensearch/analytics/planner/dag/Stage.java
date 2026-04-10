@@ -40,7 +40,6 @@ public class Stage {
     private List<StagePlan> planAlternatives;
     private ShardFilterPhase shardFilterPhase = ShardFilterPhase.IDENTITY;
     private TerminationDecider terminationDecider = TerminationDecider.DISPATCH_ALL;
-    private boolean parallelChildren = false;
 
     public Stage(int stageId, RelNode fragment, List<Stage> childStages, ExchangeInfo exchangeInfo) {
         this.stageId = stageId;
@@ -116,14 +115,6 @@ public class Stage {
 
     public void setTerminationDecider(TerminationDecider terminationDecider) {
         this.terminationDecider = terminationDecider;
-    }
-
-    public boolean isParallelChildren() {
-        return parallelChildren;
-    }
-
-    public void setParallelChildren(boolean parallelChildren) {
-        this.parallelChildren = parallelChildren;
     }
 
     /** Walks the fragment tree to find OpenSearchTableScan and extract the table name. */

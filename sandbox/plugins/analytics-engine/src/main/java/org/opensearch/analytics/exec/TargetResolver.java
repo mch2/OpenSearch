@@ -37,56 +37,57 @@ public final class TargetResolver {
      * Uses {@code stage.getTableName()} and {@code stage.isShuffleWrite()}
      * — no RelNode tree walking needed.
      */
-    public static List<PlanWalker.TargetShard> resolveTargets(
+    public static List<TargetShard> resolveTargets(
         Stage stage,
         ClusterService clusterService,
-        Map<Integer, PlanWalker.StageOutput> stageOutputs
+        Map<Integer, Map<ShardId, Map<Integer, String>>> shuffleManifests
     ) {
         if (stage.getTableName() != null) {
             return resolveIndexShards(stage.getTableName(), clusterService);
         }
         if (stage.isShuffleWrite()) {
-            return resolveShuffleTargets(stage, stageOutputs, clusterService);
+            return resolveShuffleTargets(stage, shuffleManifests, clusterService);
         }
         return List.of();
     }
 
-    static List<PlanWalker.TargetShard> resolveIndexShards(String tableName, ClusterService clusterService) {
+    static List<TargetShard> resolveIndexShards(String tableName, ClusterService clusterService) {
         ClusterState state = clusterService.state();
+        // TODO: support routing/preference params?
         GroupShardsIterator<ShardIterator> shardIterators = clusterService.operationRouting()
             .searchShards(state, new String[] { tableName }, null, null);
 
-        List<PlanWalker.TargetShard> targets = new ArrayList<>();
+        List<TargetShard> targets = new ArrayList<>();
         for (ShardIterator shardIt : shardIterators) {
             ShardRouting shard = shardIt.nextOrNull();
             if (shard != null) {
                 DiscoveryNode node = state.nodes().get(shard.currentNodeId());
-                targets.add(new PlanWalker.TargetShard(shard.shardId(), node));
+                targets.add(new TargetShard(shard.shardId(), node));
             }
         }
         return targets;
     }
 
-    static List<PlanWalker.TargetShard> resolveShuffleTargets(
+    static List<TargetShard> resolveShuffleTargets(
         Stage stage,
-        Map<Integer, PlanWalker.StageOutput> stageOutputs,
+        Map<Integer, Map<ShardId, Map<Integer, String>>> shuffleManifests,
         ClusterService clusterService
     ) {
         for (Stage child : stage.getChildStages()) {
-            PlanWalker.StageOutput childOutput = stageOutputs.get(child.getStageId());
-            if (childOutput instanceof PlanWalker.StageOutput.PartitionManifest manifest) {
+            Map<ShardId, Map<Integer, String>> manifest = shuffleManifests.get(child.getStageId());
+            if (manifest != null) {
                 return pickShuffleTargetNodes(manifest, clusterService);
             }
         }
         throw new IllegalStateException("No partition manifest found for stage " + stage.getStageId());
     }
 
-    static List<PlanWalker.TargetShard> pickShuffleTargetNodes(
-        PlanWalker.StageOutput.PartitionManifest manifest,
+    static List<TargetShard> pickShuffleTargetNodes(
+        Map<ShardId, Map<Integer, String>> manifest,
         ClusterService clusterService
     ) {
         ClusterState state = clusterService.state();
-        List<DiscoveryNode> sourceNodes = manifest.manifests()
+        List<DiscoveryNode> sourceNodes = manifest
             .keySet()
             .stream()
             .map(
@@ -96,12 +97,12 @@ public final class TargetResolver {
             .distinct()
             .toList();
 
-        int numPartitions = manifest.manifests().values().iterator().next().size();
+        int numPartitions = manifest.values().iterator().next().size();
 
-        List<PlanWalker.TargetShard> targets = new ArrayList<>();
+        List<TargetShard> targets = new ArrayList<>();
         for (int p = 0; p < numPartitions; p++) {
             DiscoveryNode node = sourceNodes.get(p % sourceNodes.size());
-            targets.add(new PlanWalker.TargetShard(new ShardId(new Index("_shuffle", "_na_"), p), node));
+            targets.add(new TargetShard(new ShardId(new Index("_shuffle", "_na_"), p), node));
         }
         return targets;
     }

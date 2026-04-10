@@ -98,7 +98,7 @@ public class AnalyticsTaskTests extends OpenSearchTestCase {
         int stageId = randomIntBetween(0, 10);
         ShardId shardId = new ShardId(new Index("test-index", "test-uuid"), randomIntBetween(0, 5));
 
-        FragmentExecutionRequest request = new FragmentExecutionRequest(queryId, stageId, "task-id", shardId, List.of());
+        FragmentExecutionRequest request = new FragmentExecutionRequest(queryId, stageId, shardId, List.of());
 
         Task task = request.createTask(1L, "transport", "analytics_shard", TaskId.EMPTY_TASK_ID, Collections.emptyMap());
 

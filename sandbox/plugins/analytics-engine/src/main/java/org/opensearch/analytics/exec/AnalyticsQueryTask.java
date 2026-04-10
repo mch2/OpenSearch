@@ -25,14 +25,7 @@ public class AnalyticsQueryTask extends CancellableTask {
 
     private final String queryId;
 
-    public AnalyticsQueryTask(
-        long id,
-        String type,
-        String action,
-        String queryId,
-        TaskId parentTaskId,
-        Map<String, String> headers
-    ) {
+    public AnalyticsQueryTask(long id, String type, String action, String queryId, TaskId parentTaskId, Map<String, String> headers) {
         super(id, type, action, "queryId[" + queryId + "]", parentTaskId, headers);
         this.queryId = queryId;
     }

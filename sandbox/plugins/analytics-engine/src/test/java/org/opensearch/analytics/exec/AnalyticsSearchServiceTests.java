@@ -154,7 +154,6 @@ public class AnalyticsSearchServiceTests extends OpenSearchTestCase {
         FragmentExecutionRequest request = new FragmentExecutionRequest(
             "query-1",
             0,
-            "task-1",
             new ShardId(new Index("test_index", "_na_"), 0),
             List.of(new FragmentExecutionRequest.PlanAlternative("lucene", null))
         );

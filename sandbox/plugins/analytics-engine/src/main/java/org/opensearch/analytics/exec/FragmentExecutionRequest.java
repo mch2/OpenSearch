@@ -34,14 +34,12 @@ public class FragmentExecutionRequest extends ActionRequest {
 
     private final String queryId;
     private final int stageId;
-    private final String taskId;
     private final ShardId shardId;
     private final List<PlanAlternative> planAlternatives;
 
-    public FragmentExecutionRequest(String queryId, int stageId, String taskId, ShardId shardId, List<PlanAlternative> planAlternatives) {
+    public FragmentExecutionRequest(String queryId, int stageId, ShardId shardId, List<PlanAlternative> planAlternatives) {
         this.queryId = queryId;
         this.stageId = stageId;
-        this.taskId = taskId;
         this.shardId = shardId;
         this.planAlternatives = planAlternatives;
     }
@@ -50,7 +48,6 @@ public class FragmentExecutionRequest extends ActionRequest {
         super(in);
         this.queryId = in.readString();
         this.stageId = in.readInt();
-        this.taskId = in.readString();
         this.shardId = new ShardId(in);
         int numAlternatives = in.readVInt();
         this.planAlternatives = new ArrayList<>(numAlternatives);
@@ -64,7 +61,6 @@ public class FragmentExecutionRequest extends ActionRequest {
         super.writeTo(out);
         out.writeString(queryId);
         out.writeInt(stageId);
-        out.writeString(taskId);
         shardId.writeTo(out);
         out.writeVInt(planAlternatives.size());
         for (PlanAlternative alt : planAlternatives) {
@@ -78,10 +74,6 @@ public class FragmentExecutionRequest extends ActionRequest {
 
     public int getStageId() {
         return stageId;
-    }
-
-    public String getTaskId() {
-        return taskId;
     }
 
     public ShardId getShardId() {

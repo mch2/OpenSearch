@@ -33,15 +33,15 @@ public class ShardFilterPhaseAndTerminationDeciderTests extends OpenSearchTestCa
      */
     public void testShardFilterPhaseIdentityReturnsInput() {
         int numTargets = randomIntBetween(1, 10);
-        List<PlanWalker.TargetShard> targets = new ArrayList<>();
+        List<TargetShard> targets = new ArrayList<>();
         for (int i = 0; i < numTargets; i++) {
             ShardId shardId = new ShardId(new Index(randomAlphaOfLength(8), "_na_"), i);
             DiscoveryNode node = mock(DiscoveryNode.class);
-            targets.add(new PlanWalker.TargetShard(shardId, node));
+            targets.add(new TargetShard(shardId, node));
         }
 
         Stage stage = mock(Stage.class);
-        List<PlanWalker.TargetShard> result = ShardFilterPhase.IDENTITY.filter(targets, stage);
+        List<TargetShard> result = ShardFilterPhase.IDENTITY.filter(targets, stage);
 
         assertSame("IDENTITY filter must return the exact same list reference", targets, result);
     }

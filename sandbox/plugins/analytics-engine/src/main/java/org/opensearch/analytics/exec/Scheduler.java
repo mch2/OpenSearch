@@ -16,12 +16,18 @@ import org.opensearch.transport.TransportRequestOptions;
 import org.opensearch.transport.TransportService;
 
 import java.util.ArrayDeque;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
 /**
  * Coordinator-side orchestrator. Manages {@link PlanWalker} lifecycle via a
  * walker pool and gates per-node concurrency via {@link PendingExecutions}.
+ *
+ * <p>Per-node concurrency gating is per-query: each query gets its own
+ * {@code PendingExecutions} map so concurrent queries independently throttle
+ * at {@code maxConcurrentShardRequests} per node — matching the model in
+ * {@code AbstractSearchAsyncAction}.
  *
  * <p>Uses {@link TransportService#sendRequest} to dispatch tasks to the target
  * data node, which triggers {@link TransportAnalyticsShardAction} on the remote
@@ -35,8 +41,7 @@ import java.util.concurrent.ConcurrentMap;
 public class Scheduler {
     private final TransportService transportService;
     private final int maxConcurrentShardRequests;
-    private final ConcurrentMap<String, PlanWalker> walkerPool = new ConcurrentHashMap<>();
-    private final ConcurrentMap<String, PendingExecutions> pendingExecutionsPerNode = new ConcurrentHashMap<>();
+    private final Map<String, PlanWalker> walkerPool = new ConcurrentHashMap<>();
 
     public Scheduler(TransportService transportService, int maxConcurrentShardRequests) {
         this.transportService = transportService;
@@ -47,11 +52,16 @@ public class Scheduler {
      * Executes a PlanWalker asynchronously. Caches the walker during execution
      * and removes it on completion (success or failure). Extracts the
      * {@link AnalyticsQueryTask} from the walker for parent-child task propagation.
+     *
+     * <p>Creates a per-query {@code pendingExecutionsPerNode} map so that
+     * each query independently gates at {@code maxConcurrentShardRequests}
+     * per node. The map is GC'd when the query completes.
      */
     public void execute(PlanWalker walker, ActionListener<Iterable<Object[]>> listener) {
         walkerPool.put(walker.getQueryId(), walker);
         Task parentTask = walker.getParentTask();
-        walker.walk((req, node, l) -> dispatchTask(req, node, l, parentTask), ActionListener.wrap(result -> {
+        Map<String, PendingExecutions> pendingPerNode = new ConcurrentHashMap<>();
+        walker.walk((req, node, l) -> dispatchTask(req, node, l, parentTask, pendingPerNode), ActionListener.wrap(result -> {
             walkerPool.remove(walker.getQueryId());
             listener.onResponse(result);
         }, e -> {
@@ -74,9 +84,10 @@ public class Scheduler {
         FragmentExecutionRequest request,
         DiscoveryNode targetNode,
         ActionListener<FragmentExecutionResponse> listener,
-        Task parentTask
+        Task parentTask,
+        Map<String, PendingExecutions> pendingPerNode
     ) {
-        PendingExecutions pending = pendingExecutionsPerNode.computeIfAbsent(
+        PendingExecutions pending = pendingPerNode.computeIfAbsent(
             targetNode.getId(),
             n -> new PendingExecutions(maxConcurrentShardRequests)
         );
@@ -100,8 +111,14 @@ public class Scheduler {
 
         pending.tryRun(() -> {
             if (parentTask != null) {
-                transportService
-                    .sendChildRequest(targetNode, AnalyticsShardAction.NAME, request, parentTask, TransportRequestOptions.EMPTY, handler);
+                transportService.sendChildRequest(
+                    targetNode,
+                    AnalyticsShardAction.NAME,
+                    request,
+                    parentTask,
+                    TransportRequestOptions.EMPTY,
+                    handler
+                );
             } else {
                 transportService.sendRequest(targetNode, AnalyticsShardAction.NAME, request, handler);
             }

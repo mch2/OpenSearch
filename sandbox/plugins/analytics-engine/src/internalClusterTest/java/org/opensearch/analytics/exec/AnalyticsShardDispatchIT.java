@@ -14,7 +14,6 @@ import org.opensearch.Version;
 import org.opensearch.analytics.AnalyticsPlugin;
 import org.opensearch.arrow.flight.transport.FlightStreamPlugin;
 import org.opensearch.be.datafusion.DataFusionPlugin;
-import org.opensearch.be.lucene.LuceneSearchEnginePlugin;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.plugins.Plugin;

@@ -10,15 +10,11 @@ package org.opensearch.analytics.exec;
 
 import org.opensearch.analytics.planner.dag.QueryDAG;
 import org.opensearch.analytics.planner.dag.Stage;
-import org.opensearch.cluster.node.DiscoveryNode;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.core.action.ActionListener;
-import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.tasks.Task;
 
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -28,42 +24,23 @@ import java.util.concurrent.atomic.AtomicReference;
  * {@code DefaultPlanExecutor}, passed to {@code Scheduler}. Never blocks —
  * takes an {@code ActionListener} and signals completion via callbacks.
  *
- * <p>Owns the root sink and stage outputs map. Delegates stage dispatch to
- * {@link StageExecutor} and target resolution to {@link TargetResolver}.
+ * <p>Owns the root sink. Delegates stage dispatch to {@link StageExecutor}
+ * and target resolution to {@link TargetResolver}.
  *
  * @opensearch.internal
  */
 public class PlanWalker {
 
-    // Immutable query context
     private final QueryDAG dag;
-    private final Executor searchExecutor;
     private final Task parentTask;
-    private final StageExecutor stageExecutor;
-
-    // Per-query mutable state
     private final ExchangeSink rootSink;
-    private final Map<Integer, StageOutput> stageOutputs = new HashMap<>();
-    private final Map<Integer, StageMetrics> stageMetrics = new HashMap<>();
-
-    /** Output produced by a completed stage. */
-    public sealed interface StageOutput {
-        /** Rows already fed into the root sink. No additional data. */
-        record RowData() implements StageOutput {}
-
-        /** Partition manifests from each shard: shardId → (partitionId → filePath). */
-        record PartitionManifest(Map<ShardId, Map<Integer, String>> manifests) implements StageOutput {}
-    }
-
-    /** Shard + node pairing. */
-    public record TargetShard(ShardId shardId, DiscoveryNode node) {}
+    private final StageExecutor stageExecutor;
 
     public PlanWalker(QueryDAG dag, ClusterService clusterService, Executor searchExecutor, Task parentTask) {
         this.dag = dag;
-        this.searchExecutor = searchExecutor;
         this.parentTask = parentTask;
         this.rootSink = createRootSink(dag.rootStage());
-        this.stageExecutor = new StageExecutor(dag.queryId(), clusterService, rootSink, stageOutputs, stageMetrics);
+        this.stageExecutor = new StageExecutor(dag.queryId(), clusterService, searchExecutor, rootSink);
     }
 
     public String getQueryId() {
@@ -75,11 +52,6 @@ public class PlanWalker {
         return parentTask;
     }
 
-    /** Fork a runnable to the search thread pool. */
-    void fork(Runnable runnable) {
-        searchExecutor.execute(runnable);
-    }
-
     /**
      * Walks the DAG bottom-up, dispatching tasks for each stage asynchronously.
      * Calls the listener with the root sink's result when all stages complete.
@@ -89,43 +61,23 @@ public class PlanWalker {
     }
 
     /**
-     * Walks a single stage: first walks all children (parallel or sequential based
-     * on the stage's parallelChildren flag), then dispatches this stage.
+     * Walks a single stage: first walks all children concurrently,
+     * then dispatches this stage after all children complete.
      */
     private void walkStage(Stage stage, TaskSubmitter submitter, ActionListener<Void> stageListener) {
-        ActionListener<Void> dispatchAfterChildren = ActionListener.wrap(
-            v -> stageExecutor.dispatch(stage, submitter, stageListener),
-            stageListener::onFailure
-        );
-        if (stage.isParallelChildren()) {
-            walkChildrenInParallel(stage.getChildStages(), submitter, dispatchAfterChildren);
-        } else {
-            walkChildrenSequentially(stage.getChildStages(), 0, submitter, dispatchAfterChildren);
-        }
-    }
-
-    /**
-     * Walks child stages one at a time, left to right. When all children are done,
-     * calls the listener. Each child's completion triggers the next child.
-     */
-    private void walkChildrenSequentially(List<Stage> children, int index, TaskSubmitter submitter, ActionListener<Void> listener) {
-        if (index >= children.size()) {
-            listener.onResponse(null);
-            return;
-        }
-        walkStage(
-            children.get(index),
+        walkChildren(
+            stage.getChildStages(),
             submitter,
-            ActionListener.wrap(v -> walkChildrenSequentially(children, index + 1, submitter, listener), listener::onFailure)
+            ActionListener.wrap(v -> stageExecutor.dispatch(stage, submitter, stageListener), stageListener::onFailure)
         );
     }
 
     /**
      * Walks all child stages concurrently. Uses AtomicInteger for remaining count
-     * and AtomicReference for first-failure capture, consistent with the dispatch pattern.
-     * Completion is signaled only after all children finish (success or failure).
+     * and AtomicReference for first-failure capture. Completion is signaled only
+     * after all children finish (success or failure).
      */
-    private void walkChildrenInParallel(List<Stage> children, TaskSubmitter submitter, ActionListener<Void> listener) {
+    private void walkChildren(List<Stage> children, TaskSubmitter submitter, ActionListener<Void> listener) {
         if (children.isEmpty()) {
             listener.onResponse(null);
             return;
@@ -136,6 +88,8 @@ public class PlanWalker {
             walkStage(child, submitter, new ActionListener<>() {
                 @Override
                 public void onResponse(Void v) {
+                    // don't move to the next stage until all children have completed
+                    // Sink is still accumulating batches within the stage.
                     if (remaining.decrementAndGet() == 0) {
                         Exception e = failure.get();
                         if (e != null) {

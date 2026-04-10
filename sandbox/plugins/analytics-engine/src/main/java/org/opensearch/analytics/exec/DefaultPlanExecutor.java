@@ -46,7 +46,8 @@ import java.util.concurrent.Executor;
  * @opensearch.internal
  */
 public class DefaultPlanExecutor extends HandledTransportAction<ActionRequest, ActionResponse>
-    implements QueryPlanExecutor<RelNode, Iterable<Object[]>> {
+    implements
+        QueryPlanExecutor<RelNode, Iterable<Object[]>> {
 
     private static final Logger logger = LogManager.getLogger(DefaultPlanExecutor.class);
 
@@ -82,11 +83,7 @@ public class DefaultPlanExecutor extends HandledTransportAction<ActionRequest, A
 
         // Register coordinator-level query task with TaskManager (like SearchTask).
         // This gives us a proper unique ID, visibility in _tasks API, and cancellation support.
-        Task queryTask = taskManager.register(
-            "transport",
-            "analytics_query",
-            new AnalyticsQueryTaskRequest(dag.queryId())
-        );
+        Task queryTask = taskManager.register("transport", "analytics_query", new AnalyticsQueryTaskRequest(dag.queryId()));
 
         PlanWalker walker = new PlanWalker(dag, clusterService, searchExecutor, queryTask);
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();

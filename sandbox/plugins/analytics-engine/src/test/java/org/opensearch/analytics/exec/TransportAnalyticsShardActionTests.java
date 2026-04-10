@@ -61,7 +61,6 @@ public class TransportAnalyticsShardActionTests extends OpenSearchTestCase {
         FragmentExecutionRequest request = new FragmentExecutionRequest(
             "query-1",
             0,
-            "task-1",
             shardId,
             List.of(new FragmentExecutionRequest.PlanAlternative("lucene", null))
         );
@@ -85,7 +84,6 @@ public class TransportAnalyticsShardActionTests extends OpenSearchTestCase {
         FragmentExecutionRequest request = new FragmentExecutionRequest(
             "query-2",
             0,
-            "task-2",
             shardId,
             List.of(new FragmentExecutionRequest.PlanAlternative("lucene", null))
         );
@@ -113,7 +111,6 @@ public class TransportAnalyticsShardActionTests extends OpenSearchTestCase {
         FragmentExecutionRequest request = new FragmentExecutionRequest(
             "query-3",
             0,
-            "task-3",
             shardId,
             List.of(new FragmentExecutionRequest.PlanAlternative("lucene", null))
         );

@@ -141,7 +141,6 @@ public class PlanWalkerParallelTests extends OpenSearchTestCase {
         OpenSearchStageInputScan stageInput = new OpenSearchStageInputScan(cluster, RelTraitSet.createEmpty(), 0, rowType, List.of());
         Stage rootStage = new Stage(2, stageInput, List.of(childA, childB), null);
         rootStage.setPlanAlternatives(List.of(new StagePlan(stageInput, "lucene")));
-        rootStage.setParallelChildren(true);
 
         QueryDAG dag = new QueryDAG("test-query", rootStage);
 
@@ -184,7 +183,6 @@ public class PlanWalkerParallelTests extends OpenSearchTestCase {
         OpenSearchStageInputScan stageInput = new OpenSearchStageInputScan(cluster, RelTraitSet.createEmpty(), 0, rowType, List.of());
         Stage rootStage = new Stage(0, stageInput, List.of(), null);
         rootStage.setPlanAlternatives(List.of(new StagePlan(stageInput, "lucene")));
-        rootStage.setParallelChildren(true);
 
         QueryDAG dag = new QueryDAG("test-query", rootStage);
 
@@ -230,7 +228,6 @@ public class PlanWalkerParallelTests extends OpenSearchTestCase {
         OpenSearchStageInputScan stageInput = new OpenSearchStageInputScan(cluster, RelTraitSet.createEmpty(), 0, rowType, List.of());
         Stage rootStage = new Stage(2, stageInput, List.of(childA, childB), null);
         rootStage.setPlanAlternatives(List.of(new StagePlan(stageInput, "lucene")));
-        rootStage.setParallelChildren(true);
 
         QueryDAG dag = new QueryDAG("test-query", rootStage);
 
@@ -291,7 +288,6 @@ public class PlanWalkerParallelTests extends OpenSearchTestCase {
         OpenSearchStageInputScan stageInput = new OpenSearchStageInputScan(cluster, RelTraitSet.createEmpty(), 0, rowType, List.of());
         Stage rootStage = new Stage(2, stageInput, List.of(childX, childY), null);
         rootStage.setPlanAlternatives(List.of(new StagePlan(stageInput, "lucene")));
-        rootStage.setParallelChildren(true);
 
         QueryDAG dag = new QueryDAG("test-query", rootStage);
 

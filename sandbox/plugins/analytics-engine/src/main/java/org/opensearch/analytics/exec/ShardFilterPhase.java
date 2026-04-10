@@ -30,7 +30,7 @@ public interface ShardFilterPhase {
      * @param stage   the stage being dispatched
      * @return a filtered or reordered list of targets
      */
-    List<PlanWalker.TargetShard> filter(List<PlanWalker.TargetShard> targets, Stage stage);
+    List<TargetShard> filter(List<TargetShard> targets, Stage stage);
 
     /** Identity filter — returns the input list unchanged. */
     ShardFilterPhase IDENTITY = (targets, stage) -> targets;

@@ -49,6 +49,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.mockito.ArgumentMatchers.any;
@@ -371,20 +372,22 @@ public class PlanWalkerAsyncTests extends OpenSearchTestCase {
         // Walk should complete (root stage is coordinator gather, no dispatch needed for it)
         future.actionGet();
 
-        // Use reflection to verify stageOutputs contains a PartitionManifest for Stage 0
-        Field stageOutputsField = PlanWalker.class.getDeclaredField("stageOutputs");
-        stageOutputsField.setAccessible(true);
-        Map<Integer, Object> outputs = (Map<Integer, Object>) stageOutputsField.get(walker);
+        // Use reflection to verify shuffleManifests contains a manifest for Stage 0
+        Field executorField2 = PlanWalker.class.getDeclaredField("stageExecutor");
+        executorField2.setAccessible(true);
+        Object stageExec2 = executorField2.get(walker);
+        Field shuffleManifestsField = StageExecutor.class.getDeclaredField("shuffleManifests");
+        shuffleManifestsField.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        Map<Integer, Map<ShardId, Map<Integer, String>>> manifests =
+            (Map<Integer, Map<ShardId, Map<Integer, String>>>) shuffleManifestsField.get(stageExec2);
 
-        Object stage0Output = outputs.get(0);
-        assertNotNull("Stage 0 should have an output in stageOutputs", stage0Output);
-        assertTrue("Stage 0 output should be a PartitionManifest", stage0Output instanceof PlanWalker.StageOutput.PartitionManifest);
-
-        PlanWalker.StageOutput.PartitionManifest manifest = (PlanWalker.StageOutput.PartitionManifest) stage0Output;
-        assertEquals("Manifest should have one entry per shard", numShards, manifest.manifests().size());
+        Map<ShardId, Map<Integer, String>> stage0Manifest = manifests.get(0);
+        assertNotNull("Stage 0 should have a shuffle manifest", stage0Manifest);
+        assertEquals("Manifest should have one entry per shard", numShards, stage0Manifest.size());
 
         // Verify each shard's manifest has 2 partitions with correct paths
-        for (Map.Entry<ShardId, Map<Integer, String>> entry : manifest.manifests().entrySet()) {
+        for (Map.Entry<ShardId, Map<Integer, String>> entry : stage0Manifest.entrySet()) {
             int shardIdx = entry.getKey().id();
             Map<Integer, String> partitions = entry.getValue();
             assertEquals("Each shard manifest should have 2 partitions", 2, partitions.size());
@@ -462,21 +465,25 @@ public class PlanWalkerAsyncTests extends OpenSearchTestCase {
         QueryDAG dag = new QueryDAG("test-query", rootStage);
         PlanWalker walker = new PlanWalker(dag, clusterService, Runnable::run, null);
 
-        // Pre-populate stageOutputs with the PartitionManifest for child stage 0
-        Field stageOutputsField = PlanWalker.class.getDeclaredField("stageOutputs");
-        stageOutputsField.setAccessible(true);
+        // Pre-populate shuffleManifests with the manifest for child stage 0
+        Field executorField = PlanWalker.class.getDeclaredField("stageExecutor");
+        executorField.setAccessible(true);
+        Object stageExec = executorField.get(walker);
+        Field shuffleManifestsField = StageExecutor.class.getDeclaredField("shuffleManifests");
+        shuffleManifestsField.setAccessible(true);
         @SuppressWarnings("unchecked")
-        Map<Integer, PlanWalker.StageOutput> stageOutputs = (Map<Integer, PlanWalker.StageOutput>) stageOutputsField.get(walker);
-        stageOutputs.put(0, new PlanWalker.StageOutput.PartitionManifest(manifestData));
+        Map<Integer, Map<ShardId, Map<Integer, String>>> shuffleManifests =
+            (Map<Integer, Map<ShardId, Map<Integer, String>>>) shuffleManifestsField.get(stageExec);
+        shuffleManifests.put(0, manifestData);
 
         // Call resolveTargets via TargetResolver
-        List<PlanWalker.TargetShard> targets = TargetResolver.resolveTargets(parentStage, clusterService, stageOutputs);
+        List<TargetShard> targets = TargetResolver.resolveTargets(parentStage, clusterService, shuffleManifests);
 
         // Should have one TargetShard per partition
         assertEquals("Should have one target per partition", numPartitions, targets.size());
 
         // All target nodes should come from the source shard node set {nodeA, nodeB}
-        for (PlanWalker.TargetShard target : targets) {
+        for (TargetShard target : targets) {
             assertTrue("Target node should be from source shard set", target.node() == nodeA || target.node() == nodeB);
             assertEquals("Target shard index should be _shuffle", "_shuffle", target.shardId().getIndexName());
         }
@@ -517,10 +524,12 @@ public class PlanWalkerAsyncTests extends OpenSearchTestCase {
         QueryDAG dag = new QueryDAG("test-query", rootStage);
         PlanWalker walker = new PlanWalker(dag, clusterService, Runnable::run, null);
 
-        // stageOutputs is empty — no manifest for child stage 0
-        Map<Integer, PlanWalker.StageOutput> emptyOutputs = new HashMap<>();
-        IllegalStateException ex = expectThrows(IllegalStateException.class,
-            () -> TargetResolver.resolveTargets(parentStage, clusterService, emptyOutputs));
+        // shuffleManifests is empty — no manifest for child stage 0
+        Map<Integer, Map<ShardId, Map<Integer, String>>> emptyManifests = new HashMap<>();
+        IllegalStateException ex = expectThrows(
+            IllegalStateException.class,
+            () -> TargetResolver.resolveTargets(parentStage, clusterService, emptyManifests)
+        );
         assertTrue("Exception message should reference the stage ID", ex.getMessage().contains("No partition manifest found for stage 1"));
     }
 
@@ -560,14 +569,16 @@ public class PlanWalkerAsyncTests extends OpenSearchTestCase {
         // No tasks should have been submitted
         assertEquals("Coordinator gather should not dispatch any tasks", 0, submitCount.get());
 
-        // Verify stageOutputs contains RowData for the coordinator gather stage
-        Field stageOutputsField = PlanWalker.class.getDeclaredField("stageOutputs");
-        stageOutputsField.setAccessible(true);
-        Map<Integer, Object> outputs = (Map<Integer, Object>) stageOutputsField.get(walker);
+        // Verify completedStages contains the coordinator gather stage
+        Field executorField3 = PlanWalker.class.getDeclaredField("stageExecutor");
+        executorField3.setAccessible(true);
+        Object stageExec3 = executorField3.get(walker);
+        Field completedStagesField = StageExecutor.class.getDeclaredField("completedStages");
+        completedStagesField.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        Set<Integer> completed = (Set<Integer>) completedStagesField.get(stageExec3);
 
-        Object stageOutput = outputs.get(1);
-        assertNotNull("Coordinator gather stage should have an output", stageOutput);
-        assertTrue("Coordinator gather stage output should be RowData", stageOutput instanceof PlanWalker.StageOutput.RowData);
+        assertTrue("Coordinator gather stage should be in completedStages", completed.contains(1));
     }
 
     /**
