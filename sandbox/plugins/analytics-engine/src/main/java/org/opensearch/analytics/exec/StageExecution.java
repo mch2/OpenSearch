@@ -94,11 +94,11 @@ final class StageExecution {
             listener.onResponse(null);
             return;
         }
-        inFlight.set(initialDispatchCount);
         transitionTo(State.CREATED, State.RUNNING);
         for (int i = 0; i < initialDispatchCount; i++) {
             ShardTarget target = pendingTargets.poll();
             if (target == null) break;  // re-entrant completion already drained the queue
+            inFlight.incrementAndGet();
             dispatchShardTask(target);
         }
     }
@@ -173,17 +173,19 @@ final class StageExecution {
     }
 
     void finishStageInternal() {
-        metrics.recordEnd();
         Exception captured = failure.get();
+        State terminal = captured != null ? State.FAILED : State.SUCCEEDED;
+        if (!transitionToTerminal(terminal)) {
+            return;  // another thread already finalized
+        }
+        metrics.recordEnd();
         if (captured != null) {
-            transitionToTerminal(State.FAILED);
             if (context.parentTask() instanceof CancellableTask ct && ct.isCancelled()) {
                 listener.onFailure(new TaskCancelledException("query cancelled"));
             } else {
                 listener.onFailure(new RuntimeException("Stage " + stage.getStageId() + " failed", captured));
             }
         } else {
-            transitionToTerminal(State.SUCCEEDED);
             if (stage.isShuffleWrite()) {
                 context.shuffleManifests().put(stage.getStageId(), manifests);
             }
@@ -198,10 +200,8 @@ final class StageExecution {
         assert ok : "illegal state transition: expected " + expected + ", was " + state.get();
     }
 
-    private void transitionToTerminal(State terminal) {
-        if (!state.compareAndSet(State.TERMINATED, terminal)) {
-            state.compareAndSet(State.RUNNING, terminal);
-        }
+    private boolean transitionToTerminal(State terminal) {
+        return state.compareAndSet(State.TERMINATED, terminal) || state.compareAndSet(State.RUNNING, terminal);
     }
 
     private boolean isTerminated() {

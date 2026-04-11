@@ -18,10 +18,12 @@ import org.opensearch.analytics.spi.FilterOperator;
 import org.opensearch.analytics.spi.OperatorCapability;
 import org.opensearch.index.engine.dataformat.DataFormat;
 import org.opensearch.index.engine.dataformat.FieldTypeCapabilities;
+import org.opensearch.index.engine.dataformat.ReaderManagerConfig;
 import org.opensearch.index.engine.exec.EngineReaderManager;
 import org.opensearch.index.shard.ShardPath;
 import org.opensearch.plugins.SearchBackEndPlugin;
 
+import java.io.IOException;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -151,7 +153,7 @@ public class MockLuceneBackend implements AnalyticsSearchBackendPlugin, SearchBa
     }
 
     @Override
-    public EngineReaderManager<Object> createReaderManager(DataFormat format, ShardPath shardPath) {
+    public EngineReaderManager<Object> createReaderManager(ReaderManagerConfig settings) throws IOException {
         return null;
     }
 }

@@ -14,6 +14,8 @@
 
 apply plugin: 'opensearch.internal-cluster-test'
 
+java { sourceCompatibility = JavaVersion.toVersion(25); targetCompatibility = JavaVersion.toVersion(25) }
+
 // SQL Unified Query API version (aligned with OpenSearch build version)
 def sqlUnifiedQueryVersion = '3.6.0.0-SNAPSHOT'
 

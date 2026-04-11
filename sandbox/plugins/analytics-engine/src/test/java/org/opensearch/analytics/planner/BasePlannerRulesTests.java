@@ -32,12 +32,14 @@ import org.opensearch.cluster.metadata.Metadata;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.core.index.Index;
 import org.opensearch.index.engine.dataformat.DataFormat;
+import org.opensearch.index.engine.dataformat.ReaderManagerConfig;
 import org.opensearch.index.engine.dataformat.FieldTypeCapabilities;
 import org.opensearch.index.engine.exec.EngineReaderManager;
 import org.opensearch.index.shard.ShardPath;
 import org.opensearch.plugins.SearchBackEndPlugin;
 import org.opensearch.test.OpenSearchTestCase;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
@@ -291,7 +293,7 @@ public abstract class BasePlannerRulesTests extends OpenSearchTestCase {
         }
 
         @Override
-        public EngineReaderManager<Object> createReaderManager(DataFormat format, ShardPath shardPath) {
+        public EngineReaderManager<Object> createReaderManager(ReaderManagerConfig settings) throws IOException {
             return null;
         }
     }
