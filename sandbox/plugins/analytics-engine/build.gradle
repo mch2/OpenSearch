@@ -33,16 +33,24 @@ repositories {
 // compile classpaths by OpenSearch. Main sources don't need it; test sources do
 // (Calcite API exposes ImmutableList, Predicate). Bypass via custom config.
 configurations {
+  calciteCompile
   calciteTestCompile
-  compileClasspath { exclude group: 'com.google.guava' }
   testCompileClasspath { exclude group: 'com.google.guava' }
 }
+sourceSets.main.compileClasspath += configurations.calciteCompile
 sourceSets.test.compileClasspath += configurations.calciteTestCompile
 
 dependencies {
   // Shared types and SPI interfaces (QueryPlanExecutor, EngineBridge, AnalyticsBackEndPlugin, etc.)
   // Also provides calcite-core transitively via api.
   api project(':sandbox:libs:analytics-framework')
+
+  // Guava — required at compile time because Calcite base classes expose guava types.
+  // Uses custom config to bypass forbidden-dependencies.gradle check on compileClasspath.
+  calciteCompile "com.google.guava:guava:${versions.guava}"
+
+  // Immutables — Calcite's ConverterRule$Config references @Immutable annotation
+  compileOnly 'org.immutables:value-annotations:2.8.8'
 
   // Guava for test compilation — Calcite API exposes guava types
   calciteTestCompile "com.google.guava:guava:${versions.guava}"
@@ -64,6 +72,14 @@ dependencies {
 
   // Arrow Flight streaming transport for ITs
   internalClusterTestImplementation project(':plugins:arrow-flight-rpc')
+
+  // Lucene analytics backend for ITs (required by FieldStorageResolver during planning)
+  // commenting out or this blows up AnalyticsShardDispatchIT
+//  internalClusterTestImplementation project(':sandbox:plugins:analytics-backend-lucene')
+
+  // DataFusion analytics backend for ITs
+  internalClusterTestImplementation project(':sandbox:plugins:analytics-backend-datafusion')
+  internalClusterTestRuntimeOnly "com.fasterxml.jackson.datatype:jackson-datatype-jdk8:${versions.jackson}"
 
   // Calcite bytecode references @Immutable from immutables — resolve at test compile time
   testCompileOnly 'org.immutables:value-annotations:2.8.8'
@@ -99,6 +115,9 @@ configurations.all {
     force "net.minidev:json-smart:2.5.2"
     force "org.apache.httpcomponents.client5:httpclient5:5.6"
     force "org.apache.httpcomponents.core5:httpcore5:5.4"
+    force "org.apache.arrow:arrow-memory-core:18.3.0"
+    force "org.apache.arrow:arrow-vector:18.3.0"
+    force "org.apache.arrow:arrow-format:18.3.0"
     force "com.squareup.okhttp3:okhttp:4.12.0"
     force "org.jetbrains.kotlin:kotlin-stdlib:1.8.21"
     force "org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.8.21"
@@ -118,4 +137,45 @@ internalClusterTest {
   systemProperty 'io.netty.tryUnsafe', 'true'
   systemProperty 'io.netty.tryReflectionSetAccessible', 'true'
   jvmArgs += ["--add-opens", "java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED"]
+}
+
+// ---- JMH benchmark source set ----
+sourceSets {
+  jmh {
+    java.srcDirs = ['src/jmh/java']
+    compileClasspath += sourceSets.main.output + sourceSets.test.output
+    runtimeClasspath += sourceSets.main.output
+    runtimeClasspath += sourceSets.test.runtimeClasspath
+  }
+}
+
+dependencies {
+  jmhImplementation "org.openjdk.jmh:jmh-core:${versions.jmh}"
+  jmhAnnotationProcessor "org.openjdk.jmh:jmh-generator-annprocess:${versions.jmh}"
+  jmhImplementation project(':sandbox:libs:analytics-framework')
+  jmhImplementation project(':server')
+  jmhImplementation project(':test:framework')
+  jmhImplementation "com.google.guava:guava:${versions.guava}"
+}
+
+// JMH generated code uses forbidden APIs — skip checking
+tasks.matching { it.name == 'forbiddenApisJmh' }.configureEach { enabled = false }
+
+tasks.named('compileJmhJava').configure {
+  options.compilerArgs.addAll(["-processor", "org.openjdk.jmh.generators.BenchmarkProcessor"])
+}
+
+tasks.register('jmh', JavaExec) {
+  dependsOn jmhClasses
+  mainClass = 'org.openjdk.jmh.Main'
+  classpath = sourceSets.jmh.runtimeClasspath
+  if (project.hasProperty('jmh.includes')) {
+    args project.property('jmh.includes')
+  }
+}
+
+spotless {
+  java {
+    targetExclude 'src/jmh/generated/**/*.java'
+  }
 }

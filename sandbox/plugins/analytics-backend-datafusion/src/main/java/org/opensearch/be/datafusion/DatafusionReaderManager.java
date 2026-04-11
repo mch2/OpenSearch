@@ -17,6 +17,10 @@ import org.opensearch.index.engine.exec.coord.CatalogSnapshot;
 import org.opensearch.index.shard.ShardPath;
 
 import java.io.IOException;
+import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.Map;
@@ -36,10 +40,13 @@ public class DatafusionReaderManager implements EngineReaderManager<DatafusionRe
 
     private static final Logger logger = LogManager.getLogger(DatafusionReaderManager.class);
 
+    private static final String MOCK_FILE_NAME = "clickbench_hits_100.parquet";
+
     private final Map<CatalogSnapshot, DatafusionReader> readers = new HashMap<>();
     private final DataFormat dataFormat;
     private final String directoryPath;
     private final DataFusionService dataFusionService;
+    private volatile boolean mockDataCopied = false;
 
     /**
      * Creates a reader manager.
@@ -88,8 +95,44 @@ public class DatafusionReaderManager implements EngineReaderManager<DatafusionRe
     public void afterRefresh(boolean didRefresh, CatalogSnapshot catalogSnapshot) throws IOException {
         if (didRefresh == false) return;
         if (readers.containsKey(catalogSnapshot)) return;
-        DatafusionReader reader = new DatafusionReader(directoryPath, catalogSnapshot.getSearchableFiles(dataFormat.name()));
+
+        var files = catalogSnapshot.getSearchableFiles(dataFormat.name());
+
+        // [indexing-mock] If no real parquet files from indexing pipeline, fall back to bundled
+        // mock data so the real reader path is exercised during development.
+        // Remove this block once parquet indexing is fully wired.
+        if (files == null || files.isEmpty()) {
+            ensureMockDataAvailable();
+            DatafusionReader reader = new DatafusionReader(directoryPath, new String[] { MOCK_FILE_NAME });
+            readers.put(catalogSnapshot, reader);
+            return;
+        }
+
+        DatafusionReader reader = new DatafusionReader(directoryPath, files);
         readers.put(catalogSnapshot, reader);
+    }
+
+    /**
+     * [indexing-mock] Copies the bundled mock parquet file into the shard's parquet directory so the
+     * real DatafusionReader path is exercised during development before indexing is wired.
+     * Remove this method once parquet indexing is fully wired.
+     */
+    private void ensureMockDataAvailable() throws IOException {
+        if (mockDataCopied) return;
+        Path dir = Path.of(directoryPath);
+        Files.createDirectories(dir);
+        Path target = dir.resolve(MOCK_FILE_NAME);
+        if (Files.exists(target) == false) {
+            try (InputStream in = getClass().getClassLoader().getResourceAsStream(MOCK_FILE_NAME)) {
+                if (in == null) {
+                    logger.warn("Mock parquet resource [{}] not found on classpath", MOCK_FILE_NAME);
+                    return;
+                }
+                Files.copy(in, target, StandardCopyOption.REPLACE_EXISTING);
+                logger.info("Copied mock parquet data to [{}]", target);
+            }
+        }
+        mockDataCopied = true;
     }
 
     private Collection<String> toAbsolutePaths(Collection<String> fileNames) {

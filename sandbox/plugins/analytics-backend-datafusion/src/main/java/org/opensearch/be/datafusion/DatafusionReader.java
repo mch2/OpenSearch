@@ -49,6 +49,16 @@ public class DatafusionReader implements Closeable {
     }
 
     /**
+     * [indexing-mock] Creates a DatafusionReader from explicit file names.
+     * Used by DatafusionReaderManager to create readers from mock parquet data
+     * before the indexing pipeline is fully wired. Package-private access.
+     */
+    DatafusionReader(String directoryPath, String[] fileNames) {
+        this.directoryPath = directoryPath;
+        this.readerHandle = new ReaderHandle(directoryPath, fileNames);
+    }
+
+    /**
      * Wraps a pre-existing native reader pointer (test only).
      * The caller retains ownership — this reader will NOT close the handle.
      */

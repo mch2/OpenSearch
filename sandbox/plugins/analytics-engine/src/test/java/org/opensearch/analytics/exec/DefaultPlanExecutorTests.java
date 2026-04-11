@@ -15,7 +15,6 @@ import org.apache.calcite.plan.RelTraitSet;
 import org.apache.calcite.plan.hep.HepPlanner;
 import org.apache.calcite.plan.hep.HepProgramBuilder;
 import org.apache.calcite.rel.AbstractRelNode;
-import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.TableScan;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeFactory;
@@ -26,27 +25,14 @@ import org.opensearch.analytics.backend.EngineResultStream;
 import org.opensearch.analytics.backend.ExecutionContext;
 import org.opensearch.analytics.backend.SearchExecEngine;
 import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
-import org.opensearch.cluster.ClusterState;
-import org.opensearch.cluster.metadata.IndexMetadata;
-import org.opensearch.cluster.metadata.Metadata;
-import org.opensearch.cluster.service.ClusterService;
-import org.opensearch.common.concurrent.GatedCloseable;
-import org.opensearch.core.index.Index;
-import org.opensearch.index.IndexService;
-import org.opensearch.index.engine.DataFormatAwareEngine;
 import org.opensearch.index.engine.dataformat.DataFormat;
 import org.opensearch.index.engine.dataformat.FieldTypeCapabilities;
 import org.opensearch.index.engine.exec.EngineReaderManager;
 import org.opensearch.index.engine.exec.Segment;
 import org.opensearch.index.engine.exec.WriterFileSet;
 import org.opensearch.index.engine.exec.coord.CatalogSnapshot;
-import org.opensearch.index.engine.exec.coord.CatalogSnapshotManager;
-import org.opensearch.index.shard.IndexShard;
-import org.opensearch.indices.IndicesService;
 import org.opensearch.test.OpenSearchTestCase;
 
-import java.io.IOException;
-import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
@@ -75,83 +61,9 @@ public class DefaultPlanExecutorTests extends OpenSearchTestCase {
         cluster = RelOptCluster.create(planner, rexBuilder);
     }
 
-    /**
-     * extractTableName returns the table name from a TableScan node.
-     */
-    public void testExtractTableNameFromTableScan() {
-        RelOptTable table = mockTable("schema", "my_index");
-        TableScan scan = new StubTableScan(cluster, cluster.traitSet(), table);
-        assertEquals("my_index", DefaultPlanExecutor.extractTableName(scan));
-    }
-
-    /**
-     * extractTableName throws when no TableScan is found.
-     */
-    public void testExtractTableNameThrowsForNonTableScan() {
-        RelNode stub = new StubRelNode(cluster, cluster.traitSet(), buildRowType(1));
-        IllegalArgumentException ex = expectThrows(IllegalArgumentException.class, () -> DefaultPlanExecutor.extractTableName(stub));
-        assertTrue(ex.getMessage().contains("No TableScan found"));
-    }
-
-    /**
-     * End-to-end: write file sets → catalog snapshot → DataFormatAwareEngine →
-     * DefaultPlanExecutor.execute() with mock backend returns rows via EngineResultStream.
-     */
-    public void testEndToEndExecuteWithMockBackend() throws IOException {
-        MockDataFormat format = new MockDataFormat();
-        Path dir = createTempDir();
-
-        WriterFileSet fs1 = WriterFileSet.builder().directory(dir).writerGeneration(1L).addFile("gen1.parquet").addNumRows(2).build();
-        WriterFileSet fs2 = WriterFileSet.builder().directory(dir).writerGeneration(2L).addFile("gen2.parquet").addNumRows(1).build();
-
-        Segment seg1 = Segment.builder(0L).addSearchableFiles(format, fs1).build();
-        Segment seg2 = Segment.builder(1L).addSearchableFiles(format, fs2).build();
-
-        CatalogSnapshotManager snapshotManager = new CatalogSnapshotManager(1L, 1L, 0L, List.of(seg1, seg2), 2L, Map.of());
-
-        MockReaderManager readerManager = new MockReaderManager(format.name());
-        try (GatedCloseable<CatalogSnapshot> ref = snapshotManager.acquireSnapshot()) {
-            readerManager.afterRefresh(true, ref.get());
-        }
-
-        DataFormatAwareEngine engine = new DataFormatAwareEngine(Map.of(format, readerManager), snapshotManager);
-
-        // Mock shard + cluster wiring
-        IndexShard shard = mock(IndexShard.class);
-        when(shard.getCompositeEngine()).thenReturn(engine);
-
-        Index index = new Index("my_index", "uuid");
-        IndexMetadata indexMetadata = mock(IndexMetadata.class);
-        when(indexMetadata.getIndex()).thenReturn(index);
-
-        Metadata metadata = mock(Metadata.class);
-        when(metadata.index("my_index")).thenReturn(indexMetadata);
-
-        ClusterState clusterState = mock(ClusterState.class);
-        when(clusterState.metadata()).thenReturn(metadata);
-
-        ClusterService clusterService = mock(ClusterService.class);
-        when(clusterService.state()).thenReturn(clusterState);
-
-        IndexService indexService = mock(IndexService.class);
-        when(indexService.shardIds()).thenReturn(Set.of(0));
-        when(indexService.getShardOrNull(0)).thenReturn(shard);
-
-        IndicesService indicesService = mock(IndicesService.class);
-        when(indicesService.indexService(index)).thenReturn(indexService);
-
-        MockBackendPlugin backendPlugin = new MockBackendPlugin(format);
-        DefaultPlanExecutor executor = new DefaultPlanExecutor(List.of(backendPlugin), indicesService, clusterService);
-
-        RelOptTable table = mockTable("my_index");
-        TableScan scan = new StubTableScan(cluster, cluster.traitSet(), table);
-
-        Iterable<Object[]> results = executor.execute(scan, new Object());
-        List<Object[]> rows = new ArrayList<>();
-        results.forEach(rows::add);
-
-        assertEquals(3, rows.size());
-    }
+    // E2E execution test removed — DefaultPlanExecutor is coordinator-only now.
+    // Planning is tested via planner rule tests. Shard execution will be tested
+    // via the data-node transport action.
 
     private RelOptTable mockTable(String... qualifiedName) {
         RelOptTable table = mock(RelOptTable.class);

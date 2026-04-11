@@ -10,10 +10,6 @@ package org.opensearch.be.datafusion;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.opensearch.analytics.backend.EngineResultStream;
-import org.opensearch.analytics.backend.ExecutionContext;
-import org.opensearch.analytics.backend.SearchExecEngine;
-import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
 import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.settings.Setting;
@@ -34,19 +30,23 @@ import org.opensearch.transport.client.Client;
 import org.opensearch.watcher.ResourceWatcherService;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.function.Supplier;
+import java.util.stream.Collectors;
 
 /**
  * Main plugin class for the DataFusion native engine integration.
  * <p>
- * Initializes the {@link DataFusionService} at node startup and creates
- * per-shard {@link DatafusionSearchExecEngine} instances via the
- * {@link AnalyticsSearchBackendPlugin} SPI.
+ * Owns the {@link DataFusionService} lifecycle (memory pool, native runtime).
+ * Analytics query capabilities are declared in {@link DataFusionAnalyticsExtension},
+ * which is SPI-discovered and receives this plugin instance via its constructor.
  */
-public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<DatafusionReader>, AnalyticsSearchBackendPlugin {
+public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<DatafusionReader> {
 
     private static final Logger logger = LogManager.getLogger(DataFusionPlugin.class);
 
@@ -66,11 +66,15 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
         Setting.Property.NodeScope
     );
 
+    /**
+     * Data formats this backend can query — populated by DataFormatExtension callbacks.
+     * Static because analytics-engine's extension loader creates a separate DataFusionPlugin
+     * instance via SPI, which must share the same format list as the real plugin instance.
+     */
+    private static final List<DataFormat> supportedFormats = new ArrayList<>();
+
     private volatile DataFusionService dataFusionService;
 
-    /**
-     * Creates the DataFusion plugin.
-     */
     public DataFusionPlugin() {}
 
     @Override
@@ -90,7 +94,6 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
         Settings settings = environment.settings();
         long memoryPoolLimit = DATAFUSION_MEMORY_POOL_LIMIT.get(settings);
         long spillMemoryLimit = DATAFUSION_SPILL_MEMORY_LIMIT.get(settings);
-        // TODO : Get the spill directory from configuration
         String spillDir = environment.dataFiles()[0].getParent().resolve("tmp").toAbsolutePath().toString();
 
         dataFusionService = DataFusionService.builder()
@@ -104,6 +107,11 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
         return Collections.singletonList(dataFusionService);
     }
 
+    /** Package-private so {@link DataFusionAnalyticsExtension} can access it. */
+    DataFusionService getDataFusionService() {
+        return dataFusionService;
+    }
+
     @Override
     public String name() {
         return "datafusion";
@@ -115,31 +123,24 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
     }
 
     /**
-     * Data formats this plugin can handle. Used by CompositeEngine to route queries.
+     * Called by {@link DataFusionDataFormatExtension} when a data format plugin
+     * provides its DataFormat with field capabilities.
+     *
+     * @param format the DataFormat with field type capabilities
      */
-    public List<DataFormat> getSupportedFormats() {
-        return null; // TODO : List.of("parquet");
+    void registerDataFormat(DataFormat format) {
+        supportedFormats.add(format);
+        logger.info("DataFusion registered format [{}] with {} field types", format.name(), format.supportedFields().size());
+    }
+
+    /** Returns the set of format names this backend supports. */
+    static Set<String> getSupportedFormatNames() {
+        return supportedFormats.stream().map(DataFormat::name).collect(Collectors.toUnmodifiableSet());
     }
 
     @Override
-    public SearchExecEngine<ExecutionContext, EngineResultStream> createSearchExecEngine(ExecutionContext ctx) {
-        DatafusionReader dfReader = null;
-        List<DataFormat> formats = getSupportedFormats();
-        if (formats != null) {
-            for (DataFormat format : formats) {
-                dfReader = ctx.getReader().getReader(format, DatafusionReader.class);
-                if (dfReader != null) {
-                    break;
-                }
-            }
-        }
-        if (dfReader == null) {
-            throw new IllegalStateException("No DatafusionReader available in the acquired reader");
-        }
-        DatafusionContext context = new DatafusionContext(ctx.getTask(), dfReader, dataFusionService.getNativeRuntime());
-        DatafusionSearchExecEngine engine = new DatafusionSearchExecEngine(context, dataFusionService::newChildAllocator);
-        engine.prepare(ctx);
-        return engine;
+    public List<DataFormat> getSupportedFormats() {
+        return List.copyOf(supportedFormats);
     }
 
     @Override

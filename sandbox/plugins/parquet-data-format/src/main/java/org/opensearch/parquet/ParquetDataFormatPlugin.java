@@ -18,12 +18,14 @@ import org.opensearch.core.xcontent.NamedXContentRegistry;
 import org.opensearch.env.Environment;
 import org.opensearch.env.NodeEnvironment;
 import org.opensearch.index.engine.dataformat.DataFormat;
+import org.opensearch.index.engine.dataformat.DataFormatExtension;
 import org.opensearch.index.engine.dataformat.DataFormatPlugin;
 import org.opensearch.index.engine.dataformat.IndexingEngineConfig;
 import org.opensearch.index.engine.dataformat.IndexingExecutionEngine;
 import org.opensearch.parquet.engine.ParquetDataFormat;
 import org.opensearch.parquet.engine.ParquetIndexingEngine;
 import org.opensearch.parquet.fields.ArrowSchemaBuilder;
+import org.opensearch.plugins.ExtensiblePlugin;
 import org.opensearch.plugins.Plugin;
 import org.opensearch.repositories.RepositoriesService;
 import org.opensearch.script.ScriptService;
@@ -48,7 +50,7 @@ import java.util.function.Supplier;
  *
  * <p>Registers plugin settings defined in {@link ParquetSettings}.
  */
-public class ParquetDataFormatPlugin extends Plugin implements DataFormatPlugin {
+public class ParquetDataFormatPlugin extends Plugin implements DataFormatPlugin, ExtensiblePlugin {
 
     /** Thread pool name for background native Parquet writes during VSR rotation. */
     public static final String PARQUET_THREAD_POOL_NAME = "parquet_native_write";
@@ -60,6 +62,13 @@ public class ParquetDataFormatPlugin extends Plugin implements DataFormatPlugin 
 
     /** Creates a new ParquetDataFormatPlugin. */
     public ParquetDataFormatPlugin() {}
+
+    @Override
+    public void loadExtensions(ExtensionLoader loader) {
+        for (DataFormatExtension extension : loader.loadExtensions(DataFormatExtension.class)) {
+            extension.registerDataFormat(dataFormat);
+        }
+    }
 
     @Override
     public Collection<Object> createComponents(

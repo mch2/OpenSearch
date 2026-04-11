@@ -53,6 +53,12 @@ public class DslQueryPlanExecutor {
             logPlan(relNode);
             // TODO: context param is null, may carry execution hints
             Iterable<Object[]> rows = executor.execute(relNode, null);
+            int rowCount = 0;
+            for (Object[] row : rows) {
+                logger.info("Row {}: {}", rowCount, java.util.Arrays.toString(row));
+                rowCount++;
+            }
+            logger.info("Plan [{}] returned {} rows", plan.type(), rowCount);
             results.add(new ExecutionResult(plan, rows));
         }
 

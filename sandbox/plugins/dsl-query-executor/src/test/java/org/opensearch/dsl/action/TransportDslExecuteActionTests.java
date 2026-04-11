@@ -29,9 +29,13 @@ import org.opensearch.index.IndexNotFoundException;
 import org.opensearch.search.builder.SearchSourceBuilder;
 import org.opensearch.tasks.Task;
 import org.opensearch.test.OpenSearchTestCase;
+import org.opensearch.threadpool.TestThreadPool;
+import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.TransportService;
 
 import java.util.Collections;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.mockito.Mockito.any;
@@ -40,7 +44,21 @@ import static org.mockito.Mockito.when;
 
 public class TransportDslExecuteActionTests extends OpenSearchTestCase {
 
-    public void testDoExecuteReturnsSearchResponse() {
+    private ThreadPool threadPool;
+
+    @Override
+    public void setUp() throws Exception {
+        super.setUp();
+        threadPool = new TestThreadPool(getTestName());
+    }
+
+    @Override
+    public void tearDown() throws Exception {
+        ThreadPool.terminate(threadPool, 10, TimeUnit.SECONDS);
+        super.tearDown();
+    }
+
+    public void testDoExecuteReturnsSearchResponse() throws Exception {
         TransportDslExecuteAction action = createAction(new Index("test-index", "uuid"));
 
         TestListener listener = executeWith(action, "test-index");
@@ -50,7 +68,7 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
         assertEquals(200, listener.response.get().status().getStatus());
     }
 
-    public void testDoExecuteFailsWhenIndexNotInSchema() {
+    public void testDoExecuteFailsWhenIndexNotInSchema() throws Exception {
         TransportDslExecuteAction action = createAction(new Index("nonexistent-index", "uuid"));
 
         TestListener listener = executeWith(action, "nonexistent-index");
@@ -61,7 +79,7 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
         assertTrue(listener.failure.get().getMessage().contains("nonexistent-index"));
     }
 
-    public void testDoExecuteRejectsMultipleConcreteIndices() {
+    public void testDoExecuteRejectsMultipleConcreteIndices() throws Exception {
         TransportDslExecuteAction action = createAction(new Index("index-a", "uuid-a"), new Index("index-b", "uuid-b"));
 
         TestListener listener = executeWith(action, "multi-alias");
@@ -72,7 +90,7 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
         assertTrue(listener.failure.get().getMessage().contains("exactly one concrete index"));
     }
 
-    public void testDoExecuteFailsWhenIndexNotInClusterState() {
+    public void testDoExecuteFailsWhenIndexNotInClusterState() throws Exception {
         ClusterService clusterService = mock(ClusterService.class);
         when(clusterService.state()).thenReturn(mock(ClusterState.class));
 
@@ -81,6 +99,7 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
 
         TransportDslExecuteAction action = new TransportDslExecuteAction(
             mock(TransportService.class),
+            threadPool,
             new ActionFilters(Collections.emptySet()),
             buildEngineContext(),
             (plan, ctx) -> Collections.emptyList(),
@@ -95,12 +114,13 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
         assertTrue(listener.failure.get() instanceof IndexNotFoundException);
     }
 
-    private TestListener executeWith(TransportDslExecuteAction action, String index) {
+    private TestListener executeWith(TransportDslExecuteAction action, String index) throws Exception {
         SearchRequest request = new SearchRequest(index);
         request.source(new SearchSourceBuilder());
 
         TestListener listener = new TestListener();
         action.doExecute(mock(Task.class), request, listener);
+        assertTrue("Timed out waiting for response", listener.latch.await(10, TimeUnit.SECONDS));
         return listener;
     }
 
@@ -113,6 +133,7 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
 
         return new TransportDslExecuteAction(
             mock(TransportService.class),
+            threadPool,
             new ActionFilters(Collections.emptySet()),
             buildEngineContext(),
             (plan, ctx) -> Collections.emptyList(),
@@ -150,15 +171,18 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
     private static class TestListener implements ActionListener<SearchResponse> {
         final AtomicReference<SearchResponse> response = new AtomicReference<>();
         final AtomicReference<Exception> failure = new AtomicReference<>();
+        final CountDownLatch latch = new CountDownLatch(1);
 
         @Override
         public void onResponse(SearchResponse r) {
             response.set(r);
+            latch.countDown();
         }
 
         @Override
         public void onFailure(Exception e) {
             failure.set(e);
+            latch.countDown();
         }
     }
 }

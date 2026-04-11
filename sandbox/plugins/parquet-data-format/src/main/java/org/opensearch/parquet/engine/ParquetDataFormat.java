@@ -27,7 +27,7 @@ public class ParquetDataFormat extends DataFormat {
     /** Creates a new ParquetDataFormat. */
     public ParquetDataFormat() {}
 
-    static final String PARQUET_DATA_FORMAT_NAME = "parquet";
+    public static final String PARQUET_DATA_FORMAT_NAME = "parquet";
 
     @Override
     public String name() {
@@ -41,7 +41,6 @@ public class ParquetDataFormat extends DataFormat {
 
     @Override
     public Set<FieldTypeCapabilities> supportedFields() {
-        // TODO - Override FieldRegistry to return capability for each field
         return ArrowFieldRegistry.getRegisteredFields()
             .keySet()
             .stream()

@@ -28,6 +28,7 @@ import org.opensearch.dsl.executor.QueryPlans;
 import org.opensearch.dsl.result.ExecutionResult;
 import org.opensearch.dsl.result.SearchResponseBuilder;
 import org.opensearch.tasks.Task;
+import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.TransportService;
 
 import java.util.List;
@@ -45,6 +46,7 @@ public class TransportDslExecuteAction extends HandledTransportAction<SearchRequ
 
     private final EngineContext engineContext;
     private final DslQueryPlanExecutor planExecutor;
+    private final ThreadPool threadPool;
     private final ClusterService clusterService;
     private final IndexNameExpressionResolver indexNameExpressionResolver;
 
@@ -52,6 +54,7 @@ public class TransportDslExecuteAction extends HandledTransportAction<SearchRequ
      * Guice-injected constructor — receives analytics engine dependencies.
      *
      * @param transportService transport service
+     * @param threadPool thread pool for offloading blocking execution
      * @param actionFilters action filters
      * @param engineContext analytics engine context providing schema and operator table
      * @param executor analytics engine plan executor
@@ -61,6 +64,7 @@ public class TransportDslExecuteAction extends HandledTransportAction<SearchRequ
     @Inject
     public TransportDslExecuteAction(
         TransportService transportService,
+        ThreadPool threadPool,
         ActionFilters actionFilters,
         EngineContext engineContext,
         QueryPlanExecutor<RelNode, Iterable<Object[]>> executor,
@@ -70,26 +74,30 @@ public class TransportDslExecuteAction extends HandledTransportAction<SearchRequ
         super(DslExecuteAction.NAME, transportService, actionFilters, SearchRequest::new);
         this.engineContext = engineContext;
         this.planExecutor = new DslQueryPlanExecutor(executor);
+        this.threadPool = threadPool;
         this.clusterService = clusterService;
         this.indexNameExpressionResolver = indexNameExpressionResolver;
     }
 
     @Override
     protected void doExecute(Task task, SearchRequest request, ActionListener<SearchResponse> listener) {
-        try {
-            String indexName = resolveToSingleIndex(request);
+        // Run on SEARCH pool to avoid blocking the transport thread.
+        threadPool.executor(ThreadPool.Names.SEARCH).execute(() -> {
+            try {
+                String indexName = resolveToSingleIndex(request);
 
-            long convertStart = System.nanoTime();
-            SearchSourceConverter converter = new SearchSourceConverter(engineContext.getSchema());
-            QueryPlans plans = converter.convert(request.source(), indexName);
-            long convertTime = System.nanoTime() - convertStart;
-            List<ExecutionResult> results = planExecutor.execute(plans);
-            SearchResponse response = SearchResponseBuilder.build(results, convertTime);
-            listener.onResponse(response);
-        } catch (Exception e) {
-            logger.error("DSL execution failed", e);
-            listener.onFailure(e);
-        }
+                long convertStart = System.nanoTime();
+                SearchSourceConverter converter = new SearchSourceConverter(engineContext.getSchema());
+                QueryPlans plans = converter.convert(request.source(), indexName);
+                long convertTime = System.nanoTime() - convertStart;
+                List<ExecutionResult> results = planExecutor.execute(plans);
+                SearchResponse response = SearchResponseBuilder.build(results, convertTime);
+                listener.onResponse(response);
+            } catch (Exception e) {
+                logger.error("DSL execution failed", e);
+                listener.onFailure(e);
+            }
+        });
     }
 
     // TODO: Consider delegating index resolution to Analytics Core plugin (e.g. via

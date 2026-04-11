@@ -84,6 +84,16 @@ public class DataFormatAwareEngine implements IndexReaderProvider, Closeable {
         return readerManagers.get(format);
     }
 
+    /** Returns all reader managers. */
+    public Map<DataFormat, EngineReaderManager<?>> getReaderManagers() {
+        return readerManagers;
+    }
+
+    /** Returns the catalog snapshot manager. */
+    public CatalogSnapshotManager getCatalogSnapshotManager() {
+        return catalogSnapshotManager;
+    }
+
     /**
      * Acquires a DataFormatAwareReader on the latest catalog snapshot.
      * The caller MUST close the returned {@link DataFormatAwareReader} when done,
