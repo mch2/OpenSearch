@@ -39,7 +39,6 @@ import org.opensearch.test.OpenSearchTestCase;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -442,10 +441,11 @@ public class StageExecutorSlidingWindowTests extends OpenSearchTestCase {
         Field executorField = PlanWalker.class.getDeclaredField("stageExecutor");
         executorField.setAccessible(true);
         Object stageExec = executorField.get(walker);
-        Field completedStagesField = StageExecutor.class.getDeclaredField("completedStages");
-        completedStagesField.setAccessible(true);
+        Field contextField = StageExecutor.class.getDeclaredField("context");
+        contextField.setAccessible(true);
+        QueryExecutionContext dispatchContext = (QueryExecutionContext) contextField.get(stageExec);
         @SuppressWarnings("unchecked")
-        Set<Integer> completed = (Set<Integer>) completedStagesField.get(stageExec);
+        Set<Integer> completed = dispatchContext.completedStages();
 
         assertTrue("Stage 0 should be in completedStages", completed.contains(0));
     }

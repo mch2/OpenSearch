@@ -17,5 +17,5 @@ import org.opensearch.core.index.shard.ShardId;
  *
  * @opensearch.internal
  */
-public record TargetShard(ShardId shardId, DiscoveryNode node) {
+public record ShardTarget(ShardId shardId, DiscoveryNode node) {
 }

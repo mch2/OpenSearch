@@ -15,7 +15,7 @@ import java.util.List;
 /**
  * Filter or reorder resolved target shards before dispatch.
  * Called by PlanWalker after resolveTargets() and before submitting tasks.
- * Operates on TargetShard (post-resolution shard+node pairs), analogous
+ * Operates on ShardTarget (post-resolution shard+node pairs), analogous
  * to CanMatch operating on SearchShardIterator.
  *
  * @opensearch.internal
@@ -30,7 +30,7 @@ public interface ShardFilterPhase {
      * @param stage   the stage being dispatched
      * @return a filtered or reordered list of targets
      */
-    List<TargetShard> filter(List<TargetShard> targets, Stage stage);
+    List<ShardTarget> filter(List<ShardTarget> targets, Stage stage);
 
     /** Identity filter — returns the input list unchanged. */
     ShardFilterPhase IDENTITY = (targets, stage) -> targets;

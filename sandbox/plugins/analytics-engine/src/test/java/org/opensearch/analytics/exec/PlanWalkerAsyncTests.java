@@ -376,11 +376,11 @@ public class PlanWalkerAsyncTests extends OpenSearchTestCase {
         Field executorField2 = PlanWalker.class.getDeclaredField("stageExecutor");
         executorField2.setAccessible(true);
         Object stageExec2 = executorField2.get(walker);
-        Field shuffleManifestsField = StageExecutor.class.getDeclaredField("shuffleManifests");
-        shuffleManifestsField.setAccessible(true);
+        Field contextField = StageExecutor.class.getDeclaredField("context");
+        contextField.setAccessible(true);
+        QueryExecutionContext dispatchContext = (QueryExecutionContext) contextField.get(stageExec2);
         @SuppressWarnings("unchecked")
-        Map<Integer, Map<ShardId, Map<Integer, String>>> manifests =
-            (Map<Integer, Map<ShardId, Map<Integer, String>>>) shuffleManifestsField.get(stageExec2);
+        Map<Integer, Map<ShardId, Map<Integer, String>>> manifests = dispatchContext.shuffleManifests();
 
         Map<ShardId, Map<Integer, String>> stage0Manifest = manifests.get(0);
         assertNotNull("Stage 0 should have a shuffle manifest", stage0Manifest);
@@ -400,7 +400,7 @@ public class PlanWalkerAsyncTests extends OpenSearchTestCase {
      * Task 7.3: resolveShuffleTargets from child stage manifests.
      * Pre-populates stageOutputs with a PartitionManifest for a child stage, then builds
      * a parent stage with HASH_DISTRIBUTED exchange and walks the DAG. Verifies the returned
-     * TargetShard list has one entry per partition with nodes from the source shard set.
+     * ShardTarget list has one entry per partition with nodes from the source shard set.
      * Validates: Requirements 5.1, 5.2, 5.3
      */
     @SuppressWarnings("unchecked")
@@ -469,21 +469,21 @@ public class PlanWalkerAsyncTests extends OpenSearchTestCase {
         Field executorField = PlanWalker.class.getDeclaredField("stageExecutor");
         executorField.setAccessible(true);
         Object stageExec = executorField.get(walker);
-        Field shuffleManifestsField = StageExecutor.class.getDeclaredField("shuffleManifests");
-        shuffleManifestsField.setAccessible(true);
+        Field contextField = StageExecutor.class.getDeclaredField("context");
+        contextField.setAccessible(true);
+        QueryExecutionContext dispatchContext = (QueryExecutionContext) contextField.get(stageExec);
         @SuppressWarnings("unchecked")
-        Map<Integer, Map<ShardId, Map<Integer, String>>> shuffleManifests =
-            (Map<Integer, Map<ShardId, Map<Integer, String>>>) shuffleManifestsField.get(stageExec);
+        Map<Integer, Map<ShardId, Map<Integer, String>>> shuffleManifests = dispatchContext.shuffleManifests();
         shuffleManifests.put(0, manifestData);
 
         // Call resolveTargets via TargetResolver
-        List<TargetShard> targets = TargetResolver.resolveTargets(parentStage, clusterService, shuffleManifests);
+        List<ShardTarget> targets = TargetResolver.resolveTargets(parentStage, clusterService, shuffleManifests);
 
-        // Should have one TargetShard per partition
+        // Should have one ShardTarget per partition
         assertEquals("Should have one target per partition", numPartitions, targets.size());
 
         // All target nodes should come from the source shard node set {nodeA, nodeB}
-        for (TargetShard target : targets) {
+        for (ShardTarget target : targets) {
             assertTrue("Target node should be from source shard set", target.node() == nodeA || target.node() == nodeB);
             assertEquals("Target shard index should be _shuffle", "_shuffle", target.shardId().getIndexName());
         }
@@ -573,10 +573,11 @@ public class PlanWalkerAsyncTests extends OpenSearchTestCase {
         Field executorField3 = PlanWalker.class.getDeclaredField("stageExecutor");
         executorField3.setAccessible(true);
         Object stageExec3 = executorField3.get(walker);
-        Field completedStagesField = StageExecutor.class.getDeclaredField("completedStages");
-        completedStagesField.setAccessible(true);
+        Field contextField = StageExecutor.class.getDeclaredField("context");
+        contextField.setAccessible(true);
+        QueryExecutionContext dispatchContext = (QueryExecutionContext) contextField.get(stageExec3);
         @SuppressWarnings("unchecked")
-        Set<Integer> completed = (Set<Integer>) completedStagesField.get(stageExec3);
+        Set<Integer> completed = dispatchContext.completedStages();
 
         assertTrue("Coordinator gather stage should be in completedStages", completed.contains(1));
     }

@@ -47,8 +47,9 @@ public class TransportAnalyticsShardAction extends HandledTransportAction<Fragme
     @Override
     protected void doExecute(Task task, FragmentExecutionRequest request, ActionListener<FragmentExecutionResponse> listener) {
         try {
+            AnalyticsShardTask shardTask = task instanceof AnalyticsShardTask ? (AnalyticsShardTask) task : null;
             IndexShard shard = indicesService.indexServiceSafe(request.getShardId().getIndex()).getShard(request.getShardId().id());
-            listener.onResponse(searchService.executeFragment(request, shard));
+            listener.onResponse(searchService.executeFragment(request, shard, shardTask));
         } catch (Exception e) {
             listener.onFailure(e);
         }

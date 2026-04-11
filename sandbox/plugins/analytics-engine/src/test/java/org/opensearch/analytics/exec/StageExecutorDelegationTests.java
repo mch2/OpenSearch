@@ -48,7 +48,7 @@ import static org.mockito.Mockito.when;
 
 /**
  * Tests that {@link StageExecutor#dispatch} correctly delegates to
- * {@link StageExec} for non-coordinator-gather stages and handles
+ * {@link StageExecution} for non-coordinator-gather stages and handles
  * coordinator-gather stages inline.
  *
  * Validates: Requirements 6.1, 6.2, 6.3, 6.4, 7.3
@@ -121,16 +121,10 @@ public class StageExecutorDelegationTests extends OpenSearchTestCase {
         ClusterService clusterService = mock(ClusterService.class);
         ExchangeSink rootSink = new SimpleExchangeSink();
 
-        StageExecutor executor = new StageExecutor("test-query", clusterService, Runnable::run, rootSink);
+        StageExecutor executor = new StageExecutor("test-query", clusterService, Runnable::run, rootSink, null);
 
         // Coordinator-gather stage: StageInputScan, no exchange, no TableScan
-        OpenSearchStageInputScan stageInput = new OpenSearchStageInputScan(
-            cluster,
-            RelTraitSet.createEmpty(),
-            0,
-            rowType,
-            List.of()
-        );
+        OpenSearchStageInputScan stageInput = new OpenSearchStageInputScan(cluster, RelTraitSet.createEmpty(), 0, rowType, List.of());
         Stage stage = new Stage(1, stageInput, List.of(), null);
         stage.setPlanAlternatives(List.of(new StagePlan(stageInput, "lucene")));
 
@@ -160,7 +154,7 @@ public class StageExecutorDelegationTests extends OpenSearchTestCase {
     }
 
     /**
-     * Non-gather stage with 3 target shards delegates to StageExec.
+     * Non-gather stage with 3 target shards delegates to StageExecution.
      * Verifies 3 submissions are captured and driving 3 responses completes
      * the stage with listener.onResponse called.
      *
@@ -171,7 +165,7 @@ public class StageExecutorDelegationTests extends OpenSearchTestCase {
         ClusterService clusterService = buildMockClusterService("http_logs", numShards);
         ExchangeSink rootSink = new SimpleExchangeSink();
 
-        StageExecutor executor = new StageExecutor("test-query", clusterService, Runnable::run, rootSink);
+        StageExecutor executor = new StageExecutor("test-query", clusterService, Runnable::run, rootSink, null);
 
         OpenSearchTableScan scan = buildTableScan("http_logs", List.of("lucene"));
         StagePlan plan = new StagePlan(scan, "lucene");

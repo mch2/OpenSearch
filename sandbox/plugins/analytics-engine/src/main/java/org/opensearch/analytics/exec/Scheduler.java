@@ -18,7 +18,6 @@ import org.opensearch.transport.TransportService;
 import java.util.ArrayDeque;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
 
 /**
  * Coordinator-side orchestrator. Manages {@link PlanWalker} lifecycle via a
@@ -61,7 +60,7 @@ public class Scheduler {
         walkerPool.put(walker.getQueryId(), walker);
         Task parentTask = walker.getParentTask();
         Map<String, PendingExecutions> pendingPerNode = new ConcurrentHashMap<>();
-        walker.walk((req, node, l) -> dispatchTask(req, node, l, parentTask, pendingPerNode), ActionListener.wrap(result -> {
+        walker.walk((req, node, l) -> dispatchShardRequest(req, node, l, parentTask, pendingPerNode), ActionListener.wrap(result -> {
             walkerPool.remove(walker.getQueryId());
             listener.onResponse(result);
         }, e -> {
@@ -80,7 +79,7 @@ public class Scheduler {
      * to data nodes (enabling task cancellation cascading). When null (test mode),
      * falls back to {@link TransportService#sendRequest}.
      */
-    private void dispatchTask(
+    private void dispatchShardRequest(
         FragmentExecutionRequest request,
         DiscoveryNode targetNode,
         ActionListener<FragmentExecutionResponse> listener,

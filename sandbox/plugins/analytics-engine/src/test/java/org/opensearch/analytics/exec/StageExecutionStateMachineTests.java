@@ -17,7 +17,6 @@ import org.opensearch.test.OpenSearchTestCase;
 
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -32,15 +31,15 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * State-machine tests for {@link StageExec}. These tests exercise
+ * State-machine tests for {@link StageExecution}. These tests exercise
  * construction, {@code run()}, and the initial batch dispatch logic directly.
  *
- * <p>These tests will NOT compile until Phase 2 produces the {@code StageExec} class.
+ * <p>These tests will NOT compile until Phase 2 produces the {@code StageExecution} class.
  *
  * Validates: Requirements 9.1, 9.2, 9.3, 9.4, 2.2, 2.3, 2.4
  */
 @SuppressWarnings("unchecked")
-public class StageExecStateMachineTests extends OpenSearchTestCase {
+public class StageExecutionStateMachineTests extends OpenSearchTestCase {
 
     /**
      * After construction (before {@code run()} is called), the task must be in CREATED state.
@@ -49,28 +48,21 @@ public class StageExecStateMachineTests extends OpenSearchTestCase {
      */
     public void testInitialStateIsCreated() {
         Stage stage = mockStage(5);
-        List<TargetShard> targets = buildTargets(3);
+        List<ShardTarget> targets = buildTargets(3);
         ActionListener<Void> listener = mock(ActionListener.class);
         AtomicInteger submissions = new AtomicInteger(0);
         TaskSubmitter submitter = capturingSubmitter(submissions);
 
-        StageExec task = new StageExec(
+        StageExecution task = new StageExecution(
             stage,
             targets,
             List.of(),
-            false,
-            new ConcurrentHashMap<>(),
-            new StageMetrics(0),
-            "test-query",
-            Runnable::run,
-            mock(ExchangeSink.class),
-            ConcurrentHashMap.newKeySet(),
-            new ConcurrentHashMap<>(),
+            new QueryExecutionContext("test-query", Runnable::run, mock(ExchangeSink.class), ConcurrentHashMap.newKeySet(), new ConcurrentHashMap<>(), null),
             submitter,
             listener
         );
 
-        assertEquals("State must be CREATED before run() is called", StageExec.State.CREATED, task.getState());
+        assertEquals("State must be CREATED before run() is called", StageExecution.State.CREATED, task.getState());
     }
 
     /**
@@ -81,30 +73,23 @@ public class StageExecStateMachineTests extends OpenSearchTestCase {
      */
     public void testRunWithZeroTargetsGoesDirectlyToSucceeded() {
         Stage stage = mockStage(0);
-        List<TargetShard> targets = List.of();
+        List<ShardTarget> targets = List.of();
         ActionListener<Void> listener = mock(ActionListener.class);
         AtomicInteger submissions = new AtomicInteger(0);
         TaskSubmitter submitter = capturingSubmitter(submissions);
 
-        StageExec task = new StageExec(
+        StageExecution task = new StageExecution(
             stage,
             targets,
             List.of(),
-            false,
-            new ConcurrentHashMap<>(),
-            new StageMetrics(0),
-            "test-query",
-            Runnable::run,
-            mock(ExchangeSink.class),
-            ConcurrentHashMap.newKeySet(),
-            new ConcurrentHashMap<>(),
+            new QueryExecutionContext("test-query", Runnable::run, mock(ExchangeSink.class), ConcurrentHashMap.newKeySet(), new ConcurrentHashMap<>(), null),
             submitter,
             listener
         );
 
         task.run();
 
-        assertEquals("State must be SUCCEEDED after run() with zero targets", StageExec.State.SUCCEEDED, task.getState());
+        assertEquals("State must be SUCCEEDED after run() with zero targets", StageExecution.State.SUCCEEDED, task.getState());
         verify(listener, times(1)).onResponse(null);
         verify(listener, never()).onFailure(org.mockito.ArgumentMatchers.any());
         assertEquals("No submissions should have been made", 0, submissions.get());
@@ -119,30 +104,23 @@ public class StageExecStateMachineTests extends OpenSearchTestCase {
     public void testRunWithNonEmptyBatchTransitionsToRunning() {
         int numTargets = 3;
         Stage stage = mockStage(numTargets);
-        List<TargetShard> targets = buildTargets(numTargets);
+        List<ShardTarget> targets = buildTargets(numTargets);
         ActionListener<Void> listener = mock(ActionListener.class);
         AtomicInteger submissions = new AtomicInteger(0);
         TaskSubmitter submitter = capturingSubmitter(submissions);
 
-        StageExec task = new StageExec(
+        StageExecution task = new StageExecution(
             stage,
             targets,
             List.of(),
-            false,
-            new ConcurrentHashMap<>(),
-            new StageMetrics(0),
-            "test-query",
-            Runnable::run,
-            mock(ExchangeSink.class),
-            ConcurrentHashMap.newKeySet(),
-            new ConcurrentHashMap<>(),
+            new QueryExecutionContext("test-query", Runnable::run, mock(ExchangeSink.class), ConcurrentHashMap.newKeySet(), new ConcurrentHashMap<>(), null),
             submitter,
             listener
         );
 
         task.run();
 
-        assertEquals("State must be RUNNING after run() with non-empty batch", StageExec.State.RUNNING, task.getState());
+        assertEquals("State must be RUNNING after run() with non-empty batch", StageExecution.State.RUNNING, task.getState());
         assertEquals("Submissions must equal number of targets", numTargets, submissions.get());
     }
 
@@ -157,30 +135,23 @@ public class StageExecStateMachineTests extends OpenSearchTestCase {
         int numTargets = 5;
         int initialBatch = 2;
         Stage stage = mockStage(initialBatch);
-        List<TargetShard> targets = buildTargets(numTargets);
+        List<ShardTarget> targets = buildTargets(numTargets);
         ActionListener<Void> listener = mock(ActionListener.class);
         AtomicInteger submissions = new AtomicInteger(0);
         TaskSubmitter submitter = capturingSubmitter(submissions);
 
-        StageExec task = new StageExec(
+        StageExecution task = new StageExecution(
             stage,
             targets,
             List.of(),
-            false,
-            new ConcurrentHashMap<>(),
-            new StageMetrics(0),
-            "test-query",
-            Runnable::run,
-            mock(ExchangeSink.class),
-            ConcurrentHashMap.newKeySet(),
-            new ConcurrentHashMap<>(),
+            new QueryExecutionContext("test-query", Runnable::run, mock(ExchangeSink.class), ConcurrentHashMap.newKeySet(), new ConcurrentHashMap<>(), null),
             submitter,
             listener
         );
 
         task.run();
 
-        assertEquals("State must be RUNNING", StageExec.State.RUNNING, task.getState());
+        assertEquals("State must be RUNNING", StageExecution.State.RUNNING, task.getState());
         assertEquals("Only initialBatchSize submissions should occur", initialBatch, submissions.get());
         assertEquals("completedTasks must be 0 after run()", 0, task.getCompletedTasks());
         assertEquals("inFlight must equal initialBatchSize", initialBatch, task.getInFlight());
@@ -196,34 +167,23 @@ public class StageExecStateMachineTests extends OpenSearchTestCase {
         int numTargets = 3;
         int initialBatch = 10;
         Stage stage = mockStage(initialBatch);
-        List<TargetShard> targets = buildTargets(numTargets);
+        List<ShardTarget> targets = buildTargets(numTargets);
         ActionListener<Void> listener = mock(ActionListener.class);
         AtomicInteger submissions = new AtomicInteger(0);
         TaskSubmitter submitter = capturingSubmitter(submissions);
 
-        StageExec task = new StageExec(
+        StageExecution task = new StageExecution(
             stage,
             targets,
             List.of(),
-            false,
-            new ConcurrentHashMap<>(),
-            new StageMetrics(0),
-            "test-query",
-            Runnable::run,
-            mock(ExchangeSink.class),
-            ConcurrentHashMap.newKeySet(),
-            new ConcurrentHashMap<>(),
+            new QueryExecutionContext("test-query", Runnable::run, mock(ExchangeSink.class), ConcurrentHashMap.newKeySet(), new ConcurrentHashMap<>(), null),
             submitter,
             listener
         );
 
         task.run();
 
-        assertEquals(
-            "Submissions must be clamped to totalTargets when initialBatchSize exceeds it",
-            numTargets,
-            submissions.get()
-        );
+        assertEquals("Submissions must be clamped to totalTargets when initialBatchSize exceeds it", numTargets, submissions.get());
     }
 
     // ─── Phase 2: Response / failure state-transition tests ────────────
@@ -237,41 +197,34 @@ public class StageExecStateMachineTests extends OpenSearchTestCase {
     public void testAllSuccessfulResponsesEndInSucceeded() {
         int numTargets = 3;
         Stage stage = mockStage(numTargets);
-        List<TargetShard> targets = buildTargets(numTargets);
+        List<ShardTarget> targets = buildTargets(numTargets);
         ActionListener<Void> listener = mock(ActionListener.class);
-        StageMetrics metrics = new StageMetrics(0);
         ExchangeSink rootSink = mock(ExchangeSink.class);
         Set<Integer> completedStages = ConcurrentHashMap.newKeySet();
         Map<Integer, Map<ShardId, Map<Integer, String>>> shuffleManifests = new ConcurrentHashMap<>();
 
-        StageExec task = new StageExec(
+        StageExecution task = new StageExecution(
             stage,
             targets,
             List.of(),
-            false,
-            new ConcurrentHashMap<>(),
-            metrics,
-            "test-query",
-            Runnable::run,
-            rootSink,
-            completedStages,
-            shuffleManifests,
+            new QueryExecutionContext("test-query", Runnable::run, rootSink, completedStages, shuffleManifests, null),
             capturingSubmitter(new AtomicInteger(0)),
             listener
         );
 
         task.run();
-        assertEquals(StageExec.State.RUNNING, task.getState());
+        assertEquals(StageExecution.State.RUNNING, task.getState());
 
         // Drive 3 successful responses
         FragmentExecutionResponse response = new FragmentExecutionResponse(
-            List.of("field"), Collections.singletonList(new Object[] { "value" })
+            List.of("field"),
+            Collections.singletonList(new Object[] { "value" })
         );
         for (int i = 0; i < numTargets; i++) {
             task.handleResponse(response, targets.get(i));
         }
 
-        assertEquals("Final state must be SUCCEEDED", StageExec.State.SUCCEEDED, task.getState());
+        assertEquals("Final state must be SUCCEEDED", StageExecution.State.SUCCEEDED, task.getState());
         verify(listener, times(1)).onResponse(null);
         verify(listener, never()).onFailure(org.mockito.ArgumentMatchers.any());
         assertEquals("completedTasks must equal number of targets", numTargets, task.getCompletedTasks());
@@ -287,25 +240,17 @@ public class StageExecStateMachineTests extends OpenSearchTestCase {
     public void testAnyFailureEndsInFailed() {
         int numTargets = 3;
         Stage stage = mockStage(numTargets);
-        List<TargetShard> targets = buildTargets(numTargets);
+        List<ShardTarget> targets = buildTargets(numTargets);
         ActionListener<Void> listener = mock(ActionListener.class);
-        StageMetrics metrics = new StageMetrics(0);
         ExchangeSink rootSink = mock(ExchangeSink.class);
         Set<Integer> completedStages = ConcurrentHashMap.newKeySet();
         Map<Integer, Map<ShardId, Map<Integer, String>>> shuffleManifests = new ConcurrentHashMap<>();
 
-        StageExec task = new StageExec(
+        StageExecution task = new StageExecution(
             stage,
             targets,
             List.of(),
-            false,
-            new ConcurrentHashMap<>(),
-            metrics,
-            "test-query",
-            Runnable::run,
-            rootSink,
-            completedStages,
-            shuffleManifests,
+            new QueryExecutionContext("test-query", Runnable::run, rootSink, completedStages, shuffleManifests, null),
             capturingSubmitter(new AtomicInteger(0)),
             listener
         );
@@ -314,14 +259,15 @@ public class StageExecStateMachineTests extends OpenSearchTestCase {
 
         // 1 success, 1 failure, 1 success
         FragmentExecutionResponse response = new FragmentExecutionResponse(
-            List.of("field"), Collections.singletonList(new Object[] { "value" })
+            List.of("field"),
+            Collections.singletonList(new Object[] { "value" })
         );
         task.handleResponse(response, targets.get(0));
         RuntimeException cause = new RuntimeException("shard failed");
         task.handleFailure(cause);
         task.handleResponse(response, targets.get(2));
 
-        assertEquals("Final state must be FAILED", StageExec.State.FAILED, task.getState());
+        assertEquals("Final state must be FAILED", StageExecution.State.FAILED, task.getState());
         verify(listener, never()).onResponse(null);
         org.mockito.ArgumentCaptor<Exception> captor = org.mockito.ArgumentCaptor.forClass(Exception.class);
         verify(listener, times(1)).onFailure(captor.capture());
@@ -340,22 +286,13 @@ public class StageExecStateMachineTests extends OpenSearchTestCase {
     public void testFirstFailureIsCapturedSubsequentFailuresDiscarded() {
         int numTargets = 3;
         Stage stage = mockStage(numTargets);
-        List<TargetShard> targets = buildTargets(numTargets);
+        List<ShardTarget> targets = buildTargets(numTargets);
         ActionListener<Void> listener = mock(ActionListener.class);
-        StageMetrics metrics = new StageMetrics(0);
-
-        StageExec task = new StageExec(
+        StageExecution task = new StageExecution(
             stage,
             targets,
             List.of(),
-            false,
-            new ConcurrentHashMap<>(),
-            metrics,
-            "test-query",
-            Runnable::run,
-            mock(ExchangeSink.class),
-            ConcurrentHashMap.newKeySet(),
-            new ConcurrentHashMap<>(),
+            new QueryExecutionContext("test-query", Runnable::run, mock(ExchangeSink.class), ConcurrentHashMap.newKeySet(), new ConcurrentHashMap<>(), null),
             capturingSubmitter(new AtomicInteger(0)),
             listener
         );
@@ -367,12 +304,10 @@ public class StageExecStateMachineTests extends OpenSearchTestCase {
         task.handleFailure(first);
         task.handleFailure(second);
         // Drive one more response to drain inFlight to 0
-        FragmentExecutionResponse response = new FragmentExecutionResponse(
-            List.of("f"), Collections.singletonList(new Object[] { "v" })
-        );
+        FragmentExecutionResponse response = new FragmentExecutionResponse(List.of("f"), Collections.singletonList(new Object[] { "v" }));
         task.handleResponse(response, targets.get(2));
 
-        assertEquals("Final state must be FAILED", StageExec.State.FAILED, task.getState());
+        assertEquals("Final state must be FAILED", StageExecution.State.FAILED, task.getState());
         org.mockito.ArgumentCaptor<Exception> captor = org.mockito.ArgumentCaptor.forClass(Exception.class);
         verify(listener, times(1)).onFailure(captor.capture());
         assertSame("Cause must be the FIRST exception", first, captor.getValue().getCause());
@@ -386,22 +321,15 @@ public class StageExecStateMachineTests extends OpenSearchTestCase {
     public void testResponseFeedsRootSinkWhenNotCollectingMetadata() {
         int numTargets = 1;
         Stage stage = mockStage(numTargets);
-        List<TargetShard> targets = buildTargets(numTargets);
+        List<ShardTarget> targets = buildTargets(numTargets);
         ActionListener<Void> listener = mock(ActionListener.class);
         ExchangeSink rootSink = mock(ExchangeSink.class);
 
-        StageExec task = new StageExec(
+        StageExecution task = new StageExecution(
             stage,
             targets,
             List.of(),
-            false,
-            new ConcurrentHashMap<>(),
-            new StageMetrics(0),
-            "test-query",
-            Runnable::run,
-            rootSink,
-            ConcurrentHashMap.newKeySet(),
-            new ConcurrentHashMap<>(),
+            new QueryExecutionContext("test-query", Runnable::run, rootSink, ConcurrentHashMap.newKeySet(), new ConcurrentHashMap<>(), null),
             capturingSubmitter(new AtomicInteger(0)),
             listener
         );
@@ -409,7 +337,8 @@ public class StageExecStateMachineTests extends OpenSearchTestCase {
         task.run();
 
         FragmentExecutionResponse response = new FragmentExecutionResponse(
-            List.of("field"), Collections.singletonList(new Object[] { "value" })
+            List.of("field"),
+            Collections.singletonList(new Object[] { "value" })
         );
         task.handleResponse(response, targets.get(0));
 
@@ -425,23 +354,17 @@ public class StageExecStateMachineTests extends OpenSearchTestCase {
     public void testResponseStoresManifestWhenCollectingMetadata() {
         int numTargets = 1;
         Stage stage = mockStage(numTargets);
-        List<TargetShard> targets = buildTargets(numTargets);
+        when(stage.isShuffleWrite()).thenReturn(true);
+        List<ShardTarget> targets = buildTargets(numTargets);
         ActionListener<Void> listener = mock(ActionListener.class);
         ExchangeSink rootSink = mock(ExchangeSink.class);
-        Map<ShardId, Map<Integer, String>> manifests = new ConcurrentHashMap<>();
+        Map<Integer, Map<ShardId, Map<Integer, String>>> shuffleManifests = new ConcurrentHashMap<>();
 
-        StageExec task = new StageExec(
+        StageExecution task = new StageExecution(
             stage,
             targets,
             List.of(),
-            true,
-            manifests,
-            new StageMetrics(0),
-            "test-query",
-            Runnable::run,
-            rootSink,
-            ConcurrentHashMap.newKeySet(),
-            new ConcurrentHashMap<>(),
+            new QueryExecutionContext("test-query", Runnable::run, rootSink, ConcurrentHashMap.newKeySet(), shuffleManifests, null),
             capturingSubmitter(new AtomicInteger(0)),
             listener
         );
@@ -452,7 +375,7 @@ public class StageExecStateMachineTests extends OpenSearchTestCase {
         task.handleResponse(response, targets.get(0));
 
         verify(rootSink, never()).feed(org.mockito.ArgumentMatchers.any());
-        assertFalse("Manifests map should not be empty after metadata response", manifests.isEmpty());
+        assertFalse("Manifests map should not be empty after metadata response", shuffleManifests.isEmpty());
     }
 
     /**
@@ -464,22 +387,14 @@ public class StageExecStateMachineTests extends OpenSearchTestCase {
     public void testMetricsIncrementedOnSuccessAndFailure() {
         int numTargets = 3;
         Stage stage = mockStage(numTargets);
-        List<TargetShard> targets = buildTargets(numTargets);
+        List<ShardTarget> targets = buildTargets(numTargets);
         ActionListener<Void> listener = mock(ActionListener.class);
-        StageMetrics metrics = new StageMetrics(0);
 
-        StageExec task = new StageExec(
+        StageExecution task = new StageExecution(
             stage,
             targets,
             List.of(),
-            false,
-            new ConcurrentHashMap<>(),
-            metrics,
-            "test-query",
-            Runnable::run,
-            mock(ExchangeSink.class),
-            ConcurrentHashMap.newKeySet(),
-            new ConcurrentHashMap<>(),
+            new QueryExecutionContext("test-query", Runnable::run, mock(ExchangeSink.class), ConcurrentHashMap.newKeySet(), new ConcurrentHashMap<>(), null),
             capturingSubmitter(new AtomicInteger(0)),
             listener
         );
@@ -487,14 +402,15 @@ public class StageExecStateMachineTests extends OpenSearchTestCase {
         task.run();
 
         FragmentExecutionResponse response = new FragmentExecutionResponse(
-            List.of("field"), Collections.singletonList(new Object[] { "value" })
+            List.of("field"),
+            Collections.singletonList(new Object[] { "value" })
         );
         task.handleResponse(response, targets.get(0));
         task.handleResponse(response, targets.get(1));
         task.handleFailure(new RuntimeException("oops"));
 
-        assertEquals("tasksCompleted must be 2", 2, metrics.getTasksCompleted());
-        assertEquals("tasksFailed must be 1", 1, metrics.getTasksFailed());
+        assertEquals("tasksCompleted must be 2", 2, task.getMetrics().getTasksCompleted());
+        assertEquals("tasksFailed must be 1", 1, task.getMetrics().getTasksFailed());
     }
 
     // ─── Phase 2: Early termination and sliding-window semantics ──────
@@ -521,36 +437,30 @@ public class StageExecStateMachineTests extends OpenSearchTestCase {
             }
         };
         Stage stage = mockStageWithDecider(initialBatch, decider);
-        List<TargetShard> targets = buildTargets(numTargets);
+        List<ShardTarget> targets = buildTargets(numTargets);
         ActionListener<Void> listener = mock(ActionListener.class);
         AtomicInteger submissions = new AtomicInteger(0);
 
-        StageExec task = new StageExec(
+        StageExecution task = new StageExecution(
             stage,
             targets,
             List.of(),
-            false,
-            new ConcurrentHashMap<>(),
-            new StageMetrics(0),
-            "test-query",
-            Runnable::run,
-            mock(ExchangeSink.class),
-            ConcurrentHashMap.newKeySet(),
-            new ConcurrentHashMap<>(),
+            new QueryExecutionContext("test-query", Runnable::run, mock(ExchangeSink.class), ConcurrentHashMap.newKeySet(), new ConcurrentHashMap<>(), null),
             capturingSubmitter(submissions),
             listener
         );
 
         task.run();
-        assertEquals(StageExec.State.RUNNING, task.getState());
+        assertEquals(StageExecution.State.RUNNING, task.getState());
 
         // Drive 1st completion — decider says terminate → finishStageInternal called immediately
         FragmentExecutionResponse response = new FragmentExecutionResponse(
-            List.of("field"), Collections.singletonList(new Object[] { "value" })
+            List.of("field"),
+            Collections.singletonList(new Object[] { "value" })
         );
         task.handleResponse(response, targets.get(0));
 
-        assertEquals("State must be SUCCEEDED after decider triggers", StageExec.State.SUCCEEDED, task.getState());
+        assertEquals("State must be SUCCEEDED after decider triggers", StageExecution.State.SUCCEEDED, task.getState());
         verify(listener, times(1)).onResponse(null);
         verify(listener, never()).onFailure(org.mockito.ArgumentMatchers.any());
     }
@@ -564,22 +474,15 @@ public class StageExecStateMachineTests extends OpenSearchTestCase {
     public void testLateResponseAfterTerminalIsDiscarded() {
         int numTargets = 3;
         Stage stage = mockStage(numTargets);
-        List<TargetShard> targets = buildTargets(numTargets);
+        List<ShardTarget> targets = buildTargets(numTargets);
         ActionListener<Void> listener = mock(ActionListener.class);
         ExchangeSink rootSink = mock(ExchangeSink.class);
 
-        StageExec task = new StageExec(
+        StageExecution task = new StageExecution(
             stage,
             targets,
             List.of(),
-            false,
-            new ConcurrentHashMap<>(),
-            new StageMetrics(0),
-            "test-query",
-            Runnable::run,
-            rootSink,
-            ConcurrentHashMap.newKeySet(),
-            new ConcurrentHashMap<>(),
+            new QueryExecutionContext("test-query", Runnable::run, rootSink, ConcurrentHashMap.newKeySet(), new ConcurrentHashMap<>(), null),
             capturingSubmitter(new AtomicInteger(0)),
             listener
         );
@@ -588,19 +491,20 @@ public class StageExecStateMachineTests extends OpenSearchTestCase {
 
         // Drive 3 responses → SUCCEEDED
         FragmentExecutionResponse response = new FragmentExecutionResponse(
-            List.of("field"), Collections.singletonList(new Object[] { "value" })
+            List.of("field"),
+            Collections.singletonList(new Object[] { "value" })
         );
         for (int i = 0; i < numTargets; i++) {
             task.handleResponse(response, targets.get(i));
         }
-        assertEquals(StageExec.State.SUCCEEDED, task.getState());
+        assertEquals(StageExecution.State.SUCCEEDED, task.getState());
         verify(listener, times(1)).onResponse(null);
 
         // 4th late response — should be discarded
-        TargetShard extraTarget = buildTargets(4).get(3);
+        ShardTarget extraTarget = buildTargets(4).get(3);
         task.handleResponse(response, extraTarget);
 
-        assertEquals("State must remain SUCCEEDED after late response", StageExec.State.SUCCEEDED, task.getState());
+        assertEquals("State must remain SUCCEEDED after late response", StageExecution.State.SUCCEEDED, task.getState());
         verify(listener, times(1)).onResponse(null);
     }
 
@@ -613,21 +517,14 @@ public class StageExecStateMachineTests extends OpenSearchTestCase {
     public void testLateFailureAfterTerminalIsDiscarded() {
         int numTargets = 3;
         Stage stage = mockStage(numTargets);
-        List<TargetShard> targets = buildTargets(numTargets);
+        List<ShardTarget> targets = buildTargets(numTargets);
         ActionListener<Void> listener = mock(ActionListener.class);
 
-        StageExec task = new StageExec(
+        StageExecution task = new StageExecution(
             stage,
             targets,
             List.of(),
-            false,
-            new ConcurrentHashMap<>(),
-            new StageMetrics(0),
-            "test-query",
-            Runnable::run,
-            mock(ExchangeSink.class),
-            ConcurrentHashMap.newKeySet(),
-            new ConcurrentHashMap<>(),
+            new QueryExecutionContext("test-query", Runnable::run, mock(ExchangeSink.class), ConcurrentHashMap.newKeySet(), new ConcurrentHashMap<>(), null),
             capturingSubmitter(new AtomicInteger(0)),
             listener
         );
@@ -636,17 +533,18 @@ public class StageExecStateMachineTests extends OpenSearchTestCase {
 
         // Drive 3 responses → SUCCEEDED
         FragmentExecutionResponse response = new FragmentExecutionResponse(
-            List.of("field"), Collections.singletonList(new Object[] { "value" })
+            List.of("field"),
+            Collections.singletonList(new Object[] { "value" })
         );
         for (int i = 0; i < numTargets; i++) {
             task.handleResponse(response, targets.get(i));
         }
-        assertEquals(StageExec.State.SUCCEEDED, task.getState());
+        assertEquals(StageExecution.State.SUCCEEDED, task.getState());
 
         // Late failure — should be discarded
         task.handleFailure(new RuntimeException("late failure"));
 
-        assertEquals("State must remain SUCCEEDED after late failure", StageExec.State.SUCCEEDED, task.getState());
+        assertEquals("State must remain SUCCEEDED after late failure", StageExecution.State.SUCCEEDED, task.getState());
         verify(listener, never()).onFailure(org.mockito.ArgumentMatchers.any());
     }
 
@@ -660,22 +558,15 @@ public class StageExecStateMachineTests extends OpenSearchTestCase {
         int numTargets = 5;
         int initialBatch = 2;
         Stage stage = mockStage(initialBatch);
-        List<TargetShard> targets = buildTargets(numTargets);
+        List<ShardTarget> targets = buildTargets(numTargets);
         ActionListener<Void> listener = mock(ActionListener.class);
         AtomicInteger submissions = new AtomicInteger(0);
 
-        StageExec task = new StageExec(
+        StageExecution task = new StageExecution(
             stage,
             targets,
             List.of(),
-            false,
-            new ConcurrentHashMap<>(),
-            new StageMetrics(0),
-            "test-query",
-            Runnable::run,
-            mock(ExchangeSink.class),
-            ConcurrentHashMap.newKeySet(),
-            new ConcurrentHashMap<>(),
+            new QueryExecutionContext("test-query", Runnable::run, mock(ExchangeSink.class), ConcurrentHashMap.newKeySet(), new ConcurrentHashMap<>(), null),
             capturingSubmitter(submissions),
             listener
         );
@@ -685,7 +576,8 @@ public class StageExecStateMachineTests extends OpenSearchTestCase {
 
         // Drive 1 handleResponse for targets.get(0) → should dispatch next target (index 2)
         FragmentExecutionResponse response = new FragmentExecutionResponse(
-            List.of("field"), Collections.singletonList(new Object[] { "value" })
+            List.of("field"),
+            Collections.singletonList(new Object[] { "value" })
         );
         task.handleResponse(response, targets.get(0));
 
@@ -713,22 +605,15 @@ public class StageExecStateMachineTests extends OpenSearchTestCase {
             }
         };
         Stage stage = mockStageWithDecider(initialBatch, decider);
-        List<TargetShard> targets = buildTargets(numTargets);
+        List<ShardTarget> targets = buildTargets(numTargets);
         ActionListener<Void> listener = mock(ActionListener.class);
         AtomicInteger submissions = new AtomicInteger(0);
 
-        StageExec task = new StageExec(
+        StageExecution task = new StageExecution(
             stage,
             targets,
             List.of(),
-            false,
-            new ConcurrentHashMap<>(),
-            new StageMetrics(0),
-            "test-query",
-            Runnable::run,
-            mock(ExchangeSink.class),
-            ConcurrentHashMap.newKeySet(),
-            new ConcurrentHashMap<>(),
+            new QueryExecutionContext("test-query", Runnable::run, mock(ExchangeSink.class), ConcurrentHashMap.newKeySet(), new ConcurrentHashMap<>(), null),
             capturingSubmitter(submissions),
             listener
         );
@@ -738,7 +623,8 @@ public class StageExecStateMachineTests extends OpenSearchTestCase {
 
         // Drive 1 handleResponse → decider terminates, no follow-up dispatch
         FragmentExecutionResponse response = new FragmentExecutionResponse(
-            List.of("field"), Collections.singletonList(new Object[] { "value" })
+            List.of("field"),
+            Collections.singletonList(new Object[] { "value" })
         );
         task.handleResponse(response, targets.get(0));
 
@@ -767,41 +653,35 @@ public class StageExecStateMachineTests extends OpenSearchTestCase {
             }
         };
         Stage stage = mockStageWithDecider(initialBatch, decider);
-        List<TargetShard> targets = buildTargets(numTargets);
+        List<ShardTarget> targets = buildTargets(numTargets);
         ActionListener<Void> listener = mock(ActionListener.class);
 
-        StageExec task = new StageExec(
+        StageExecution task = new StageExecution(
             stage,
             targets,
             List.of(),
-            false,
-            new ConcurrentHashMap<>(),
-            new StageMetrics(0),
-            "test-query",
-            Runnable::run,
-            mock(ExchangeSink.class),
-            ConcurrentHashMap.newKeySet(),
-            new ConcurrentHashMap<>(),
+            new QueryExecutionContext("test-query", Runnable::run, mock(ExchangeSink.class), ConcurrentHashMap.newKeySet(), new ConcurrentHashMap<>(), null),
             capturingSubmitter(new AtomicInteger(0)),
             listener
         );
 
         task.run();
-        assertEquals(StageExec.State.RUNNING, task.getState());
+        assertEquals(StageExecution.State.RUNNING, task.getState());
 
         // Drive 1st completion → TERMINATED → finishStageInternal → SUCCEEDED, listener called
         FragmentExecutionResponse response = new FragmentExecutionResponse(
-            List.of("field"), Collections.singletonList(new Object[] { "value" })
+            List.of("field"),
+            Collections.singletonList(new Object[] { "value" })
         );
         task.handleResponse(response, targets.get(0));
 
-        assertEquals("State must be SUCCEEDED after termination finishes immediately", StageExec.State.SUCCEEDED, task.getState());
+        assertEquals("State must be SUCCEEDED after termination finishes immediately", StageExecution.State.SUCCEEDED, task.getState());
         verify(listener, times(1)).onResponse(null);
 
         // Drive 2nd completion → late, discarded (state is already SUCCEEDED)
         task.handleResponse(response, targets.get(1));
 
-        assertEquals("State must remain SUCCEEDED after late response", StageExec.State.SUCCEEDED, task.getState());
+        assertEquals("State must remain SUCCEEDED after late response", StageExecution.State.SUCCEEDED, task.getState());
         // listener.onResponse still called only once
         verify(listener, times(1)).onResponse(null);
         verify(listener, never()).onFailure(org.mockito.ArgumentMatchers.any());
@@ -819,7 +699,7 @@ public class StageExecStateMachineTests extends OpenSearchTestCase {
     public void testConcurrentCompletionsSerializeCorrectly() throws Exception {
         int numTargets = 10;
         Stage stage = mockStage(numTargets);
-        List<TargetShard> targets = buildTargets(numTargets);
+        List<ShardTarget> targets = buildTargets(numTargets);
         AtomicInteger listenerCalls = new AtomicInteger(0);
         ActionListener<Void> listener = new ActionListener<>() {
             @Override
@@ -833,18 +713,11 @@ public class StageExecStateMachineTests extends OpenSearchTestCase {
             }
         };
 
-        StageExec task = new StageExec(
+        StageExecution task = new StageExecution(
             stage,
             targets,
             List.of(),
-            false,
-            new ConcurrentHashMap<>(),
-            new StageMetrics(0),
-            "test-query",
-            Runnable::run,
-            mock(ExchangeSink.class),
-            ConcurrentHashMap.newKeySet(),
-            new ConcurrentHashMap<>(),
+            new QueryExecutionContext("test-query", Runnable::run, mock(ExchangeSink.class), ConcurrentHashMap.newKeySet(), new ConcurrentHashMap<>(), null),
             capturingSubmitter(new AtomicInteger(0)),
             listener
         );
@@ -874,7 +747,7 @@ public class StageExecStateMachineTests extends OpenSearchTestCase {
         startLatch.countDown();
         doneLatch.await();
 
-        assertEquals(StageExec.State.SUCCEEDED, task.getState());
+        assertEquals(StageExecution.State.SUCCEEDED, task.getState());
         assertEquals(1, listenerCalls.get());
         assertEquals(numTargets, task.getCompletedTasks());
     }
@@ -889,7 +762,7 @@ public class StageExecStateMachineTests extends OpenSearchTestCase {
     public void testConcurrentCompletionsWithOneFailureEndsFailed() throws Exception {
         int numTargets = 10;
         Stage stage = mockStage(numTargets);
-        List<TargetShard> targets = buildTargets(numTargets);
+        List<ShardTarget> targets = buildTargets(numTargets);
         AtomicInteger listenerCalls = new AtomicInteger(0);
         AtomicInteger failureCalls = new AtomicInteger(0);
         ActionListener<Void> listener = new ActionListener<>() {
@@ -905,18 +778,11 @@ public class StageExecStateMachineTests extends OpenSearchTestCase {
             }
         };
 
-        StageExec task = new StageExec(
+        StageExecution task = new StageExecution(
             stage,
             targets,
             List.of(),
-            false,
-            new ConcurrentHashMap<>(),
-            new StageMetrics(0),
-            "test-query",
-            Runnable::run,
-            mock(ExchangeSink.class),
-            ConcurrentHashMap.newKeySet(),
-            new ConcurrentHashMap<>(),
+            new QueryExecutionContext("test-query", Runnable::run, mock(ExchangeSink.class), ConcurrentHashMap.newKeySet(), new ConcurrentHashMap<>(), null),
             capturingSubmitter(new AtomicInteger(0)),
             listener
         );
@@ -950,7 +816,7 @@ public class StageExecStateMachineTests extends OpenSearchTestCase {
         startLatch.countDown();
         doneLatch.await();
 
-        assertEquals(StageExec.State.FAILED, task.getState());
+        assertEquals(StageExecution.State.FAILED, task.getState());
         assertEquals(1, listenerCalls.get());
         assertEquals(1, failureCalls.get());
     }
@@ -978,7 +844,7 @@ public class StageExecStateMachineTests extends OpenSearchTestCase {
             }
         };
         Stage stage = mockStageWithDecider(initialBatch, decider);
-        List<TargetShard> targets = buildTargets(numTargets);
+        List<ShardTarget> targets = buildTargets(numTargets);
         AtomicInteger listenerCalls = new AtomicInteger(0);
         ActionListener<Void> listener = new ActionListener<>() {
             @Override
@@ -993,18 +859,11 @@ public class StageExecStateMachineTests extends OpenSearchTestCase {
         };
         AtomicInteger submissions = new AtomicInteger(0);
 
-        StageExec task = new StageExec(
+        StageExecution task = new StageExecution(
             stage,
             targets,
             List.of(),
-            false,
-            new ConcurrentHashMap<>(),
-            new StageMetrics(0),
-            "test-query",
-            Runnable::run,
-            mock(ExchangeSink.class),
-            ConcurrentHashMap.newKeySet(),
-            new ConcurrentHashMap<>(),
+            new QueryExecutionContext("test-query", Runnable::run, mock(ExchangeSink.class), ConcurrentHashMap.newKeySet(), new ConcurrentHashMap<>(), null),
             capturingSubmitter(submissions),
             listener
         );
@@ -1036,18 +895,15 @@ public class StageExecStateMachineTests extends OpenSearchTestCase {
         doneLatch.await();
 
         // State must be terminal
-        StageExec.State finalState = task.getState();
+        StageExecution.State finalState = task.getState();
         assertTrue(
             "State must be terminal (SUCCEEDED or FAILED), was " + finalState,
-            finalState == StageExec.State.SUCCEEDED || finalState == StageExec.State.FAILED
+            finalState == StageExecution.State.SUCCEEDED || finalState == StageExecution.State.FAILED
         );
         // Listener called exactly once
         assertEquals(1, listenerCalls.get());
         // Submitter calls bounded: initial batch (3) + at most 1 follow-up per completion before termination
-        assertTrue(
-            "Submitter calls must be bounded, was " + submissions.get(),
-            submissions.get() <= initialBatch + initialBatch
-        );
+        assertTrue("Submitter calls must be bounded, was " + submissions.get(), submissions.get() <= initialBatch + initialBatch);
     }
 
     /**
@@ -1072,7 +928,7 @@ public class StageExecStateMachineTests extends OpenSearchTestCase {
             }
         };
         Stage stage = mockStageWithDecider(initialBatch, decider);
-        List<TargetShard> targets = buildTargets(numTargets);
+        List<ShardTarget> targets = buildTargets(numTargets);
         AtomicInteger listenerCalls = new AtomicInteger(0);
         ActionListener<Void> listener = new ActionListener<>() {
             @Override
@@ -1087,18 +943,11 @@ public class StageExecStateMachineTests extends OpenSearchTestCase {
         };
         AtomicInteger submissions = new AtomicInteger(0);
 
-        StageExec task = new StageExec(
+        StageExecution task = new StageExecution(
             stage,
             targets,
             List.of(),
-            false,
-            new ConcurrentHashMap<>(),
-            new StageMetrics(0),
-            "test-query",
-            Runnable::run,
-            mock(ExchangeSink.class),
-            ConcurrentHashMap.newKeySet(),
-            new ConcurrentHashMap<>(),
+            new QueryExecutionContext("test-query", Runnable::run, mock(ExchangeSink.class), ConcurrentHashMap.newKeySet(), new ConcurrentHashMap<>(), null),
             capturingSubmitter(submissions),
             listener
         );
@@ -1112,11 +961,7 @@ public class StageExecStateMachineTests extends OpenSearchTestCase {
         );
         task.handleResponse(response, targets.get(0));
 
-        assertEquals(
-            "Submitter must have received exactly 2 calls (no 3rd dispatch after termination)",
-            2,
-            submissions.get()
-        );
+        assertEquals("Submitter must have received exactly 2 calls (no 3rd dispatch after termination)", 2, submissions.get());
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────
@@ -1128,11 +973,13 @@ public class StageExecStateMachineTests extends OpenSearchTestCase {
     private Stage mockStage(int initialBatchSize) {
         TerminationDecider decider = mock(TerminationDecider.class);
         when(decider.initialBatchSize(org.mockito.ArgumentMatchers.anyInt())).thenReturn(initialBatchSize);
-        when(decider.shouldTerminate(
-            org.mockito.ArgumentMatchers.any(),
-            org.mockito.ArgumentMatchers.anyInt(),
-            org.mockito.ArgumentMatchers.anyInt()
-        )).thenReturn(false);
+        when(
+            decider.shouldTerminate(
+                org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt()
+            )
+        ).thenReturn(false);
 
         Stage stage = mock(Stage.class);
         when(stage.getTerminationDecider()).thenReturn(decider);
@@ -1157,13 +1004,13 @@ public class StageExecStateMachineTests extends OpenSearchTestCase {
     /**
      * Build a list of {@code count} target shards with distinct shard IDs and mock nodes.
      */
-    private List<TargetShard> buildTargets(int count) {
-        List<TargetShard> targets = new ArrayList<>();
+    private List<ShardTarget> buildTargets(int count) {
+        List<ShardTarget> targets = new ArrayList<>();
         Index index = new Index("test_index", "_na_");
         for (int i = 0; i < count; i++) {
             ShardId shardId = new ShardId(index, i);
             DiscoveryNode node = mock(DiscoveryNode.class);
-            targets.add(new TargetShard(shardId, node));
+            targets.add(new ShardTarget(shardId, node));
         }
         return targets;
     }

@@ -37,7 +37,7 @@ public final class TargetResolver {
      * Uses {@code stage.getTableName()} and {@code stage.isShuffleWrite()}
      * — no RelNode tree walking needed.
      */
-    public static List<TargetShard> resolveTargets(
+    public static List<ShardTarget> resolveTargets(
         Stage stage,
         ClusterService clusterService,
         Map<Integer, Map<ShardId, Map<Integer, String>>> shuffleManifests
@@ -51,24 +51,24 @@ public final class TargetResolver {
         return List.of();
     }
 
-    static List<TargetShard> resolveIndexShards(String tableName, ClusterService clusterService) {
+    static List<ShardTarget> resolveIndexShards(String tableName, ClusterService clusterService) {
         ClusterState state = clusterService.state();
         // TODO: support routing/preference params?
         GroupShardsIterator<ShardIterator> shardIterators = clusterService.operationRouting()
             .searchShards(state, new String[] { tableName }, null, null);
 
-        List<TargetShard> targets = new ArrayList<>();
+        List<ShardTarget> targets = new ArrayList<>();
         for (ShardIterator shardIt : shardIterators) {
             ShardRouting shard = shardIt.nextOrNull();
             if (shard != null) {
                 DiscoveryNode node = state.nodes().get(shard.currentNodeId());
-                targets.add(new TargetShard(shard.shardId(), node));
+                targets.add(new ShardTarget(shard.shardId(), node));
             }
         }
         return targets;
     }
 
-    static List<TargetShard> resolveShuffleTargets(
+    static List<ShardTarget> resolveShuffleTargets(
         Stage stage,
         Map<Integer, Map<ShardId, Map<Integer, String>>> shuffleManifests,
         ClusterService clusterService
@@ -82,13 +82,9 @@ public final class TargetResolver {
         throw new IllegalStateException("No partition manifest found for stage " + stage.getStageId());
     }
 
-    static List<TargetShard> pickShuffleTargetNodes(
-        Map<ShardId, Map<Integer, String>> manifest,
-        ClusterService clusterService
-    ) {
+    static List<ShardTarget> pickShuffleTargetNodes(Map<ShardId, Map<Integer, String>> manifest, ClusterService clusterService) {
         ClusterState state = clusterService.state();
-        List<DiscoveryNode> sourceNodes = manifest
-            .keySet()
+        List<DiscoveryNode> sourceNodes = manifest.keySet()
             .stream()
             .map(
                 shardId -> state.nodes()
@@ -99,10 +95,10 @@ public final class TargetResolver {
 
         int numPartitions = manifest.values().iterator().next().size();
 
-        List<TargetShard> targets = new ArrayList<>();
+        List<ShardTarget> targets = new ArrayList<>();
         for (int p = 0; p < numPartitions; p++) {
             DiscoveryNode node = sourceNodes.get(p % sourceNodes.size());
-            targets.add(new TargetShard(new ShardId(new Index("_shuffle", "_na_"), p), node));
+            targets.add(new ShardTarget(new ShardId(new Index("_shuffle", "_na_"), p), node));
         }
         return targets;
     }

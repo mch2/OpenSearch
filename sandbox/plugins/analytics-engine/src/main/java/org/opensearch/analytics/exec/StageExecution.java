@@ -11,12 +11,14 @@ package org.opensearch.analytics.exec;
 import org.opensearch.analytics.planner.dag.Stage;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.index.shard.ShardId;
+import org.opensearch.core.tasks.TaskCancelledException;
+import org.opensearch.tasks.CancellableTask;
 
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.Executor;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -33,102 +35,83 @@ import java.util.concurrent.atomic.AtomicReference;
  *
  * @opensearch.internal
  */
-final class StageExec {
+final class StageExecution {
 
-    // ─── State machine ──────────────────────────────────────────────────
-    enum State { CREATED, RUNNING, TERMINATED, SUCCEEDED, FAILED }
+    enum State {
+        CREATED,
+        RUNNING,
+        TERMINATED,
+        SUCCEEDED,
+        FAILED
+    }
 
     private final AtomicReference<State> state = new AtomicReference<>(State.CREATED);
 
-    // ─── Sliding-window state ───────────────────────────────────────────
-    private final AtomicInteger nextTargetIndex = new AtomicInteger(0);
+    // Manage outbound tasks for early termination
+    private final ConcurrentLinkedQueue<ShardTarget> pendingTargets;
     private final AtomicInteger inFlight = new AtomicInteger(0);
     private final AtomicInteger completedTasks = new AtomicInteger(0);
     private final AtomicReference<Exception> failure = new AtomicReference<>();
 
-    // ─── Stage-scoped inputs (immutable after construction) ─────────────
     private final Stage stage;
-    private final List<TargetShard> targets;
-    private final int totalTargets;
+    private final List<ShardTarget> targets;
     private final List<FragmentExecutionRequest.PlanAlternative> planAlternatives;
-    private final TerminationDecider decider;
-    private final boolean collectMetadata;
+    private final TaskSubmitter submitter;
+    private final ActionListener<Void> listener;
+    private final QueryExecutionContext context;
+
+    // ─── Per-dispatch state (created internally) ─────────────────────────
     private final Map<ShardId, Map<Integer, String>> manifests;
     private final StageMetrics metrics;
 
-    // ─── Cross-stage / per-query references ─────────────────────────────
-    private final String queryId;
-    private final Executor searchExecutor;
-    private final ExchangeSink rootSink;
-    private final Set<Integer> completedStages;
-    private final Map<Integer, Map<ShardId, Map<Integer, String>>> shuffleManifests;
-    private final TaskSubmitter submitter;
-    private final ActionListener<Void> listener;
-
-    // ─── Construction ───────────────────────────────────────────────────
-    StageExec(
+    StageExecution(
         Stage stage,
-        List<TargetShard> targets,
+        List<ShardTarget> targets,
         List<FragmentExecutionRequest.PlanAlternative> planAlternatives,
-        boolean collectMetadata,
-        Map<ShardId, Map<Integer, String>> manifests,
-        StageMetrics metrics,
-        String queryId,
-        Executor searchExecutor,
-        ExchangeSink rootSink,
-        Set<Integer> completedStages,
-        Map<Integer, Map<ShardId, Map<Integer, String>>> shuffleManifests,
+        QueryExecutionContext context,
         TaskSubmitter submitter,
         ActionListener<Void> listener
     ) {
         this.stage = stage;
         this.targets = targets;
-        this.totalTargets = targets.size();
+        this.pendingTargets = new ConcurrentLinkedQueue<>(targets);
         this.planAlternatives = planAlternatives;
-        this.decider = stage.getTerminationDecider();
-        this.collectMetadata = collectMetadata;
-        this.manifests = manifests;
-        this.metrics = metrics;
-        this.queryId = queryId;
-        this.searchExecutor = searchExecutor;
-        this.rootSink = rootSink;
-        this.completedStages = completedStages;
-        this.shuffleManifests = shuffleManifests;
+        this.context = context;
         this.submitter = submitter;
         this.listener = listener;
+        this.manifests = new ConcurrentHashMap<>();
+        this.metrics = new StageMetrics(stage.getStageId());
     }
 
     // ─── Entry point ────────────────────────────────────────────────────
     void run() {
-        int actualBatch = Math.min(decider.initialBatchSize(totalTargets), totalTargets);
-        if (actualBatch == 0) {
+        metrics.recordStart();
+        int initialDispatchCount = Math.min(stage.getTerminationDecider().initialBatchSize(targets.size()), targets.size());
+        if (initialDispatchCount == 0) {
             transitionTo(State.CREATED, State.SUCCEEDED);
             metrics.recordEnd();
-            completedStages.add(stage.getStageId());
+            context.completedStages().add(stage.getStageId());
             listener.onResponse(null);
             return;
         }
-        nextTargetIndex.set(actualBatch);
-        inFlight.set(actualBatch);
+        inFlight.set(initialDispatchCount);
         transitionTo(State.CREATED, State.RUNNING);
-        for (int i = 0; i < actualBatch; i++) {
-            submitTask(i);
+        for (int i = 0; i < initialDispatchCount; i++) {
+            ShardTarget target = pendingTargets.poll();
+            if (target == null) break;  // re-entrant completion already drained the queue
+            dispatchShardTask(target);
         }
     }
 
     // ─── Dispatch primitive ────────────────────────────────────────────
-    private void submitTask(int index) {
-        TargetShard target = targets.get(index);
+    private void dispatchShardTask(ShardTarget target) {
         FragmentExecutionRequest request = new FragmentExecutionRequest(
-            queryId,
-            stage.getStageId(),
-            target.shardId(),
-            planAlternatives
+            context.queryId(), stage.getStageId(), target.shardId(), planAlternatives
         );
         submitter.submit(request, target.node(), new ActionListener<>() {
             @Override
             public void onResponse(FragmentExecutionResponse response) {
-                searchExecutor.execute(() -> handleResponse(response, target));
+                context.searchExecutor().execute(() -> handleResponse(response, target));
             }
 
             @Override
@@ -138,16 +121,15 @@ final class StageExec {
         });
     }
 
-    // ─── Response handling (package-private for test drive) ─────────────
-    void handleResponse(FragmentExecutionResponse response, TargetShard target) {
+    void handleResponse(FragmentExecutionResponse response, ShardTarget target) {
         if (isTerminated()) {
             inFlight.decrementAndGet();
             return;
         }
-        if (collectMetadata) {
+        if (stage.isShuffleWrite()) {
             manifests.put(target.shardId(), parseManifest(response.getMetadata()));
         } else {
-            rootSink.feed(response);
+            context.rootSink().feed(response);
         }
         metrics.incrementTasksCompleted();
         onTaskCompletion();
@@ -163,25 +145,24 @@ final class StageExec {
         onTaskCompletion();
     }
 
-    // ─── Completion plumbing ────────────────────────────────────────────
     private void onTaskCompletion() {
         int completed = completedTasks.incrementAndGet();
 
         // Check termination — if decider says stop, finish immediately
         if (state.get() == State.RUNNING) {
-            if (decider.shouldTerminate(rootSink, completed, totalTargets)) {
+            if (stage.getTerminationDecider().shouldTerminate(context.rootSink(), completed, targets.size())) {
                 state.compareAndSet(State.RUNNING, State.TERMINATED);
                 finishStageInternal();
                 return;
             }
         }
 
-        // Dispatch next target if still running and more remain
+        // Dispatch next pending target if still running
         if (state.get() == State.RUNNING) {
-            int next = nextTargetIndex.getAndIncrement();
-            if (next < totalTargets) {
+            ShardTarget next = pendingTargets.poll();
+            if (next != null) {
                 inFlight.incrementAndGet();
-                submitTask(next);
+                dispatchShardTask(next);
             }
         }
 
@@ -196,13 +177,17 @@ final class StageExec {
         Exception captured = failure.get();
         if (captured != null) {
             transitionToTerminal(State.FAILED);
-            listener.onFailure(new RuntimeException("Stage " + stage.getStageId() + " failed", captured));
+            if (context.parentTask() instanceof CancellableTask ct && ct.isCancelled()) {
+                listener.onFailure(new TaskCancelledException("query cancelled"));
+            } else {
+                listener.onFailure(new RuntimeException("Stage " + stage.getStageId() + " failed", captured));
+            }
         } else {
             transitionToTerminal(State.SUCCEEDED);
-            if (collectMetadata) {
-                shuffleManifests.put(stage.getStageId(), manifests);
+            if (stage.isShuffleWrite()) {
+                context.shuffleManifests().put(stage.getStageId(), manifests);
             }
-            completedStages.add(stage.getStageId());
+            context.completedStages().add(stage.getStageId());
             listener.onResponse(null);
         }
     }
@@ -235,6 +220,10 @@ final class StageExec {
     // ─── Test accessors (package-private) ───────────────────────────────
     State getState() {
         return state.get();
+    }
+
+    StageMetrics getMetrics() {
+        return metrics;
     }
 
     int getCompletedTasks() {

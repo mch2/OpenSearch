@@ -15,13 +15,16 @@ import org.opensearch.action.ActionRequest;
 import org.opensearch.action.support.ActionFilters;
 import org.opensearch.action.support.HandledTransportAction;
 import org.opensearch.action.support.PlainActionFuture;
+import org.opensearch.action.support.TimeoutTaskCancellationUtility;
 import org.opensearch.analytics.EngineContext;
 import org.opensearch.analytics.planner.CapabilityRegistry;
 import org.opensearch.analytics.planner.PlannerContext;
 import org.opensearch.analytics.planner.PlannerImpl;
 import org.opensearch.analytics.planner.dag.QueryDAG;
 import org.opensearch.cluster.service.ClusterService;
+import org.opensearch.common.Nullable;
 import org.opensearch.common.inject.Inject;
+import org.opensearch.common.unit.TimeValue;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.action.ActionResponse;
 import org.opensearch.core.tasks.TaskId;
@@ -30,6 +33,7 @@ import org.opensearch.tasks.TaskAwareRequest;
 import org.opensearch.tasks.TaskManager;
 import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.TransportService;
+import org.opensearch.transport.client.node.NodeClient;
 
 import java.util.Map;
 import java.util.concurrent.Executor;
@@ -56,6 +60,7 @@ public class DefaultPlanExecutor extends HandledTransportAction<ActionRequest, A
     private final Scheduler scheduler;
     private final Executor searchExecutor;
     private final TaskManager taskManager;
+    private final NodeClient client;
 
     @Inject
     public DefaultPlanExecutor(
@@ -64,7 +69,8 @@ public class DefaultPlanExecutor extends HandledTransportAction<ActionRequest, A
         ClusterService clusterService,
         ThreadPool threadPool,
         CapabilityRegistry capabilityRegistry,
-        EngineContext engineContext
+        EngineContext engineContext,
+        NodeClient client
     ) {
         super(AnalyticsQueryAction.NAME, transportService, actionFilters, in -> {
             throw new UnsupportedOperationException("Transport path not implemented yet");
@@ -74,6 +80,7 @@ public class DefaultPlanExecutor extends HandledTransportAction<ActionRequest, A
         this.searchExecutor = threadPool.executor(ThreadPool.Names.SEARCH);
         this.taskManager = transportService.getTaskManager();
         this.scheduler = new Scheduler(transportService, 5);
+        this.client = client;
     }
 
     @Override
@@ -83,17 +90,30 @@ public class DefaultPlanExecutor extends HandledTransportAction<ActionRequest, A
 
         // Register coordinator-level query task with TaskManager (like SearchTask).
         // This gives us a proper unique ID, visibility in _tasks API, and cancellation support.
-        Task queryTask = taskManager.register("transport", "analytics_query", new AnalyticsQueryTaskRequest(dag.queryId()));
+        Task queryTask = taskManager.register("transport", "analytics_query", new AnalyticsQueryTaskRequest(dag.queryId(), null));
 
         PlanWalker walker = new PlanWalker(dag, clusterService, searchExecutor, queryTask);
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-        scheduler.execute(walker, ActionListener.wrap(result -> {
+
+        ActionListener<Iterable<Object[]>> listener = ActionListener.wrap(result -> {
             taskManager.unregister(queryTask);
             future.onResponse(result);
         }, e -> {
             taskManager.unregister(queryTask);
             future.onFailure(e);
-        }));
+        });
+
+        if (queryTask instanceof AnalyticsQueryTask aqt && aqt.getCancelAfterTimeInterval() != null) {
+            listener = TimeoutTaskCancellationUtility.wrapWithCancellationListener(
+                client,
+                aqt,
+                aqt.getCancelAfterTimeInterval(),
+                listener,
+                e -> {}
+            );
+        }
+
+        scheduler.execute(walker, listener);
         return future.actionGet();  // TODO: single blocking point — will become async when API changes
     }
 
@@ -111,10 +131,12 @@ public class DefaultPlanExecutor extends HandledTransportAction<ActionRequest, A
      */
     static class AnalyticsQueryTaskRequest implements TaskAwareRequest {
         private final String queryId;
+        private final TimeValue cancelAfterTimeInterval;
         private TaskId parentTaskId = TaskId.EMPTY_TASK_ID;
 
-        AnalyticsQueryTaskRequest(String queryId) {
+        AnalyticsQueryTaskRequest(String queryId, @Nullable TimeValue cancelAfterTimeInterval) {
             this.queryId = queryId;
+            this.cancelAfterTimeInterval = cancelAfterTimeInterval;
         }
 
         @Override
@@ -129,7 +151,7 @@ public class DefaultPlanExecutor extends HandledTransportAction<ActionRequest, A
 
         @Override
         public Task createTask(long id, String type, String action, TaskId parentTaskId, Map<String, String> headers) {
-            return new AnalyticsQueryTask(id, type, action, queryId, parentTaskId, headers);
+            return new AnalyticsQueryTask(id, type, action, queryId, parentTaskId, headers, cancelAfterTimeInterval);
         }
     }
 }

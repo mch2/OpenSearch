@@ -215,7 +215,7 @@ public class SchedulerTests extends OpenSearchTestCase {
         assertTrue(pool.isEmpty());
     }
 
-    public void testDispatchTaskCallsTransportServiceSendRequest() throws Exception {
+    public void testDispatchShardRequestCallsTransportServiceSendRequest() throws Exception {
         TransportService transportService = mock(TransportService.class);
         Scheduler scheduler = new Scheduler(transportService, 5);
 

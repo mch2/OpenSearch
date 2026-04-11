@@ -40,7 +40,7 @@ public class PlanWalker {
         this.dag = dag;
         this.parentTask = parentTask;
         this.rootSink = createRootSink(dag.rootStage());
-        this.stageExecutor = new StageExecutor(dag.queryId(), clusterService, searchExecutor, rootSink);
+        this.stageExecutor = new StageExecutor(dag.queryId(), clusterService, searchExecutor, rootSink, parentTask);
     }
 
     public String getQueryId() {

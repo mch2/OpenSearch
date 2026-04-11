@@ -54,7 +54,7 @@ public class TransportAnalyticsShardActionTests extends OpenSearchTestCase {
         List<Object[]> rows = new ArrayList<>();
         rows.add(new Object[] { "hello", 42L });
         FragmentExecutionResponse expectedResponse = new FragmentExecutionResponse(List.of("col1", "col2"), rows);
-        when(searchService.executeFragment(any(), any())).thenReturn(expectedResponse);
+        when(searchService.executeFragment(any(), any(), any())).thenReturn(expectedResponse);
 
         TransportAnalyticsShardAction action = createAction(indicesService, searchService);
 
@@ -104,7 +104,7 @@ public class TransportAnalyticsShardActionTests extends OpenSearchTestCase {
         ShardId shardId = new ShardId(new Index("test_index", "_na_"), 0);
         when(indicesService.indexServiceSafe(any())).thenReturn(indexService);
         when(indexService.getShard(anyInt())).thenReturn(indexShard);
-        when(searchService.executeFragment(any(), any())).thenThrow(new RuntimeException("execution failed"));
+        when(searchService.executeFragment(any(), any(), any())).thenThrow(new RuntimeException("execution failed"));
 
         TransportAnalyticsShardAction action = createAction(indicesService, searchService);
 

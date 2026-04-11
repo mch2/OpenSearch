@@ -14,7 +14,9 @@ import org.opensearch.analytics.backend.EngineResultStream;
 import org.opensearch.analytics.backend.ExecutionContext;
 import org.opensearch.analytics.backend.SearchExecEngine;
 import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
+import org.opensearch.common.Nullable;
 import org.opensearch.common.concurrent.GatedCloseable;
+import org.opensearch.core.tasks.TaskCancelledException;
 import org.opensearch.index.engine.DataFormatAwareEngine;
 import org.opensearch.index.engine.exec.IndexReaderProvider.Reader;
 import org.opensearch.index.shard.IndexShard;
@@ -51,6 +53,23 @@ public class AnalyticsSearchService {
      * @return a response containing field names and result rows
      */
     public FragmentExecutionResponse executeFragment(FragmentExecutionRequest request, IndexShard shard) {
+        return executeFragment(request, shard, null);
+    }
+
+    /**
+     * Executes a plan fragment against the given shard and returns the collected results,
+     * polling the shard task for cancellation between batches.
+     *
+     * @param request the fragment execution request
+     * @param shard   the already-resolved index shard
+     * @param task    the shard task to poll for cancellation (nullable)
+     * @return a response containing field names and result rows
+     */
+    public FragmentExecutionResponse executeFragment(
+        FragmentExecutionRequest request,
+        IndexShard shard,
+        @Nullable AnalyticsShardTask task
+    ) {
         DataFormatAwareEngine compositeEngine = shard.getCompositeEngine();
         if (compositeEngine == null) {
             throw new IllegalStateException("No CompositeEngine on " + shard.shardId());
@@ -75,8 +94,8 @@ public class AnalyticsSearchService {
         }
 
         try (GatedCloseable<Reader> gatedReader = compositeEngine.acquireReader()) {
-            SearchShardTask task = null; // TODO: real task for cancellation
-            ExecutionContext ctx = new ExecutionContext(request.getShardId().getIndexName(), task, gatedReader.get());
+            SearchShardTask searchShardTask = null; // TODO: real task for cancellation
+            ExecutionContext ctx = new ExecutionContext(request.getShardId().getIndexName(), searchShardTask, gatedReader.get());
             ctx.setFragmentBytes(selectedPlan.getFragmentBytes());
 
             AnalyticsSearchBackendPlugin backend = backends.get(selectedPlan.getBackendId());
@@ -84,9 +103,11 @@ public class AnalyticsSearchService {
             // createSearchExecEngine calls prepare() internally — do NOT call prepare() again
             try (SearchExecEngine<ExecutionContext, EngineResultStream> engine = backend.createSearchExecEngine(ctx)) {
                 try (EngineResultStream stream = engine.execute(ctx)) {
-                    return collectResponse(stream);
+                    return collectResponse(stream, task);
                 }
             }
+        } catch (TaskCancelledException e) {
+            throw e; // do NOT wrap — preserve type
         } catch (IllegalStateException | IllegalArgumentException e) {
             throw e;
         } catch (Exception e) {
@@ -99,10 +120,25 @@ public class AnalyticsSearchService {
      * Field names are captured from the first batch.
      */
     FragmentExecutionResponse collectResponse(EngineResultStream stream) {
+        return collectResponse(stream, null);
+    }
+
+    /**
+     * Collects all batches from the result stream into a single {@link FragmentExecutionResponse}.
+     * Field names are captured from the first batch. Polls the shard task for cancellation
+     * at each batch boundary.
+     *
+     * @param stream the result stream to drain
+     * @param task   the shard task to poll for cancellation (nullable)
+     */
+    FragmentExecutionResponse collectResponse(EngineResultStream stream, @Nullable AnalyticsShardTask task) {
         List<Object[]> rows = new ArrayList<>();
         List<String> fieldNames = null;
         Iterator<EngineResultBatch> it = stream.iterator();
         while (it.hasNext()) {
+            if (task != null && task.isCancelled()) {
+                throw new TaskCancelledException("task cancelled: " + task.getReasonCancelled());
+            }
             EngineResultBatch batch = it.next();
             if (fieldNames == null) {
                 fieldNames = batch.getFieldNames();
