@@ -68,7 +68,7 @@ public class LocalStageContextTests extends OpenSearchTestCase {
         private int feedCount = 0;
 
         @Override
-        public void feed(FragmentExecutionResponse response) {
+        public void feed(org.apache.arrow.vector.VectorSchemaRoot batch) {
             feedCount++;
         }
 

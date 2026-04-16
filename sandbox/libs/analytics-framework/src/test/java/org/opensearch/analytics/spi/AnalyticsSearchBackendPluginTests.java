@@ -45,14 +45,7 @@ public class AnalyticsSearchBackendPluginTests extends OpenSearchTestCase {
     }
 
     private static LocalStageRequest dummyRequest() {
-        return new LocalStageRequest(
-            "q-1",
-            0,
-            new byte[] { 1 },
-            mock(BufferAllocator.class),
-            mock(ExchangeSink.class),
-            Map.of()
-        );
+        return new LocalStageRequest("q-1", 0, new byte[] { 1 }, mock(BufferAllocator.class), mock(ExchangeSink.class), Map.of());
     }
 
     public void testCreateLocalStageDefaultThrows() {

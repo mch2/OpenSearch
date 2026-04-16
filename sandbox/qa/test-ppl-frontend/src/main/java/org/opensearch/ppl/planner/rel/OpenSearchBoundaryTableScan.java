@@ -15,7 +15,6 @@ import org.apache.calcite.adapter.enumerable.PhysType;
 import org.apache.calcite.adapter.enumerable.PhysTypeImpl;
 import org.apache.calcite.linq4j.Enumerable;
 import org.apache.calcite.linq4j.Linq4j;
-import org.checkerframework.checker.nullness.qual.Nullable;
 import org.apache.calcite.linq4j.tree.Blocks;
 import org.apache.calcite.linq4j.tree.Expression;
 import org.apache.calcite.linq4j.tree.Expressions;
@@ -29,6 +28,8 @@ import org.opensearch.analytics.exec.QueryPlanExecutor;
 import org.opensearch.sql.calcite.plan.Scannable;
 
 import java.util.List;
+
+import org.checkerframework.checker.nullness.qual.Nullable;
 
 /**
  * Boundary node that absorbs supported logical operators into a single scan.

@@ -41,7 +41,10 @@ import java.util.List;
  */
 @ExperimentalApi
 public class LuceneSearchEnginePlugin extends Plugin
-    implements SearchBackEndPlugin<DirectoryReader>, AnalyticsSearchBackendPlugin, DataFormatPlugin {
+    implements
+        SearchBackEndPlugin<DirectoryReader>,
+        AnalyticsSearchBackendPlugin,
+        DataFormatPlugin {
 
     public LuceneSearchEnginePlugin() {}
 

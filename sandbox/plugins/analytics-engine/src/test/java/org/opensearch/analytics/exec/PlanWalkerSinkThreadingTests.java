@@ -20,7 +20,9 @@ import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.opensearch.action.support.PlainActionFuture;
-import org.opensearch.analytics.backend.FragmentExecutionResponse;
+import org.opensearch.analytics.backend.ScanResponse;
+import org.opensearch.analytics.exec.action.FragmentExecutionRequest;
+import org.opensearch.analytics.exec.stage.StageExecutionBuilder;
 import org.opensearch.analytics.planner.dag.ExchangeInfo;
 import org.opensearch.analytics.planner.dag.QueryDAG;
 import org.opensearch.analytics.planner.dag.Stage;
@@ -37,7 +39,9 @@ import org.opensearch.cluster.routing.ShardRouting;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.core.index.Index;
 import org.opensearch.core.index.shard.ShardId;
+import org.opensearch.tasks.Task;
 import org.opensearch.test.OpenSearchTestCase;
+import org.opensearch.transport.TransportService;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -49,11 +53,10 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * Tests that the sink-aware {@code walkStage} path in {@link PlanWalker}
- * threads the {@code outputSink} parameter through {@code walkChildren}
- * into the recursive {@code walkStage} calls and ultimately to the
- * {@link StageExecutor#dispatch} call, rather than always using
- * {@code state.rootSink()}.
+ * Tests that the event-driven walker correctly threads sinks through the
+ * DAG construction and ultimately to the scheduler's
+ * {@code createExecution} / {@code createRootExecution} calls, so that
+ * rows end up in the root execution's sink.
  *
  * Validates: Requirements 3.1, 3.2, 3.3
  */
@@ -111,13 +114,14 @@ public class PlanWalkerSinkThreadingTests extends OpenSearchTestCase {
 
     /**
      * Walks a two-stage DAG (child data-node stage + root coordinator-gather stage)
-     * via {@link PlanWalker#walk}. The walk entry point passes {@code state.rootSink()}
-     * as the initial output sink. Verifies that the child stage's dispatch receives
-     * the threaded sink (which is rootSink in this case) and rows end up there.
+     * via {@link PlanWalker#walk}. The walker constructs all executions up front,
+     * with the root getting a {@code RowProducingSink} as its sink via
+     * {@code createRootExecution}. Verifies that the child stage's dispatch
+     * receives the threaded sink and rows end up in the root execution's output.
      *
-     * This confirms that {@code dispatchStage} threads the outputSink through
-     * the recursive call and ultimately to
-     * {@code stageExecutor.dispatch(stage, sink, client, childDispatcher, config, state, listener)}.
+     * This confirms that the up-front walk correctly threads sinks through
+     * the DAG construction and ultimately to the scheduler's
+     * {@code createExecution(stage, parentExec, config)} call.
      *
      * Validates: Requirements 3.1, 3.2, 3.3
      */
@@ -144,30 +148,33 @@ public class PlanWalkerSinkThreadingTests extends OpenSearchTestCase {
 
         QueryDAG dag = new QueryDAG("test-query", rootStage);
 
-        // Create state with a known rootSink so we can inspect it
-        SimpleExchangeSink rootSink = new SimpleExchangeSink();
-        QueryState state = new QueryState(rootSink);
 
-        // Client returns one row per shard
-        ShardRequestClient client = (request, node, listener) -> {
-            List<Object[]> rows = new ArrayList<>();
-            rows.add(new Object[] { "row_" + request.getShardId().id() });
-            listener.onStreamResponse(new FragmentExecutionResponse(List.of("field_0"), rows), true);
+        // Dispatcher returns one row per shard
+        AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(mock(TransportService.class), clusterService) {
+            @Override
+            public void dispatchScan(
+                FragmentExecutionRequest request,
+                DiscoveryNode node,
+                StreamingResponseListener<ScanResponse> listener,
+                Task parentTask,
+                PendingExecutions _pending
+            ) {
+                List<Object[]> rows = new ArrayList<>();
+                rows.add(new Object[] { "row_" + request.getShardId().id() });
+                listener.onStreamResponse(new ScanResponse(List.of("field_0"), rows), true);
+            }
         };
 
-        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), state, new StageExecutor(clusterService));
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-        walker.walk(client, future);
+        new EventDrivenScheduler(
+            new StageExecutionBuilder(clusterService, dispatcher, null)
+        ).execute(QueryContext.forTest(dag, null), future);
 
         Iterable<Object[]> result = future.actionGet();
         List<Object[]> resultList = new ArrayList<>();
         result.forEach(resultList::add);
 
-        // walk() passes state.rootSink() as the initial outputSink.
-        // PlanWalker.dispatchStage threads it through StageExecutor.dispatch into the child's
-        // recursive dispatchStage call, which passes it to stageExecutor.dispatch(stage, sink, client, ...).
-        // The dispatch uses the sink to construct SinkFeedingHandler, so rows land in rootSink.
-        assertEquals("rootSink should have received rows from all shards", numShards, rootSink.getRowCount());
+        // Root output is now owned by the root's execution. Verify rows via the listener result.
         assertEquals("result should contain rows from all shards", numShards, resultList.size());
     }
 
@@ -188,23 +195,32 @@ public class PlanWalkerSinkThreadingTests extends OpenSearchTestCase {
 
         QueryDAG dag = new QueryDAG("test-query", stage);
 
-        SimpleExchangeSink rootSink = new SimpleExchangeSink();
-        QueryState state = new QueryState(rootSink);
-
-        ShardRequestClient client = (request, node, listener) -> {
-            List<Object[]> rows = new ArrayList<>();
-            rows.add(new Object[] { "value_" + request.getShardId().id() });
-            listener.onStreamResponse(new FragmentExecutionResponse(List.of("field_0"), rows), true);
+        AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(mock(TransportService.class), clusterService) {
+            @Override
+            public void dispatchScan(
+                FragmentExecutionRequest request,
+                DiscoveryNode node,
+                StreamingResponseListener<ScanResponse> listener,
+                Task parentTask,
+                PendingExecutions _pending
+            ) {
+                List<Object[]> rows = new ArrayList<>();
+                rows.add(new Object[] { "value_" + request.getShardId().id() });
+                listener.onStreamResponse(new ScanResponse(List.of("field_0"), rows), true);
+            }
         };
 
-        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), state, new StageExecutor(clusterService));
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-        walker.walk(client, future);
+        new EventDrivenScheduler(
+            new StageExecutionBuilder(clusterService, dispatcher, null)
+        ).execute(QueryContext.forTest(dag, null), future);
 
-        future.actionGet();
+        Iterable<Object[]> result = future.actionGet();
+        List<Object[]> resultList = new ArrayList<>();
+        result.forEach(resultList::add);
 
-        // All rows should have been fed into rootSink via the threaded outputSink path
-        assertEquals("rootSink should have received rows from all shards", numShards, rootSink.getRowCount());
+        // Root output is now owned by the root's execution. Verify rows via the listener result.
+        assertEquals("result should contain rows from all shards", numShards, resultList.size());
     }
 
     /**
@@ -242,24 +258,33 @@ public class PlanWalkerSinkThreadingTests extends OpenSearchTestCase {
 
         QueryDAG dag = new QueryDAG("test-query", rootStage);
 
-        SimpleExchangeSink rootSink = new SimpleExchangeSink();
-        QueryState state = new QueryState(rootSink);
-
-        ShardRequestClient client = (request, node, listener) -> {
-            List<Object[]> rows = new ArrayList<>();
-            rows.add(new Object[] { "stage_" + request.getStageId() });
-            listener.onStreamResponse(new FragmentExecutionResponse(List.of("field_0"), rows), true);
+        AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(mock(TransportService.class), clusterService) {
+            @Override
+            public void dispatchScan(
+                FragmentExecutionRequest request,
+                DiscoveryNode node,
+                StreamingResponseListener<ScanResponse> listener,
+                Task parentTask,
+                PendingExecutions _pending
+            ) {
+                List<Object[]> rows = new ArrayList<>();
+                rows.add(new Object[] { "stage_" + request.getStageId() });
+                listener.onStreamResponse(new ScanResponse(List.of("field_0"), rows), true);
+            }
         };
 
-        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), state, new StageExecutor(clusterService));
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-        walker.walk(client, future);
+        new EventDrivenScheduler(
+            new StageExecutionBuilder(clusterService, dispatcher, null)
+        ).execute(QueryContext.forTest(dag, null), future);
 
-        future.actionGet();
+        Iterable<Object[]> result = future.actionGet();
+        List<Object[]> resultList = new ArrayList<>();
+        result.forEach(resultList::add);
 
-        // Both children should have fed their rows into the same rootSink
+        // Both children should have fed their rows into the same root output
         // 1 shard per child × 2 children = 2 rows total
-        assertEquals("rootSink should have received rows from both children", 2, rootSink.getRowCount());
+        assertEquals("result should have rows from both children", 2, resultList.size());
     }
 
     private ClusterService buildMockClusterServiceForMultipleTables(String[] tableNames, int numShards) {

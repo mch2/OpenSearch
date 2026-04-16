@@ -20,8 +20,10 @@ import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.opensearch.analytics.backend.ExchangeSink;
-import org.opensearch.analytics.backend.FragmentExecutionResponse;
 import org.opensearch.analytics.backend.LocalStageContext;
+import org.opensearch.analytics.backend.ScanResponse;
+import org.opensearch.analytics.exec.action.FragmentExecutionRequest;
+import org.opensearch.analytics.exec.stage.StageExecutionBuilder;
 import org.opensearch.analytics.planner.dag.ExchangeInfo;
 import org.opensearch.analytics.planner.dag.QueryDAG;
 import org.opensearch.analytics.planner.dag.Stage;
@@ -42,7 +44,9 @@ import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.index.Index;
 import org.opensearch.core.index.shard.ShardId;
+import org.opensearch.tasks.Task;
 import org.opensearch.test.OpenSearchTestCase;
+import org.opensearch.transport.TransportService;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -128,20 +132,30 @@ public class PlanWalkerLocalStageTests extends OpenSearchTestCase {
         when(mockBackend.createLocalStage(any())).thenReturn(mockCtx);
 
         QueryDAG dag = new QueryDAG("test-query", rootStage);
-        QueryState state = new QueryState();
+
         QueryContext config = QueryContext.forTest(dag, null);
 
-        ShardRequestClient client = (request, node, listener) -> {
-            List<Object[]> rows = new ArrayList<>();
-            rows.add(new Object[] { "row" });
-            listener.onStreamResponse(new FragmentExecutionResponse(List.of("field_0"), rows), true);
+        AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(mock(TransportService.class), clusterService) {
+            @Override
+            public void dispatchScan(
+                FragmentExecutionRequest request,
+                DiscoveryNode node,
+                StreamingResponseListener<ScanResponse> listener,
+                Task _parentTask,
+                PendingExecutions _pending
+            ) {
+                List<Object[]> rows = new ArrayList<>();
+                rows.add(new Object[] { "row" });
+                listener.onStreamResponse(new ScanResponse(List.of("field_0"), rows), true);
+            }
         };
-
-        PlanWalker walker = new PlanWalker(config, state, new StageExecutor(clusterService, mockBackend));
 
         AtomicBoolean success = new AtomicBoolean(false);
         AtomicReference<Exception> error = new AtomicReference<>();
-        walker.walk(client, ActionListener.wrap(v -> success.set(true), error::set));
+        new EventDrivenScheduler(
+            new StageExecutionBuilder(clusterService, dispatcher, java.util.Map.of(mockBackend.name(), mockBackend)),
+            dispatcher
+        ).execute(config, ActionListener.wrap(v -> success.set(true), error::set));
 
         assertTrue("Walk should have succeeded", success.get());
         assertNull("No error expected", error.get());
@@ -199,19 +213,29 @@ public class PlanWalkerLocalStageTests extends OpenSearchTestCase {
         when(mockBackend.createLocalStage(any())).thenReturn(mockCtx);
 
         QueryDAG dag = new QueryDAG("test-query", rootStage);
-        QueryState state = new QueryState();
+
         QueryContext config = QueryContext.forTest(dag, null);
 
-        ShardRequestClient client = (request, node, listener) -> {
-            List<Object[]> rows = new ArrayList<>();
-            rows.add(new Object[] { "row_" + request.getStageId() });
-            listener.onStreamResponse(new FragmentExecutionResponse(List.of("field_0"), rows), true);
+        AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(mock(TransportService.class), clusterService) {
+            @Override
+            public void dispatchScan(
+                FragmentExecutionRequest request,
+                DiscoveryNode node,
+                StreamingResponseListener<ScanResponse> listener,
+                Task _parentTask,
+                PendingExecutions _pending
+            ) {
+                List<Object[]> rows = new ArrayList<>();
+                rows.add(new Object[] { "row_" + request.getStageId() });
+                listener.onStreamResponse(new ScanResponse(List.of("field_0"), rows), true);
+            }
         };
 
-        PlanWalker walker = new PlanWalker(config, state, new StageExecutor(clusterService, mockBackend));
-
         AtomicBoolean success = new AtomicBoolean(false);
-        walker.walk(client, ActionListener.wrap(v -> success.set(true), e -> fail("unexpected: " + e)));
+        new EventDrivenScheduler(
+            new StageExecutionBuilder(clusterService, dispatcher, java.util.Map.of(mockBackend.name(), mockBackend)),
+            dispatcher
+        ).execute(config, ActionListener.wrap(v -> success.set(true), e -> fail("unexpected: " + e)));
 
         assertTrue("Walk should have succeeded", success.get());
         verify(mockCtx).sinkFor(0);
@@ -254,17 +278,29 @@ public class PlanWalkerLocalStageTests extends OpenSearchTestCase {
         when(mockBackend.createLocalStage(any())).thenReturn(mockCtx);
 
         QueryDAG dag = new QueryDAG("test-query", rootStage);
-        QueryState state = new QueryState();
+
         QueryContext config = QueryContext.forTest(dag, null);
 
-        // Client that fails
+        // Dispatcher that fails
         RuntimeException childError = new RuntimeException("shard exploded");
-        ShardRequestClient client = (request, node, listener) -> listener.onFailure(childError);
-
-        PlanWalker walker = new PlanWalker(config, state, new StageExecutor(clusterService, mockBackend));
+        AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(mock(TransportService.class), clusterService) {
+            @Override
+            public void dispatchScan(
+                FragmentExecutionRequest request,
+                DiscoveryNode node,
+                StreamingResponseListener<ScanResponse> listener,
+                Task parentTask,
+                PendingExecutions _pending
+            ) {
+                listener.onFailure(childError);
+            }
+        };
 
         AtomicReference<Exception> captured = new AtomicReference<>();
-        walker.walk(client, ActionListener.wrap(v -> fail("should not succeed"), captured::set));
+        new EventDrivenScheduler(
+            new StageExecutionBuilder(clusterService, dispatcher, java.util.Map.of(mockBackend.name(), mockBackend)),
+            dispatcher
+        ).execute(config, ActionListener.wrap(v -> fail("should not succeed"), captured::set));
 
         assertNotNull("Should have received failure", captured.get());
         verify(mockCtx).close();
@@ -305,26 +341,41 @@ public class PlanWalkerLocalStageTests extends OpenSearchTestCase {
         when(mockBackend.supportedOperators()).thenReturn(Set.of(OperatorCapability.LOCAL_STAGE));
 
         QueryDAG dag = new QueryDAG("test-query", rootStage);
-        SimpleExchangeSink rootSink = new SimpleExchangeSink();
-        QueryState state = new QueryState(rootSink);
+
         QueryContext config = QueryContext.forTest(dag, null);
 
-        ShardRequestClient client = (request, node, listener) -> {
-            List<Object[]> rows = new ArrayList<>();
-            rows.add(new Object[] { "row_" + request.getShardId().id() });
-            listener.onStreamResponse(new FragmentExecutionResponse(List.of("field_0"), rows), true);
+        AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(mock(TransportService.class), clusterService) {
+            @Override
+            public void dispatchScan(
+                FragmentExecutionRequest request,
+                DiscoveryNode node,
+                StreamingResponseListener<ScanResponse> listener,
+                Task _parentTask,
+                PendingExecutions _pending
+            ) {
+                List<Object[]> rows = new ArrayList<>();
+                rows.add(new Object[] { "row_" + request.getShardId().id() });
+                listener.onStreamResponse(new ScanResponse(List.of("field_0"), rows), true);
+            }
         };
 
-        PlanWalker walker = new PlanWalker(config, state, new StageExecutor(clusterService, mockBackend));
-
         AtomicBoolean success = new AtomicBoolean(false);
-        walker.walk(client, ActionListener.wrap(v -> success.set(true), e -> fail("unexpected: " + e)));
+        AtomicReference<Iterable<Object[]>> resultRef = new AtomicReference<>();
+        new EventDrivenScheduler(
+            new StageExecutionBuilder(clusterService, dispatcher, java.util.Map.of(mockBackend.name(), mockBackend)),
+            dispatcher
+        ).execute(config, ActionListener.wrap(v -> {
+            success.set(true);
+            resultRef.set(v);
+        }, e -> fail("unexpected: " + e)));
 
         assertTrue("Walk should have succeeded", success.get());
         // Backend should NOT have been called
         verify(mockBackend, never()).createLocalStage(any());
-        // Rows should have reached the rootSink directly
-        assertEquals("rootSink should have rows from all shards", numShards, rootSink.getRowCount());
+        // Rows should have reached the root output via the pass-through path
+        List<Object[]> resultList = new ArrayList<>();
+        resultRef.get().forEach(resultList::add);
+        assertEquals("Result should have rows from all shards", numShards, resultList.size());
     }
 
     /**
@@ -366,20 +417,30 @@ public class PlanWalkerLocalStageTests extends OpenSearchTestCase {
         when(mockBackend.createLocalStage(any())).thenReturn(mockCtx);
 
         QueryDAG dag = new QueryDAG("test-query", rootStage);
-        QueryState state = new QueryState();
+
         QueryContext config = QueryContext.forTest(dag, null);
 
-        ShardRequestClient client = (request, node, listener) -> {
-            List<Object[]> rows = new ArrayList<>();
-            rows.add(new Object[] { "v" });
-            listener.onStreamResponse(new FragmentExecutionResponse(List.of("field_0"), rows), true);
+        AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(mock(TransportService.class), clusterService) {
+            @Override
+            public void dispatchScan(
+                FragmentExecutionRequest request,
+                DiscoveryNode node,
+                StreamingResponseListener<ScanResponse> listener,
+                Task _parentTask,
+                PendingExecutions _pending
+            ) {
+                List<Object[]> rows = new ArrayList<>();
+                rows.add(new Object[] { "v" });
+                listener.onStreamResponse(new ScanResponse(List.of("field_0"), rows), true);
+            }
         };
-
-        PlanWalker walker = new PlanWalker(config, state, new StageExecutor(clusterService, mockBackend));
 
         java.util.concurrent.atomic.AtomicInteger responseCount = new java.util.concurrent.atomic.AtomicInteger(0);
         java.util.concurrent.atomic.AtomicInteger failureCount = new java.util.concurrent.atomic.AtomicInteger(0);
-        walker.walk(client, new ActionListener<>() {
+        new EventDrivenScheduler(
+            new StageExecutionBuilder(clusterService, dispatcher, java.util.Map.of(mockBackend.name(), mockBackend)),
+            dispatcher
+        ).execute(config, new ActionListener<>() {
             @Override
             public void onResponse(Iterable<Object[]> v) {
                 responseCount.incrementAndGet();
@@ -487,7 +548,7 @@ public class PlanWalkerLocalStageTests extends OpenSearchTestCase {
     }
 
     /**
-     * When the test-only 1-arg {@link StageExecutor} constructor is used (null
+     * When the test-only 1-arg {@link StageExecutionBuilder} constructor is used (null
      * primaryBackend) and the walker is asked to dispatch a compute LOCAL
      * stage, it must fail fast with a clear {@link IllegalStateException}
      * instead of NPE. Pass-through LOCAL stages are unaffected (they don't
@@ -513,18 +574,33 @@ public class PlanWalkerLocalStageTests extends OpenSearchTestCase {
         rootStage.setPlanAlternatives(List.of(new StagePlan(sortNode, "test-backend", new byte[] { 1 })));
 
         QueryDAG dag = new QueryDAG("test-query", rootStage);
-        QueryState state = new QueryState();
+
         QueryContext config = QueryContext.forTest(dag, null);
 
-        ShardRequestClient client = (request, node, listener) -> {
-            listener.onStreamResponse(new FragmentExecutionResponse(List.of("field_0"), List.of()), true);
+        AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(mock(TransportService.class), clusterService) {
+            @Override
+            public void dispatchScan(
+                FragmentExecutionRequest request,
+                DiscoveryNode node,
+                StreamingResponseListener<ScanResponse> listener,
+                Task _parentTask,
+                PendingExecutions _pending
+            ) {
+                listener.onStreamResponse(new ScanResponse(List.of("field_0"), List.of()), true);
+            }
         };
 
-        // Test-only 1-arg constructor — no primaryBackend
-        PlanWalker walker = new PlanWalker(config, state, new StageExecutor(clusterService));
-
+        // No primaryBackend
         AtomicReference<Exception> captured = new AtomicReference<>();
-        walker.walk(client, ActionListener.wrap(v -> fail("should not succeed"), captured::set));
+        try {
+            new EventDrivenScheduler(
+                new StageExecutionBuilder(clusterService, dispatcher, java.util.Map.of()),
+                dispatcher
+            ).execute(config, ActionListener.wrap(v -> fail("should not succeed"), captured::set));
+        } catch (IllegalStateException e) {
+            // The error may be thrown synchronously from graph construction
+            captured.set(e);
+        }
 
         Exception e = captured.get();
         assertNotNull("Should have received failure", e);

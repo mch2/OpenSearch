@@ -8,71 +8,38 @@
 
 package org.opensearch.analytics.exec;
 
-import org.opensearch.common.inject.Inject;
+import org.opensearch.analytics.exec.stage.StageExecution;
+import org.opensearch.analytics.exec.stage.StageExecutionBuilder;
 import org.opensearch.core.action.ActionListener;
 
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-
 /**
- * Coordinator-side query orchestrator. Manages the walker pool and binds
- * the per-query {@link ShardRequestClient} from the shared
- * {@link ShardTransportDispatcher}.
+ * Pluggable coordinator-side query control flow. Given a {@link QueryContext},
+ * drives the query to completion and signals the caller via an
+ * {@link ActionListener}.
  *
- * <p>Walker creation is the caller's responsibility ({@link DefaultPlanExecutor}).
- * Scheduler is pure orchestration — it takes an already-built walker, binds
- * per-query transport state, and kicks off the walk.
+ * <p>Implementations own:
+ * <ul>
+ *   <li>how the execution graph is built from {@code QueryContext.dag()}</li>
+ *   <li>how stages are started and how failures cascade</li>
+ *   <li>how external cancellation (timeouts, task cancel) is wired</li>
+ *   <li>per-query cleanup on the transport dispatcher + any owned resources</li>
+ * </ul>
+ *
+ * <p>Today's only implementation is {@link QueryScheduler}, which walks
+ * the DAG once up front, constructs all {@link StageExecution} instances via
+ * {@link StageExecutionBuilder#buildExecution}, and drives them through a
+ * {@link PlanWalker} using state listeners. Future implementations
+ * (pipelined, bottom-up recursive, etc.) implement this same contract.
  *
  * @opensearch.internal
  */
-public class Scheduler {
-    private final ShardTransportDispatcher dispatcher;
-    private final StageExecutor stageExecutor;
-    private final Map<String, PlanWalker> walkerPool = new ConcurrentHashMap<>();
-
-    @Inject
-    public Scheduler(ShardTransportDispatcher dispatcher, StageExecutor stageExecutor) {
-        this.dispatcher = dispatcher;
-        this.stageExecutor = stageExecutor;
-    }
-
-    /** Returns the shared stage executor for callers that need to construct a {@link PlanWalker}. */
-    public StageExecutor getStageExecutor() {
-        return stageExecutor;
-    }
+public interface Scheduler {
 
     /**
-     * Executes a pre-built {@link PlanWalker} asynchronously. Manages the walker
-     * pool lifecycle and binds a per-query {@link ShardRequestClient} from the
-     * shared {@link ShardTransportDispatcher}.
-     *
-     * @param walker   the walker to execute (created by the caller with a {@link QueryContext} and {@link QueryState})
-     * @param listener completion listener — receives the final result rows
+     * Drives the query described by {@code config} to completion. Never blocks.
+     * Fires the listener exactly once — {@code onResponse} with the root output's
+     * rows on success, {@code onFailure} with the captured cause on failure or
+     * cancellation.
      */
-    public void execute(PlanWalker walker, ActionListener<Iterable<Object[]>> listener) {
-        String queryId = walker.getQueryId();
-        walkerPool.put(queryId, walker);
-
-        // Per-query transport concurrency state — local to this query's execution
-        Map<String, ShardTransportDispatcher.PendingExecutions> pendingPerNode = new ConcurrentHashMap<>();
-
-        // Per-query ShardRequestClient: binds dispatcher with parentTask + pendingPerNode
-        ShardRequestClient client = (request, node, streamListener) -> dispatcher.dispatch(
-            request,
-            node,
-            streamListener,
-            walker.getParentTask(),
-            pendingPerNode
-        );
-
-        walker.walk(client, ActionListener.wrap(result -> {
-            walkerPool.remove(queryId);
-            listener.onResponse(result);
-        }, e -> {
-            walkerPool.remove(queryId);
-            listener.onFailure(e);
-        }));
-    }
-
-    // TODO: Vend metrics from walker pool
+    void execute(QueryContext config, ActionListener<Iterable<Object[]>> listener);
 }

@@ -17,6 +17,8 @@ import org.opensearch.action.support.HandledTransportAction;
 import org.opensearch.action.support.PlainActionFuture;
 import org.opensearch.action.support.TimeoutTaskCancellationUtility;
 import org.opensearch.analytics.EngineContext;
+import org.opensearch.analytics.exec.action.AnalyticsQueryAction;
+import org.opensearch.analytics.exec.task.AnalyticsQueryTask;
 import org.opensearch.analytics.planner.CapabilityRegistry;
 import org.opensearch.analytics.planner.PlannerContext;
 import org.opensearch.analytics.planner.PlannerImpl;
@@ -60,18 +62,11 @@ public class DefaultPlanExecutor extends HandledTransportAction<ActionRequest, A
 
     private final CapabilityRegistry capabilityRegistry;
     private final ClusterService clusterService;
+    private final TransportService transportService;
     private final Scheduler scheduler;
     private final Executor searchExecutor;
     private final TaskManager taskManager;
     private final NodeClient client;
-
-    /**
-     * Test-only: holds the {@link QueryState} from the most recent {@link #execute} call.
-     * Set before {@code scheduler.execute()} so it's available even if the query completes
-     * synchronously. Package-private so integration tests can inspect per-stage metrics
-     * after a query finishes.
-     */
-    volatile QueryState lastQueryState;
 
     @Inject
     public DefaultPlanExecutor(
@@ -89,6 +84,7 @@ public class DefaultPlanExecutor extends HandledTransportAction<ActionRequest, A
         });
         this.capabilityRegistry = capabilityRegistry;
         this.clusterService = clusterService;
+        this.transportService = transportService;
         this.searchExecutor = threadPool.executor(ThreadPool.Names.SEARCH);
         this.taskManager = transportService.getTaskManager();
         this.client = client;
@@ -102,52 +98,39 @@ public class DefaultPlanExecutor extends HandledTransportAction<ActionRequest, A
 
         // Register coordinator-level query task with TaskManager (like SearchTask).
         // This gives us a proper unique ID, visibility in _tasks API, and cancellation support.
-        Task queryTask = taskManager.register("transport", "analytics_query", new AnalyticsQueryTaskRequest(dag.queryId(), null));
+        // TODO: accept a request type from FrontEnd including cancelAfterTimeInterval - its set from cluster settings below, null in req.
+        final AnalyticsQueryTask queryTask = (AnalyticsQueryTask) taskManager.register(
+            "transport",
+            "analytics_query",
+            new AnalyticsQueryTaskRequest(dag.queryId(), null)
+        );
 
-        // Create per-query config and state
+        // Create per-query context
         QueryContext config = new QueryContext(dag, searchExecutor, queryTask);
-        QueryState state = new QueryState();
-
-        // Wire external cancellation into cancelActiveStages
-        if (queryTask instanceof AnalyticsQueryTask aqt) {
-            aqt.setOnCancelCallback(() -> {
-                String reason = "task cancelled: " + (aqt.getReasonCancelled() != null ? aqt.getReasonCancelled() : "unknown");
-                logger.info("[DefaultPlanExecutor] AnalyticsQueryTask.onCancelled fired, reason={}", reason);
-                cancelActiveStages(state, reason);
-            });
-        }
-
-        // Capture for test-only inspection (must be set before scheduler.execute
-        // so it's available even if the query completes synchronously)
-        this.lastQueryState = state;
-
-        // Build the walker with the shared stage executor
-        PlanWalker walker = new PlanWalker(config, state, scheduler.getStageExecutor());
 
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
 
+        // Per-query cleanup on terminal. Stage-execution cancellation on external
+        // task-cancel/timeout is wired inside the Scheduler — on this path the
+        // walker has already cascaded cancellations by the time we see the failure.
         ActionListener<Iterable<Object[]>> listener = ActionListener.wrap(result -> {
-            state.closeBufferAllocator();
+            config.closeBufferAllocator();
             taskManager.unregister(queryTask);
             future.onResponse(result);
         }, e -> {
-            // Cancel any registered stages first, before tearing down the allocator
-            cancelActiveStages(state, "query failed: " + e.getMessage());
-            state.closeBufferAllocator();
+            config.closeBufferAllocator();
             taskManager.unregister(queryTask);
             future.onFailure(e);
         });
 
-        if (queryTask instanceof AnalyticsQueryTask aqt) {
-            TimeValue taskTimeout = aqt.getCancelAfterTimeInterval();
-            TimeValue clusterTimeout = clusterService.getClusterSettings().get(SEARCH_CANCEL_AFTER_TIME_INTERVAL_SETTING);
-            if (taskTimeout != null || SearchService.NO_TIMEOUT.equals(clusterTimeout) == false) {
-                listener = TimeoutTaskCancellationUtility.wrapWithCancellationListener(client, aqt, clusterTimeout, listener, e -> {});
-            }
+        TimeValue taskTimeout = queryTask.getCancelAfterTimeInterval();
+        TimeValue clusterTimeout = clusterService.getClusterSettings().get(SEARCH_CANCEL_AFTER_TIME_INTERVAL_SETTING);
+        if (taskTimeout != null || SearchService.NO_TIMEOUT.equals(clusterTimeout) == false) {
+            listener = TimeoutTaskCancellationUtility.wrapWithCancellationListener(client, queryTask, clusterTimeout, listener, e -> {});
         }
 
-        scheduler.execute(walker, listener);
-        return future.actionGet();  // TODO: single blocking point — will become async when API changes
+        scheduler.execute(config, listener);
+        return future.actionGet();  // TODO: single blocking point — Should be async with Front-End passing listener.
     }
 
     @Override
@@ -155,21 +138,6 @@ public class DefaultPlanExecutor extends HandledTransportAction<ActionRequest, A
         // Transport path — reserved for future remote query invocation.
         // Currently, the SQL plugin invokes execute(RelNode, Object) directly.
         listener.onFailure(new UnsupportedOperationException("Direct invocation only — use execute(RelNode, Object)"));
-    }
-
-    /**
-     * Cancels all currently active stage executions registered in the given query state.
-     * Fire-and-forget: exceptions thrown by individual {@code cancel()} calls are swallowed
-     * so the caller can proceed with allocator teardown and task unregistration.
-     *
-     * <p>Package-private (not private) so unit tests can exercise the helper directly.
-     */
-    static void cancelActiveStages(QueryState state, String reason) {
-        for (StageExecution exec : state.activeStageExecutions()) {
-            try {
-                exec.cancel(reason);
-            } catch (Exception ignore) {}
-        }
     }
 
     /**

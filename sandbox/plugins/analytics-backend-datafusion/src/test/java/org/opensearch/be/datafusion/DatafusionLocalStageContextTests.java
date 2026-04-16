@@ -23,11 +23,10 @@ import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.opensearch.analytics.backend.EngineResultBatch;
-import org.opensearch.analytics.backend.FragmentExecutionResponse;
 import org.opensearch.be.datafusion.internal.InputHandle;
 import org.opensearch.test.OpenSearchTestCase;
 
-import java.util.ArrayList;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -59,7 +58,7 @@ public class DatafusionLocalStageContextTests extends OpenSearchTestCase {
     // ---- DatafusionChildSink tests ----
 
     /**
-     * feed() with a 2-row response converts to Arrow and pushes to the handle.
+     * feed() with a 2-row VectorSchemaRoot pushes the batch to the handle.
      */
     public void testChildSinkFeedPushesBatchToHandle() {
         Schema schema = twoColumnSchema();
@@ -84,12 +83,20 @@ public class DatafusionLocalStageContextTests extends OpenSearchTestCase {
 
         DatafusionChildSink sink = new DatafusionChildSink(handle, schema, allocator, 42);
 
-        List<Object[]> rows = new ArrayList<>();
-        rows.add(new Object[] { 10L, "alice" });
-        rows.add(new Object[] { 20L, "bob" });
-        FragmentExecutionResponse response = new FragmentExecutionResponse(List.of("id", "name"), rows);
+        // Build a VectorSchemaRoot with 2 rows
+        VectorSchemaRoot vsr = VectorSchemaRoot.create(schema, allocator);
+        vsr.allocateNew();
+        BigIntVector idVec = (BigIntVector) vsr.getVector("id");
+        idVec.set(0, 10L);
+        idVec.set(1, 20L);
+        idVec.setValueCount(2);
+        VarCharVector nameVec = (VarCharVector) vsr.getVector("name");
+        nameVec.setSafe(0, "alice".getBytes(StandardCharsets.UTF_8));
+        nameVec.setSafe(1, "bob".getBytes(StandardCharsets.UTF_8));
+        nameVec.setValueCount(2);
+        vsr.setRowCount(2);
 
-        sink.feed(response);
+        sink.feed(vsr);
 
         assertNotNull("pushBatch should have been called", captured.get());
         captured.get().close();
@@ -114,8 +121,12 @@ public class DatafusionLocalStageContextTests extends OpenSearchTestCase {
         };
 
         DatafusionChildSink sink = new DatafusionChildSink(handle, schema, allocator, 7);
-        FragmentExecutionResponse response = new FragmentExecutionResponse(List.of("id", "name"), new ArrayList<>());
-        sink.feed(response);
+        VectorSchemaRoot emptyVsr = VectorSchemaRoot.create(schema, allocator);
+        emptyVsr.allocateNew();
+        emptyVsr.setRowCount(0);
+        emptyVsr.getVector("id").setValueCount(0);
+        emptyVsr.getVector("name").setValueCount(0);
+        sink.feed(emptyVsr);
 
         assertNotNull("pushBatch should have been called for empty batch", captured.get());
         captured.get().close();
@@ -147,11 +158,17 @@ public class DatafusionLocalStageContextTests extends OpenSearchTestCase {
         DatafusionChildSink sink = new DatafusionChildSink(handle, schema, allocator, 3);
         handle.closeInput();
 
-        List<Object[]> rows = new ArrayList<>();
-        rows.add(new Object[] { 1L, "test" });
-        FragmentExecutionResponse response = new FragmentExecutionResponse(List.of("id", "name"), rows);
+        VectorSchemaRoot vsr = VectorSchemaRoot.create(schema, allocator);
+        vsr.allocateNew();
+        BigIntVector idVec = (BigIntVector) vsr.getVector("id");
+        idVec.set(0, 1L);
+        idVec.setValueCount(1);
+        VarCharVector nameVec = (VarCharVector) vsr.getVector("name");
+        nameVec.setSafe(0, "test".getBytes(StandardCharsets.UTF_8));
+        nameVec.setValueCount(1);
+        vsr.setRowCount(1);
 
-        expectThrows(IllegalStateException.class, () -> sink.feed(response));
+        expectThrows(IllegalStateException.class, () -> sink.feed(vsr));
     }
 
     /**
@@ -192,12 +209,12 @@ public class DatafusionLocalStageContextTests extends OpenSearchTestCase {
         assertNull(sink.getValueAt("id", 0));
     }
 
-    // ---- batchToResponse tests ----
+    // ---- batchToVsr tests ----
 
     /**
-     * batchToResponse converts an EngineResultBatch to a FragmentExecutionResponse.
+     * batchToVsr converts an EngineResultBatch to a VectorSchemaRoot.
      */
-    public void testBatchToResponseConvertsCorrectly() {
+    public void testBatchToVsrConvertsCorrectly() {
         EngineResultBatch batch = new EngineResultBatch() {
             @Override
             public List<String> getFieldNames() {
@@ -218,20 +235,25 @@ public class DatafusionLocalStageContextTests extends OpenSearchTestCase {
             }
         };
 
-        FragmentExecutionResponse response = DatafusionLocalStageContext.batchToResponse(batch);
+        VectorSchemaRoot vsr = DatafusionLocalStageContext.batchToVsr(batch, allocator);
 
-        assertEquals(List.of("age", "city"), response.getFieldNames());
-        assertEquals(2, response.getRows().size());
-        assertEquals(25L, response.getRows().get(0)[0]);
-        assertEquals("NYC", response.getRows().get(0)[1]);
-        assertEquals(30L, response.getRows().get(1)[0]);
-        assertEquals("LA", response.getRows().get(1)[1]);
+        assertEquals(2, vsr.getSchema().getFields().size());
+        assertEquals("age", vsr.getSchema().getFields().get(0).getName());
+        assertEquals("city", vsr.getSchema().getFields().get(1).getName());
+        assertEquals(2, vsr.getRowCount());
+        // Values are stored as VarChar (strings)
+        assertEquals("25", vsr.getVector("age").getObject(0).toString());
+        assertEquals("NYC", vsr.getVector("city").getObject(0).toString());
+        assertEquals("30", vsr.getVector("age").getObject(1).toString());
+        assertEquals("LA", vsr.getVector("city").getObject(1).toString());
+
+        vsr.close();
     }
 
     /**
-     * batchToResponse with zero rows returns an empty response.
+     * batchToVsr with zero rows returns an empty VectorSchemaRoot.
      */
-    public void testBatchToResponseEmptyBatch() {
+    public void testBatchToVsrEmptyBatch() {
         EngineResultBatch batch = new EngineResultBatch() {
             @Override
             public List<String> getFieldNames() {
@@ -249,9 +271,12 @@ public class DatafusionLocalStageContextTests extends OpenSearchTestCase {
             }
         };
 
-        FragmentExecutionResponse response = DatafusionLocalStageContext.batchToResponse(batch);
-        assertEquals(List.of("x"), response.getFieldNames());
-        assertTrue(response.getRows().isEmpty());
+        VectorSchemaRoot vsr = DatafusionLocalStageContext.batchToVsr(batch, allocator);
+        assertEquals(1, vsr.getSchema().getFields().size());
+        assertEquals("x", vsr.getSchema().getFields().get(0).getName());
+        assertEquals(0, vsr.getRowCount());
+
+        vsr.close();
     }
 
     // ---- stageInputId tests ----

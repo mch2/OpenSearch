@@ -33,13 +33,22 @@ public class StageExecutionTypeDagBuilderTests extends BasePlannerRulesTests {
 
     private static final Map<String, Map<String, Object>> FIELDS = Map.of("A", Map.of("type", "integer"), "B", Map.of("type", "integer"));
 
-    // ---- 3.1: SELECT * FROM T with 1 shard -> root is LOCAL ----
+    // ---- 3.1: SELECT * FROM T with 1 shard -> root is DATA_NODE ----
 
-    public void testSingleShardScanIsLocal() {
+    /**
+     * Single-shard plain scans go to DATA_NODE. The coordinator cannot execute
+     * scan fragments locally (no direct index reader), so the fragment must be
+     * dispatched to the shard via {@code ShardFanOutStageScheduler}. When there's
+     * only one shard, no exchange is inserted and no StageInputScan appears in
+     * the fragment; the whole plan (TableScan or Aggregate → TableScan) becomes
+     * the DATA_NODE stage's fragment. {@code TargetResolver.resolveTargets} uses
+     * {@code Stage.getTableName()} to find the one shard to dispatch to.
+     */
+    public void testSingleShardScanIsDataNode() {
         QueryDAG dag = buildDAG(1, stubScan(testTable()));
 
         Stage root = dag.rootStage();
-        assertEquals("Single-shard scan root should be LOCAL", StageExecutionType.LOCAL, root.getExecutionType());
+        assertEquals("Single-shard scan root should be DATA_NODE", StageExecutionType.DATA_NODE, root.getExecutionType());
     }
 
     // ---- 3.2: SELECT * FROM T with 10 shards -> root is LOCAL ----

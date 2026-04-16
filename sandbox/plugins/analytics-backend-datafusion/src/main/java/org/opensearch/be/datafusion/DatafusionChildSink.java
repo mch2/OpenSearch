@@ -14,15 +14,14 @@ import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.backend.ExchangeSink;
-import org.opensearch.analytics.backend.FragmentExecutionResponse;
 import org.opensearch.be.datafusion.internal.InputHandle;
 
 import java.util.List;
 
 /**
- * Per-child {@link ExchangeSink} that converts row-oriented
- * {@link FragmentExecutionResponse} batches to Arrow and pushes them
- * into the corresponding {@link InputHandle} (which feeds a DataFusion
+ * Per-child {@link ExchangeSink} that receives Arrow
+ * {@link VectorSchemaRoot} batches and pushes them into the
+ * corresponding {@link InputHandle} (which feeds a DataFusion
  * partition stream via mpsc channel).
  *
  * <p>Closing the {@link InputHandle} (EOF) is NOT this sink's responsibility —
@@ -47,16 +46,15 @@ class DatafusionChildSink implements ExchangeSink {
     }
 
     @Override
-    public void feed(FragmentExecutionResponse response) {
-        int rowCount = response.getRows() != null ? response.getRows().size() : 0;
+    public void feed(VectorSchemaRoot batch) {
+        int rowCount = batch.getRowCount();
         logger.info(
             "[DF.LocalStageContext] childSink.feed ENTRY childStageId={} rows={} fields={}",
             childStageId,
             rowCount,
-            response.getFieldNames()
+            batch.getSchema().getFields()
         );
-        VectorSchemaRoot vsr = RowBatchToArrowConverter.convert(response, schema, allocator);
-        handle.pushBatch(vsr);
+        handle.pushBatch(batch);
         logger.info("[DF.LocalStageContext] childSink.feed EXIT childStageId={} rows={}", childStageId, rowCount);
     }
 

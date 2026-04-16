@@ -20,7 +20,9 @@ import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.opensearch.action.support.PlainActionFuture;
-import org.opensearch.analytics.backend.FragmentExecutionResponse;
+import org.opensearch.analytics.backend.ScanResponse;
+import org.opensearch.analytics.exec.action.FragmentExecutionRequest;
+import org.opensearch.analytics.exec.stage.StageExecutionBuilder;
 import org.opensearch.analytics.planner.dag.ExchangeInfo;
 import org.opensearch.analytics.planner.dag.QueryDAG;
 import org.opensearch.analytics.planner.dag.Stage;
@@ -39,7 +41,9 @@ import org.opensearch.cluster.routing.ShardRouting;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.core.index.Index;
 import org.opensearch.core.index.shard.ShardId;
+import org.opensearch.tasks.Task;
 import org.opensearch.test.OpenSearchTestCase;
+import org.opensearch.transport.TransportService;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -140,13 +144,23 @@ public class PlanWalkerResolveTargetsTests extends OpenSearchTestCase {
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
         List<FragmentExecutionRequest> capturedRequests = new ArrayList<>();
 
-        ShardRequestClient client = (request, node, listener) -> {
-            capturedRequests.add(request);
-            listener.onStreamResponse(new FragmentExecutionResponse(List.of(), List.of()), true);
+        AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(mock(TransportService.class), clusterService) {
+            @Override
+            public void dispatchScan(
+                FragmentExecutionRequest request,
+                DiscoveryNode node,
+                StreamingResponseListener<ScanResponse> listener,
+                Task _parentTask,
+                PendingExecutions _pending
+            ) {
+                capturedRequests.add(request);
+                listener.onStreamResponse(new ScanResponse(List.of(), List.of()), true);
+            }
         };
 
-        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
-        walker.walk(client, future);
+        new EventDrivenScheduler(
+            new StageExecutionBuilder(clusterService, dispatcher, null)
+        ).execute(QueryContext.forTest(dag, null), future);
         future.actionGet();
 
         assertEquals(numShards, capturedRequests.size());
@@ -184,13 +198,23 @@ public class PlanWalkerResolveTargetsTests extends OpenSearchTestCase {
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
         List<FragmentExecutionRequest> capturedRequests = new ArrayList<>();
 
-        ShardRequestClient client = (request, node, listener) -> {
-            capturedRequests.add(request);
-            listener.onStreamResponse(new FragmentExecutionResponse(List.of(), List.of()), true);
+        AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(mock(TransportService.class), clusterService) {
+            @Override
+            public void dispatchScan(
+                FragmentExecutionRequest request,
+                DiscoveryNode node,
+                StreamingResponseListener<ScanResponse> listener,
+                Task _parentTask,
+                PendingExecutions _pending
+            ) {
+                capturedRequests.add(request);
+                listener.onStreamResponse(new ScanResponse(List.of(), List.of()), true);
+            }
         };
 
-        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
-        walker.walk(client, future);
+        new EventDrivenScheduler(
+            new StageExecutionBuilder(clusterService, dispatcher, null)
+        ).execute(QueryContext.forTest(dag, null), future);
         future.actionGet();
 
         // Only the child stage (SINGLETON with TableScan) should dispatch tasks.
@@ -223,13 +247,23 @@ public class PlanWalkerResolveTargetsTests extends OpenSearchTestCase {
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
         List<FragmentExecutionRequest> capturedRequests = new ArrayList<>();
 
-        ShardRequestClient client = (request, node, listener) -> {
-            capturedRequests.add(request);
-            listener.onStreamResponse(new FragmentExecutionResponse(List.of(), List.of()), true);
+        AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(mock(TransportService.class), clusterService) {
+            @Override
+            public void dispatchScan(
+                FragmentExecutionRequest request,
+                DiscoveryNode node,
+                StreamingResponseListener<ScanResponse> listener,
+                Task _parentTask,
+                PendingExecutions _pending
+            ) {
+                capturedRequests.add(request);
+                listener.onStreamResponse(new ScanResponse(List.of(), List.of()), true);
+            }
         };
 
-        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
-        walker.walk(client, future);
+        new EventDrivenScheduler(
+            new StageExecutionBuilder(clusterService, dispatcher, null)
+        ).execute(QueryContext.forTest(dag, null), future);
         future.actionGet();
 
         // Coordinator-only stage with StageInputScan (no TableScan) should dispatch zero tasks

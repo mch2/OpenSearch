@@ -20,7 +20,9 @@ import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.opensearch.action.support.PlainActionFuture;
-import org.opensearch.analytics.backend.FragmentExecutionResponse;
+import org.opensearch.analytics.backend.ScanResponse;
+import org.opensearch.analytics.exec.action.FragmentExecutionRequest;
+import org.opensearch.analytics.exec.stage.StageExecutionBuilder;
 import org.opensearch.analytics.planner.dag.ExchangeInfo;
 import org.opensearch.analytics.planner.dag.QueryDAG;
 import org.opensearch.analytics.planner.dag.Stage;
@@ -37,7 +39,9 @@ import org.opensearch.cluster.routing.ShardRouting;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.core.index.Index;
 import org.opensearch.core.index.shard.ShardId;
+import org.opensearch.tasks.Task;
 import org.opensearch.test.OpenSearchTestCase;
+import org.opensearch.transport.TransportService;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -148,16 +152,26 @@ public class PlanWalkerParallelTests extends OpenSearchTestCase {
         AtomicInteger listenerSignalCount = new AtomicInteger(0);
         List<Integer> dispatchedStageIds = new ArrayList<>();
 
-        ShardRequestClient client = (request, node, listener) -> {
-            dispatchedStageIds.add(request.getStageId());
-            List<Object[]> rows = new ArrayList<>();
-            rows.add(new Object[] { "row_stage_" + request.getStageId() });
-            listener.onStreamResponse(new FragmentExecutionResponse(List.of("field_0"), rows), true);
+        AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(mock(TransportService.class), clusterService) {
+            @Override
+            public void dispatchScan(
+                FragmentExecutionRequest request,
+                DiscoveryNode node,
+                StreamingResponseListener<ScanResponse> listener,
+                Task _parentTask,
+                PendingExecutions _pending
+            ) {
+                dispatchedStageIds.add(request.getStageId());
+                List<Object[]> rows = new ArrayList<>();
+                rows.add(new Object[] { "row_stage_" + request.getStageId() });
+                listener.onStreamResponse(new ScanResponse(List.of("field_0"), rows), true);
+            }
         };
 
-        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-        walker.walk(client, future);
+        new EventDrivenScheduler(
+            new StageExecutionBuilder(clusterService, dispatcher, null)
+        ).execute(QueryContext.forTest(dag, null), future);
 
         Iterable<Object[]> result = future.actionGet();
         assertNotNull(result);
@@ -188,14 +202,24 @@ public class PlanWalkerParallelTests extends OpenSearchTestCase {
         QueryDAG dag = new QueryDAG("test-query", rootStage);
 
         AtomicInteger submitCount = new AtomicInteger(0);
-        ShardRequestClient client = (request, node, listener) -> {
-            submitCount.incrementAndGet();
-            listener.onStreamResponse(new FragmentExecutionResponse(List.of(), List.of()), true);
+        AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(mock(TransportService.class), clusterService) {
+            @Override
+            public void dispatchScan(
+                FragmentExecutionRequest request,
+                DiscoveryNode node,
+                StreamingResponseListener<ScanResponse> listener,
+                Task _parentTask,
+                PendingExecutions _pending
+            ) {
+                submitCount.incrementAndGet();
+                listener.onStreamResponse(new ScanResponse(List.of(), List.of()), true);
+            }
         };
 
-        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-        walker.walk(client, future);
+        new EventDrivenScheduler(
+            new StageExecutionBuilder(clusterService, dispatcher, null)
+        ).execute(QueryContext.forTest(dag, null), future);
 
         Iterable<Object[]> result = future.actionGet();
         assertNotNull("Walk should complete successfully", result);
@@ -234,29 +258,40 @@ public class PlanWalkerParallelTests extends OpenSearchTestCase {
 
         AtomicInteger completedChildren = new AtomicInteger(0);
 
-        ShardRequestClient client = (request, node, listener) -> {
-            if (request.getStageId() == 1) {
-                // Stage 1 (table_b) fails
-                completedChildren.incrementAndGet();
-                listener.onFailure(new RuntimeException("child_b_failed"));
-            } else {
-                // Stage 0 (table_a) succeeds
-                completedChildren.incrementAndGet();
-                List<Object[]> rows = new ArrayList<>();
-                rows.add(new Object[] { "ok" });
-                listener.onStreamResponse(new FragmentExecutionResponse(List.of("field_0"), rows), true);
+        AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(mock(TransportService.class), clusterService) {
+            @Override
+            public void dispatchScan(
+                FragmentExecutionRequest request,
+                DiscoveryNode node,
+                StreamingResponseListener<ScanResponse> listener,
+                Task _parentTask,
+                PendingExecutions _pending
+            ) {
+                if (request.getStageId() == 1) {
+                    // Stage 1 (table_b) fails
+                    completedChildren.incrementAndGet();
+                    listener.onFailure(new RuntimeException("child_b_failed"));
+                } else {
+                    // Stage 0 (table_a) succeeds
+                    completedChildren.incrementAndGet();
+                    List<Object[]> rows = new ArrayList<>();
+                    rows.add(new Object[] { "ok" });
+                    listener.onStreamResponse(new ScanResponse(List.of("field_0"), rows), true);
+                }
             }
         };
 
-        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-        walker.walk(client, future);
+        new EventDrivenScheduler(
+            new StageExecutionBuilder(clusterService, dispatcher, null)
+        ).execute(QueryContext.forTest(dag, null), future);
 
         // Walk should fail with the child_b failure wrapped in a stage failure
         RuntimeException ex = expectThrows(RuntimeException.class, future::actionGet);
         assertTrue(
-            "Exception should reference stage failure",
-            ex.getMessage().contains("Stage 1 failed") || ex.getCause().getMessage().contains("child_b_failed")
+            "Exception should reference child failure",
+            ex.getMessage().contains("child_b_failed")
+                || (ex.getCause() != null && ex.getCause().getMessage().contains("child_b_failed"))
         );
 
         // All shard tasks across both children should have completed
@@ -294,18 +329,28 @@ public class PlanWalkerParallelTests extends OpenSearchTestCase {
 
         List<Integer> dispatchOrder = new ArrayList<>();
 
-        ShardRequestClient client = (request, node, listener) -> {
-            synchronized (dispatchOrder) {
-                dispatchOrder.add(request.getStageId());
+        AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(mock(TransportService.class), clusterService) {
+            @Override
+            public void dispatchScan(
+                FragmentExecutionRequest request,
+                DiscoveryNode node,
+                StreamingResponseListener<ScanResponse> listener,
+                Task _parentTask,
+                PendingExecutions _pending
+            ) {
+                synchronized (dispatchOrder) {
+                    dispatchOrder.add(request.getStageId());
+                }
+                List<Object[]> rows = new ArrayList<>();
+                rows.add(new Object[] { "data" });
+                listener.onStreamResponse(new ScanResponse(List.of("field_0"), rows), true);
             }
-            List<Object[]> rows = new ArrayList<>();
-            rows.add(new Object[] { "data" });
-            listener.onStreamResponse(new FragmentExecutionResponse(List.of("field_0"), rows), true);
         };
 
-        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-        walker.walk(client, future);
+        new EventDrivenScheduler(
+            new StageExecutionBuilder(clusterService, dispatcher, null)
+        ).execute(QueryContext.forTest(dag, null), future);
 
         future.actionGet();
 

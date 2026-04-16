@@ -74,6 +74,9 @@ dependencies {
     exclude group: 'org.opensearch'
   }
 
+  // Shared contract test suites from analytics-framework (e.g. ShuffleExchangeServiceContractTests)
+  testImplementation testFixtures(project(':sandbox:libs:analytics-framework'))
+
   // Arrow — needed for RowBatchToArrowConverter and ArrowSchemaFromCalcite unit tests
   testImplementation "org.apache.arrow:arrow-vector:${versions.arrow}"
   testImplementation "org.apache.arrow:arrow-memory-core:${versions.arrow}"
@@ -119,6 +122,8 @@ configurations.all {
     force "com.fasterxml.jackson.core:jackson-annotations:${versions.jackson_annotations}"
     force "com.fasterxml.jackson.dataformat:jackson-dataformat-cbor:${versions.jackson}"
     force "com.fasterxml.jackson.dataformat:jackson-dataformat-yaml:${versions.jackson}"
+    force "com.fasterxml.jackson.datatype:jackson-datatype-jsr310:${versions.jackson}"
+    force "com.fasterxml.jackson:jackson-bom:${versions.jackson}"
     force "org.slf4j:slf4j-api:${versions.slf4j}"
     force "org.locationtech.jts:jts-core:${versions.jts}"
     force "commons-codec:commons-codec:${versions.commonscodec}"

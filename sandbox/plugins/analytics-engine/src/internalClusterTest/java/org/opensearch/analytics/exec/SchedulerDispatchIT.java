@@ -20,7 +20,11 @@ import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.opensearch.action.support.PlainActionFuture;
 import org.opensearch.analytics.AnalyticsPlugin;
-import org.opensearch.analytics.backend.FragmentExecutionResponse;
+import org.opensearch.analytics.backend.ScanResponse;
+import org.opensearch.analytics.exec.action.AnalyticsScanAction;
+import org.opensearch.analytics.exec.action.FragmentExecutionRequest;
+import org.opensearch.analytics.exec.stage.StageExecutionBuilder;
+import org.opensearch.analytics.exec.task.AnalyticsQueryTask;
 import org.opensearch.analytics.planner.dag.ExchangeInfo;
 import org.opensearch.analytics.planner.dag.QueryDAG;
 import org.opensearch.analytics.planner.dag.Stage;
@@ -55,9 +59,9 @@ import static org.mockito.Mockito.when;
  * {@code Scheduler → PlanWalker → StageExecution → TransportService → mock handler → response → sink}
  *
  * <p>No analytics backends (DataFusion, Lucene) are loaded. The transport action
- * handler is replaced with a mock that returns canned {@link FragmentExecutionResponse}s.
+ * handler is replaced with a mock that returns canned {@link ScanResponse}s.
  */
-@OpenSearchIntegTestCase.ClusterScope(scope = OpenSearchIntegTestCase.Scope.TEST, numDataNodes = 2)
+@OpenSearchIntegTestCase.ClusterScope(scope = OpenSearchIntegTestCase.Scope.SUITE, numDataNodes = 2)
 public class SchedulerDispatchIT extends OpenSearchIntegTestCase {
 
     private static final String TEST_INDEX = "scheduler_test";
@@ -127,9 +131,9 @@ public class SchedulerDispatchIT extends OpenSearchIntegTestCase {
         for (String nodeName : internalCluster().getNodeNames()) {
             MockTransportService transportService = (MockTransportService) internalCluster().getInstance(TransportService.class, nodeName);
             transportService.<FragmentExecutionRequest>addRequestHandlingBehavior(
-                AnalyticsShardAction.NAME,
+                AnalyticsScanAction.NAME,
                 (handler, request, channel, task) -> {
-                    FragmentExecutionResponse response = new FragmentExecutionResponse(List.of("field_0", "field_1"), rows);
+                    ScanResponse response = new ScanResponse(List.of("field_0", "field_1"), rows);
                     channel.sendResponse(response);
                 }
             );
@@ -148,7 +152,7 @@ public class SchedulerDispatchIT extends OpenSearchIntegTestCase {
         for (String nodeName : internalCluster().getNodeNames()) {
             MockTransportService transportService = (MockTransportService) internalCluster().getInstance(TransportService.class, nodeName);
             transportService.<FragmentExecutionRequest>addRequestHandlingBehavior(
-                AnalyticsShardAction.NAME,
+                AnalyticsScanAction.NAME,
                 (handler, request, channel, task) -> {
                     int inflight = currentInFlight.incrementAndGet();
                     maxObservedInFlight.updateAndGet(prev -> Math.max(prev, inflight));
@@ -159,7 +163,7 @@ public class SchedulerDispatchIT extends OpenSearchIntegTestCase {
                         currentInFlight.decrementAndGet();
                         allDispatched.countDown();
                     }
-                    channel.sendResponse(new FragmentExecutionResponse(List.of("field_0", "field_1"), rows));
+                    channel.sendResponse(new ScanResponse(List.of("field_0", "field_1"), rows));
                 }
             );
         }
@@ -173,12 +177,12 @@ public class SchedulerDispatchIT extends OpenSearchIntegTestCase {
         for (String nodeName : internalCluster().getNodeNames()) {
             MockTransportService transportService = (MockTransportService) internalCluster().getInstance(TransportService.class, nodeName);
             transportService.<FragmentExecutionRequest>addRequestHandlingBehavior(
-                AnalyticsShardAction.NAME,
+                AnalyticsScanAction.NAME,
                 (handler, request, channel, task) -> {
                     if (requestCount.incrementAndGet() == failOnN) {
                         channel.sendResponse(new RuntimeException("shard execution failed [mock]"));
                     } else {
-                        channel.sendResponse(new FragmentExecutionResponse(List.of("field_0", "field_1"), rows));
+                        channel.sendResponse(new ScanResponse(List.of("field_0", "field_1"), rows));
                     }
                 }
             );
@@ -195,22 +199,19 @@ public class SchedulerDispatchIT extends OpenSearchIntegTestCase {
         }
     }
 
-    // ─── Scheduler + PlanWalker construction ────────────────────────────
+    // ─── Scheduler construction ─────────────────────────────────────────
 
     private Scheduler buildScheduler(int maxConcurrentShardRequests) {
         TransportService transportService = internalCluster().getInstance(TransportService.class, coordinatorNode());
         // Use regular TransportService for dispatch since MockTransportService
         // intercepts requests on the regular transport. The handleResponse fallback
         ClusterService clusterService = internalCluster().getInstance(ClusterService.class, coordinatorNode());
-        ShardTransportDispatcher dispatcher = new ShardTransportDispatcher(transportService, clusterService, maxConcurrentShardRequests);
-        return new Scheduler(dispatcher, new StageExecutor(clusterService));
+        ShardTransportDispatcher dispatcher = new AnalyticsSearchTransportService(transportService, clusterService);
+        return new EventDrivenScheduler(new StageExecutionBuilder(clusterService, dispatcher, null, null, null), dispatcher);
     }
 
-    private PlanWalker buildWalker(QueryDAG dag, Task parentTask) {
-        ClusterService clusterService = internalCluster().getInstance(ClusterService.class, coordinatorNode());
-        QueryContext config = QueryContext.forTest(dag, parentTask);
-        QueryState state = new QueryState();
-        return new PlanWalker(config, state, new StageExecutor(clusterService));
+    private QueryContext buildConfig(QueryDAG dag, Task parentTask) {
+        return QueryContext.forTest(dag, parentTask);
     }
 
     /** Returns the coordinator node name (first node). Used to ensure task registration and scheduler use the same node. */
@@ -243,9 +244,8 @@ public class SchedulerDispatchIT extends OpenSearchIntegTestCase {
             AnalyticsQueryTask queryTask = registerQueryTask("fanout-test");
 
             try {
-                PlanWalker walker = buildWalker(dag, queryTask);
                 PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-                scheduler.execute(walker, future);
+                scheduler.execute(buildConfig(dag, queryTask), future);
 
                 Iterable<Object[]> result = future.actionGet();
                 List<Object[]> rows = new java.util.ArrayList<>();
@@ -282,9 +282,8 @@ public class SchedulerDispatchIT extends OpenSearchIntegTestCase {
             AnalyticsQueryTask queryTask = registerQueryTask("concurrency-test");
 
             try {
-                PlanWalker walker = buildWalker(dag, queryTask);
                 PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-                scheduler.execute(walker, future);
+                scheduler.execute(buildConfig(dag, queryTask), future);
 
                 future.actionGet();
 
@@ -325,9 +324,8 @@ public class SchedulerDispatchIT extends OpenSearchIntegTestCase {
             AnalyticsQueryTask queryTask = registerQueryTask("failure-test");
 
             try {
-                PlanWalker walker = buildWalker(dag, queryTask);
                 PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-                scheduler.execute(walker, future);
+                scheduler.execute(buildConfig(dag, queryTask), future);
 
                 try {
                     future.get(10, TimeUnit.SECONDS);
@@ -371,9 +369,8 @@ public class SchedulerDispatchIT extends OpenSearchIntegTestCase {
             AnalyticsQueryTask queryTask = registerQueryTask("twostage-test");
 
             try {
-                PlanWalker walker = buildWalker(dag, queryTask);
                 PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-                scheduler.execute(walker, future);
+                scheduler.execute(buildConfig(dag, queryTask), future);
 
                 Iterable<Object[]> result = future.actionGet();
                 List<Object[]> rows = new java.util.ArrayList<>();

@@ -130,9 +130,6 @@ import org.opensearch.index.cache.request.ShardRequestCache;
 import org.opensearch.index.codec.CodecService;
 import org.opensearch.index.engine.CommitStats;
 import org.opensearch.index.engine.DataFormatAwareEngine;
-import org.opensearch.index.engine.dataformat.DataFormat;
-import org.opensearch.index.engine.exec.EngineReaderManager;
-import org.opensearch.index.engine.exec.coord.CatalogSnapshotManager;
 import org.opensearch.index.engine.Engine;
 import org.opensearch.index.engine.Engine.GetResult;
 import org.opensearch.index.engine.EngineBackedIndexer;
@@ -148,8 +145,11 @@ import org.opensearch.index.engine.RefreshFailedEngineException;
 import org.opensearch.index.engine.SafeCommitInfo;
 import org.opensearch.index.engine.Segment;
 import org.opensearch.index.engine.SegmentsStats;
+import org.opensearch.index.engine.dataformat.DataFormat;
 import org.opensearch.index.engine.dataformat.DataFormatRegistry;
+import org.opensearch.index.engine.exec.EngineReaderManager;
 import org.opensearch.index.engine.exec.Indexer;
+import org.opensearch.index.engine.exec.coord.CatalogSnapshotManager;
 import org.opensearch.index.fielddata.FieldDataStats;
 import org.opensearch.index.fielddata.ShardFieldData;
 import org.opensearch.index.flush.FlushStats;
@@ -584,14 +584,12 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
             // This is needed so acquireReader() works before the indexing pipeline is fully wired.
             // Once indexing creates real snapshots, this initialization should come from the indexing engine.
             Map<DataFormat, EngineReaderManager<?>> readerManagers = dataFormatRegistry.getReaderManagers(
-                mapperService, indexSettings, path
+                mapperService,
+                indexSettings,
+                path
             );
-            CatalogSnapshotManager snapshotManager = new CatalogSnapshotManager(
-                0L, 0L, 0L, java.util.List.of(), 0L, java.util.Map.of()
-            );
-            this.currentCompositeEngineReference.set(
-                new DataFormatAwareEngine(readerManagers, snapshotManager)
-            );
+            CatalogSnapshotManager snapshotManager = new CatalogSnapshotManager(0L, 0L, 0L, java.util.List.of(), 0L, java.util.Map.of());
+            this.currentCompositeEngineReference.set(new DataFormatAwareEngine(readerManagers, snapshotManager));
         }
     }
 
@@ -4398,9 +4396,11 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         // CatalogSnapshots. Once indexing is wired, this bridge should be replaced by the
         // proper CompositeIndexingExecutionEngine refresh path.
         DataFormatAwareEngine compositeEngine = currentCompositeEngineReference.get();
-        logger.info("[indexing-mock] Wiring refresh bridge: compositeEngine={}, dataFormatRegistry={}",
+        logger.info(
+            "[indexing-mock] Wiring refresh bridge: compositeEngine={}, dataFormatRegistry={}",
             compositeEngine != null ? "present" : "null",
-            dataFormatRegistry != null ? "present" : "null");
+            dataFormatRegistry != null ? "present" : "null"
+        );
         if (compositeEngine != null && dataFormatRegistry != null) {
             Map<DataFormat, EngineReaderManager<?>> readerManagers = compositeEngine.getReaderManagers();
             internalRefreshListener.add(new ReferenceManager.RefreshListener() {

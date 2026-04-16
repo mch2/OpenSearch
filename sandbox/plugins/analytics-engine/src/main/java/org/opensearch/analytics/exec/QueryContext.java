@@ -8,34 +8,107 @@
 
 package org.opensearch.analytics.exec;
 
+import org.apache.arrow.memory.BufferAllocator;
+import org.apache.arrow.memory.RootAllocator;
+import org.opensearch.analytics.exec.task.AnalyticsQueryTask;
 import org.opensearch.analytics.planner.dag.QueryDAG;
 import org.opensearch.tasks.Task;
 
 import java.util.concurrent.Executor;
 
 /**
- * Immutable per-query configuration. Created once in {@link DefaultPlanExecutor#execute}
- * and threaded through execution components as a read-only reference.
+ * Per-query context. Created once in {@link DefaultPlanExecutor#execute}
+ * and threaded through execution components. Holds immutable config (DAG,
+ * executor, parent task) and the lazy per-query {@link BufferAllocator}.
  *
- * <p>Separate from {@link QueryState}, which holds mutable per-query state.
- * Components that only read configuration take {@code QueryContext};
- * components that mutate shared state also take {@code QueryState}.
+ * <p>The execution registry has moved to {@link PlanWalker}, which owns
+ * the per-query execution map internally. This context is now purely
+ * configuration plus one lazy allocator.
  *
  * @opensearch.internal
  */
-public record QueryContext(QueryDAG dag, Executor searchExecutor, Task parentTask) {
+public class QueryContext {
+
+    // TODO: make configurable via cluster setting (like search.max_concurrent_shard_requests)
+    private static final int DEFAULT_MAX_CONCURRENT_SHARD_REQUESTS = 5;
+
+    private final QueryDAG dag;
+    private final Executor searchExecutor;
+    private final AnalyticsQueryTask parentTask;
+    private final int maxConcurrentShardRequests;
+    private volatile BufferAllocator bufferAllocator;
+
+    public QueryContext(QueryDAG dag, Executor searchExecutor, AnalyticsQueryTask parentTask) {
+        this(dag, searchExecutor, parentTask, DEFAULT_MAX_CONCURRENT_SHARD_REQUESTS);
+    }
+
+    public QueryContext(QueryDAG dag, Executor searchExecutor, AnalyticsQueryTask parentTask, int maxConcurrentShardRequests) {
+        this.dag = dag;
+        this.searchExecutor = searchExecutor;
+        this.parentTask = parentTask;
+        this.maxConcurrentShardRequests = maxConcurrentShardRequests;
+    }
+
+    public QueryDAG dag() {
+        return dag;
+    }
+
+    public Executor searchExecutor() {
+        return searchExecutor;
+    }
+
+    public AnalyticsQueryTask parentTask() {
+        return parentTask;
+    }
 
     public String queryId() {
         return dag.queryId();
     }
 
+    public int maxConcurrentShardRequests() {
+        return maxConcurrentShardRequests;
+    }
+
+    // ─── Buffer allocator ──────────────────────────────────────────────
+
+    /**
+     * Returns the per-query Arrow buffer allocator, creating it lazily on first access.
+     * The allocator is a child of a root allocator and should be closed when the query completes.
+     */
+    public BufferAllocator bufferAllocator() {
+        BufferAllocator alloc = bufferAllocator;
+        if (alloc == null) {
+            synchronized (this) {
+                alloc = bufferAllocator;
+                if (alloc == null) {
+                    alloc = new RootAllocator(Long.MAX_VALUE);
+                    bufferAllocator = alloc;
+                }
+            }
+        }
+        return alloc;
+    }
+
+    /**
+     * Closes the per-query buffer allocator if it was created.
+     * Called by the plan executor when the query completes.
+     */
+    public void closeBufferAllocator() {
+        BufferAllocator alloc = bufferAllocator;
+        if (alloc != null) {
+            alloc.close();
+        }
+    }
+
+    // ─── Test factories ────────────────────────────────────────────────
+
     /** Creates a test context with a synchronous executor. */
-    public static QueryContext forTest(QueryDAG dag, Task parentTask) {
+    public static QueryContext forTest(QueryDAG dag, AnalyticsQueryTask parentTask) {
         return new QueryContext(dag, Runnable::run, parentTask);
     }
 
     /** Creates a test context with a stub DAG. */
-    public static QueryContext forTest(String queryId, Task parentTask) {
+    public static QueryContext forTest(String queryId, AnalyticsQueryTask parentTask) {
         return new QueryContext(new QueryDAG(queryId, null), Runnable::run, parentTask);
     }
 }

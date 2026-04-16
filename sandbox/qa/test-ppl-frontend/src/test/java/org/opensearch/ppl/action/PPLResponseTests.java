@@ -9,7 +9,6 @@
 package org.opensearch.ppl.action;
 
 import org.opensearch.common.xcontent.XContentFactory;
-import org.opensearch.common.xcontent.XContentType;
 import org.opensearch.core.xcontent.ToXContent;
 import org.opensearch.core.xcontent.XContentBuilder;
 import org.opensearch.test.OpenSearchTestCase;
@@ -29,10 +28,7 @@ public class PPLResponseTests extends OpenSearchTestCase {
 
     public void testToXContentWithData() throws IOException {
         List<String> columns = List.of("name", "age");
-        List<Object[]> rows = List.of(
-            new Object[] { "Alice", 30 },
-            new Object[] { "Bob", 25 }
-        );
+        List<Object[]> rows = List.of(new Object[] { "Alice", 30 }, new Object[] { "Bob", 25 });
         PPLResponse response = new PPLResponse(columns, rows);
         XContentBuilder builder = XContentFactory.jsonBuilder();
         response.toXContent(builder, ToXContent.EMPTY_PARAMS);

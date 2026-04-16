@@ -20,7 +20,9 @@ import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.opensearch.action.support.PlainActionFuture;
-import org.opensearch.analytics.backend.FragmentExecutionResponse;
+import org.opensearch.analytics.backend.ScanResponse;
+import org.opensearch.analytics.exec.action.FragmentExecutionRequest;
+import org.opensearch.analytics.exec.stage.StageExecutionBuilder;
 import org.opensearch.analytics.planner.dag.ExchangeInfo;
 import org.opensearch.analytics.planner.dag.QueryDAG;
 import org.opensearch.analytics.planner.dag.Stage;
@@ -38,7 +40,9 @@ import org.opensearch.core.index.Index;
 import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.core.tasks.TaskCancelledException;
 import org.opensearch.tasks.CancellableTask;
+import org.opensearch.tasks.Task;
 import org.opensearch.test.OpenSearchTestCase;
+import org.opensearch.transport.TransportService;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -55,9 +59,9 @@ import static org.mockito.Mockito.when;
 
 /**
  * Unit tests for the full coordinator dispatch path:
- * {@code PlanWalker → StageExecutor → StageExecution → ShardRequestClient → response → sink}.
+ * {@code PlanWalker → StageExecutionBuilder → StageExecution → AnalyticsSearchTransportService → response → sink}.
  *
- * <p>No cluster, no transport, no IT overhead. Mock {@link ShardRequestClient} returns canned
+ * <p>No cluster, no transport, no IT overhead. Mock {@link AnalyticsSearchTransportService} returns canned
  * responses. Mock {@link ClusterService} provides shard routing. Tests run in milliseconds.
  */
 public class CoordinatorDispatchTests extends OpenSearchTestCase {
@@ -157,40 +161,70 @@ public class CoordinatorDispatchTests extends OpenSearchTestCase {
         return task;
     }
 
-    /** ShardRequestClient that responds immediately with canned rows. */
-    private ShardRequestClient immediateSubmitter(List<Object[]> rows) {
-        return (request, node, listener) -> { listener.onStreamResponse(new FragmentExecutionResponse(List.of("f0", "f1"), rows), true); };
-    }
-
-    /** ShardRequestClient that counts submissions and responds with canned rows. */
-    private ShardRequestClient countingSubmitter(List<Object[]> rows, AtomicInteger counter) {
-        return (request, node, listener) -> {
-            counter.incrementAndGet();
-            listener.onStreamResponse(new FragmentExecutionResponse(List.of("f0", "f1"), rows), true);
+    /** Dispatcher that responds immediately with canned rows. */
+    private AnalyticsSearchTransportService immediateSubmitter(List<Object[]> rows, ClusterService cs) {
+        return new AnalyticsSearchTransportService(mock(TransportService.class), cs) {
+            @Override
+            public void dispatchScan(
+                FragmentExecutionRequest request,
+                DiscoveryNode node,
+                StreamingResponseListener<ScanResponse> listener,
+                Task parentTask,
+                PendingExecutions _pending
+            ) {
+                listener.onStreamResponse(new ScanResponse(List.of("f0", "f1"), rows), true);
+            }
         };
     }
 
-    /** ShardRequestClient that fails the Nth request. */
-    private ShardRequestClient failOnNthSubmitter(List<Object[]> rows, int failOnN, AtomicInteger counter) {
-        return (request, node, listener) -> {
-            if (counter.incrementAndGet() == failOnN) {
-                listener.onFailure(new RuntimeException("shard failed [mock]"));
-            } else {
-                listener.onStreamResponse(new FragmentExecutionResponse(List.of("f0", "f1"), rows), true);
+    /** Dispatcher that counts submissions and responds with canned rows. */
+    private AnalyticsSearchTransportService countingSubmitter(List<Object[]> rows, AtomicInteger counter, ClusterService cs) {
+        return new AnalyticsSearchTransportService(mock(TransportService.class), cs) {
+            @Override
+            public void dispatchScan(
+                FragmentExecutionRequest request,
+                DiscoveryNode node,
+                StreamingResponseListener<ScanResponse> listener,
+                Task parentTask,
+                PendingExecutions _pending
+            ) {
+                counter.incrementAndGet();
+                listener.onStreamResponse(new ScanResponse(List.of("f0", "f1"), rows), true);
+            }
+        };
+    }
+
+    /** Dispatcher that fails the Nth request. */
+    private AnalyticsSearchTransportService failOnNthSubmitter(List<Object[]> rows, int failOnN, AtomicInteger counter, ClusterService cs) {
+        return new AnalyticsSearchTransportService(mock(TransportService.class), cs) {
+            @Override
+            public void dispatchScan(
+                FragmentExecutionRequest request,
+                DiscoveryNode node,
+                StreamingResponseListener<ScanResponse> listener,
+                Task parentTask,
+                PendingExecutions _pending
+            ) {
+                if (counter.incrementAndGet() == failOnN) {
+                    listener.onFailure(new RuntimeException("shard failed [mock]"));
+                } else {
+                    listener.onStreamResponse(new ScanResponse(List.of("f0", "f1"), rows), true);
+                }
             }
         };
     }
 
     /** Walk a DAG and return collected rows. */
-    private List<Object[]> walkAndCollect(QueryDAG dag, ClusterService cs, ShardRequestClient client) throws Exception {
-        return walkAndCollect(dag, cs, client, null);
+    private List<Object[]> walkAndCollect(QueryDAG dag, ClusterService cs, AnalyticsSearchTransportService dispatcher) throws Exception {
+        return walkAndCollect(dag, cs, dispatcher, null);
     }
 
-    private List<Object[]> walkAndCollect(QueryDAG dag, ClusterService cs, ShardRequestClient client, CancellableTask parentTask)
+    private List<Object[]> walkAndCollect(QueryDAG dag, ClusterService cs, AnalyticsSearchTransportService dispatcher, CancellableTask parentTask)
         throws Exception {
-        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, parentTask), new QueryState(), new StageExecutor(cs));
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-        walker.walk(client, future);
+        new EventDrivenScheduler(
+            new StageExecutionBuilder(cs, dispatcher, null)
+        ).execute(QueryContext.forTest(dag, parentTask), future);
         List<Object[]> rows = new ArrayList<>();
         future.actionGet().forEach(rows::add);
         return rows;
@@ -209,7 +243,7 @@ public class CoordinatorDispatchTests extends OpenSearchTestCase {
         QueryDAG dag = new QueryDAG("q1", stage);
 
         List<Object[]> rows = java.util.Arrays.asList(new Object[] { "a", 1L }, new Object[] { "b", 2L });
-        List<Object[]> result = walkAndCollect(dag, cs, immediateSubmitter(rows));
+        List<Object[]> result = walkAndCollect(dag, cs, immediateSubmitter(rows, cs));
         assertEquals(6, result.size());
     }
 
@@ -223,7 +257,7 @@ public class CoordinatorDispatchTests extends OpenSearchTestCase {
         stage.setPlanAlternatives(List.of(new StagePlan(s, BACKEND)));
         QueryDAG dag = new QueryDAG("q2", stage);
 
-        List<Object[]> result = walkAndCollect(dag, cs, immediateSubmitter(List.of()));
+        List<Object[]> result = walkAndCollect(dag, cs, immediateSubmitter(List.of(), cs));
         assertEquals(0, result.size());
     }
 
@@ -239,11 +273,13 @@ public class CoordinatorDispatchTests extends OpenSearchTestCase {
 
         AtomicInteger counter = new AtomicInteger();
         List<Object[]> rows = Collections.singletonList(new Object[] { "ok", 1L });
-        ShardRequestClient sub = failOnNthSubmitter(rows, 2, counter);
+        AnalyticsSearchTransportService sub = failOnNthSubmitter(rows, 2, counter, cs);
 
-        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(cs));
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-        walker.walk(sub, future);
+        new EventDrivenScheduler(
+            new StageExecutionBuilder(cs, sub, null),
+            sub
+        ).execute(QueryContext.forTest(dag, null), future);
 
         ExecutionException ex = expectThrows(ExecutionException.class, () -> future.get(5, TimeUnit.SECONDS));
         assertTrue(ex.getCause().getMessage().contains("Stage 0 failed"));
@@ -259,11 +295,24 @@ public class CoordinatorDispatchTests extends OpenSearchTestCase {
         stage.setPlanAlternatives(List.of(new StagePlan(s, BACKEND)));
         QueryDAG dag = new QueryDAG("q4", stage);
 
-        ShardRequestClient sub = (req, node, listener) -> listener.onFailure(new RuntimeException("boom"));
+        AnalyticsSearchTransportService sub = new AnalyticsSearchTransportService(mock(TransportService.class), cs) {
+            @Override
+            public void dispatchScan(
+                FragmentExecutionRequest req,
+                DiscoveryNode node,
+                StreamingResponseListener<ScanResponse> listener,
+                Task parentTask,
+                PendingExecutions _pending
+            ) {
+                listener.onFailure(new RuntimeException("boom"));
+            }
+        };
 
-        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(cs));
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-        walker.walk(sub, future);
+        new EventDrivenScheduler(
+            new StageExecutionBuilder(cs, sub, null),
+            sub
+        ).execute(QueryContext.forTest(dag, null), future);
 
         ExecutionException ex = expectThrows(ExecutionException.class, () -> future.get(5, TimeUnit.SECONDS));
         assertTrue(ex.getCause().getMessage().contains("Stage 0 failed"));
@@ -286,7 +335,7 @@ public class CoordinatorDispatchTests extends OpenSearchTestCase {
 
         QueryDAG dag = new QueryDAG("q5", root);
         List<Object[]> rows = Collections.singletonList(new Object[] { "v", 10L });
-        List<Object[]> result = walkAndCollect(dag, cs, immediateSubmitter(rows));
+        List<Object[]> result = walkAndCollect(dag, cs, immediateSubmitter(rows, cs));
 
         assertEquals("3 shards × 1 row", 3, result.size());
     }
@@ -303,11 +352,24 @@ public class CoordinatorDispatchTests extends OpenSearchTestCase {
         Stage root = new Stage(1, null, List.of(child), null);
 
         QueryDAG dag = new QueryDAG("q6", root);
-        ShardRequestClient sub = (req, node, listener) -> listener.onFailure(new RuntimeException("child boom"));
+        AnalyticsSearchTransportService sub = new AnalyticsSearchTransportService(mock(TransportService.class), cs) {
+            @Override
+            public void dispatchScan(
+                FragmentExecutionRequest req,
+                DiscoveryNode node,
+                StreamingResponseListener<ScanResponse> listener,
+                Task parentTask,
+                PendingExecutions _pending
+            ) {
+                listener.onFailure(new RuntimeException("child boom"));
+            }
+        };
 
-        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(cs));
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-        walker.walk(sub, future);
+        new EventDrivenScheduler(
+            new StageExecutionBuilder(cs, sub, null),
+            sub
+        ).execute(QueryContext.forTest(dag, null), future);
 
         ExecutionException ex = expectThrows(ExecutionException.class, () -> future.get(5, TimeUnit.SECONDS));
         assertTrue(ex.getCause().getMessage().contains("Stage 0 failed"));
@@ -342,7 +404,7 @@ public class CoordinatorDispatchTests extends OpenSearchTestCase {
         List<Object[]> rows = Collections.singletonList(new Object[] { "row", 1L });
 
         AtomicInteger submissions = new AtomicInteger();
-        List<Object[]> result = walkAndCollect(dag, cs, countingSubmitter(rows, submissions));
+        List<Object[]> result = walkAndCollect(dag, cs, countingSubmitter(rows, submissions, cs));
 
         // 2 shards (orders) + 3 shards (customers) = 5 submissions, 5 rows
         assertEquals(5, submissions.get());
@@ -371,20 +433,31 @@ public class CoordinatorDispatchTests extends OpenSearchTestCase {
         QueryDAG dag = new QueryDAG("join-fail-q", root);
 
         // Fail all shards for "orders", succeed for "customers"
-        ShardRequestClient sub = (req, node, listener) -> {
-            if (req.getShardId().getIndex().getName().equals("orders")) {
-                listener.onFailure(new RuntimeException("orders shard failed"));
-            } else {
-                listener.onStreamResponse(
-                    new FragmentExecutionResponse(List.of("f0", "f1"), Collections.singletonList(new Object[] { "ok", 1L })),
-                    true
-                );
+        AnalyticsSearchTransportService sub = new AnalyticsSearchTransportService(mock(TransportService.class), cs) {
+            @Override
+            public void dispatchScan(
+                FragmentExecutionRequest req,
+                DiscoveryNode node,
+                StreamingResponseListener<ScanResponse> listener,
+                Task parentTask,
+                PendingExecutions _pending
+            ) {
+                if (req.getShardId().getIndex().getName().equals("orders")) {
+                    listener.onFailure(new RuntimeException("orders shard failed"));
+                } else {
+                    listener.onStreamResponse(
+                        new ScanResponse(List.of("f0", "f1"), Collections.singletonList(new Object[] { "ok", 1L })),
+                        true
+                    );
+                }
             }
         };
 
-        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(cs));
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-        walker.walk(sub, future);
+        new EventDrivenScheduler(
+            new StageExecutionBuilder(cs, sub, null),
+            sub
+        ).execute(QueryContext.forTest(dag, null), future);
 
         ExecutionException ex = expectThrows(ExecutionException.class, () -> future.get(5, TimeUnit.SECONDS));
         assertTrue(ex.getCause().getMessage().contains("Stage 0 failed"));
@@ -425,9 +498,18 @@ public class CoordinatorDispatchTests extends OpenSearchTestCase {
         List<String> dispatchOrder = Collections.synchronizedList(new ArrayList<>());
         List<Object[]> rows = Collections.singletonList(new Object[] { "v", 1L });
 
-        ShardRequestClient sub = (req, node, listener) -> {
-            dispatchOrder.add("stage" + req.getStageId() + "_shard" + req.getShardId().id());
-            listener.onStreamResponse(new FragmentExecutionResponse(List.of("f0", "f1"), rows), true);
+        AnalyticsSearchTransportService sub = new AnalyticsSearchTransportService(mock(TransportService.class), cs) {
+            @Override
+            public void dispatchScan(
+                FragmentExecutionRequest req,
+                DiscoveryNode node,
+                StreamingResponseListener<ScanResponse> listener,
+                Task parentTask,
+                PendingExecutions _pending
+            ) {
+                dispatchOrder.add("stage" + req.getStageId() + "_shard" + req.getShardId().id());
+                listener.onStreamResponse(new ScanResponse(List.of("f0", "f1"), rows), true);
+            }
         };
 
         List<Object[]> result = walkAndCollect(dag, cs, sub);
@@ -464,14 +546,25 @@ public class CoordinatorDispatchTests extends OpenSearchTestCase {
         QueryDAG dag = new QueryDAG("chain-fail-q", root);
 
         AtomicInteger submissions = new AtomicInteger();
-        ShardRequestClient sub = (req, node, listener) -> {
-            submissions.incrementAndGet();
-            listener.onFailure(new RuntimeException("stage " + req.getStageId() + " boom"));
+        AnalyticsSearchTransportService sub = new AnalyticsSearchTransportService(mock(TransportService.class), cs) {
+            @Override
+            public void dispatchScan(
+                FragmentExecutionRequest req,
+                DiscoveryNode node,
+                StreamingResponseListener<ScanResponse> listener,
+                Task parentTask,
+                PendingExecutions _pending
+            ) {
+                submissions.incrementAndGet();
+                listener.onFailure(new RuntimeException("stage " + req.getStageId() + " boom"));
+            }
         };
 
-        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(cs));
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-        walker.walk(sub, future);
+        new EventDrivenScheduler(
+            new StageExecutionBuilder(cs, sub, null),
+            sub
+        ).execute(QueryContext.forTest(dag, null), future);
 
         ExecutionException ex = expectThrows(ExecutionException.class, () -> future.get(5, TimeUnit.SECONDS));
         // Stage 0 fails, Stage 1 never dispatches
@@ -494,11 +587,24 @@ public class CoordinatorDispatchTests extends OpenSearchTestCase {
         CancellableTask parentTask = mockParentTask(true);
 
         // All shards respond with TaskCancelledException (simulating data-node-side cancellation)
-        ShardRequestClient sub = (req, node, listener) -> listener.onFailure(new TaskCancelledException("task cancelled [mock]"));
+        AnalyticsSearchTransportService sub = new AnalyticsSearchTransportService(mock(TransportService.class), cs) {
+            @Override
+            public void dispatchScan(
+                FragmentExecutionRequest req,
+                DiscoveryNode node,
+                StreamingResponseListener<ScanResponse> listener,
+                Task parentTaskArg,
+                PendingExecutions _pending
+            ) {
+                listener.onFailure(new TaskCancelledException("task cancelled [mock]"));
+            }
+        };
 
-        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, parentTask), new QueryState(), new StageExecutor(cs));
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-        walker.walk(sub, future);
+        new EventDrivenScheduler(
+            new StageExecutionBuilder(cs, sub, null),
+            sub
+        ).execute(QueryContext.forTest(dag, parentTask), future);
 
         ExecutionException ex = expectThrows(ExecutionException.class, () -> future.get(5, TimeUnit.SECONDS));
         assertTrue(ex.getCause() instanceof TaskCancelledException);
@@ -518,11 +624,24 @@ public class CoordinatorDispatchTests extends OpenSearchTestCase {
 
         CancellableTask parentTask = mockParentTask(false); // NOT cancelled
 
-        ShardRequestClient sub = (req, node, listener) -> listener.onFailure(new TaskCancelledException("circuit breaker [mock]"));
+        AnalyticsSearchTransportService sub = new AnalyticsSearchTransportService(mock(TransportService.class), cs) {
+            @Override
+            public void dispatchScan(
+                FragmentExecutionRequest req,
+                DiscoveryNode node,
+                StreamingResponseListener<ScanResponse> listener,
+                Task parentTaskArg,
+                PendingExecutions _pending
+            ) {
+                listener.onFailure(new TaskCancelledException("circuit breaker [mock]"));
+            }
+        };
 
-        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, parentTask), new QueryState(), new StageExecutor(cs));
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-        walker.walk(sub, future);
+        new EventDrivenScheduler(
+            new StageExecutionBuilder(cs, sub, null),
+            sub
+        ).execute(QueryContext.forTest(dag, parentTask), future);
 
         ExecutionException ex = expectThrows(ExecutionException.class, () -> future.get(5, TimeUnit.SECONDS));
         assertFalse("Should NOT be TaskCancelledException", ex.getCause() instanceof TaskCancelledException);
@@ -539,11 +658,25 @@ public class CoordinatorDispatchTests extends OpenSearchTestCase {
         stage.setPlanAlternatives(List.of(new StagePlan(s, BACKEND)));
         QueryDAG dag = new QueryDAG("null-task-q", stage);
 
-        ShardRequestClient sub = (req, node, listener) -> listener.onFailure(new TaskCancelledException("cancelled"));
+        AnalyticsSearchTransportService sub = new AnalyticsSearchTransportService(mock(TransportService.class), cs) {
+            @Override
+            public void dispatchScan(
+                FragmentExecutionRequest req,
+                DiscoveryNode node,
+                StreamingResponseListener<ScanResponse> listener,
+                Task parentTaskArg,
+                PendingExecutions _pending
+            ) {
+                listener.onFailure(new TaskCancelledException("cancelled"));
+            }
+        };
 
-        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(cs)); // null parent
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-        walker.walk(sub, future);
+        // null parent
+        new EventDrivenScheduler(
+            new StageExecutionBuilder(cs, sub, null),
+            sub
+        ).execute(QueryContext.forTest(dag, null), future);
 
         ExecutionException ex = expectThrows(ExecutionException.class, () -> future.get(5, TimeUnit.SECONDS));
         assertTrue(ex.getCause().getMessage().contains("Stage 0 failed"));
@@ -563,7 +696,7 @@ public class CoordinatorDispatchTests extends OpenSearchTestCase {
 
         AtomicInteger submissions = new AtomicInteger();
         List<Object[]> rows = Collections.singletonList(new Object[] { "x", 1L });
-        walkAndCollect(dag, cs, countingSubmitter(rows, submissions));
+        walkAndCollect(dag, cs, countingSubmitter(rows, submissions, cs));
 
         assertEquals(5, submissions.get());
     }
@@ -588,7 +721,7 @@ public class CoordinatorDispatchTests extends OpenSearchTestCase {
 
         AtomicInteger submissions = new AtomicInteger();
         List<Object[]> rows = Collections.singletonList(new Object[] { "r", 1L });
-        walkAndCollect(dag, cs, countingSubmitter(rows, submissions));
+        walkAndCollect(dag, cs, countingSubmitter(rows, submissions, cs));
 
         assertEquals(10, submissions.get());
     }

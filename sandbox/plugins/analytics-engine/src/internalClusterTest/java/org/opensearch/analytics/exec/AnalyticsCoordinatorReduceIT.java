@@ -243,8 +243,6 @@ public class AnalyticsCoordinatorReduceIT extends OpenSearchIntegTestCase {
         return client().execute(UnifiedPPLExecuteAction.INSTANCE, request).actionGet();
     }
 
-    // ─── 49.1: Scalar SUM across shards ─────────────────────────────────
-
     /**
      * {@code source = T | stats sum(Age) as total_age} with NUM_SHARDS shards →
      * verify the coord-reduce path produces the exact deterministic final sum
@@ -307,44 +305,6 @@ public class AnalyticsCoordinatorReduceIT extends OpenSearchIntegTestCase {
             totalAge
         );
 
-        // ── Stage metrics assertions (Requirement 4.5) ─────────────────
-        // After the query completes, the coordinator's DefaultPlanExecutor
-        // retains the QueryState in a volatile lastQueryState field. Find
-        // the executor instance that actually ran this query (the one whose
-        // lastQueryState is non-null).
-        QueryState queryState = null;
-        for (DefaultPlanExecutor executor : internalCluster().getInstances(DefaultPlanExecutor.class)) {
-            if (executor.lastQueryState != null) {
-                queryState = executor.lastQueryState;
-                break;
-            }
-        }
-        assertNotNull("lastQueryState should be captured by DefaultPlanExecutor after query execution", queryState);
-
-        Map<Integer, StageMetrics> allMetrics = queryState.allStageMetrics();
-        assertFalse("Stage metrics map should not be empty after query execution", allMetrics.isEmpty());
-        assertTrue("At least 2 stages should have metrics (DATA_NODE child + LOCAL parent)", allMetrics.size() >= 2);
-
-        // The DATA_NODE child stage's rowsProcessed must be > 0, confirming
-        // that the MetricsInstrumentedSink wiring counted rows flowing from
-        // shards through the coordinator's sink chain.
-        boolean foundDataNodeStageWithRows = false;
-        for (Map.Entry<Integer, StageMetrics> entry : allMetrics.entrySet()) {
-            if (entry.getValue().getRowsProcessed() > 0) {
-                foundDataNodeStageWithRows = true;
-                logger.info(
-                    "[testScalarSumAcrossShards] stageId={} rowsProcessed={} bytesRead={}",
-                    entry.getKey(),
-                    entry.getValue().getRowsProcessed(),
-                    entry.getValue().getBytesRead()
-                );
-            }
-        }
-        assertTrue(
-            "At least one stage should have rowsProcessed > 0 — the DATA_NODE stage's "
-                + "MetricsInstrumentedSink should have counted the partial aggregate rows from each shard",
-            foundDataNodeStageWithRows
-        );
     }
 
     // ─── 49.2: GROUP BY aggregate across shards ─────────────────────────
@@ -519,7 +479,7 @@ public class AnalyticsCoordinatorReduceIT extends OpenSearchIntegTestCase {
      * {@code ChannelPendingTaskTracker.removeTask}: <i>"task &lt;n&gt; is not in
      * the pending list"</i>. The assertion fires from
      * {@link org.opensearch.transport.RequestHandlerRegistry#processMessageReceived}'s
-     * finally block when our {@code AnalyticsShardAction} handler releases the
+     * finally block when our {@code AnalyticsScanAction} handler releases the
      * task — meaning either the task isn't registered when expected, or it's
      * being released twice, or the registration timing races with the release.
      *

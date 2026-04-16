@@ -8,9 +8,9 @@
 
 package org.opensearch.analytics.planner.dag;
 
+import org.apache.calcite.rel.RelDistribution;
 import org.apache.calcite.rel.RelNode;
 import org.opensearch.analytics.exec.ShardFilterPhase;
-import org.opensearch.analytics.exec.TerminationDecider;
 import org.opensearch.analytics.planner.rel.OpenSearchTableScan;
 import org.opensearch.common.Nullable;
 
@@ -40,7 +40,6 @@ public class Stage {
     private final StageExecutionType executionType;
     private List<StagePlan> planAlternatives;
     private ShardFilterPhase shardFilterPhase = ShardFilterPhase.IDENTITY;
-    private TerminationDecider terminationDecider = TerminationDecider.DISPATCH_ALL;
 
     /**
      * Creates a stage with an inferred execution type. The type defaults to
@@ -103,11 +102,35 @@ public class Stage {
     }
 
     /**
-     * Returns true if this stage writes shuffle output (exchange is HASH/RANGE with shuffle).
+     * Returns true if this stage writes shuffle output (exchange is HASH_DISTRIBUTED).
      * Responses carry metadata (partition manifests) instead of rows.
      */
     public boolean isShuffleWrite() {
-        return exchangeInfo != null && exchangeInfo.isShuffle();
+        return exchangeInfo != null && exchangeInfo.distributionType() == RelDistribution.Type.HASH_DISTRIBUTED;
+    }
+
+    /**
+     * Returns true if this stage is a shuffle-read stage: a LOCAL stage that has
+     * at least one child whose {@link #isShuffleWrite()} is true.
+     */
+    public boolean isShuffleRead() {
+        return executionType == StageExecutionType.LOCAL && childStages.stream().anyMatch(Stage::isShuffleWrite);
+    }
+
+    /**
+     * Returns true if this stage writes broadcast output (exchange is BROADCAST_DISTRIBUTED).
+     * Responses carry a broadcast manifest (one opaque handle per producer shard) instead of rows.
+     */
+    public boolean isBroadcastWrite() {
+        return exchangeInfo != null && exchangeInfo.distributionType() == RelDistribution.Type.BROADCAST_DISTRIBUTED;
+    }
+
+    /**
+     * Returns true if this stage has at least one child whose {@link #isBroadcastWrite()} is true.
+     * No {@code executionType} constraint — scope is enforced at the scheduler selection layer.
+     */
+    public boolean isBroadcastRead() {
+        return childStages.stream().anyMatch(Stage::isBroadcastWrite);
     }
 
     public List<StagePlan> getPlanAlternatives() {
@@ -124,14 +147,6 @@ public class Stage {
 
     public void setShardFilterPhase(ShardFilterPhase shardFilterPhase) {
         this.shardFilterPhase = shardFilterPhase;
-    }
-
-    public TerminationDecider getTerminationDecider() {
-        return terminationDecider;
-    }
-
-    public void setTerminationDecider(TerminationDecider terminationDecider) {
-        this.terminationDecider = terminationDecider;
     }
 
     /** Walks the fragment tree to find OpenSearchTableScan and extract the table name. */

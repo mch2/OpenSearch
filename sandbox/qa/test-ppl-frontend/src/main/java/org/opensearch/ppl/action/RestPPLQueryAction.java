@@ -8,11 +8,11 @@
 
 package org.opensearch.ppl.action;
 
-import org.opensearch.transport.client.node.NodeClient;
 import org.opensearch.core.xcontent.XContentParser;
 import org.opensearch.rest.BaseRestHandler;
 import org.opensearch.rest.RestRequest;
 import org.opensearch.rest.action.RestToXContentListener;
+import org.opensearch.transport.client.node.NodeClient;
 
 import java.io.IOException;
 import java.util.List;
@@ -43,11 +43,7 @@ public class RestPPLQueryAction extends BaseRestHandler {
             queryText = parseQueryText(parser);
         }
         PPLRequest pplRequest = new PPLRequest(queryText);
-        return channel -> client.execute(
-            UnifiedPPLExecuteAction.INSTANCE,
-            pplRequest,
-            new RestToXContentListener<>(channel)
-        );
+        return channel -> client.execute(UnifiedPPLExecuteAction.INSTANCE, pplRequest, new RestToXContentListener<>(channel));
     }
 
     private String parseQueryText(XContentParser parser) throws IOException {

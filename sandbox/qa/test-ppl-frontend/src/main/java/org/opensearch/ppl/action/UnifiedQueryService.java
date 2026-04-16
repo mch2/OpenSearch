@@ -13,19 +13,18 @@ import org.apache.calcite.rel.type.RelDataTypeField;
 import org.apache.calcite.schema.SchemaPlus;
 import org.apache.calcite.schema.Table;
 import org.apache.calcite.schema.impl.AbstractSchema;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.EngineContext;
 import org.opensearch.analytics.exec.QueryPlanExecutor;
 import org.opensearch.sql.api.UnifiedQueryContext;
 import org.opensearch.sql.api.UnifiedQueryPlanner;
 import org.opensearch.sql.executor.QueryType;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
 
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.List;
 
 /**
  * Core orchestrator: PPL text → RelNode → QueryPlanExecutor → PPLResponse.
@@ -67,15 +66,21 @@ public class UnifiedQueryService {
             }
         };
 
-        logger.info("[UnifiedQueryService] schemaPlus class: {}, tableNames: {}, tableMap: {}, engineContext class: {}",
-            schemaPlus.getClass().getName(), schemaPlus.getTableNames(), tableMap.keySet(),
-            engineContext.getClass().getName());
+        logger.info(
+            "[UnifiedQueryService] schemaPlus class: {}, tableNames: {}, tableMap: {}, engineContext class: {}",
+            schemaPlus.getClass().getName(),
+            schemaPlus.getTableNames(),
+            tableMap.keySet(),
+            engineContext.getClass().getName()
+        );
 
-        try (UnifiedQueryContext context = UnifiedQueryContext.builder()
-            .language(QueryType.PPL)
-            .catalog(DEFAULT_CATALOG, flatSchema)
-            .defaultNamespace(DEFAULT_CATALOG)
-            .build()) {
+        try (
+            UnifiedQueryContext context = UnifiedQueryContext.builder()
+                .language(QueryType.PPL)
+                .catalog(DEFAULT_CATALOG, flatSchema)
+                .defaultNamespace(DEFAULT_CATALOG)
+                .build()
+        ) {
 
             // Log what the context's root schema looks like
             logger.info("[UnifiedQueryService] Context built, planning PPL: {}", pplText);

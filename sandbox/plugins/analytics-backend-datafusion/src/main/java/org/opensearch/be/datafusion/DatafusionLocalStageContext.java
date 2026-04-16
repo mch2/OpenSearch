@@ -9,13 +9,17 @@
 package org.opensearch.be.datafusion;
 
 import org.apache.arrow.memory.BufferAllocator;
+import org.apache.arrow.vector.VarCharVector;
+import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.types.pojo.ArrowType;
+import org.apache.arrow.vector.types.pojo.Field;
+import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.backend.EngineResultBatch;
 import org.opensearch.analytics.backend.EngineResultStream;
 import org.opensearch.analytics.backend.ExchangeSink;
-import org.opensearch.analytics.backend.FragmentExecutionResponse;
 import org.opensearch.analytics.backend.LocalStageContext;
 import org.opensearch.analytics.backend.LocalStageRequest;
 import org.opensearch.be.datafusion.internal.InputHandle;
@@ -23,6 +27,7 @@ import org.opensearch.be.datafusion.internal.LocalExecutionContext;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.tasks.TaskCancelledException;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -76,13 +81,13 @@ class DatafusionLocalStageContext implements LocalStageContext {
 
         // Register one input per child stage and create per-child sinks
         for (Map.Entry<Integer, Schema> entry : req.getChildSchemas().entrySet()) {
-            int childStageId = entry.getKey();
+            int partitionId = entry.getKey();
             Schema schema = entry.getValue();
-            String inputId = stageInputId(childStageId);
+            String inputId = stageInputId(partitionId);
             DatafusionInputHandle handle = engine.registerInput(inputId, schema);
-            handles.put(childStageId, handle);
-            childSinks.put(childStageId, new DatafusionChildSink(handle, schema, allocator, childStageId));
-            logger.info("[DF.LocalStageContext] registered child childStageId={} inputId={} schema={}", childStageId, inputId, schema);
+            handles.put(partitionId, handle);
+            childSinks.put(partitionId, new DatafusionChildSink(handle, schema, allocator, partitionId));
+            logger.info("[DF.LocalStageContext] registered child partitionId={} inputId={} schema={}", partitionId, inputId, schema);
         }
 
         // Start engine execution — begins polling inputs (which initially block on empty mpsc channels)
@@ -92,12 +97,12 @@ class DatafusionLocalStageContext implements LocalStageContext {
     }
 
     @Override
-    public ExchangeSink sinkFor(int childStageId) {
-        ExchangeSink sink = childSinks.get(childStageId);
+    public ExchangeSink sinkFor(int partitionId) {
+        ExchangeSink sink = childSinks.get(partitionId);
         if (sink == null) {
-            throw new IllegalArgumentException("No sink registered for child stage " + childStageId);
+            throw new IllegalArgumentException("No sink registered for child stage " + partitionId);
         }
-        logger.info("[DF.LocalStageContext] sinkFor childStageId={}", childStageId);
+        logger.info("[DF.LocalStageContext] sinkFor partitionId={}", partitionId);
         return sink;
     }
 
@@ -127,9 +132,9 @@ class DatafusionLocalStageContext implements LocalStageContext {
                         batch.getFieldNames(),
                         stageId
                     );
-                    FragmentExecutionResponse response = batchToResponse(batch);
+                    VectorSchemaRoot vsr = batchToVsr(batch, allocator);
                     synchronized (downstream) {
-                        downstream.feed(response);
+                        downstream.feed(vsr);
                     }
                 }
                 if (cancelled.get()) {
@@ -183,19 +188,41 @@ class DatafusionLocalStageContext implements LocalStageContext {
     }
 
     /**
-     * Converts an {@link EngineResultBatch} to a {@link FragmentExecutionResponse}.
+     * Converts an {@link EngineResultBatch} to an Arrow {@link VectorSchemaRoot}.
+     * Uses VarChar vectors for all fields since the engine result batch carries
+     * generic Object values.
      */
-    static FragmentExecutionResponse batchToResponse(EngineResultBatch batch) {
+    static VectorSchemaRoot batchToVsr(EngineResultBatch batch, BufferAllocator allocator) {
         List<String> fieldNames = batch.getFieldNames();
-        List<Object[]> rows = new ArrayList<>();
-        for (int r = 0; r < batch.getRowCount(); r++) {
-            Object[] row = new Object[fieldNames.size()];
-            for (int c = 0; c < fieldNames.size(); c++) {
-                row[c] = batch.getFieldValue(fieldNames.get(c), r);
-            }
-            rows.add(row);
+        List<Field> fields = new ArrayList<>();
+        for (String name : fieldNames) {
+            fields.add(new Field(name, FieldType.nullable(ArrowType.Utf8.INSTANCE), null));
         }
-        return new FragmentExecutionResponse(fieldNames, rows);
+        Schema schema = new Schema(fields);
+
+        VectorSchemaRoot vsr = VectorSchemaRoot.create(schema, allocator);
+        try {
+            vsr.allocateNew();
+            int rowCount = batch.getRowCount();
+            for (int col = 0; col < fieldNames.size(); col++) {
+                VarCharVector vec = (VarCharVector) vsr.getVector(col);
+                String fieldName = fieldNames.get(col);
+                for (int r = 0; r < rowCount; r++) {
+                    Object value = batch.getFieldValue(fieldName, r);
+                    if (value == null) {
+                        vec.setNull(r);
+                    } else {
+                        vec.setSafe(r, value.toString().getBytes(StandardCharsets.UTF_8));
+                    }
+                }
+                vec.setValueCount(rowCount);
+            }
+            vsr.setRowCount(rowCount);
+            return vsr;
+        } catch (Exception e) {
+            vsr.close();
+            throw e;
+        }
     }
 
     static String stageInputId(int childStageId) {

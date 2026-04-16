@@ -10,7 +10,8 @@ package org.opensearch.analytics.exec;
 
 import org.opensearch.analytics.backend.EngineResultBatch;
 import org.opensearch.analytics.backend.EngineResultStream;
-import org.opensearch.analytics.backend.FragmentExecutionResponse;
+import org.opensearch.analytics.backend.ScanResponse;
+import org.opensearch.analytics.exec.task.AnalyticsShardTask;
 import org.opensearch.core.tasks.TaskCancelledException;
 import org.opensearch.test.OpenSearchTestCase;
 
@@ -152,7 +153,7 @@ public class AnalyticsSearchServiceCancellationTests extends OpenSearchTestCase 
         EngineResultStream stream = new CountingStream(List.of(batch1, batch2));
         AnalyticsShardTask task = createNotCancelledTask();
 
-        FragmentExecutionResponse response = service.collectResponse(stream, task);
+        ScanResponse response = service.collectResponse(stream, task);
 
         assertEquals(List.of("field_0"), response.getFieldNames());
         assertEquals(2, response.getRows().size());
@@ -168,7 +169,7 @@ public class AnalyticsSearchServiceCancellationTests extends OpenSearchTestCase 
         EngineResultStream stream = new CountingStream(List.of(batch));
 
         // null task should not cause NPE
-        FragmentExecutionResponse response = service.collectResponse(stream, null);
+        ScanResponse response = service.collectResponse(stream, null);
 
         assertEquals(List.of("field_0"), response.getFieldNames());
         assertEquals(1, response.getRows().size());
@@ -198,7 +199,7 @@ public class AnalyticsSearchServiceCancellationTests extends OpenSearchTestCase 
 
         AnalyticsSearchService service = new AnalyticsSearchService(Map.of()) {
             @Override
-            FragmentExecutionResponse collectResponse(EngineResultStream stream, AnalyticsShardTask task) {
+            ScanResponse collectResponse(EngineResultStream stream, AnalyticsShardTask task) {
                 throw original;
             }
         };

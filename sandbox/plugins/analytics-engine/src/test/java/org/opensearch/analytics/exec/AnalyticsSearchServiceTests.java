@@ -10,7 +10,8 @@ package org.opensearch.analytics.exec;
 
 import org.opensearch.analytics.backend.EngineResultBatch;
 import org.opensearch.analytics.backend.EngineResultStream;
-import org.opensearch.analytics.backend.FragmentExecutionResponse;
+import org.opensearch.analytics.backend.ScanResponse;
+import org.opensearch.analytics.exec.action.FragmentExecutionRequest;
 import org.opensearch.core.index.Index;
 import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.index.shard.IndexShard;
@@ -98,7 +99,7 @@ public class AnalyticsSearchServiceTests extends OpenSearchTestCase {
         MockResultBatch batch = new MockResultBatch(fieldNames, rows);
         MockResultStream stream = new MockResultStream(List.of(batch));
 
-        FragmentExecutionResponse response = service.collectResponse(stream);
+        ScanResponse response = service.collectResponse(stream);
 
         assertEquals(List.of("name", "score"), response.getFieldNames());
         assertEquals(3, response.getRows().size());
@@ -123,7 +124,7 @@ public class AnalyticsSearchServiceTests extends OpenSearchTestCase {
 
         MockResultStream stream = new MockResultStream(List.of(batch1, batch2));
 
-        FragmentExecutionResponse response = service.collectResponse(stream);
+        ScanResponse response = service.collectResponse(stream);
 
         // Field names come from the first batch
         assertEquals(List.of("id", "value"), response.getFieldNames());
@@ -139,7 +140,7 @@ public class AnalyticsSearchServiceTests extends OpenSearchTestCase {
 
         MockResultStream stream = new MockResultStream(Collections.emptyList());
 
-        FragmentExecutionResponse response = service.collectResponse(stream);
+        ScanResponse response = service.collectResponse(stream);
 
         assertEquals(List.of(), response.getFieldNames());
         assertEquals(0, response.getRows().size());

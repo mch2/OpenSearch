@@ -8,6 +8,7 @@
 
 package org.opensearch.analytics.exec;
 
+import org.opensearch.analytics.exec.task.AnalyticsQueryTask;
 import org.opensearch.core.tasks.TaskId;
 import org.opensearch.test.OpenSearchTestCase;
 

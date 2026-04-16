@@ -8,16 +8,19 @@
 
 package org.opensearch.analytics.backend;
 
+import org.apache.arrow.vector.VectorSchemaRoot;
+
 /**
- * Per-stage result accumulator that collects {@link FragmentExecutionResponse} rows
+ * Per-stage result accumulator that collects Arrow {@link VectorSchemaRoot} batches
  * from shard executions and provides access to the accumulated result set.
  */
 public interface ExchangeSink {
 
     /**
-     * Ingest a shard response into this sink.
+     * Ingest an Arrow batch into this sink. The sink takes ownership of the
+     * batch and is responsible for releasing it when no longer needed.
      */
-    void feed(FragmentExecutionResponse response);
+    void feed(VectorSchemaRoot batch);
 
     /**
      * Signal that no more responses will be fed.

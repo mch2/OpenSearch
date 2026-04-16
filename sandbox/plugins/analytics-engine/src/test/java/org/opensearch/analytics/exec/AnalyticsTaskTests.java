@@ -8,6 +8,9 @@
 
 package org.opensearch.analytics.exec;
 
+import org.opensearch.analytics.exec.action.FragmentExecutionRequest;
+import org.opensearch.analytics.exec.task.AnalyticsQueryTask;
+import org.opensearch.analytics.exec.task.AnalyticsShardTask;
 import org.opensearch.core.index.Index;
 import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.core.tasks.TaskId;

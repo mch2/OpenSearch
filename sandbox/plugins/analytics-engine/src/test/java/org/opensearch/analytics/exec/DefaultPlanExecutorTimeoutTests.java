@@ -10,6 +10,7 @@ package org.opensearch.analytics.exec;
 
 import org.opensearch.action.admin.cluster.node.tasks.cancel.CancelTasksRequest;
 import org.opensearch.action.support.TimeoutTaskCancellationUtility;
+import org.opensearch.analytics.exec.task.AnalyticsQueryTask;
 import org.opensearch.common.unit.TimeValue;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.tasks.TaskId;

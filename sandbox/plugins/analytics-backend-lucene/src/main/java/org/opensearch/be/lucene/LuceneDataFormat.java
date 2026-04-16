@@ -31,20 +31,20 @@ public class LuceneDataFormat extends DataFormat {
     public static final LuceneDataFormat INSTANCE = new LuceneDataFormat();
 
     private static final Set<Capability> DOC_VALUES_INDEX_STORED = Set.of(
-        Capability.COLUMNAR_STORAGE, Capability.FULL_TEXT_SEARCH, Capability.STORED_FIELDS
+        Capability.COLUMNAR_STORAGE,
+        Capability.FULL_TEXT_SEARCH,
+        Capability.STORED_FIELDS
     );
 
     private static final Set<Capability> DOC_VALUES_POINT_STORED = Set.of(
-        Capability.COLUMNAR_STORAGE, Capability.POINT_RANGE, Capability.STORED_FIELDS
+        Capability.COLUMNAR_STORAGE,
+        Capability.POINT_RANGE,
+        Capability.STORED_FIELDS
     );
 
-    private static final Set<Capability> FULL_TEXT_STORED = Set.of(
-        Capability.FULL_TEXT_SEARCH, Capability.STORED_FIELDS
-    );
+    private static final Set<Capability> FULL_TEXT_STORED = Set.of(Capability.FULL_TEXT_SEARCH, Capability.STORED_FIELDS);
 
-    private static final Set<Capability> DOC_VALUES_STORED = Set.of(
-        Capability.COLUMNAR_STORAGE, Capability.STORED_FIELDS
-    );
+    private static final Set<Capability> DOC_VALUES_STORED = Set.of(Capability.COLUMNAR_STORAGE, Capability.STORED_FIELDS);
 
     private static final Set<FieldTypeCapabilities> SUPPORTED_FIELDS = Set.of(
         // String types

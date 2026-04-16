@@ -9,7 +9,10 @@
 package org.opensearch.analytics.exec;
 
 import org.opensearch.action.support.ActionFilters;
-import org.opensearch.analytics.backend.FragmentExecutionResponse;
+import org.opensearch.analytics.backend.ScanResponse;
+import org.opensearch.analytics.exec.action.AnalyticsShardAction;
+import org.opensearch.analytics.exec.action.FragmentExecutionRequest;
+import org.opensearch.analytics.exec.action.TransportAnalyticsShardAction;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.index.Index;
 import org.opensearch.core.index.shard.ShardId;
@@ -54,7 +57,7 @@ public class TransportAnalyticsShardActionTests extends OpenSearchTestCase {
 
         List<Object[]> rows = new ArrayList<>();
         rows.add(new Object[] { "hello", 42L });
-        FragmentExecutionResponse expectedResponse = new FragmentExecutionResponse(List.of("col1", "col2"), rows);
+        ScanResponse expectedResponse = new ScanResponse(List.of("col1", "col2"), rows);
         when(searchService.executeFragment(any(), any(), any())).thenReturn(expectedResponse);
 
         TransportAnalyticsShardAction action = createAction(indicesService, searchService);
@@ -66,7 +69,7 @@ public class TransportAnalyticsShardActionTests extends OpenSearchTestCase {
             List.of(new FragmentExecutionRequest.PlanAlternative("lucene", null))
         );
 
-        ActionListener<FragmentExecutionResponse> listener = mock(ActionListener.class);
+        ActionListener<ScanResponse> listener = mock(ActionListener.class);
         action.doExecute(mock(Task.class), request, listener);
 
         verify(listener).onResponse(expectedResponse);
@@ -89,7 +92,7 @@ public class TransportAnalyticsShardActionTests extends OpenSearchTestCase {
             List.of(new FragmentExecutionRequest.PlanAlternative("lucene", null))
         );
 
-        ActionListener<FragmentExecutionResponse> listener = mock(ActionListener.class);
+        ActionListener<ScanResponse> listener = mock(ActionListener.class);
         action.doExecute(mock(Task.class), request, listener);
 
         verify(listener).onFailure(any(IndexNotFoundException.class));
@@ -116,7 +119,7 @@ public class TransportAnalyticsShardActionTests extends OpenSearchTestCase {
             List.of(new FragmentExecutionRequest.PlanAlternative("lucene", null))
         );
 
-        ActionListener<FragmentExecutionResponse> listener = mock(ActionListener.class);
+        ActionListener<ScanResponse> listener = mock(ActionListener.class);
         action.doExecute(mock(Task.class), request, listener);
 
         verify(listener).onFailure(any(RuntimeException.class));

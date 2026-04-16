@@ -8,6 +8,7 @@
 
 package org.opensearch.analytics.exec;
 
+import org.opensearch.analytics.exec.action.ShardTarget;
 import org.opensearch.analytics.planner.dag.Stage;
 
 import java.util.List;

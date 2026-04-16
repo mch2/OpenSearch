@@ -9,7 +9,10 @@
 package org.opensearch.analytics.exec;
 
 import org.opensearch.action.support.ActionFilters;
-import org.opensearch.analytics.backend.FragmentExecutionResponse;
+import org.opensearch.analytics.backend.ScanResponse;
+import org.opensearch.analytics.exec.action.FragmentExecutionRequest;
+import org.opensearch.analytics.exec.action.TransportAnalyticsShardAction;
+import org.opensearch.analytics.exec.task.AnalyticsShardTask;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.index.Index;
 import org.opensearch.core.index.shard.ShardId;
@@ -50,8 +53,6 @@ public class TransportAnalyticsShardActionCancellationTests extends OpenSearchTe
         return new FragmentExecutionRequest("query-1", 0, shardId, List.of(new FragmentExecutionRequest.PlanAlternative("lucene", null)));
     }
 
-    // ── 11.1 testDoExecutePassesShardTaskToSearchService ──
-
     @SuppressWarnings("unchecked")
     public void testDoExecutePassesShardTaskToSearchService() {
         IndicesService indicesService = mock(IndicesService.class);
@@ -65,7 +66,7 @@ public class TransportAnalyticsShardActionCancellationTests extends OpenSearchTe
 
         List<Object[]> rows = new ArrayList<>();
         rows.add(new Object[] { "val" });
-        FragmentExecutionResponse expectedResponse = new FragmentExecutionResponse(List.of("col1"), rows);
+        ScanResponse expectedResponse = new ScanResponse(List.of("col1"), rows);
         when(searchService.executeFragment(any(), any(), any())).thenReturn(expectedResponse);
 
         TransportAnalyticsShardAction action = createAction(indicesService, searchService);
@@ -80,16 +81,13 @@ public class TransportAnalyticsShardActionCancellationTests extends OpenSearchTe
         );
 
         FragmentExecutionRequest request = createRequest(shardId);
-        ActionListener<FragmentExecutionResponse> listener = mock(ActionListener.class);
+        ActionListener<ScanResponse> listener = mock(ActionListener.class);
 
         action.doExecute(shardTask, request, listener);
 
-        // Verify the same task instance was passed to searchService
         verify(searchService).executeFragment(eq(request), same(indexShard), same(shardTask));
         verify(listener).onResponse(expectedResponse);
     }
-
-    // ── 11.2 testDoExecuteForwardsTaskCancelledExceptionToListener ──
 
     @SuppressWarnings("unchecked")
     public void testDoExecuteForwardsTaskCancelledExceptionToListener() {
@@ -117,11 +115,10 @@ public class TransportAnalyticsShardActionCancellationTests extends OpenSearchTe
         );
 
         FragmentExecutionRequest request = createRequest(shardId);
-        ActionListener<FragmentExecutionResponse> listener = mock(ActionListener.class);
+        ActionListener<ScanResponse> listener = mock(ActionListener.class);
 
         action.doExecute(shardTask, request, listener);
 
-        // Verify the same TaskCancelledException instance was forwarded (not wrapped)
         verify(listener).onFailure(same(cancelledException));
     }
 }

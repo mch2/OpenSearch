@@ -84,10 +84,11 @@ public class DAGBuilder {
             return StageExecutionType.LOCAL;
         }
         // Single-shard plan: no exchange was inserted, so no StageInputScan exists.
-        // The root fragment is the entire plan (e.g., a TableScan). This is LOCAL.
-        if (containsNoStageInputScan(fragment)) {
-            return StageExecutionType.LOCAL;
-        }
+        // The root fragment is the entire plan (e.g., TableScan, Aggregate → TableScan).
+        // This is DATA_NODE — the coordinator can't execute scan fragments locally, so
+        // it must dispatch to the shard via the fan-out path. TargetResolver picks up
+        // the single shard via Stage.getTableName() and the shard-side backend executes
+        // the full fragment.
         return StageExecutionType.DATA_NODE;
     }
 

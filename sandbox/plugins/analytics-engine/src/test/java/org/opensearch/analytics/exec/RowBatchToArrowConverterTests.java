@@ -19,7 +19,7 @@ import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.types.pojo.Schema;
-import org.opensearch.analytics.backend.FragmentExecutionResponse;
+import org.opensearch.analytics.backend.ScanResponse;
 import org.opensearch.test.OpenSearchTestCase;
 
 import java.util.ArrayList;
@@ -66,7 +66,7 @@ public class RowBatchToArrowConverterTests extends OpenSearchTestCase {
         rows.add(new Object[] { 1L, 3.14, "alice", true });
         rows.add(new Object[] { 2L, 2.71, "bob", false });
 
-        FragmentExecutionResponse response = new FragmentExecutionResponse(List.of("id", "score", "name", "active"), rows);
+        ScanResponse response = new ScanResponse(List.of("id", "score", "name", "active"), rows);
 
         try (VectorSchemaRoot vsr = RowBatchToArrowConverter.convert(response, schema, allocator)) {
             assertEquals(2, vsr.getRowCount());
@@ -103,7 +103,7 @@ public class RowBatchToArrowConverterTests extends OpenSearchTestCase {
         rows.add(new Object[] { 1L, null });
         rows.add(new Object[] { null, "bob" });
 
-        FragmentExecutionResponse response = new FragmentExecutionResponse(List.of("id", "name"), rows);
+        ScanResponse response = new ScanResponse(List.of("id", "name"), rows);
 
         try (VectorSchemaRoot vsr = RowBatchToArrowConverter.convert(response, schema, allocator)) {
             assertEquals(2, vsr.getRowCount());
@@ -128,7 +128,7 @@ public class RowBatchToArrowConverterTests extends OpenSearchTestCase {
         List<Object[]> rows = new ArrayList<>();
         rows.add(new Object[] { "not_a_long" });
 
-        FragmentExecutionResponse response = new FragmentExecutionResponse(List.of("id"), rows);
+        ScanResponse response = new ScanResponse(List.of("id"), rows);
 
         expectThrows(IllegalArgumentException.class, () -> {
             try (VectorSchemaRoot vsr = RowBatchToArrowConverter.convert(response, schema, allocator)) {
@@ -147,7 +147,7 @@ public class RowBatchToArrowConverterTests extends OpenSearchTestCase {
             )
         );
 
-        FragmentExecutionResponse response = new FragmentExecutionResponse(List.of("id", "name"), new ArrayList<>());
+        ScanResponse response = new ScanResponse(List.of("id", "name"), new ArrayList<>());
 
         try (VectorSchemaRoot vsr = RowBatchToArrowConverter.convert(response, schema, allocator)) {
             assertEquals(0, vsr.getRowCount());
@@ -166,7 +166,7 @@ public class RowBatchToArrowConverterTests extends OpenSearchTestCase {
         List<Object[]> rows = new ArrayList<>();
         rows.add(new Object[] { new StringBuilder("hello") });
 
-        FragmentExecutionResponse response = new FragmentExecutionResponse(List.of("label"), rows);
+        ScanResponse response = new ScanResponse(List.of("label"), rows);
 
         try (VectorSchemaRoot vsr = RowBatchToArrowConverter.convert(response, schema, allocator)) {
             assertEquals(1, vsr.getRowCount());

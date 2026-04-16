@@ -9,47 +9,46 @@
 package org.opensearch.analytics.exec;
 
 import org.apache.calcite.jdbc.JavaTypeFactoryImpl;
+import org.apache.calcite.rel.RelDistribution;
 import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelOptTable;
 import org.apache.calcite.plan.RelTraitSet;
 import org.apache.calcite.plan.hep.HepPlanner;
 import org.apache.calcite.plan.hep.HepProgramBuilder;
-import org.apache.calcite.rel.RelDistribution;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.opensearch.action.support.PlainActionFuture;
-import org.opensearch.analytics.backend.FragmentExecutionResponse;
+import org.opensearch.analytics.backend.ScanResponse;
+import org.opensearch.analytics.exec.action.FragmentExecutionRequest;
+import org.opensearch.analytics.exec.stage.StageExecutionBuilder;
 import org.opensearch.analytics.planner.dag.ExchangeInfo;
 import org.opensearch.analytics.planner.dag.QueryDAG;
 import org.opensearch.analytics.planner.dag.Stage;
 import org.opensearch.analytics.planner.dag.StagePlan;
 import org.opensearch.analytics.planner.rel.OpenSearchStageInputScan;
 import org.opensearch.analytics.planner.rel.OpenSearchTableScan;
-import org.opensearch.analytics.planner.rel.ShuffleImpl;
 import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
 import org.opensearch.analytics.spi.FragmentConvertor;
 import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.node.DiscoveryNode;
 import org.opensearch.cluster.node.DiscoveryNodes;
 import org.opensearch.cluster.routing.GroupShardsIterator;
-import org.opensearch.cluster.routing.IndexRoutingTable;
-import org.opensearch.cluster.routing.IndexShardRoutingTable;
 import org.opensearch.cluster.routing.OperationRouting;
-import org.opensearch.cluster.routing.RoutingTable;
 import org.opensearch.cluster.routing.ShardIterator;
 import org.opensearch.cluster.routing.ShardRouting;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.core.index.Index;
 import org.opensearch.core.index.shard.ShardId;
+import org.opensearch.tasks.Task;
 import org.opensearch.test.OpenSearchTestCase;
+import org.opensearch.transport.TransportService;
 
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.mockito.ArgumentMatchers.any;
@@ -77,6 +76,15 @@ public class PlanWalkerAsyncTests extends OpenSearchTestCase {
         HepPlanner planner = new HepPlanner(new HepProgramBuilder().build());
         cluster = RelOptCluster.create(planner, rexBuilder);
         rowType = typeFactory.builder().add("field_0", SqlTypeName.VARCHAR).build();
+    }
+
+    private static AnalyticsSearchTransportService failingDispatcher(ClusterService clusterService) {
+        return new AnalyticsSearchTransportService(mock(TransportService.class), clusterService) {
+            @Override
+            public void dispatchScan(FragmentExecutionRequest r, DiscoveryNode n, StreamingResponseListener<ScanResponse> l, Task t, PendingExecutions p) {
+                fail("should not be called");
+            }
+        };
     }
 
     /** Creates a mock backends map where every backend returns a no-op FragmentConvertor (returns empty bytes). */
@@ -147,17 +155,27 @@ public class PlanWalkerAsyncTests extends OpenSearchTestCase {
 
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
 
-        ShardRequestClient client = (request, node, listener) -> {
-            // Return 2 rows per shard with known data
-            List<String> fields = List.of("field_0");
-            List<Object[]> rows = new ArrayList<>();
-            rows.add(new Object[] { "shard_" + request.getShardId().id() + "_row0" });
-            rows.add(new Object[] { "shard_" + request.getShardId().id() + "_row1" });
-            listener.onStreamResponse(new FragmentExecutionResponse(fields, rows), true);
+        AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(mock(TransportService.class), clusterService) {
+            @Override
+            public void dispatchScan(
+                FragmentExecutionRequest request,
+                DiscoveryNode node,
+                StreamingResponseListener<ScanResponse> listener,
+                Task _parentTask,
+                PendingExecutions _pending
+            ) {
+                // Return 2 rows per shard with known data
+                List<String> fields = List.of("field_0");
+                List<Object[]> rows = new ArrayList<>();
+                rows.add(new Object[] { "shard_" + request.getShardId().id() + "_row0" });
+                rows.add(new Object[] { "shard_" + request.getShardId().id() + "_row1" });
+                listener.onStreamResponse(new ScanResponse(fields, rows), true);
+            }
         };
 
-        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
-        walker.walk(client, future);
+        new EventDrivenScheduler(
+            new StageExecutionBuilder(clusterService, dispatcher, null)
+        ).execute(QueryContext.forTest(dag, null), future);
 
         Iterable<Object[]> result = future.actionGet();
         List<Object[]> resultList = new ArrayList<>();
@@ -180,24 +198,37 @@ public class PlanWalkerAsyncTests extends OpenSearchTestCase {
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
         AtomicInteger callCount = new AtomicInteger(0);
 
-        ShardRequestClient client = (request, node, listener) -> {
-            int call = callCount.getAndIncrement();
-            if (call == 0) {
-                // First shard succeeds
-                List<Object[]> okRows = new ArrayList<>();
-                okRows.add(new Object[] { "ok" });
-                listener.onStreamResponse(new FragmentExecutionResponse(List.of("field_0"), okRows), true);
-            } else {
-                // Second shard fails
-                listener.onFailure(new RuntimeException("shard failed"));
+        AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(mock(TransportService.class), clusterService) {
+            @Override
+            public void dispatchScan(
+                FragmentExecutionRequest request,
+                DiscoveryNode node,
+                StreamingResponseListener<ScanResponse> listener,
+                Task _parentTask,
+                PendingExecutions _pending
+            ) {
+                int call = callCount.getAndIncrement();
+                if (call == 0) {
+                    // First shard succeeds
+                    List<Object[]> okRows = new ArrayList<>();
+                    okRows.add(new Object[] { "ok" });
+                    listener.onStreamResponse(new ScanResponse(List.of("field_0"), okRows), true);
+                } else {
+                    // Second shard fails
+                    listener.onFailure(new RuntimeException("shard failed"));
+                }
             }
         };
 
-        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
-        walker.walk(client, future);
+        new EventDrivenScheduler(
+            new StageExecutionBuilder(clusterService, dispatcher, null)
+        ).execute(QueryContext.forTest(dag, null), future);
 
         RuntimeException ex = expectThrows(RuntimeException.class, future::actionGet);
-        assertTrue(ex.getMessage().contains("Stage 0 failed") || ex.getCause().getMessage().contains("shard failed"));
+        assertTrue(
+            "Exception should reference shard failure",
+            ex.getMessage().contains("shard failed") || (ex.getCause() != null && ex.getCause().getMessage().contains("shard failed"))
+        );
     }
 
     public void testEmptyTargetsSignalsListenerImmediately() {
@@ -220,13 +251,23 @@ public class PlanWalkerAsyncTests extends OpenSearchTestCase {
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
         List<FragmentExecutionRequest> capturedRequests = new ArrayList<>();
 
-        ShardRequestClient client = (request, node, listener) -> {
-            capturedRequests.add(request);
-            listener.onStreamResponse(new FragmentExecutionResponse(List.of(), List.of()), true);
+        AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(mock(TransportService.class), clusterService) {
+            @Override
+            public void dispatchScan(
+                FragmentExecutionRequest request,
+                DiscoveryNode node,
+                StreamingResponseListener<ScanResponse> listener,
+                Task _parentTask,
+                PendingExecutions _pending
+            ) {
+                capturedRequests.add(request);
+                listener.onStreamResponse(new ScanResponse(List.of(), List.of()), true);
+            }
         };
 
-        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
-        walker.walk(client, future);
+        new EventDrivenScheduler(
+            new StageExecutionBuilder(clusterService, dispatcher, null)
+        ).execute(QueryContext.forTest(dag, null), future);
 
         Iterable<Object[]> result = future.actionGet();
         List<Object[]> resultList = new ArrayList<>();
@@ -265,15 +306,25 @@ public class PlanWalkerAsyncTests extends OpenSearchTestCase {
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
         List<Integer> dispatchedStageIds = new ArrayList<>();
 
-        ShardRequestClient client = (request, node, listener) -> {
-            dispatchedStageIds.add(request.getStageId());
-            List<Object[]> dataRows = new ArrayList<>();
-            dataRows.add(new Object[] { "data" });
-            listener.onStreamResponse(new FragmentExecutionResponse(List.of("field_0"), dataRows), true);
+        AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(mock(TransportService.class), clusterService) {
+            @Override
+            public void dispatchScan(
+                FragmentExecutionRequest request,
+                DiscoveryNode node,
+                StreamingResponseListener<ScanResponse> listener,
+                Task _parentTask,
+                PendingExecutions _pending
+            ) {
+                dispatchedStageIds.add(request.getStageId());
+                List<Object[]> dataRows = new ArrayList<>();
+                dataRows.add(new Object[] { "data" });
+                listener.onStreamResponse(new ScanResponse(List.of("field_0"), dataRows), true);
+            }
         };
 
-        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
-        walker.walk(client, future);
+        new EventDrivenScheduler(
+            new StageExecutionBuilder(clusterService, dispatcher, null)
+        ).execute(QueryContext.forTest(dag, null), future);
         future.actionGet();
 
         // Child stage (stageId=0) tasks should be dispatched; root stage (stageId=1)
@@ -297,17 +348,27 @@ public class PlanWalkerAsyncTests extends OpenSearchTestCase {
 
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
 
-        ShardRequestClient client = (request, node, listener) -> {
-            // Each shard returns a distinct single row, inline (synchronous)
-            int shardIdx = request.getShardId().id();
-            List<String> fields = List.of("field_0");
-            List<Object[]> rows = new ArrayList<>();
-            rows.add(new Object[] { "value_" + shardIdx });
-            listener.onStreamResponse(new FragmentExecutionResponse(fields, rows), true);
+        AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(mock(TransportService.class), clusterService) {
+            @Override
+            public void dispatchScan(
+                FragmentExecutionRequest request,
+                DiscoveryNode node,
+                StreamingResponseListener<ScanResponse> listener,
+                Task _parentTask,
+                PendingExecutions _pending
+            ) {
+                // Each shard returns a distinct single row, inline (synchronous)
+                int shardIdx = request.getShardId().id();
+                List<String> fields = List.of("field_0");
+                List<Object[]> rows = new ArrayList<>();
+                rows.add(new Object[] { "value_" + shardIdx });
+                listener.onStreamResponse(new ScanResponse(fields, rows), true);
+            }
         };
 
-        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
-        walker.walk(client, future);
+        new EventDrivenScheduler(
+            new StageExecutionBuilder(clusterService, dispatcher, null)
+        ).execute(QueryContext.forTest(dag, null), future);
 
         Iterable<Object[]> result = future.actionGet();
         List<Object[]> resultList = new ArrayList<>();
@@ -325,200 +386,6 @@ public class PlanWalkerAsyncTests extends OpenSearchTestCase {
         assertTrue(values.contains("value_1"));
         assertTrue(values.contains("value_2"));
     }
-
-    /**
-     * Task 7.2: Metadata dispatch collecting manifests.
-     * Builds a 2-stage DAG where Stage 0 is a shuffle write stage (SINGLETON distribution
-     * with ShuffleImpl.FILE so isShuffle()=true). SINGLETON distribution means targets resolve
-     * from index shards; non-null shuffleImpl means isShuffleWriteStage()=true so metadata
-     * responses are collected into a PartitionManifest.
-     * Validates: Requirements 3.5, 3.6, 1.5
-     */
-    @SuppressWarnings("unchecked")
-    public void testMetadataDispatchCollectsManifests() throws Exception {
-        int numShards = 2;
-        ClusterService clusterService = buildMockClusterService("http_logs", numShards);
-
-        // Stage 0: shuffle write stage — SINGLETON for target resolution, ShuffleImpl.FILE for isShuffle()=true
-        OpenSearchTableScan scan = buildTableScan("http_logs", List.of("lucene"));
-        StagePlan childPlan = new StagePlan(scan, "lucene");
-        ExchangeInfo shuffleWriteExchange = new ExchangeInfo(RelDistribution.Type.SINGLETON, ShuffleImpl.FILE, List.of(0));
-        Stage childStage = new Stage(0, scan, List.of(), shuffleWriteExchange);
-        childStage.setPlanAlternatives(List.of(childPlan));
-
-        // Stage 1: root coordinator gather with StageInputScan
-        OpenSearchStageInputScan stageInput = new OpenSearchStageInputScan(cluster, RelTraitSet.createEmpty(), 0, rowType, List.of());
-        StagePlan rootPlan = new StagePlan(stageInput, "lucene");
-        Stage rootStage = new Stage(1, stageInput, List.of(childStage), null);
-        rootStage.setPlanAlternatives(List.of(rootPlan));
-
-        QueryDAG dag = new QueryDAG("test-query", rootStage);
-
-        // Mock submitter returns metadata responses (shuffle manifests) for Stage 0
-        ShardRequestClient client = (request, node, listener) -> {
-            Map<String, String> metadata = Map.of(
-                "0",
-                "/tmp/shuffle/shard_" + request.getShardId().id() + "/p0",
-                "1",
-                "/tmp/shuffle/shard_" + request.getShardId().id() + "/p1"
-            );
-            listener.onStreamResponse(new FragmentExecutionResponse(metadata), true);
-        };
-
-        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
-        PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-        walker.walk(client, future);
-
-        // Walk should complete (root stage is coordinator gather, no dispatch needed for it)
-        future.actionGet();
-
-        Map<Integer, Map<ShardId, Map<Integer, String>>> manifests = walker.getState().shuffleManifests();
-
-        Map<ShardId, Map<Integer, String>> stage0Manifest = manifests.get(0);
-        assertNotNull("Stage 0 should have a shuffle manifest", stage0Manifest);
-        assertEquals("Manifest should have one entry per shard", numShards, stage0Manifest.size());
-
-        // Verify each shard's manifest has 2 partitions with correct paths
-        for (Map.Entry<ShardId, Map<Integer, String>> entry : stage0Manifest.entrySet()) {
-            int shardIdx = entry.getKey().id();
-            Map<Integer, String> partitions = entry.getValue();
-            assertEquals("Each shard manifest should have 2 partitions", 2, partitions.size());
-            assertEquals("/tmp/shuffle/shard_" + shardIdx + "/p0", partitions.get(0));
-            assertEquals("/tmp/shuffle/shard_" + shardIdx + "/p1", partitions.get(1));
-        }
-    }
-
-    /**
-     * Task 7.3: resolveShuffleTargets from child stage manifests.
-     * Pre-populates stageOutputs with a PartitionManifest for a child stage, then builds
-     * a parent stage with HASH_DISTRIBUTED exchange and walks the DAG. Verifies the returned
-     * ShardTarget list has one entry per partition with nodes from the source shard set.
-     * Validates: Requirements 5.1, 5.2, 5.3
-     */
-    @SuppressWarnings("unchecked")
-    public void testResolveShuffleTargetsFromChildManifests() throws Exception {
-        int numSourceShards = 2;
-        int numPartitions = 3;
-        Index sourceIndex = new Index("http_logs", "_na_");
-
-        // Build mock ClusterState with routing table for source index shards
-        ClusterState clusterState = mock(ClusterState.class);
-        DiscoveryNodes discoveryNodes = mock(DiscoveryNodes.class);
-        DiscoveryNode nodeA = mock(DiscoveryNode.class);
-        DiscoveryNode nodeB = mock(DiscoveryNode.class);
-        when(discoveryNodes.get("node_0")).thenReturn(nodeA);
-        when(discoveryNodes.get("node_1")).thenReturn(nodeB);
-        when(clusterState.nodes()).thenReturn(discoveryNodes);
-
-        // Mock routing table: each source shard has a primary on its respective node
-        RoutingTable routingTable = mock(RoutingTable.class);
-        IndexRoutingTable indexRoutingTable = mock(IndexRoutingTable.class);
-        when(routingTable.index(sourceIndex)).thenReturn(indexRoutingTable);
-        for (int i = 0; i < numSourceShards; i++) {
-            IndexShardRoutingTable shardRoutingTable = mock(IndexShardRoutingTable.class);
-            ShardRouting primaryShard = mock(ShardRouting.class);
-            when(primaryShard.currentNodeId()).thenReturn("node_" + i);
-            when(shardRoutingTable.primaryShard()).thenReturn(primaryShard);
-            when(indexRoutingTable.shard(i)).thenReturn(shardRoutingTable);
-        }
-        when(clusterState.routingTable()).thenReturn(routingTable);
-
-        ClusterService clusterService = mock(ClusterService.class);
-        when(clusterService.state()).thenReturn(clusterState);
-
-        // Build a PartitionManifest for child stage 0
-        Map<ShardId, Map<Integer, String>> manifestData = new HashMap<>();
-        for (int s = 0; s < numSourceShards; s++) {
-            Map<Integer, String> partitions = new HashMap<>();
-            for (int p = 0; p < numPartitions; p++) {
-                partitions.put(p, "/tmp/shuffle/shard_" + s + "/p" + p);
-            }
-            manifestData.put(new ShardId(sourceIndex, s), partitions);
-        }
-
-        // Build child stage (Stage 0) — shuffle write, already completed
-        OpenSearchTableScan scan = buildTableScan("http_logs", List.of("lucene"));
-        ExchangeInfo hashExchange = new ExchangeInfo(RelDistribution.Type.HASH_DISTRIBUTED, ShuffleImpl.FILE, List.of(0));
-        Stage childStage = new Stage(0, scan, List.of(), hashExchange);
-        childStage.setPlanAlternatives(List.of(new StagePlan(scan, "lucene")));
-
-        // Build parent stage (Stage 1) — shuffle read with HASH_DISTRIBUTED exchange
-        // Use StageInputScan as the fragment (reads from child stage 0)
-        OpenSearchStageInputScan stageInput = new OpenSearchStageInputScan(cluster, RelTraitSet.createEmpty(), 0, rowType, List.of());
-        ExchangeInfo parentHashExchange = new ExchangeInfo(RelDistribution.Type.HASH_DISTRIBUTED, ShuffleImpl.FILE, List.of(0));
-        Stage parentStage = new Stage(1, stageInput, List.of(childStage), parentHashExchange);
-        parentStage.setPlanAlternatives(List.of(new StagePlan(stageInput, "lucene")));
-
-        // Root stage (Stage 2) — coordinator gather
-        OpenSearchStageInputScan rootInput = new OpenSearchStageInputScan(cluster, RelTraitSet.createEmpty(), 1, rowType, List.of());
-        Stage rootStage = new Stage(2, rootInput, List.of(parentStage), null);
-        rootStage.setPlanAlternatives(List.of(new StagePlan(rootInput, "lucene")));
-
-        QueryDAG dag = new QueryDAG("test-query", rootStage);
-        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
-
-        // Pre-populate shuffleManifests with the manifest for child stage 0
-        @SuppressWarnings("unchecked")
-        Map<Integer, Map<ShardId, Map<Integer, String>>> shuffleManifests = walker.getState().shuffleManifests();
-        shuffleManifests.put(0, manifestData);
-
-        // Call resolveTargets via TargetResolver
-        List<ShardTarget> targets = TargetResolver.resolveTargets(parentStage, clusterService, shuffleManifests);
-
-        // Should have one ShardTarget per partition
-        assertEquals("Should have one target per partition", numPartitions, targets.size());
-
-        // All target nodes should come from the source shard node set {nodeA, nodeB}
-        for (ShardTarget target : targets) {
-            assertTrue("Target node should be from source shard set", target.node() == nodeA || target.node() == nodeB);
-            assertEquals("Target shard index should be _shuffle", "_shuffle", target.shardId().getIndexName());
-        }
-
-        // Verify partition IDs are 0..numPartitions-1
-        for (int p = 0; p < numPartitions; p++) {
-            assertEquals("Partition ID should match target index", p, targets.get(p).shardId().id());
-        }
-    }
-
-    /**
-     * Task 7.4: resolveShuffleTargets throwing when no manifest exists.
-     * Calls resolveTargets on a stage whose child has no PartitionManifest in stageOutputs.
-     * Asserts IllegalStateException is thrown with appropriate message.
-     * Validates: Requirements 5.4
-     */
-    @SuppressWarnings("unchecked")
-    public void testResolveShuffleTargetsThrowsWhenNoManifest() throws Exception {
-        ClusterService clusterService = mock(ClusterService.class);
-
-        // Build child stage (Stage 0) — no manifest will be populated
-        OpenSearchTableScan scan = buildTableScan("http_logs", List.of("lucene"));
-        ExchangeInfo hashExchange = new ExchangeInfo(RelDistribution.Type.HASH_DISTRIBUTED, ShuffleImpl.FILE, List.of(0));
-        Stage childStage = new Stage(0, scan, List.of(), hashExchange);
-        childStage.setPlanAlternatives(List.of(new StagePlan(scan, "lucene")));
-
-        // Build parent stage (Stage 1) with HASH_DISTRIBUTED exchange
-        OpenSearchStageInputScan stageInput = new OpenSearchStageInputScan(cluster, RelTraitSet.createEmpty(), 0, rowType, List.of());
-        ExchangeInfo parentHashExchange = new ExchangeInfo(RelDistribution.Type.HASH_DISTRIBUTED, ShuffleImpl.FILE, List.of(0));
-        Stage parentStage = new Stage(1, stageInput, List.of(childStage), parentHashExchange);
-        parentStage.setPlanAlternatives(List.of(new StagePlan(stageInput, "lucene")));
-
-        // Root stage (Stage 2) — coordinator gather
-        OpenSearchStageInputScan rootInput = new OpenSearchStageInputScan(cluster, RelTraitSet.createEmpty(), 1, rowType, List.of());
-        Stage rootStage = new Stage(2, rootInput, List.of(parentStage), null);
-        rootStage.setPlanAlternatives(List.of(new StagePlan(rootInput, "lucene")));
-
-        QueryDAG dag = new QueryDAG("test-query", rootStage);
-        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
-
-        // shuffleManifests is empty — no manifest for child stage 0
-        Map<Integer, Map<ShardId, Map<Integer, String>>> emptyManifests = new HashMap<>();
-        IllegalStateException ex = expectThrows(
-            IllegalStateException.class,
-            () -> TargetResolver.resolveTargets(parentStage, clusterService, emptyManifests)
-        );
-        assertTrue("Exception message should reference the stage ID", ex.getMessage().contains("No partition manifest found for stage 1"));
-    }
-
     /**
      * Task 7.5: LOCAL pass-through stage completing without dispatch.
      * Builds a LOCAL pass-through stage (StageInputScan, no exchange, no TableScan).
@@ -539,14 +406,24 @@ public class PlanWalkerAsyncTests extends OpenSearchTestCase {
         QueryDAG dag = new QueryDAG("test-query", stage);
 
         AtomicInteger submitCount = new AtomicInteger(0);
-        ShardRequestClient client = (request, node, listener) -> {
-            submitCount.incrementAndGet();
-            listener.onStreamResponse(new FragmentExecutionResponse(List.of(), List.of()), true);
+        AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(mock(TransportService.class), clusterService) {
+            @Override
+            public void dispatchScan(
+                FragmentExecutionRequest request,
+                DiscoveryNode node,
+                StreamingResponseListener<ScanResponse> listener,
+                Task _parentTask,
+                PendingExecutions _pending
+            ) {
+                submitCount.incrementAndGet();
+                listener.onStreamResponse(new ScanResponse(List.of(), List.of()), true);
+            }
         };
 
-        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-        walker.walk(client, future);
+        new EventDrivenScheduler(
+            new StageExecutionBuilder(clusterService, dispatcher, null)
+        ).execute(QueryContext.forTest(dag, null), future);
 
         // Walk should complete successfully
         Iterable<Object[]> result = future.actionGet();
@@ -555,9 +432,7 @@ public class PlanWalkerAsyncTests extends OpenSearchTestCase {
         // No tasks should have been submitted
         assertEquals("LOCAL pass-through should not dispatch any tasks", 0, submitCount.get());
 
-        Set<Integer> completed = walker.getState().completedStages();
-
-        assertTrue("LOCAL pass-through stage should be in completedStages", completed.contains(1));
+        // completedStages set has been removed; completion is signaled via the listener
     }
 
     /**
@@ -581,29 +456,52 @@ public class PlanWalkerAsyncTests extends OpenSearchTestCase {
         AtomicInteger completedTasks = new AtomicInteger(0);
 
         // Shard 1 fails, shards 0 and 2 succeed. All responses are synchronous.
-        ShardRequestClient client = (request, node, listener) -> {
-            int shardIdx = request.getShardId().id();
-            if (shardIdx == 1) {
-                completedTasks.incrementAndGet();
-                listener.onFailure(new RuntimeException("shard_1_failed"));
-            } else {
-                completedTasks.incrementAndGet();
-                List<Object[]> rows = new ArrayList<>();
-                rows.add(new Object[] { "value_" + shardIdx });
-                listener.onStreamResponse(new FragmentExecutionResponse(List.of("field_0"), rows), true);
+        AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(mock(TransportService.class), clusterService) {
+            @Override
+            public void dispatchScan(
+                FragmentExecutionRequest request,
+                DiscoveryNode node,
+                StreamingResponseListener<ScanResponse> listener,
+                Task _parentTask,
+                PendingExecutions _pending
+            ) {
+                int shardIdx = request.getShardId().id();
+                if (shardIdx == 1) {
+                    completedTasks.incrementAndGet();
+                    listener.onFailure(new RuntimeException("shard_1_failed"));
+                } else {
+                    completedTasks.incrementAndGet();
+                    List<Object[]> rows = new ArrayList<>();
+                    rows.add(new Object[] { "value_" + shardIdx });
+                    listener.onStreamResponse(new ScanResponse(List.of("field_0"), rows), true);
+                }
             }
         };
 
-        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-        walker.walk(client, future);
+        new EventDrivenScheduler(
+            new StageExecutionBuilder(clusterService, dispatcher, null)
+        ).execute(QueryContext.forTest(dag, null), future);
 
         // The walk should fail
         RuntimeException ex = expectThrows(RuntimeException.class, future::actionGet);
-        assertTrue("Exception should reference stage failure", ex.getMessage().contains("Stage 0 failed"));
-        assertTrue("Root cause should be the shard failure", ex.getCause().getMessage().contains("shard_1_failed"));
+        assertTrue(
+            "Exception should reference shard failure",
+            ex.getMessage().contains("shard_1_failed") || (ex.getCause() != null && ex.getCause().getMessage().contains("shard_1_failed"))
+        );
 
         // All 3 tasks should have completed before the failure was signaled
         assertEquals("All tasks should have completed", numShards, completedTasks.get());
+    }
+
+    private static org.apache.calcite.rel.RelNode mockFragment() {
+        org.apache.calcite.rel.type.RelDataTypeFactory typeFactory = new JavaTypeFactoryImpl();
+        org.apache.calcite.rel.type.RelDataType rowType = typeFactory.builder()
+            .add("id", org.apache.calcite.sql.type.SqlTypeName.BIGINT)
+            .add("value", org.apache.calcite.sql.type.SqlTypeName.VARCHAR).build();
+        org.apache.calcite.rel.RelNode fragment = mock(org.apache.calcite.rel.RelNode.class);
+        when(fragment.getInputs()).thenReturn(List.of());
+        when(fragment.getRowType()).thenReturn(rowType);
+        return fragment;
     }
 }
