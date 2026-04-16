@@ -8,11 +8,14 @@
 
 package org.opensearch.analytics.exec;
 
+import org.opensearch.analytics.backend.ExchangeSink;
+import org.opensearch.analytics.backend.FragmentExecutionResponse;
 import org.opensearch.analytics.planner.dag.Stage;
 import org.opensearch.cluster.node.DiscoveryNode;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.index.Index;
 import org.opensearch.core.index.shard.ShardId;
+import org.opensearch.tasks.Task;
 import org.opensearch.test.OpenSearchTestCase;
 
 import java.util.ArrayList;
@@ -31,15 +34,107 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * State-machine tests for {@link StageExecution}. These tests exercise
+ * State-machine tests for {@link FanOutStageExecution}. These tests exercise
  * construction, {@code run()}, and the initial batch dispatch logic directly.
  *
- * <p>These tests will NOT compile until Phase 2 produces the {@code StageExecution} class.
+ * <p>Tests drive completions via captured {@link StreamingResponseListener}
+ * instances from the {@link ShardRequestClient}.
  *
  * Validates: Requirements 9.1, 9.2, 9.3, 9.4, 2.2, 2.3, 2.4
  */
 @SuppressWarnings("unchecked")
 public class StageExecutionStateMachineTests extends OpenSearchTestCase {
+
+    /**
+     * Helper that constructs a {@link FanOutStageExecution} from a {@link QueryExecutionContext}
+     * facade, unpacking it into the explicit-deps constructor. Avoids repeating the
+     * 12-arg constructor in every test.
+     */
+    /**
+     * Test helper: constructs a {@link FanOutStageExecution} with sensible defaults.
+     * Uses a fresh {@link QueryState} internally (tests that need to inspect
+     * the state should use the overload below).
+     */
+    private static FanOutStageExecution newExec(
+        Stage stage,
+        List<ShardTarget> targets,
+        List<FragmentExecutionRequest.PlanAlternative> plans,
+        StageResultHandler handler,
+        ShardRequestClient client,
+        ActionListener<Void> listener
+    ) {
+        QueryState state = new QueryState();
+        return new FanOutStageExecution(
+            stage,
+            "test-query",
+            targets,
+            plans,
+            Runnable::run,
+            null,
+            state.rootSink(),
+            handler,
+            state.completedStages(),
+            state.shuffleManifests(),
+            client,
+            listener,
+            new StageMetrics(stage.getStageId())
+        );
+    }
+
+    /** Overload with explicit {@link QueryState} (for tests that inspect shared state). */
+    private static FanOutStageExecution newExec(
+        Stage stage,
+        List<ShardTarget> targets,
+        List<FragmentExecutionRequest.PlanAlternative> plans,
+        QueryState state,
+        StageResultHandler handler,
+        ShardRequestClient client,
+        ActionListener<Void> listener
+    ) {
+        return new FanOutStageExecution(
+            stage,
+            "test-query",
+            targets,
+            plans,
+            Runnable::run,
+            null,
+            state.rootSink(),
+            handler,
+            state.completedStages(),
+            state.shuffleManifests(),
+            client,
+            listener,
+            new StageMetrics(stage.getStageId())
+        );
+    }
+
+    /** Overload with explicit parentTask (for cancellation tests). */
+    private static FanOutStageExecution newExec(
+        Stage stage,
+        List<ShardTarget> targets,
+        List<FragmentExecutionRequest.PlanAlternative> plans,
+        Task parentTask,
+        StageResultHandler handler,
+        ShardRequestClient client,
+        ActionListener<Void> listener
+    ) {
+        QueryState state = new QueryState();
+        return new FanOutStageExecution(
+            stage,
+            "test-query",
+            targets,
+            plans,
+            Runnable::run,
+            parentTask,
+            state.rootSink(),
+            handler,
+            state.completedStages(),
+            state.shuffleManifests(),
+            client,
+            listener,
+            new StageMetrics(stage.getStageId())
+        );
+    }
 
     /**
      * After construction (before {@code run()} is called), the task must be in CREATED state.
@@ -50,17 +145,10 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
         Stage stage = mockStage(5);
         List<ShardTarget> targets = buildTargets(3);
         ActionListener<Void> listener = mock(ActionListener.class);
-        AtomicInteger submissions = new AtomicInteger(0);
-        TaskSubmitter submitter = capturingSubmitter(submissions);
+        List<StreamingResponseListener> captured = new ArrayList<>();
+        ShardRequestClient client = capturingClient(captured);
 
-        StageExecution task = new StageExecution(
-            stage,
-            targets,
-            List.of(),
-            new QueryExecutionContext("test-query", Runnable::run, mock(ExchangeSink.class), ConcurrentHashMap.newKeySet(), new ConcurrentHashMap<>(), null),
-            submitter,
-            listener
-        );
+        FanOutStageExecution task = newExec(stage, targets, List.of(), new SinkFeedingHandler(new SimpleExchangeSink()), client, listener);
 
         assertEquals("State must be CREATED before run() is called", StageExecution.State.CREATED, task.getState());
     }
@@ -75,24 +163,17 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
         Stage stage = mockStage(0);
         List<ShardTarget> targets = List.of();
         ActionListener<Void> listener = mock(ActionListener.class);
-        AtomicInteger submissions = new AtomicInteger(0);
-        TaskSubmitter submitter = capturingSubmitter(submissions);
+        List<StreamingResponseListener> captured = new ArrayList<>();
+        ShardRequestClient client = capturingClient(captured);
 
-        StageExecution task = new StageExecution(
-            stage,
-            targets,
-            List.of(),
-            new QueryExecutionContext("test-query", Runnable::run, mock(ExchangeSink.class), ConcurrentHashMap.newKeySet(), new ConcurrentHashMap<>(), null),
-            submitter,
-            listener
-        );
+        FanOutStageExecution task = newExec(stage, targets, List.of(), new SinkFeedingHandler(new SimpleExchangeSink()), client, listener);
 
         task.run();
 
         assertEquals("State must be SUCCEEDED after run() with zero targets", StageExecution.State.SUCCEEDED, task.getState());
         verify(listener, times(1)).onResponse(null);
         verify(listener, never()).onFailure(org.mockito.ArgumentMatchers.any());
-        assertEquals("No submissions should have been made", 0, submissions.get());
+        assertEquals("No submissions should have been made", 0, captured.size());
     }
 
     /**
@@ -106,22 +187,15 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
         Stage stage = mockStage(numTargets);
         List<ShardTarget> targets = buildTargets(numTargets);
         ActionListener<Void> listener = mock(ActionListener.class);
-        AtomicInteger submissions = new AtomicInteger(0);
-        TaskSubmitter submitter = capturingSubmitter(submissions);
+        List<StreamingResponseListener> captured = new ArrayList<>();
+        ShardRequestClient client = capturingClient(captured);
 
-        StageExecution task = new StageExecution(
-            stage,
-            targets,
-            List.of(),
-            new QueryExecutionContext("test-query", Runnable::run, mock(ExchangeSink.class), ConcurrentHashMap.newKeySet(), new ConcurrentHashMap<>(), null),
-            submitter,
-            listener
-        );
+        FanOutStageExecution task = newExec(stage, targets, List.of(), new SinkFeedingHandler(new SimpleExchangeSink()), client, listener);
 
         task.run();
 
         assertEquals("State must be RUNNING after run() with non-empty batch", StageExecution.State.RUNNING, task.getState());
-        assertEquals("Submissions must equal number of targets", numTargets, submissions.get());
+        assertEquals("Submissions must equal number of targets", numTargets, captured.size());
     }
 
     /**
@@ -137,22 +211,15 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
         Stage stage = mockStage(initialBatch);
         List<ShardTarget> targets = buildTargets(numTargets);
         ActionListener<Void> listener = mock(ActionListener.class);
-        AtomicInteger submissions = new AtomicInteger(0);
-        TaskSubmitter submitter = capturingSubmitter(submissions);
+        List<StreamingResponseListener> captured = new ArrayList<>();
+        ShardRequestClient client = capturingClient(captured);
 
-        StageExecution task = new StageExecution(
-            stage,
-            targets,
-            List.of(),
-            new QueryExecutionContext("test-query", Runnable::run, mock(ExchangeSink.class), ConcurrentHashMap.newKeySet(), new ConcurrentHashMap<>(), null),
-            submitter,
-            listener
-        );
+        FanOutStageExecution task = newExec(stage, targets, List.of(), new SinkFeedingHandler(new SimpleExchangeSink()), client, listener);
 
         task.run();
 
         assertEquals("State must be RUNNING", StageExecution.State.RUNNING, task.getState());
-        assertEquals("Only initialBatchSize submissions should occur", initialBatch, submissions.get());
+        assertEquals("Only initialBatchSize submissions should occur", initialBatch, captured.size());
         assertEquals("completedTasks must be 0 after run()", 0, task.getCompletedTasks());
         assertEquals("inFlight must equal initialBatchSize", initialBatch, task.getInFlight());
     }
@@ -169,27 +236,20 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
         Stage stage = mockStage(initialBatch);
         List<ShardTarget> targets = buildTargets(numTargets);
         ActionListener<Void> listener = mock(ActionListener.class);
-        AtomicInteger submissions = new AtomicInteger(0);
-        TaskSubmitter submitter = capturingSubmitter(submissions);
+        List<StreamingResponseListener> captured = new ArrayList<>();
+        ShardRequestClient client = capturingClient(captured);
 
-        StageExecution task = new StageExecution(
-            stage,
-            targets,
-            List.of(),
-            new QueryExecutionContext("test-query", Runnable::run, mock(ExchangeSink.class), ConcurrentHashMap.newKeySet(), new ConcurrentHashMap<>(), null),
-            submitter,
-            listener
-        );
+        FanOutStageExecution task = newExec(stage, targets, List.of(), new SinkFeedingHandler(new SimpleExchangeSink()), client, listener);
 
         task.run();
 
-        assertEquals("Submissions must be clamped to totalTargets when initialBatchSize exceeds it", numTargets, submissions.get());
+        assertEquals("Submissions must be clamped to totalTargets when initialBatchSize exceeds it", numTargets, captured.size());
     }
 
     // ─── Phase 2: Response / failure state-transition tests ────────────
 
     /**
-     * 3 targets, drive 3 handleResponse calls → final state == SUCCEEDED,
+     * 3 targets, drive 3 final responses → final state == SUCCEEDED,
      * listener.onResponse called once, completedTasks == 3.
      *
      * Validates: Requirements 4.1, 9.6, 9.7
@@ -203,25 +263,21 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
         Set<Integer> completedStages = ConcurrentHashMap.newKeySet();
         Map<Integer, Map<ShardId, Map<Integer, String>>> shuffleManifests = new ConcurrentHashMap<>();
 
-        StageExecution task = new StageExecution(
-            stage,
-            targets,
-            List.of(),
-            new QueryExecutionContext("test-query", Runnable::run, rootSink, completedStages, shuffleManifests, null),
-            capturingSubmitter(new AtomicInteger(0)),
-            listener
-        );
+        List<StreamingResponseListener> captured = new ArrayList<>();
+        ShardRequestClient client = capturingClient(captured);
+
+        FanOutStageExecution task = newExec(stage, targets, List.of(), new SinkFeedingHandler(rootSink), client, listener);
 
         task.run();
         assertEquals(StageExecution.State.RUNNING, task.getState());
 
-        // Drive 3 successful responses
+        // Drive 3 successful final responses
         FragmentExecutionResponse response = new FragmentExecutionResponse(
             List.of("field"),
             Collections.singletonList(new Object[] { "value" })
         );
         for (int i = 0; i < numTargets; i++) {
-            task.handleResponse(response, targets.get(i));
+            captured.get(i).onStreamResponse(response, true);
         }
 
         assertEquals("Final state must be SUCCEEDED", StageExecution.State.SUCCEEDED, task.getState());
@@ -231,7 +287,7 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
     }
 
     /**
-     * 3 targets: drive 1 handleResponse + 1 handleFailure + 1 handleResponse →
+     * 3 targets: drive 1 success + 1 failure + 1 success →
      * final state == FAILED, listener.onFailure called once with RuntimeException
      * whose message contains "Stage 0 failed".
      *
@@ -246,14 +302,10 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
         Set<Integer> completedStages = ConcurrentHashMap.newKeySet();
         Map<Integer, Map<ShardId, Map<Integer, String>>> shuffleManifests = new ConcurrentHashMap<>();
 
-        StageExecution task = new StageExecution(
-            stage,
-            targets,
-            List.of(),
-            new QueryExecutionContext("test-query", Runnable::run, rootSink, completedStages, shuffleManifests, null),
-            capturingSubmitter(new AtomicInteger(0)),
-            listener
-        );
+        List<StreamingResponseListener> captured = new ArrayList<>();
+        ShardRequestClient client = capturingClient(captured);
+
+        FanOutStageExecution task = newExec(stage, targets, List.of(), new SinkFeedingHandler(rootSink), client, listener);
 
         task.run();
 
@@ -262,23 +314,23 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
             List.of("field"),
             Collections.singletonList(new Object[] { "value" })
         );
-        task.handleResponse(response, targets.get(0));
+        captured.get(0).onStreamResponse(response, true);
         RuntimeException cause = new RuntimeException("shard failed");
-        task.handleFailure(cause);
-        task.handleResponse(response, targets.get(2));
+        captured.get(1).onFailure(cause);
+        captured.get(2).onStreamResponse(response, true);
 
         assertEquals("Final state must be FAILED", StageExecution.State.FAILED, task.getState());
         verify(listener, never()).onResponse(null);
         org.mockito.ArgumentCaptor<Exception> captor = org.mockito.ArgumentCaptor.forClass(Exception.class);
         verify(listener, times(1)).onFailure(captor.capture());
-        Exception captured = captor.getValue();
-        assertTrue("Failure must be a RuntimeException", captured instanceof RuntimeException);
-        assertTrue("Message must contain 'Stage 0 failed'", captured.getMessage().contains("Stage 0 failed"));
-        assertSame("Cause must be the original exception", cause, captured.getCause());
+        Exception capturedEx = captor.getValue();
+        assertTrue("Failure must be a RuntimeException", capturedEx instanceof RuntimeException);
+        assertTrue("Message must contain 'Stage 0 failed'", capturedEx.getMessage().contains("Stage 0 failed"));
+        assertSame("Cause must be the original exception", cause, capturedEx.getCause());
     }
 
     /**
-     * Drive 2 handleFailure calls with different exceptions → the listener receives
+     * Drive 2 failures with different exceptions → the listener receives
      * the first exception as the cause, not the second.
      *
      * Validates: Requirements 5.1
@@ -288,24 +340,21 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
         Stage stage = mockStage(numTargets);
         List<ShardTarget> targets = buildTargets(numTargets);
         ActionListener<Void> listener = mock(ActionListener.class);
-        StageExecution task = new StageExecution(
-            stage,
-            targets,
-            List.of(),
-            new QueryExecutionContext("test-query", Runnable::run, mock(ExchangeSink.class), ConcurrentHashMap.newKeySet(), new ConcurrentHashMap<>(), null),
-            capturingSubmitter(new AtomicInteger(0)),
-            listener
-        );
+
+        List<StreamingResponseListener> captured = new ArrayList<>();
+        ShardRequestClient client = capturingClient(captured);
+
+        FanOutStageExecution task = newExec(stage, targets, List.of(), new SinkFeedingHandler(new SimpleExchangeSink()), client, listener);
 
         task.run();
 
         RuntimeException first = new RuntimeException("first failure");
         RuntimeException second = new RuntimeException("second failure");
-        task.handleFailure(first);
-        task.handleFailure(second);
+        captured.get(0).onFailure(first);
+        captured.get(1).onFailure(second);
         // Drive one more response to drain inFlight to 0
         FragmentExecutionResponse response = new FragmentExecutionResponse(List.of("f"), Collections.singletonList(new Object[] { "v" }));
-        task.handleResponse(response, targets.get(2));
+        captured.get(2).onStreamResponse(response, true);
 
         assertEquals("Final state must be FAILED", StageExecution.State.FAILED, task.getState());
         org.mockito.ArgumentCaptor<Exception> captor = org.mockito.ArgumentCaptor.forClass(Exception.class);
@@ -314,7 +363,7 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
     }
 
     /**
-     * When collectMetadata=false, handleResponse feeds the rootSink with the response.
+     * When collectMetadata=false, response feeds the rootSink.
      *
      * Validates: Requirements 4.2
      */
@@ -325,14 +374,10 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
         ActionListener<Void> listener = mock(ActionListener.class);
         ExchangeSink rootSink = mock(ExchangeSink.class);
 
-        StageExecution task = new StageExecution(
-            stage,
-            targets,
-            List.of(),
-            new QueryExecutionContext("test-query", Runnable::run, rootSink, ConcurrentHashMap.newKeySet(), new ConcurrentHashMap<>(), null),
-            capturingSubmitter(new AtomicInteger(0)),
-            listener
-        );
+        List<StreamingResponseListener> captured = new ArrayList<>();
+        ShardRequestClient client = capturingClient(captured);
+
+        FanOutStageExecution task = newExec(stage, targets, List.of(), new SinkFeedingHandler(rootSink), client, listener);
 
         task.run();
 
@@ -340,13 +385,13 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
             List.of("field"),
             Collections.singletonList(new Object[] { "value" })
         );
-        task.handleResponse(response, targets.get(0));
+        captured.get(0).onStreamResponse(response, true);
 
         verify(rootSink, times(1)).feed(response);
     }
 
     /**
-     * When collectMetadata=true, handleResponse stores the manifest in the manifests
+     * When collectMetadata=true, response stores the manifest in the manifests
      * map and does NOT feed the rootSink.
      *
      * Validates: Requirements 4.3
@@ -358,28 +403,24 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
         List<ShardTarget> targets = buildTargets(numTargets);
         ActionListener<Void> listener = mock(ActionListener.class);
         ExchangeSink rootSink = mock(ExchangeSink.class);
-        Map<Integer, Map<ShardId, Map<Integer, String>>> shuffleManifests = new ConcurrentHashMap<>();
+        QueryState state = new QueryState(rootSink);
 
-        StageExecution task = new StageExecution(
-            stage,
-            targets,
-            List.of(),
-            new QueryExecutionContext("test-query", Runnable::run, rootSink, ConcurrentHashMap.newKeySet(), shuffleManifests, null),
-            capturingSubmitter(new AtomicInteger(0)),
-            listener
-        );
+        List<StreamingResponseListener> captured = new ArrayList<>();
+        ShardRequestClient client = capturingClient(captured);
+
+        FanOutStageExecution task = newExec(stage, targets, List.of(), state, new ManifestCollectingHandler(), client, listener);
 
         task.run();
 
         FragmentExecutionResponse response = new FragmentExecutionResponse(Map.of("0", "path/to/file"));
-        task.handleResponse(response, targets.get(0));
+        captured.get(0).onStreamResponse(response, true);
 
         verify(rootSink, never()).feed(org.mockito.ArgumentMatchers.any());
-        assertFalse("Manifests map should not be empty after metadata response", shuffleManifests.isEmpty());
+        assertFalse("Manifests map should not be empty after metadata response", state.shuffleManifests().isEmpty());
     }
 
     /**
-     * Drive 2 handleResponse + 1 handleFailure → metrics.tasksCompleted == 2,
+     * Drive 2 successes + 1 failure → metrics.tasksCompleted == 2,
      * metrics.tasksFailed == 1.
      *
      * Validates: Requirements 4.1, 5.1
@@ -390,14 +431,10 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
         List<ShardTarget> targets = buildTargets(numTargets);
         ActionListener<Void> listener = mock(ActionListener.class);
 
-        StageExecution task = new StageExecution(
-            stage,
-            targets,
-            List.of(),
-            new QueryExecutionContext("test-query", Runnable::run, mock(ExchangeSink.class), ConcurrentHashMap.newKeySet(), new ConcurrentHashMap<>(), null),
-            capturingSubmitter(new AtomicInteger(0)),
-            listener
-        );
+        List<StreamingResponseListener> captured = new ArrayList<>();
+        ShardRequestClient client = capturingClient(captured);
+
+        FanOutStageExecution task = newExec(stage, targets, List.of(), new SinkFeedingHandler(new SimpleExchangeSink()), client, listener);
 
         task.run();
 
@@ -405,9 +442,9 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
             List.of("field"),
             Collections.singletonList(new Object[] { "value" })
         );
-        task.handleResponse(response, targets.get(0));
-        task.handleResponse(response, targets.get(1));
-        task.handleFailure(new RuntimeException("oops"));
+        captured.get(0).onStreamResponse(response, true);
+        captured.get(1).onStreamResponse(response, true);
+        captured.get(2).onFailure(new RuntimeException("oops"));
 
         assertEquals("tasksCompleted must be 2", 2, task.getMetrics().getTasksCompleted());
         assertEquals("tasksFailed must be 1", 1, task.getMetrics().getTasksFailed());
@@ -416,7 +453,7 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
     // ─── Phase 2: Early termination and sliding-window semantics ──────
 
     /**
-     * Mock decider returns true after 1st completion → after 1st handleResponse,
+     * Mock decider returns true after 1st completion → after 1st response,
      * finishStageInternal is called immediately, state == SUCCEEDED, listener
      * signaled with onResponse. Late in-flight responses are discarded.
      *
@@ -439,16 +476,11 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
         Stage stage = mockStageWithDecider(initialBatch, decider);
         List<ShardTarget> targets = buildTargets(numTargets);
         ActionListener<Void> listener = mock(ActionListener.class);
-        AtomicInteger submissions = new AtomicInteger(0);
 
-        StageExecution task = new StageExecution(
-            stage,
-            targets,
-            List.of(),
-            new QueryExecutionContext("test-query", Runnable::run, mock(ExchangeSink.class), ConcurrentHashMap.newKeySet(), new ConcurrentHashMap<>(), null),
-            capturingSubmitter(submissions),
-            listener
-        );
+        List<StreamingResponseListener> captured = new ArrayList<>();
+        ShardRequestClient client = capturingClient(captured);
+
+        FanOutStageExecution task = newExec(stage, targets, List.of(), new SinkFeedingHandler(new SimpleExchangeSink()), client, listener);
 
         task.run();
         assertEquals(StageExecution.State.RUNNING, task.getState());
@@ -458,7 +490,7 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
             List.of("field"),
             Collections.singletonList(new Object[] { "value" })
         );
-        task.handleResponse(response, targets.get(0));
+        captured.get(0).onStreamResponse(response, true);
 
         assertEquals("State must be SUCCEEDED after decider triggers", StageExecution.State.SUCCEEDED, task.getState());
         verify(listener, times(1)).onResponse(null);
@@ -466,7 +498,7 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
     }
 
     /**
-     * Drive to SUCCEEDED via 3 responses; call handleResponse a 4th time →
+     * Drive to SUCCEEDED via 3 responses; send a 4th response →
      * state unchanged (SUCCEEDED), listener.onResponse called only once.
      *
      * Validates: Requirements 4.4, 9.9
@@ -478,14 +510,10 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
         ActionListener<Void> listener = mock(ActionListener.class);
         ExchangeSink rootSink = mock(ExchangeSink.class);
 
-        StageExecution task = new StageExecution(
-            stage,
-            targets,
-            List.of(),
-            new QueryExecutionContext("test-query", Runnable::run, rootSink, ConcurrentHashMap.newKeySet(), new ConcurrentHashMap<>(), null),
-            capturingSubmitter(new AtomicInteger(0)),
-            listener
-        );
+        List<StreamingResponseListener> captured = new ArrayList<>();
+        ShardRequestClient client = capturingClient(captured);
+
+        FanOutStageExecution task = newExec(stage, targets, List.of(), new SinkFeedingHandler(rootSink), client, listener);
 
         task.run();
 
@@ -495,21 +523,20 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
             Collections.singletonList(new Object[] { "value" })
         );
         for (int i = 0; i < numTargets; i++) {
-            task.handleResponse(response, targets.get(i));
+            captured.get(i).onStreamResponse(response, true);
         }
         assertEquals(StageExecution.State.SUCCEEDED, task.getState());
         verify(listener, times(1)).onResponse(null);
 
-        // 4th late response — should be discarded
-        ShardTarget extraTarget = buildTargets(4).get(3);
-        task.handleResponse(response, extraTarget);
+        // 4th late response on the last listener — should be discarded (isTerminated check)
+        captured.get(2).onStreamResponse(response, true);
 
         assertEquals("State must remain SUCCEEDED after late response", StageExecution.State.SUCCEEDED, task.getState());
         verify(listener, times(1)).onResponse(null);
     }
 
     /**
-     * Drive to SUCCEEDED via 3 responses; call handleFailure → state unchanged
+     * Drive to SUCCEEDED via 3 responses; call onFailure → state unchanged
      * (SUCCEEDED), listener.onFailure not called.
      *
      * Validates: Requirements 4.5, 9.9
@@ -520,14 +547,10 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
         List<ShardTarget> targets = buildTargets(numTargets);
         ActionListener<Void> listener = mock(ActionListener.class);
 
-        StageExecution task = new StageExecution(
-            stage,
-            targets,
-            List.of(),
-            new QueryExecutionContext("test-query", Runnable::run, mock(ExchangeSink.class), ConcurrentHashMap.newKeySet(), new ConcurrentHashMap<>(), null),
-            capturingSubmitter(new AtomicInteger(0)),
-            listener
-        );
+        List<StreamingResponseListener> captured = new ArrayList<>();
+        ShardRequestClient client = capturingClient(captured);
+
+        FanOutStageExecution task = newExec(stage, targets, List.of(), new SinkFeedingHandler(new SimpleExchangeSink()), client, listener);
 
         task.run();
 
@@ -537,19 +560,20 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
             Collections.singletonList(new Object[] { "value" })
         );
         for (int i = 0; i < numTargets; i++) {
-            task.handleResponse(response, targets.get(i));
+            captured.get(i).onStreamResponse(response, true);
         }
         assertEquals(StageExecution.State.SUCCEEDED, task.getState());
 
-        // Late failure — should be discarded
-        task.handleFailure(new RuntimeException("late failure"));
+        // Late failure — should be discarded (onFailure still calls onTaskCompletion
+        // but finishStageInternal won't transition from SUCCEEDED)
+        captured.get(2).onFailure(new RuntimeException("late failure"));
 
         assertEquals("State must remain SUCCEEDED after late failure", StageExecution.State.SUCCEEDED, task.getState());
         verify(listener, never()).onFailure(org.mockito.ArgumentMatchers.any());
     }
 
     /**
-     * 5 targets, initialBatchSize=2, drive 1 handleResponse → submitter received
+     * 5 targets, initialBatchSize=2, drive 1 response → client received
      * 3 calls total (2 initial + 1 follow-up dispatch).
      *
      * Validates: Requirements 4.6, 9.5
@@ -560,33 +584,28 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
         Stage stage = mockStage(initialBatch);
         List<ShardTarget> targets = buildTargets(numTargets);
         ActionListener<Void> listener = mock(ActionListener.class);
-        AtomicInteger submissions = new AtomicInteger(0);
 
-        StageExecution task = new StageExecution(
-            stage,
-            targets,
-            List.of(),
-            new QueryExecutionContext("test-query", Runnable::run, mock(ExchangeSink.class), ConcurrentHashMap.newKeySet(), new ConcurrentHashMap<>(), null),
-            capturingSubmitter(submissions),
-            listener
-        );
+        List<StreamingResponseListener> captured = new ArrayList<>();
+        ShardRequestClient client = capturingClient(captured);
+
+        FanOutStageExecution task = newExec(stage, targets, List.of(), new SinkFeedingHandler(new SimpleExchangeSink()), client, listener);
 
         task.run();
-        assertEquals("Initial submissions must be 2", 2, submissions.get());
+        assertEquals("Initial submissions must be 2", 2, captured.size());
 
-        // Drive 1 handleResponse for targets.get(0) → should dispatch next target (index 2)
+        // Drive 1 response for targets.get(0) → should dispatch next target (index 2)
         FragmentExecutionResponse response = new FragmentExecutionResponse(
             List.of("field"),
             Collections.singletonList(new Object[] { "value" })
         );
-        task.handleResponse(response, targets.get(0));
+        captured.get(0).onStreamResponse(response, true);
 
-        assertEquals("Submitter must have received 3 calls (2 initial + 1 follow-up)", 3, submissions.get());
+        assertEquals("Client must have received 3 calls (2 initial + 1 follow-up)", 3, captured.size());
     }
 
     /**
      * 10 targets, initialBatchSize=2, decider terminates after 1st completion →
-     * submitter received only 2 calls total (no follow-up dispatch).
+     * client received only 2 calls total (no follow-up dispatch).
      *
      * Validates: Requirements 4.4, 9.5
      */
@@ -607,28 +626,23 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
         Stage stage = mockStageWithDecider(initialBatch, decider);
         List<ShardTarget> targets = buildTargets(numTargets);
         ActionListener<Void> listener = mock(ActionListener.class);
-        AtomicInteger submissions = new AtomicInteger(0);
 
-        StageExecution task = new StageExecution(
-            stage,
-            targets,
-            List.of(),
-            new QueryExecutionContext("test-query", Runnable::run, mock(ExchangeSink.class), ConcurrentHashMap.newKeySet(), new ConcurrentHashMap<>(), null),
-            capturingSubmitter(submissions),
-            listener
-        );
+        List<StreamingResponseListener> captured = new ArrayList<>();
+        ShardRequestClient client = capturingClient(captured);
+
+        FanOutStageExecution task = newExec(stage, targets, List.of(), new SinkFeedingHandler(new SimpleExchangeSink()), client, listener);
 
         task.run();
-        assertEquals("Initial submissions must be 2", 2, submissions.get());
+        assertEquals("Initial submissions must be 2", 2, captured.size());
 
-        // Drive 1 handleResponse → decider terminates, no follow-up dispatch
+        // Drive 1 response → decider terminates, no follow-up dispatch
         FragmentExecutionResponse response = new FragmentExecutionResponse(
             List.of("field"),
             Collections.singletonList(new Object[] { "value" })
         );
-        task.handleResponse(response, targets.get(0));
+        captured.get(0).onStreamResponse(response, true);
 
-        assertEquals("Submitter must have received only 2 calls (no follow-up after termination)", 2, submissions.get());
+        assertEquals("Client must have received only 2 calls (no follow-up after termination)", 2, captured.size());
     }
 
     /**
@@ -656,14 +670,10 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
         List<ShardTarget> targets = buildTargets(numTargets);
         ActionListener<Void> listener = mock(ActionListener.class);
 
-        StageExecution task = new StageExecution(
-            stage,
-            targets,
-            List.of(),
-            new QueryExecutionContext("test-query", Runnable::run, mock(ExchangeSink.class), ConcurrentHashMap.newKeySet(), new ConcurrentHashMap<>(), null),
-            capturingSubmitter(new AtomicInteger(0)),
-            listener
-        );
+        List<StreamingResponseListener> captured = new ArrayList<>();
+        ShardRequestClient client = capturingClient(captured);
+
+        FanOutStageExecution task = newExec(stage, targets, List.of(), new SinkFeedingHandler(new SimpleExchangeSink()), client, listener);
 
         task.run();
         assertEquals(StageExecution.State.RUNNING, task.getState());
@@ -673,13 +683,13 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
             List.of("field"),
             Collections.singletonList(new Object[] { "value" })
         );
-        task.handleResponse(response, targets.get(0));
+        captured.get(0).onStreamResponse(response, true);
 
         assertEquals("State must be SUCCEEDED after termination finishes immediately", StageExecution.State.SUCCEEDED, task.getState());
         verify(listener, times(1)).onResponse(null);
 
         // Drive 2nd completion → late, discarded (state is already SUCCEEDED)
-        task.handleResponse(response, targets.get(1));
+        captured.get(1).onStreamResponse(response, true);
 
         assertEquals("State must remain SUCCEEDED after late response", StageExecution.State.SUCCEEDED, task.getState());
         // listener.onResponse still called only once
@@ -691,7 +701,7 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
 
     /**
      * 10 targets, initialBatchSize=10. Spawn 10 threads, each calling
-     * handleResponse with a distinct target. Assert: final state == SUCCEEDED,
+     * onStreamResponse with isLast=true. Assert: final state == SUCCEEDED,
      * listener.onResponse called exactly once, completedTasks == 10.
      *
      * Validates: Requirements 9.7, 9.10
@@ -713,14 +723,10 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
             }
         };
 
-        StageExecution task = new StageExecution(
-            stage,
-            targets,
-            List.of(),
-            new QueryExecutionContext("test-query", Runnable::run, mock(ExchangeSink.class), ConcurrentHashMap.newKeySet(), new ConcurrentHashMap<>(), null),
-            capturingSubmitter(new AtomicInteger(0)),
-            listener
-        );
+        List<StreamingResponseListener> captured = new ArrayList<>();
+        ShardRequestClient client = capturingClient(captured);
+
+        FanOutStageExecution task = newExec(stage, targets, List.of(), new SinkFeedingHandler(new SimpleExchangeSink()), client, listener);
         task.run();
 
         FragmentExecutionResponse response = new FragmentExecutionResponse(
@@ -739,7 +745,7 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                 }
-                task.handleResponse(response, targets.get(idx));
+                captured.get(idx).onStreamResponse(response, true);
                 doneLatch.countDown();
             });
             threads[i].start();
@@ -754,7 +760,7 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
 
     /**
      * 10 targets, initialBatchSize=10. Spawn 10 threads — thread 0 calls
-     * handleFailure, threads 1–9 call handleResponse. Assert: final state ==
+     * onFailure, threads 1–9 call onStreamResponse. Assert: final state ==
      * FAILED, listener called exactly once.
      *
      * Validates: Requirements 9.7, 9.10
@@ -778,14 +784,10 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
             }
         };
 
-        StageExecution task = new StageExecution(
-            stage,
-            targets,
-            List.of(),
-            new QueryExecutionContext("test-query", Runnable::run, mock(ExchangeSink.class), ConcurrentHashMap.newKeySet(), new ConcurrentHashMap<>(), null),
-            capturingSubmitter(new AtomicInteger(0)),
-            listener
-        );
+        List<StreamingResponseListener> captured = new ArrayList<>();
+        ShardRequestClient client = capturingClient(captured);
+
+        FanOutStageExecution task = newExec(stage, targets, List.of(), new SinkFeedingHandler(new SimpleExchangeSink()), client, listener);
         task.run();
 
         FragmentExecutionResponse response = new FragmentExecutionResponse(
@@ -805,9 +807,9 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
                     Thread.currentThread().interrupt();
                 }
                 if (idx == 0) {
-                    task.handleFailure(new RuntimeException("shard failed"));
+                    captured.get(idx).onFailure(new RuntimeException("shard failed"));
                 } else {
-                    task.handleResponse(response, targets.get(idx));
+                    captured.get(idx).onStreamResponse(response, true);
                 }
                 doneLatch.countDown();
             });
@@ -824,7 +826,7 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
     /**
      * 10 targets, initialBatchSize=3, decider returns true when completedTasks >= 2.
      * Spawn 3 threads for the initial batch concurrently. Assert: state is a terminal
-     * state (SUCCEEDED or FAILED), submitter received a bounded number of calls
+     * state (SUCCEEDED or FAILED), client received a bounded number of calls
      * (no over-dispatch).
      *
      * Validates: Requirements 9.7, 9.10
@@ -857,18 +859,13 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
                 listenerCalls.incrementAndGet();
             }
         };
-        AtomicInteger submissions = new AtomicInteger(0);
 
-        StageExecution task = new StageExecution(
-            stage,
-            targets,
-            List.of(),
-            new QueryExecutionContext("test-query", Runnable::run, mock(ExchangeSink.class), ConcurrentHashMap.newKeySet(), new ConcurrentHashMap<>(), null),
-            capturingSubmitter(submissions),
-            listener
-        );
+        List<StreamingResponseListener> captured = new ArrayList<>();
+        ShardRequestClient client = capturingClient(captured);
+
+        FanOutStageExecution task = newExec(stage, targets, List.of(), new SinkFeedingHandler(new SimpleExchangeSink()), client, listener);
         task.run();
-        assertEquals(initialBatch, submissions.get());
+        assertEquals(initialBatch, captured.size());
 
         FragmentExecutionResponse response = new FragmentExecutionResponse(
             List.of("field"),
@@ -886,7 +883,7 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                 }
-                task.handleResponse(response, targets.get(idx));
+                captured.get(idx).onStreamResponse(response, true);
                 doneLatch.countDown();
             });
             threads[i].start();
@@ -902,13 +899,13 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
         );
         // Listener called exactly once
         assertEquals(1, listenerCalls.get());
-        // Submitter calls bounded: initial batch (3) + at most 1 follow-up per completion before termination
-        assertTrue("Submitter calls must be bounded, was " + submissions.get(), submissions.get() <= initialBatch + initialBatch);
+        // Client calls bounded: initial batch (3) + at most 1 follow-up per completion before termination
+        assertTrue("Client calls must be bounded, was " + captured.size(), captured.size() <= initialBatch + initialBatch);
     }
 
     /**
      * 5 targets, initialBatchSize=2, decider returns true on 1st completion.
-     * Drive 1 handleResponse → verify submitter received exactly 2 calls
+     * Drive 1 response → verify client received exactly 2 calls
      * (no 3rd dispatch after termination).
      *
      * Validates: Requirements 9.7, 9.10
@@ -941,27 +938,22 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
                 listenerCalls.incrementAndGet();
             }
         };
-        AtomicInteger submissions = new AtomicInteger(0);
 
-        StageExecution task = new StageExecution(
-            stage,
-            targets,
-            List.of(),
-            new QueryExecutionContext("test-query", Runnable::run, mock(ExchangeSink.class), ConcurrentHashMap.newKeySet(), new ConcurrentHashMap<>(), null),
-            capturingSubmitter(submissions),
-            listener
-        );
+        List<StreamingResponseListener> captured = new ArrayList<>();
+        ShardRequestClient client = capturingClient(captured);
+
+        FanOutStageExecution task = newExec(stage, targets, List.of(), new SinkFeedingHandler(new SimpleExchangeSink()), client, listener);
         task.run();
-        assertEquals("Initial submissions must be 2", 2, submissions.get());
+        assertEquals("Initial submissions must be 2", 2, captured.size());
 
         // Drive 1st completion — decider terminates, no follow-up dispatch
         FragmentExecutionResponse response = new FragmentExecutionResponse(
             List.of("field"),
             Collections.singletonList(new Object[] { "value" })
         );
-        task.handleResponse(response, targets.get(0));
+        captured.get(0).onStreamResponse(response, true);
 
-        assertEquals("Submitter must have received exactly 2 calls (no 3rd dispatch after termination)", 2, submissions.get());
+        assertEquals("Client must have received exactly 2 calls (no 3rd dispatch after termination)", 2, captured.size());
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────
@@ -985,7 +977,6 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
         when(stage.getTerminationDecider()).thenReturn(decider);
         when(stage.getStageId()).thenReturn(0);
         when(stage.isShuffleWrite()).thenReturn(false);
-        when(stage.isCoordinatorGather()).thenReturn(false);
         return stage;
     }
 
@@ -997,7 +988,6 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
         when(stage.getTerminationDecider()).thenReturn(decider);
         when(stage.getStageId()).thenReturn(0);
         when(stage.isShuffleWrite()).thenReturn(false);
-        when(stage.isCoordinatorGather()).thenReturn(false);
         return stage;
     }
 
@@ -1016,11 +1006,11 @@ public class StageExecutionStateMachineTests extends OpenSearchTestCase {
     }
 
     /**
-     * Create a {@link TaskSubmitter} that counts submissions without actually
-     * dispatching anything. The returned submitter does NOT call the listener —
+     * Create a {@link ShardRequestClient} that captures {@link StreamingResponseListener}
+     * instances. The returned client does NOT call the listener —
      * tasks remain "in flight" until the test drives completions manually.
      */
-    private TaskSubmitter capturingSubmitter(AtomicInteger counter) {
-        return (request, node, listener) -> counter.incrementAndGet();
+    private ShardRequestClient capturingClient(List<StreamingResponseListener> captured) {
+        return (request, node, listener) -> captured.add(listener);
     }
 }

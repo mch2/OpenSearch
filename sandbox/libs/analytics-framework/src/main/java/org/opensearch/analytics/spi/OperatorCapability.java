@@ -24,5 +24,5 @@ public enum OperatorCapability {
     JOIN,
     WINDOW,
     PROJECT,
-    COORDINATOR_REDUCE
+    LOCAL_STAGE
 }

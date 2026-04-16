@@ -8,6 +8,7 @@
 
 package org.opensearch.analytics.exec;
 
+import org.opensearch.analytics.backend.FragmentExecutionResponse;
 import org.opensearch.common.io.stream.BytesStreamOutput;
 import org.opensearch.core.common.io.stream.StreamInput;
 import org.opensearch.test.OpenSearchTestCase;

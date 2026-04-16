@@ -14,6 +14,14 @@ opensearchplugin {
 
 def buildType = project.hasProperty('rustDebug') ? 'debug' : 'release'
 
+// Guava comes transitively from calcite-core (via analytics-framework) — forbidden on
+// compile classpaths by OpenSearch. Test sources need it (Calcite API exposes ImmutableList).
+configurations {
+  calciteTestCompile
+  testCompileClasspath { exclude group: 'com.google.guava' }
+}
+sourceSets.test.compileClasspath += configurations.calciteTestCompile
+
 dependencies {
   // Provided at runtime by the parent analytics-engine plugin; compile-only to avoid jar hell.
   compileOnly project(':sandbox:libs:analytics-framework')
@@ -48,6 +56,13 @@ dependencies {
   // Substrait Isthmus — Calcite RelNode → Substrait conversion
   implementation "io.substrait:isthmus:0.67.0"
   implementation "io.substrait:core:0.67.0"
+
+  // Test dependencies — Calcite types for building RelNode trees in fragment convertor tests
+  testImplementation project(':sandbox:libs:analytics-framework')
+  testImplementation project(':sandbox:plugins:analytics-engine')
+  calciteTestCompile "com.google.guava:guava:${versions.guava}"
+  testRuntimeOnly "org.codehaus.janino:janino:3.1.9"
+  testRuntimeOnly "org.codehaus.janino:commons-compiler:3.1.9"
 }
 
 // Rust native library build
@@ -105,12 +120,21 @@ clean {
 
 test {
   jvmArgs += ["--add-opens", "java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED"]
+  // Grant --enable-native-access for FFM downcall handles used by FfmBindings.
+  jvmArgs += ["--enable-native-access=ALL-UNNAMED"]
   systemProperty 'java.library.path', file('src/main/resources/native').absolutePath
 }
 
 tasks.withType(JavaCompile).configureEach {
   // Arrow references Jackson annotations not on classpath — harmless warnings
   options.compilerArgs -= '-Werror'
+  // This module uses FFM (java.lang.foreign.*) APIs and virtual threads. Both are
+  // finalized in JDK 22+ / 21 respectively, but the OpenSearch project-wide source
+  // level is still JDK 21 (set in buildSrc/build.gradle). Override to the current
+  // JDK so FfmBindings and DatafusionLocalExecEngine compile against finalized APIs
+  // (no --enable-preview needed — these are GA features on JDK 25).
+  sourceCompatibility = JavaVersion.current()
+  targetCompatibility = JavaVersion.current()
 }
 
 // TODO: Remove once back-end is built out with test suite

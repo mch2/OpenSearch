@@ -9,6 +9,7 @@
 package org.opensearch.analytics.exec;
 
 import org.opensearch.action.ActionType;
+import org.opensearch.analytics.backend.FragmentExecutionResponse;
 
 /**
  * {@link ActionType} singleton for the analytics shard-level execution action.

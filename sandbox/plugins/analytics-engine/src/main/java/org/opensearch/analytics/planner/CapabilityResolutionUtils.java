@@ -25,9 +25,9 @@ public final class CapabilityResolutionUtils {
 
     private CapabilityResolutionUtils() {}
 
-    /** Filters viable backends to those that support COORDINATOR_REDUCE. */
+    /** Filters viable backends to those that support LOCAL_STAGE. */
     public static List<String> filterByReduceCapability(CapabilityRegistry registry, List<String> viableBackends) {
-        List<String> reduceCapable = registry.operatorBackends(OperatorCapability.COORDINATOR_REDUCE);
+        List<String> reduceCapable = registry.operatorBackends(OperatorCapability.LOCAL_STAGE);
         List<String> result = new ArrayList<>();
         for (String name : viableBackends) {
             if (reduceCapable.contains(name)) {
@@ -35,7 +35,7 @@ public final class CapabilityResolutionUtils {
             }
         }
         if (result.isEmpty()) {
-            throw new IllegalStateException("No viable backend supports COORDINATOR_REDUCE among " + viableBackends);
+            throw new IllegalStateException("No viable backend supports LOCAL_STAGE among " + viableBackends);
         }
         return result;
     }

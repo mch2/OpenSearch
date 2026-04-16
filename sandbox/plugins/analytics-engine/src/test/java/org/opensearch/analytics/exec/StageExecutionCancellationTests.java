@@ -8,6 +8,7 @@
 
 package org.opensearch.analytics.exec;
 
+import org.opensearch.analytics.backend.FragmentExecutionResponse;
 import org.opensearch.analytics.planner.dag.Stage;
 import org.opensearch.cluster.node.DiscoveryNode;
 import org.opensearch.core.action.ActionListener;
@@ -21,8 +22,6 @@ import org.opensearch.test.OpenSearchTestCase;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import org.mockito.ArgumentCaptor;
 
@@ -35,13 +34,10 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * Cancellation-aware tests for {@link StageExecution}. These tests exercise
+ * Cancellation-aware tests for {@link FanOutStageExecution}. These tests exercise
  * the cancellation logic in {@code finishStageInternal()} by constructing
- * StageExecution with a {@code parentTask} parameter and driving
- * {@code handleResponse}/{@code handleFailure} manually.
- *
- * <p>These tests will NOT compile until Task 2 adds the {@code @Nullable Task parentTask}
- * parameter to the {@code StageExecution} constructor.
+ * FanOutStageExecution with a {@code parentTask} parameter and driving
+ * completions via captured {@link StreamingResponseListener} instances.
  *
  * Validates: Requirements 1.2, 1.3, 1.5, 1.6, 5.4
  */
@@ -59,29 +55,29 @@ public class StageExecutionCancellationTests extends OpenSearchTestCase {
         ActionListener<Void> listener = mock(ActionListener.class);
         CancellableTask parentTask = mockParentTask(false);
 
-        StageExecution task = buildStageExec(numTargets, listener, parentTask);
-        List<ShardTarget> targets = buildTargets(numTargets);
+        List<StreamingResponseListener> captured = new ArrayList<>();
+        FanOutStageExecution task = buildStageExec(numTargets, listener, parentTask, captured);
         task.run();
 
         // First target fails with TaskCancelledException
-        task.handleFailure(new TaskCancelledException("task cancelled"));
+        captured.get(0).onFailure(new TaskCancelledException("task cancelled"));
 
         // Other two succeed
         FragmentExecutionResponse response = new FragmentExecutionResponse(
             List.of("field"),
             Collections.singletonList(new Object[] { "value" })
         );
-        task.handleResponse(response, targets.get(1));
-        task.handleResponse(response, targets.get(2));
+        captured.get(1).onStreamResponse(response, true);
+        captured.get(2).onStreamResponse(response, true);
 
         // Verify listener.onFailure called with RuntimeException wrapping
         ArgumentCaptor<Exception> captor = ArgumentCaptor.forClass(Exception.class);
         verify(listener, times(1)).onFailure(captor.capture());
         verify(listener, never()).onResponse(any());
 
-        Exception captured = captor.getValue();
-        assertTrue("Failure must be a RuntimeException", captured instanceof RuntimeException);
-        assertTrue("Message must contain 'Stage 0 failed'", captured.getMessage().contains("Stage 0 failed"));
+        Exception capturedEx = captor.getValue();
+        assertTrue("Failure must be a RuntimeException", capturedEx instanceof RuntimeException);
+        assertTrue("Message must contain 'Stage 0 failed'", capturedEx.getMessage().contains("Stage 0 failed"));
 
         // Verify metrics
         assertEquals("tasksFailed must be 1", 1, task.getMetrics().getTasksFailed());
@@ -100,12 +96,13 @@ public class StageExecutionCancellationTests extends OpenSearchTestCase {
         ActionListener<Void> listener = mock(ActionListener.class);
         CancellableTask parentTask = mockParentTask(true);
 
-        StageExecution task = buildStageExec(numTargets, listener, parentTask);
+        List<StreamingResponseListener> captured = new ArrayList<>();
+        FanOutStageExecution task = buildStageExec(numTargets, listener, parentTask, captured);
         task.run();
 
         // All 3 targets fail with TaskCancelledException
         for (int i = 0; i < numTargets; i++) {
-            task.handleFailure(new TaskCancelledException("task cancelled"));
+            captured.get(i).onFailure(new TaskCancelledException("task cancelled"));
         }
 
         // Verify listener.onFailure called with bare TaskCancelledException
@@ -113,9 +110,9 @@ public class StageExecutionCancellationTests extends OpenSearchTestCase {
         verify(listener, times(1)).onFailure(captor.capture());
         verify(listener, never()).onResponse(any());
 
-        Exception captured = captor.getValue();
-        assertTrue("Failure must be a TaskCancelledException", captured instanceof TaskCancelledException);
-        assertEquals("Message must be 'query cancelled'", "query cancelled", captured.getMessage());
+        Exception capturedEx = captor.getValue();
+        assertTrue("Failure must be a TaskCancelledException", capturedEx instanceof TaskCancelledException);
+        assertEquals("Message must be 'query cancelled'", "query cancelled", capturedEx.getMessage());
 
         // Verify metrics still recorded end time
         assertTrue("End time must be recorded", task.getMetrics().getEndTimeMs() > 0);
@@ -130,11 +127,10 @@ public class StageExecutionCancellationTests extends OpenSearchTestCase {
     public void testCancellationWaitsForInFlightDrain() {
         int numTargets = 3;
         ActionListener<Void> listener = mock(ActionListener.class);
-        StageMetrics metrics = new StageMetrics(0);
         CancellableTask parentTask = mockParentTask(true);
 
-        StageExecution task = buildStageExec(numTargets, listener, metrics, parentTask);
-        List<ShardTarget> targets = buildTargets(numTargets);
+        List<StreamingResponseListener> captured = new ArrayList<>();
+        FanOutStageExecution task = buildStageExec(numTargets, listener, parentTask, captured);
         task.run();
 
         FragmentExecutionResponse response = new FragmentExecutionResponse(
@@ -143,23 +139,23 @@ public class StageExecutionCancellationTests extends OpenSearchTestCase {
         );
 
         // First fails with cancellation → listener NOT signaled yet
-        task.handleFailure(new TaskCancelledException("task cancelled"));
+        captured.get(0).onFailure(new TaskCancelledException("task cancelled"));
         verify(listener, never()).onFailure(any());
         verify(listener, never()).onResponse(any());
 
         // Second completes → still not signaled
-        task.handleResponse(response, targets.get(1));
+        captured.get(1).onStreamResponse(response, true);
         verify(listener, never()).onFailure(any());
         verify(listener, never()).onResponse(any());
 
         // Third completes → NOW signaled with TaskCancelledException
-        task.handleResponse(response, targets.get(2));
+        captured.get(2).onStreamResponse(response, true);
         ArgumentCaptor<Exception> captor = ArgumentCaptor.forClass(Exception.class);
         verify(listener, times(1)).onFailure(captor.capture());
 
-        Exception captured = captor.getValue();
-        assertTrue("Failure must be a TaskCancelledException", captured instanceof TaskCancelledException);
-        assertEquals("Message must be 'query cancelled'", "query cancelled", captured.getMessage());
+        Exception capturedEx = captor.getValue();
+        assertTrue("Failure must be a TaskCancelledException", capturedEx instanceof TaskCancelledException);
+        assertEquals("Message must be 'query cancelled'", "query cancelled", capturedEx.getMessage());
     }
 
     /**
@@ -172,11 +168,10 @@ public class StageExecutionCancellationTests extends OpenSearchTestCase {
     public void testMixedFailureAndCancellationHonorsParentTaskState() {
         int numTargets = 3;
         ActionListener<Void> listener = mock(ActionListener.class);
-        StageMetrics metrics = new StageMetrics(0);
         CancellableTask parentTask = mockParentTask(true);
 
-        StageExecution task = buildStageExec(numTargets, listener, metrics, parentTask);
-        List<ShardTarget> targets = buildTargets(numTargets);
+        List<StreamingResponseListener> captured = new ArrayList<>();
+        FanOutStageExecution task = buildStageExec(numTargets, listener, parentTask, captured);
         task.run();
 
         FragmentExecutionResponse response = new FragmentExecutionResponse(
@@ -185,20 +180,20 @@ public class StageExecutionCancellationTests extends OpenSearchTestCase {
         );
 
         // First captured exception is a normal RuntimeException
-        task.handleFailure(new RuntimeException("shard OOM"));
+        captured.get(0).onFailure(new RuntimeException("shard OOM"));
         // Second is a TaskCancelledException
-        task.handleFailure(new TaskCancelledException("task cancelled"));
+        captured.get(1).onFailure(new TaskCancelledException("task cancelled"));
         // Third completes normally to drain in-flight
-        task.handleResponse(response, targets.get(2));
+        captured.get(2).onStreamResponse(response, true);
 
         // Parent task state wins: listener gets bare TaskCancelledException
         ArgumentCaptor<Exception> captor = ArgumentCaptor.forClass(Exception.class);
         verify(listener, times(1)).onFailure(captor.capture());
         verify(listener, never()).onResponse(any());
 
-        Exception captured = captor.getValue();
-        assertTrue("Failure must be a TaskCancelledException", captured instanceof TaskCancelledException);
-        assertEquals("Message must be 'query cancelled'", "query cancelled", captured.getMessage());
+        Exception capturedEx = captor.getValue();
+        assertTrue("Failure must be a TaskCancelledException", capturedEx instanceof TaskCancelledException);
+        assertEquals("Message must be 'query cancelled'", "query cancelled", capturedEx.getMessage());
     }
 
     /**
@@ -212,12 +207,13 @@ public class StageExecutionCancellationTests extends OpenSearchTestCase {
         ActionListener<Void> listener = mock(ActionListener.class);
         CancellableTask parentTask = mockParentTask(false);
 
-        StageExecution task = buildStageExec(numTargets, listener, parentTask);
+        List<StreamingResponseListener> captured = new ArrayList<>();
+        FanOutStageExecution task = buildStageExec(numTargets, listener, parentTask, captured);
         task.run();
 
         // All 3 targets fail with TaskCancelledException
         for (int i = 0; i < numTargets; i++) {
-            task.handleFailure(new TaskCancelledException("task cancelled"));
+            captured.get(i).onFailure(new TaskCancelledException("task cancelled"));
         }
 
         assertEquals("tasksFailed must be 3", 3, task.getMetrics().getTasksFailed());
@@ -233,23 +229,23 @@ public class StageExecutionCancellationTests extends OpenSearchTestCase {
     public void testNullParentTaskFallsBackToWrapping() {
         int numTargets = 1;
         ActionListener<Void> listener = mock(ActionListener.class);
-        StageMetrics metrics = new StageMetrics(0);
 
-        StageExecution task = buildStageExec(numTargets, listener, metrics, null);
+        List<StreamingResponseListener> captured = new ArrayList<>();
+        FanOutStageExecution task = buildStageExec(numTargets, listener, null, captured);
         task.run();
 
         // Target returns TaskCancelledException
-        task.handleFailure(new TaskCancelledException("task cancelled"));
+        captured.get(0).onFailure(new TaskCancelledException("task cancelled"));
 
         // Verify listener.onFailure called with RuntimeException wrapping
         ArgumentCaptor<Exception> captor = ArgumentCaptor.forClass(Exception.class);
         verify(listener, times(1)).onFailure(captor.capture());
         verify(listener, never()).onResponse(any());
 
-        Exception captured = captor.getValue();
-        assertTrue("Failure must be a RuntimeException", captured instanceof RuntimeException);
-        assertTrue("Message must contain 'Stage 0 failed'", captured.getMessage().contains("Stage 0 failed"));
-        assertTrue("Cause must be the TaskCancelledException", captured.getCause() instanceof TaskCancelledException);
+        Exception capturedEx = captor.getValue();
+        assertTrue("Failure must be a RuntimeException", capturedEx instanceof RuntimeException);
+        assertTrue("Message must contain 'Stage 0 failed'", capturedEx.getMessage().contains("Stage 0 failed"));
+        assertTrue("Cause must be the TaskCancelledException", capturedEx.getCause() instanceof TaskCancelledException);
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────
@@ -267,7 +263,6 @@ public class StageExecutionCancellationTests extends OpenSearchTestCase {
         when(stage.getTerminationDecider()).thenReturn(decider);
         when(stage.getStageId()).thenReturn(0);
         when(stage.isShuffleWrite()).thenReturn(false);
-        when(stage.isCoordinatorGather()).thenReturn(false);
         return stage;
     }
 
@@ -286,15 +281,6 @@ public class StageExecutionCancellationTests extends OpenSearchTestCase {
     }
 
     /**
-     * Create a {@link TaskSubmitter} that counts submissions without actually
-     * dispatching anything. The returned submitter does NOT call the listener —
-     * tasks remain "in flight" until the test drives completions manually.
-     */
-    private TaskSubmitter capturingSubmitter(AtomicInteger counter) {
-        return (request, node, listener) -> counter.incrementAndGet();
-    }
-
-    /**
      * Create a mock {@link CancellableTask} with a controllable {@code isCancelled()} return value.
      */
     private CancellableTask mockParentTask(boolean cancelled) {
@@ -305,21 +291,30 @@ public class StageExecutionCancellationTests extends OpenSearchTestCase {
 
     /**
      * Build a {@link StageExecution} with the given parameters, using {@code mockStage(numTargets)},
-     * {@code buildTargets(numTargets)}, and a capturing submitter. The {@code parentTask} is
-     * passed as the last constructor parameter (added by Task 2).
+     * {@code buildTargets(numTargets)}, and a capturing client.
      */
-    private StageExecution buildStageExec(int numTargets, ActionListener<Void> listener, StageMetrics metrics, Task parentTask) {
-        return buildStageExec(numTargets, listener, parentTask);
-    }
-
-    private StageExecution buildStageExec(int numTargets, ActionListener<Void> listener, Task parentTask) {
-        return new StageExecution(
-            mockStage(numTargets),
+    private FanOutStageExecution buildStageExec(
+        int numTargets,
+        ActionListener<Void> listener,
+        Task parentTask,
+        List<StreamingResponseListener> captured
+    ) {
+        QueryState state = new QueryState();
+        Stage stage = mockStage(numTargets);
+        return new FanOutStageExecution(
+            stage,
+            "test-query",
             buildTargets(numTargets),
             List.of(),
-            new QueryExecutionContext("test-query", Runnable::run, mock(ExchangeSink.class), ConcurrentHashMap.newKeySet(), new ConcurrentHashMap<>(), parentTask),
-            capturingSubmitter(new AtomicInteger(0)),
-            listener
+            Runnable::run,
+            parentTask,
+            state.rootSink(),
+            new SinkFeedingHandler(new SimpleExchangeSink()),
+            state.completedStages(),
+            state.shuffleManifests(),
+            (request, node, streamListener) -> captured.add(streamListener),
+            listener,
+            new StageMetrics(stage.getStageId())
         );
     }
 }

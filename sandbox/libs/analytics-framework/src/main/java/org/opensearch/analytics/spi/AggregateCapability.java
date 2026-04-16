@@ -21,33 +21,28 @@ import java.util.Set;
  *
  * @opensearch.internal
  */
-public record AggregateCapability(AggregateFunction function, FieldType fieldType,
-                                   Set<String> formats) {
+public record AggregateCapability(AggregateFunction function, FieldType fieldType, Set<String> formats) {
 
     public AggregateCapability {
         formats = Set.copyOf(formats);
     }
 
-    public static AggregateCapability simple(AggregateFunction function, FieldType fieldType,
-                                              Set<String> formats) {
+    public static AggregateCapability simple(AggregateFunction function, FieldType fieldType, Set<String> formats) {
         assert function.getType() == AggregateFunction.Type.SIMPLE;
         return new AggregateCapability(function, fieldType, formats);
     }
 
-    public static AggregateCapability statistical(AggregateFunction function, FieldType fieldType,
-                                                   Set<String> formats) {
+    public static AggregateCapability statistical(AggregateFunction function, FieldType fieldType, Set<String> formats) {
         assert function.getType() == AggregateFunction.Type.STATISTICAL;
         return new AggregateCapability(function, fieldType, formats);
     }
 
-    public static AggregateCapability stateExpanding(AggregateFunction function, FieldType fieldType,
-                                                      Set<String> formats) {
+    public static AggregateCapability stateExpanding(AggregateFunction function, FieldType fieldType, Set<String> formats) {
         assert function.getType() == AggregateFunction.Type.STATE_EXPANDING;
         return new AggregateCapability(function, fieldType, formats);
     }
 
-    public static AggregateCapability approximate(AggregateFunction function, FieldType fieldType,
-                                                    Set<String> formats) {
+    public static AggregateCapability approximate(AggregateFunction function, FieldType fieldType, Set<String> formats) {
         assert function.getType() == AggregateFunction.Type.APPROXIMATE;
         return new AggregateCapability(function, fieldType, formats);
     }

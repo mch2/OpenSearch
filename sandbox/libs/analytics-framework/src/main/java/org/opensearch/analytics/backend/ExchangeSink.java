@@ -6,7 +6,7 @@
  * compatible open source license.
  */
 
-package org.opensearch.analytics.exec;
+package org.opensearch.analytics.backend;
 
 /**
  * Per-stage result accumulator that collects {@link FragmentExecutionResponse} rows

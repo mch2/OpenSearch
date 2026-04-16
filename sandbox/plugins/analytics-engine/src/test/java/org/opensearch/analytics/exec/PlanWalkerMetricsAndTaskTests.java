@@ -19,6 +19,7 @@ import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.opensearch.action.support.PlainActionFuture;
+import org.opensearch.analytics.backend.FragmentExecutionResponse;
 import org.opensearch.analytics.planner.dag.QueryDAG;
 import org.opensearch.analytics.planner.dag.Stage;
 import org.opensearch.analytics.planner.dag.StagePlan;
@@ -37,9 +38,10 @@ import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.core.tasks.TaskId;
 import org.opensearch.tasks.Task;
 import org.opensearch.test.OpenSearchTestCase;
+import org.opensearch.transport.StreamTransportService;
+import org.opensearch.transport.Transport;
 import org.opensearch.transport.TransportRequest;
 import org.opensearch.transport.TransportRequestOptions;
-import org.opensearch.transport.TransportService;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -49,6 +51,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -142,7 +145,7 @@ public class PlanWalkerMetricsAndTaskTests extends OpenSearchTestCase {
             Collections.emptyMap()
         );
 
-        PlanWalker walker = new PlanWalker(dag, clusterService, Runnable::run, queryTask);
+        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, queryTask), new QueryState(), new StageExecutor(clusterService));
         assertSame("getParentTask() should return the task passed to constructor", queryTask, walker.getParentTask());
     }
 
@@ -156,12 +159,14 @@ public class PlanWalkerMetricsAndTaskTests extends OpenSearchTestCase {
      * Validates: Requirements 6.10
      */
     public void testSchedulerUsesSendChildRequestWhenParentTaskPresent() throws Exception {
-        TransportService transportService = mock(TransportService.class);
-        org.opensearch.transport.Transport.Connection mockConnection = mock(org.opensearch.transport.Transport.Connection.class);
-        Scheduler scheduler = new Scheduler(transportService, 5);
-
-        // Mock getConnection to return our mock connection
+        StreamTransportService transportService = mock(StreamTransportService.class);
+        Transport.Connection mockConnection = mock(Transport.Connection.class);
         when(transportService.getConnection(any(DiscoveryNode.class))).thenReturn(mockConnection);
+
+        // Use a fully-mocked ClusterService with routing for both dispatch and target resolution
+        ClusterService routingCs = buildMockClusterService("http_logs", 1);
+        ShardTransportDispatcher dispatcher = new ShardTransportDispatcher(transportService, routingCs, 5);
+        Scheduler scheduler = new Scheduler(dispatcher, new StageExecutor(routingCs));
 
         // Mock the non-final sendChildRequest(Connection, ...) to respond immediately
         doAnswer(invocation -> {
@@ -170,7 +175,7 @@ public class PlanWalkerMetricsAndTaskTests extends OpenSearchTestCase {
             return null;
         }).when(transportService)
             .sendChildRequest(
-                any(org.opensearch.transport.Transport.Connection.class),
+                any(Transport.Connection.class),
                 anyString(),
                 any(TransportRequest.class),
                 any(Task.class),
@@ -195,7 +200,7 @@ public class PlanWalkerMetricsAndTaskTests extends OpenSearchTestCase {
             Collections.emptyMap()
         );
 
-        PlanWalker walker = new PlanWalker(dag, clusterService, Runnable::run, queryTask);
+        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, queryTask), new QueryState(), new StageExecutor(clusterService));
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
         scheduler.execute(walker, future);
         future.actionGet();
@@ -206,7 +211,7 @@ public class PlanWalkerMetricsAndTaskTests extends OpenSearchTestCase {
             eq(AnalyticsShardAction.NAME),
             any(TransportRequest.class),
             eq(queryTask),
-            eq(TransportRequestOptions.EMPTY),
+            any(TransportRequestOptions.class),
             any(org.opensearch.transport.TransportResponseHandler.class)
         );
 
@@ -220,26 +225,33 @@ public class PlanWalkerMetricsAndTaskTests extends OpenSearchTestCase {
     }
 
     /**
-     * sendRequest called when parentTask is null (test fallback).
-     * Creates Scheduler with mock TransportService, creates PlanWalker with null parentTask.
-     * Executes and verifies sendRequest was called (not sendChildRequest).
+     * sendChildRequest always called even when parentTask is null.
+     * The new ShardTransportDispatcher always uses sendChildRequest
+     * (analytics queries always have a parent task in production).
      *
      * Validates: Requirements 6.10
      */
-    public void testSchedulerUsesSendRequestWhenParentTaskNull() throws Exception {
-        TransportService transportService = mock(TransportService.class);
-        Scheduler scheduler = new Scheduler(transportService, 5);
+    public void testSchedulerUsesSendChildRequestWhenParentTaskNull() throws Exception {
+        StreamTransportService transportService = mock(StreamTransportService.class);
+        Transport.Connection mockConnection = mock(Transport.Connection.class);
+        when(transportService.getConnection(any(DiscoveryNode.class))).thenReturn(mockConnection);
 
-        // Mock sendRequest to respond immediately
+        ClusterService routingCs = buildMockClusterService("http_logs", 1);
+        ShardTransportDispatcher dispatcher = new ShardTransportDispatcher(transportService, routingCs, 5);
+        Scheduler scheduler = new Scheduler(dispatcher, new StageExecutor(routingCs));
+
+        // Mock sendChildRequest to respond immediately
         doAnswer(invocation -> {
-            org.opensearch.transport.TransportResponseHandler<FragmentExecutionResponse> handler = invocation.getArgument(3);
+            org.opensearch.transport.TransportResponseHandler<FragmentExecutionResponse> handler = invocation.getArgument(5);
             handler.handleResponse(new FragmentExecutionResponse(List.of("field_0"), List.of()));
             return null;
         }).when(transportService)
-            .sendRequest(
-                any(DiscoveryNode.class),
+            .sendChildRequest(
+                any(Transport.Connection.class),
                 anyString(),
                 any(TransportRequest.class),
+                nullable(Task.class),
+                any(TransportRequestOptions.class),
                 any(org.opensearch.transport.TransportResponseHandler.class)
             );
 
@@ -251,26 +263,26 @@ public class PlanWalkerMetricsAndTaskTests extends OpenSearchTestCase {
         stage.setPlanAlternatives(List.of(plan));
         QueryDAG dag = new QueryDAG("test-query", stage);
 
-        PlanWalker walker = new PlanWalker(dag, clusterService, Runnable::run, null);
+        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
         scheduler.execute(walker, future);
         future.actionGet();
 
-        // Verify sendRequest was called
-        verify(transportService).sendRequest(
-            any(DiscoveryNode.class),
+        // Verify sendChildRequest was called (always used now, even with null parentTask)
+        verify(transportService).sendChildRequest(
+            eq(mockConnection),
             eq(AnalyticsShardAction.NAME),
             any(TransportRequest.class),
+            nullable(Task.class),
+            any(TransportRequestOptions.class),
             any(org.opensearch.transport.TransportResponseHandler.class)
         );
 
-        // Verify sendChildRequest(Connection, ...) was NOT called
-        verify(transportService, never()).sendChildRequest(
-            any(org.opensearch.transport.Transport.Connection.class),
+        // Verify sendRequest(DiscoveryNode, ...) was NOT called
+        verify(transportService, never()).sendRequest(
+            any(DiscoveryNode.class),
             anyString(),
             any(TransportRequest.class),
-            any(Task.class),
-            any(TransportRequestOptions.class),
             any(org.opensearch.transport.TransportResponseHandler.class)
         );
     }
@@ -300,17 +312,17 @@ public class PlanWalkerMetricsAndTaskTests extends OpenSearchTestCase {
 
         QueryDAG dag = new QueryDAG("test-query", stage);
 
-        TaskSubmitter submitter = (request, node, listener) -> {
+        ShardRequestClient client = (request, node, listener) -> {
             int shardIdx = request.getShardId().id();
             List<Object[]> rows = new ArrayList<>();
             rows.add(new Object[] { "value_" + shardIdx });
-            listener.onResponse(new FragmentExecutionResponse(List.of("field_0"), rows));
+            listener.onStreamResponse(new FragmentExecutionResponse(List.of("field_0"), rows), true);
         };
 
         // Use Runnable::run as executor (synchronous, same as existing test behavior)
-        PlanWalker walker = new PlanWalker(dag, clusterService, Runnable::run, null);
+        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-        walker.walk(submitter, future);
+        walker.walk(client, future);
 
         Iterable<Object[]> result = future.actionGet();
         List<Object[]> resultList = new ArrayList<>();

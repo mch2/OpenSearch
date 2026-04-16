@@ -26,11 +26,15 @@ use jni::{JNIEnv, JavaVM};
 use log::error;
 
 pub mod api;
+pub mod c_abi;
 pub mod cross_rt_stream;
 pub mod executor;
+pub mod ffi_partition_stream;
 pub mod io;
+pub mod local_executor;
 pub mod query_executor;
 pub mod runtime_manager;
+pub mod session_registry;
 pub mod util;
 
 use jni_macros::jni_safe;

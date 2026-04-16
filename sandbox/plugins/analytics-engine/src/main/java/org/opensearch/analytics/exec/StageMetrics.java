@@ -54,6 +54,22 @@ public class StageMetrics {
         tasksFailed.incrementAndGet();
     }
 
+    /** Atomically adds to rowsProcessed. Requires n >= 0. */
+    public void addRowsProcessed(long n) {
+        if (n < 0) {
+            throw new IllegalArgumentException("rowsProcessed delta must be >= 0, got " + n);
+        }
+        rowsProcessed.addAndGet(n);
+    }
+
+    /** Atomically adds to bytesRead. Requires n >= 0. */
+    public void addBytesRead(long n) {
+        if (n < 0) {
+            throw new IllegalArgumentException("bytesRead delta must be >= 0, got " + n);
+        }
+        bytesRead.addAndGet(n);
+    }
+
     public int getStageId() {
         return stageId;
     }

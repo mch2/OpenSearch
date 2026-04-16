@@ -15,20 +15,20 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Unit tests for {@link Scheduler.PendingExecutions} — the per-node
- * permit-based concurrency queue used by the Scheduler.
+ * Unit tests for {@link ShardTransportDispatcher.PendingExecutions} — the per-node
+ * permit-based concurrency queue used by the ShardTransportDispatcher.
  */
 public class PendingExecutionsTests extends OpenSearchTestCase {
 
     public void testRunImmediatelyWhenPermitsAvailable() {
-        Scheduler.PendingExecutions pending = new Scheduler.PendingExecutions(2);
+        ShardTransportDispatcher.PendingExecutions pending = new ShardTransportDispatcher.PendingExecutions(2);
         AtomicInteger counter = new AtomicInteger(0);
         pending.tryRun(counter::incrementAndGet);
         assertEquals(1, counter.get());
     }
 
     public void testQueueWhenAtCapacity() {
-        Scheduler.PendingExecutions pending = new Scheduler.PendingExecutions(1);
+        ShardTransportDispatcher.PendingExecutions pending = new ShardTransportDispatcher.PendingExecutions(1);
         AtomicInteger counter = new AtomicInteger(0);
         // First task runs immediately (takes the permit)
         pending.tryRun(() -> counter.incrementAndGet());
@@ -39,7 +39,7 @@ public class PendingExecutionsTests extends OpenSearchTestCase {
     }
 
     public void testFinishAndRunNextDequeuesTask() {
-        Scheduler.PendingExecutions pending = new Scheduler.PendingExecutions(1);
+        ShardTransportDispatcher.PendingExecutions pending = new ShardTransportDispatcher.PendingExecutions(1);
         AtomicInteger counter = new AtomicInteger(0);
         // First task runs immediately
         pending.tryRun(() -> counter.incrementAndGet());
@@ -53,7 +53,7 @@ public class PendingExecutionsTests extends OpenSearchTestCase {
     }
 
     public void testFIFOOrder() {
-        Scheduler.PendingExecutions pending = new Scheduler.PendingExecutions(1);
+        ShardTransportDispatcher.PendingExecutions pending = new ShardTransportDispatcher.PendingExecutions(1);
         List<String> executionOrder = new ArrayList<>();
 
         // A runs immediately
@@ -75,7 +75,7 @@ public class PendingExecutionsTests extends OpenSearchTestCase {
     }
 
     public void testMultiplePermits() {
-        Scheduler.PendingExecutions pending = new Scheduler.PendingExecutions(3);
+        ShardTransportDispatcher.PendingExecutions pending = new ShardTransportDispatcher.PendingExecutions(3);
         AtomicInteger counter = new AtomicInteger(0);
 
         // First 3 tasks all run immediately (3 permits)

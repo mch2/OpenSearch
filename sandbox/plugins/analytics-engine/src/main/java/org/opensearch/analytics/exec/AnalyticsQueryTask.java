@@ -8,15 +8,17 @@
 
 package org.opensearch.analytics.exec;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.opensearch.action.search.SearchTask;
 import org.opensearch.common.Nullable;
 import org.opensearch.common.unit.TimeValue;
 import org.opensearch.core.tasks.TaskId;
 import org.opensearch.tasks.CancellableTask;
 import org.opensearch.tasks.SearchBackpressureTask;
-import org.opensearch.wlm.WorkloadGroupTask;
 
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Coordinator-level cancellable task representing a running analytics query.
@@ -27,8 +29,11 @@ import java.util.Map;
  */
 public class AnalyticsQueryTask extends CancellableTask implements SearchBackpressureTask {
 
+    private static final Logger logger = LogManager.getLogger(AnalyticsQueryTask.class);
+
     private final String queryId;
     private final TimeValue cancelAfterTimeInterval;
+    private final AtomicReference<Runnable> onCancelCallback = new AtomicReference<>();
 
     public AnalyticsQueryTask(
         long id,
@@ -68,5 +73,30 @@ public class AnalyticsQueryTask extends CancellableTask implements SearchBackpre
     @Nullable
     public TimeValue getCancelAfterTimeInterval() {
         return cancelAfterTimeInterval;
+    }
+
+    /**
+     * Install a callback to be run when this task is cancelled. Must be called
+     * at most once per task instance — typically right after task registration
+     * by the query driver. The callback runs on whatever thread invokes cancel
+     * (transport thread, timeout scheduler, parent cascade); it must be
+     * non-blocking and safe from any thread.
+     */
+    public void setOnCancelCallback(Runnable callback) {
+        if (onCancelCallback.compareAndSet(null, callback) == false) {
+            throw new IllegalStateException("onCancelCallback already set for AnalyticsQueryTask " + queryId);
+        }
+    }
+
+    @Override
+    protected void onCancelled() {
+        Runnable cb = onCancelCallback.get();
+        if (cb != null) {
+            try {
+                cb.run();
+            } catch (Exception e) {
+                logger.warn("[AnalyticsQueryTask] onCancelled callback failed for queryId={}: {}", queryId, e.getMessage(), e);
+            }
+        }
     }
 }

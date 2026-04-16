@@ -35,8 +35,11 @@ public final class NativeBridge {
                 loaded = true;
             } catch (Exception ex) {
                 throw new ExceptionInInitializerError(
-                    "Failed to load native library opensearch_datafusion_jni: " + e.getMessage()
-                    + ". Also failed to load from resources: " + ex.getMessage());
+                    "Failed to load native library opensearch_datafusion_jni: "
+                        + e.getMessage()
+                        + ". Also failed to load from resources: "
+                        + ex.getMessage()
+                );
             }
         }
     }

@@ -24,9 +24,9 @@ import java.util.List;
  * <p>After plan forking, {@code planAlternatives} contains resolved variants
  * where every viableBackends is narrowed to exactly one backend.
  *
- * <p>Stage properties like {@code tableName}, {@code coordinatorGather}, and
- * {@code shuffleWrite} are computed once during DAG construction and avoid
- * repeated RelNode tree walking at execution time.
+ * <p>Stage properties like {@code tableName} and {@code shuffleWrite} are
+ * computed once during DAG construction and avoid repeated RelNode tree walking
+ * at execution time.
  *
  * @opensearch.internal
  */
@@ -37,17 +37,37 @@ public class Stage {
     private final List<Stage> childStages;
     private final ExchangeInfo exchangeInfo;
     private final String tableName;
+    private final StageExecutionType executionType;
     private List<StagePlan> planAlternatives;
     private ShardFilterPhase shardFilterPhase = ShardFilterPhase.IDENTITY;
     private TerminationDecider terminationDecider = TerminationDecider.DISPATCH_ALL;
 
+    /**
+     * Creates a stage with an inferred execution type. The type defaults to
+     * {@link StageExecutionType#LOCAL} when there is no exchange and no table
+     * scan, and {@link StageExecutionType#DATA_NODE} otherwise.
+     */
     public Stage(int stageId, RelNode fragment, List<Stage> childStages, ExchangeInfo exchangeInfo) {
+        this(stageId, fragment, childStages, exchangeInfo, null);
+    }
+
+    /**
+     * Creates a stage with an explicit execution type. When {@code executionType}
+     * is null the type is inferred from the fragment.
+     */
+    public Stage(int stageId, RelNode fragment, List<Stage> childStages, ExchangeInfo exchangeInfo, StageExecutionType executionType) {
         this.stageId = stageId;
         this.fragment = fragment;
         this.childStages = List.copyOf(childStages);
         this.exchangeInfo = exchangeInfo;
         this.tableName = findTableName(fragment);
         this.planAlternatives = List.of();
+        if (executionType != null) {
+            this.executionType = executionType;
+        } else {
+            // Infer: no exchange + no table scan → LOCAL
+            this.executionType = (exchangeInfo == null && this.tableName == null) ? StageExecutionType.LOCAL : StageExecutionType.DATA_NODE;
+        }
     }
 
     public int getStageId() {
@@ -70,19 +90,16 @@ public class Stage {
 
     /**
      * The table name scanned by this stage, or null if the stage has no TableScan
-     * (e.g., coordinator gather with StageInputScan).
+     * (e.g., LOCAL stage with StageInputScan).
      */
     @Nullable
     public String getTableName() {
         return tableName;
     }
 
-    /**
-     * Returns true if this stage is a coordinator gather: no exchange and no TableScan.
-     * Child results are already in the root sink; nothing to dispatch.
-     */
-    public boolean isCoordinatorGather() {
-        return exchangeInfo == null && tableName == null;
+    /** Returns the execution type assigned to this stage during DAG construction. */
+    public StageExecutionType getExecutionType() {
+        return executionType;
     }
 
     /**

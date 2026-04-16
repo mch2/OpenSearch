@@ -45,6 +45,10 @@ dependencies {
   // Also provides calcite-core transitively via api.
   api project(':sandbox:libs:analytics-framework')
 
+  // Arrow — needed by RowBatchToArrowConverter and ArrowSchemaFromCalcite (main source)
+  implementation "org.apache.arrow:arrow-vector:${versions.arrow}"
+  implementation "org.apache.arrow:arrow-memory-core:${versions.arrow}"
+
   // Guava — required at compile time because Calcite base classes expose guava types.
   // Uses custom config to bypass forbidden-dependencies.gradle check on compileClasspath.
   calciteCompile "com.google.guava:guava:${versions.guava}"
@@ -70,6 +74,12 @@ dependencies {
     exclude group: 'org.opensearch'
   }
 
+  // Arrow — needed for RowBatchToArrowConverter and ArrowSchemaFromCalcite unit tests
+  testImplementation "org.apache.arrow:arrow-vector:${versions.arrow}"
+  testImplementation "org.apache.arrow:arrow-memory-core:${versions.arrow}"
+  testImplementation "org.apache.arrow:arrow-memory-unsafe:${versions.arrow}"
+  testRuntimeOnly "org.apache.arrow:arrow-format:${versions.arrow}"
+
   // Arrow Flight streaming transport for ITs
   internalClusterTestImplementation project(':plugins:arrow-flight-rpc')
 
@@ -80,6 +90,14 @@ dependencies {
   // DataFusion analytics backend for ITs
   internalClusterTestImplementation project(':sandbox:plugins:analytics-backend-datafusion')
   internalClusterTestRuntimeOnly "com.fasterxml.jackson.datatype:jackson-datatype-jdk8:${versions.jackson}"
+
+  // Parquet data format plugin — required for FieldStorageResolver to find any
+  // format declaring capabilities for the test index's field types. Without it,
+  // DataFusionPlugin.supportedFormats is empty and the planner errors with
+  // "Field [...] has no storage in any format" before any query reaches the
+  // dispatcher. The parquet plugin's loadExtensions() registers ParquetDataFormat
+  // with DataFusion via DataFusionDataFormatExtension SPI.
+  internalClusterTestImplementation project(':sandbox:plugins:parquet-data-format')
 
   // Calcite bytecode references @Immutable from immutables — resolve at test compile time
   testCompileOnly 'org.immutables:value-annotations:2.8.8'
@@ -118,6 +136,7 @@ configurations.all {
     force "org.apache.arrow:arrow-memory-core:18.3.0"
     force "org.apache.arrow:arrow-vector:18.3.0"
     force "org.apache.arrow:arrow-format:18.3.0"
+    force "com.google.flatbuffers:flatbuffers-java:25.2.10"
     force "com.squareup.okhttp3:okhttp:4.12.0"
     force "org.jetbrains.kotlin:kotlin-stdlib:1.8.21"
     force "org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.8.21"
@@ -126,7 +145,22 @@ configurations.all {
   }
 }
 
-// Arrow/Flight requires these JVM flags
+// Arrow memory requires these JVM flags for unit tests
+test {
+  jvmArgs '--add-opens=java.base/java.nio=ALL-UNNAMED'
+  jvmArgs '-Darrow.memory.debug.allocator=false'
+}
+
+// internalClusterTest pulls in the DataFusion backend, which uses FFM (JDK 22+ GA)
+// and virtual threads (JDK 21+ GA). The project-wide source level is JDK 21, so we
+// override to the current JDK to match the DataFusion backend's compile level. No
+// --enable-preview needed — these are GA features on the current runtime (JDK 25).
+tasks.named('compileInternalClusterTestJava').configure {
+  sourceCompatibility = JavaVersion.current()
+  targetCompatibility = JavaVersion.current()
+}
+
+// Arrow/Flight + DataFusion FFM bindings JVM flags.
 internalClusterTest {
   jvmArgs '--add-opens=java.base/java.nio=ALL-UNNAMED'
   jvmArgs '--add-opens=java.base/java.lang=ALL-UNNAMED'
@@ -137,6 +171,22 @@ internalClusterTest {
   systemProperty 'io.netty.tryUnsafe', 'true'
   systemProperty 'io.netty.tryReflectionSetAccessible', 'true'
   jvmArgs += ["--add-opens", "java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED"]
+  // FFM bindings in DatafusionLocalExecEngine load the native cdylib via
+  // SymbolLookup / System.loadLibrary. The lib is bundled in the datafusion plugin's
+  // src/main/resources/native directory; set java.library.path so the consuming
+  // test JVM can find it. Without this, FfmBindings throws ExceptionInInitializerError
+  // when CoordinatorLocalStageDispatcher invokes createLocalExecEngine.
+  systemProperty 'java.library.path', project(':sandbox:plugins:analytics-backend-datafusion').file('src/main/resources/native').absolutePath
+  // Rust panic visibility — surface backtraces from any panic in the FFM/Arrow path.
+  // Without this, a panic in the Rust side appears as SIGABRT with no diagnostic.
+  environment 'RUST_BACKTRACE', 'full'
+  environment 'RUST_LOG', 'debug'
+  // Force small DataFusion batch size in tests so the multi-batch streaming path
+  // (CrossRtStream → pushBatch → drain iterator) is exercised. The bundled mock
+  // parquet has 100 rows per shard; with a batch size of 16, each shard produces
+  // ~7 batches instead of 1, validating the streaming pipeline rather than
+  // single-batch fast paths.
+  environment 'ANALYTICS_DF_BATCH_SIZE', '16'
 }
 
 // ---- JMH benchmark source set ----

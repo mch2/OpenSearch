@@ -12,6 +12,7 @@ import org.opensearch.action.search.SearchShardTask;
 import org.opensearch.analytics.backend.EngineResultBatch;
 import org.opensearch.analytics.backend.EngineResultStream;
 import org.opensearch.analytics.backend.ExecutionContext;
+import org.opensearch.analytics.backend.FragmentExecutionResponse;
 import org.opensearch.analytics.backend.SearchExecEngine;
 import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
 import org.opensearch.common.Nullable;
@@ -68,7 +69,7 @@ public class AnalyticsSearchService {
     public FragmentExecutionResponse executeFragment(
         FragmentExecutionRequest request,
         IndexShard shard,
-        @Nullable AnalyticsShardTask task
+        AnalyticsShardTask task
     ) {
         DataFormatAwareEngine compositeEngine = shard.getCompositeEngine();
         if (compositeEngine == null) {

@@ -8,6 +8,8 @@
 
 package org.opensearch.analytics.exec;
 
+import org.opensearch.analytics.backend.ExchangeSink;
+
 /**
  * Controls sliding-window dispatch for a stage. Determines the initial batch
  * size and whether to stop submitting more tasks after each completion.

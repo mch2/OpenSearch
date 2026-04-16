@@ -12,6 +12,8 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.backend.EngineResultStream;
 import org.opensearch.analytics.backend.ExecutionContext;
+import org.opensearch.analytics.backend.LocalStageContext;
+import org.opensearch.analytics.backend.LocalStageRequest;
 import org.opensearch.analytics.backend.SearchExecEngine;
 import org.opensearch.analytics.spi.AggregateCapability;
 import org.opensearch.analytics.spi.AggregateFunction;
@@ -47,7 +49,7 @@ public class DataFusionAnalyticsExtension implements AnalyticsSearchBackendPlugi
         OperatorCapability.AGGREGATE,
         OperatorCapability.SORT,
         OperatorCapability.PROJECT,
-        OperatorCapability.COORDINATOR_REDUCE
+        OperatorCapability.LOCAL_STAGE
     );
 
     private static final Set<OperatorCapability> ARROW_COMPATIBLE_OPS = Set.of(
@@ -167,4 +169,21 @@ public class DataFusionAnalyticsExtension implements AnalyticsSearchBackendPlugi
         engine.prepare(ctx);
         return engine;
     }
+
+    @Override
+    public LocalStageContext createLocalStage(LocalStageRequest req) {
+        logger.info(
+            "[DF.createLocalStage] queryId={} stageId={} fragmentBytesLen={} children={}",
+            req.getQueryId(),
+            req.getStageId(),
+            req.getFragmentBytes() != null ? req.getFragmentBytes().length : 0,
+            req.getChildSchemas().keySet()
+        );
+        DataFusionService dataFusionService = plugin.getDataFusionService();
+        if (dataFusionService == null) {
+            throw new IllegalStateException("DataFusionService not initialized — createComponents() may not have been called");
+        }
+        return new DatafusionLocalStageContext(req, dataFusionService.getNativeRuntime());
+    }
+
 }

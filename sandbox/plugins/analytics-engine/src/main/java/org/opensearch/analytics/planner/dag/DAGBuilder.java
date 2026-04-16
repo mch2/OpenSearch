@@ -10,6 +10,10 @@ package org.opensearch.analytics.planner.dag;
 
 import org.apache.calcite.rel.RelDistribution;
 import org.apache.calcite.rel.RelNode;
+import org.apache.calcite.rel.core.Aggregate;
+import org.apache.calcite.rel.core.Filter;
+import org.apache.calcite.rel.core.Project;
+import org.apache.calcite.rel.core.Sort;
 import org.apache.calcite.rel.type.RelDataType;
 import org.opensearch.analytics.planner.rel.OpenSearchExchangeReducer;
 import org.opensearch.analytics.planner.rel.OpenSearchExchangeWriter;
@@ -53,8 +57,96 @@ public class DAGBuilder {
             fragment = sever(cboOutput, counter, childStages);
         }
 
-        Stage rootStage = new Stage(counter[0]++, fragment, childStages, null);
+        StageExecutionType rootType = determineRootExecutionType(fragment);
+        Stage rootStage = new Stage(counter[0]++, fragment, childStages, null, rootType);
         return new QueryDAG(UUID.randomUUID().toString(), rootStage);
+    }
+
+    /**
+     * Determines the execution type for the root stage based on its fragment structure.
+     *
+     * <ul>
+     *   <li>Bare {@link OpenSearchStageInputScan} (possibly wrapped in an
+     *       {@link OpenSearchExchangeReducer}) with no compute above it
+     *       → {@link StageExecutionType#LOCAL}</li>
+     *   <li>Compute operators (Aggregate, Filter, Sort, Project) above a
+     *       {@link OpenSearchStageInputScan} → {@link StageExecutionType#LOCAL}</li>
+     *   <li>No {@link OpenSearchStageInputScan} at all (single-shard plan with no exchange)
+     *       → {@link StageExecutionType#LOCAL}</li>
+     *   <li>Fallback → {@link StageExecutionType#DATA_NODE}</li>
+     * </ul>
+     */
+    private static StageExecutionType determineRootExecutionType(RelNode fragment) {
+        if (hasComputeAboveStageInputScan(fragment)) {
+            return StageExecutionType.LOCAL;
+        }
+        if (isBareStageInputScan(fragment)) {
+            return StageExecutionType.LOCAL;
+        }
+        // Single-shard plan: no exchange was inserted, so no StageInputScan exists.
+        // The root fragment is the entire plan (e.g., a TableScan). This is LOCAL.
+        if (containsNoStageInputScan(fragment)) {
+            return StageExecutionType.LOCAL;
+        }
+        return StageExecutionType.DATA_NODE;
+    }
+
+    /**
+     * Returns true if the fragment is a bare {@link OpenSearchStageInputScan}
+     * with no compute wrapping — either the node itself or an
+     * {@link OpenSearchExchangeReducer} whose only input is a StageInputScan.
+     */
+    private static boolean isBareStageInputScan(RelNode fragment) {
+        if (fragment instanceof OpenSearchStageInputScan) {
+            return true;
+        }
+        if (fragment instanceof OpenSearchExchangeReducer reducer) {
+            return reducer.getInput() instanceof OpenSearchStageInputScan;
+        }
+        return false;
+    }
+
+    /**
+     * Returns true if the fragment tree contains compute operators (Aggregate,
+     * Filter, Sort, Project) above an {@link OpenSearchStageInputScan}.
+     */
+    private static boolean hasComputeAboveStageInputScan(RelNode node) {
+        return hasComputeAbove(node, false);
+    }
+
+    /**
+     * Recursive walk: tracks whether we've seen a compute operator on the path
+     * from the root. When we reach a {@link OpenSearchStageInputScan} and
+     * {@code seenCompute} is true, the fragment qualifies as LOCAL with compute.
+     */
+    private static boolean hasComputeAbove(RelNode node, boolean seenCompute) {
+        if (node instanceof OpenSearchStageInputScan) {
+            return seenCompute;
+        }
+        boolean isCompute = (node instanceof Aggregate) || (node instanceof Filter) || (node instanceof Sort) || (node instanceof Project);
+        boolean computeFlag = seenCompute || isCompute;
+        for (RelNode input : node.getInputs()) {
+            if (hasComputeAbove(input, computeFlag)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Returns true if the fragment tree contains no {@link OpenSearchStageInputScan}
+     * at all — indicating a single-shard plan where no exchange was inserted.
+     */
+    private static boolean containsNoStageInputScan(RelNode node) {
+        if (node instanceof OpenSearchStageInputScan) {
+            return false;
+        }
+        for (RelNode input : node.getInputs()) {
+            if (containsNoStageInputScan(input) == false) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**

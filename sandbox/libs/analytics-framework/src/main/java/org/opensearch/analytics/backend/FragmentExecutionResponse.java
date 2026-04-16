@@ -6,7 +6,7 @@
  * compatible open source license.
  */
 
-package org.opensearch.analytics.exec;
+package org.opensearch.analytics.backend;
 
 import org.opensearch.core.action.ActionResponse;
 import org.opensearch.core.common.io.stream.StreamInput;

@@ -8,6 +8,9 @@
 
 package org.opensearch.analytics.exec;
 
+import org.opensearch.analytics.backend.ExchangeSink;
+import org.opensearch.analytics.backend.FragmentExecutionResponse;
+
 import java.util.ArrayList;
 import java.util.List;
 

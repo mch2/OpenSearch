@@ -8,6 +8,19 @@
 
 package org.opensearch.be.datafusion;
 
+import org.apache.calcite.plan.RelOptUtil;
+import org.apache.calcite.rel.RelNode;
+import org.apache.calcite.rel.RelRoot;
+import org.apache.calcite.rel.type.RelDataTypeFactory;
+import org.apache.calcite.sql.SqlKind;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.opensearch.analytics.spi.FragmentConvertor;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+
 import io.substrait.extension.DefaultExtensionCatalog;
 import io.substrait.extension.SimpleExtension;
 import io.substrait.isthmus.ImmutableFeatureBoard;
@@ -22,20 +35,6 @@ import io.substrait.relation.NamedScan;
 import io.substrait.relation.Rel;
 import io.substrait.relation.RelCopyOnWriteVisitor;
 import io.substrait.util.EmptyVisitationContext;
-import io.substrait.relation.Rel;
-import org.apache.calcite.plan.RelOptUtil;
-import org.apache.calcite.rel.RelNode;
-import org.apache.calcite.rel.RelRoot;
-import org.apache.calcite.rel.type.RelDataTypeFactory;
-import org.apache.calcite.sql.SqlKind;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
-import org.opensearch.analytics.spi.FragmentConvertor;
-
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Optional;
-import java.util.stream.Collectors;
 
 /**
  * DataFusion fragment converter. Converts stripped Calcite RelNode fragments
@@ -77,28 +76,53 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
     @Override
     public byte[] convertScanFragment(String tableName, RelNode fragment) {
         LOGGER.info("Converting scan fragment for table [{}]:\n{}", tableName, RelOptUtil.toString(fragment));
+        return convertToSubstrait(fragment, true);
+    }
 
+    /**
+     * Converts a local stage fragment to Substrait plan bytes.
+     *
+     * <p>The caller ({@code FragmentConversionDriver}) has already rewritten
+     * {@code StageInputScan} leaves to plain {@code TableScan} nodes whose
+     * table names are the stage input IDs (e.g., {@code __stage_0_input__}).
+     * This method simply converts the rewritten Calcite tree to Substrait.
+     *
+     * <p>Table name prefix stripping is applied (same as scan fragments) so
+     * any catalog prefix added by Calcite is removed.
+     */
+    @Override
+    public byte[] convertLocalStageFragment(RelNode fragment, List<String> childStageInputIds) {
+        LOGGER.info(
+            "Converting local stage fragment with {} child stage inputs:\n{}",
+            childStageInputIds.size(),
+            RelOptUtil.toString(fragment)
+        );
+        return convertToSubstrait(fragment, true);
+    }
+
+    /**
+     * Core Substrait conversion: Calcite RelNode → Substrait Plan → protobuf bytes.
+     *
+     * @param fragment       the Calcite RelNode tree to convert
+     * @param stripPrefixes  whether to strip catalog prefixes from table names
+     * @return serialized Substrait plan bytes
+     */
+    private byte[] convertToSubstrait(RelNode fragment, boolean stripPrefixes) {
         RelRoot root = RelRoot.of(fragment, SqlKind.SELECT);
         SubstraitRelVisitor visitor = createVisitor(fragment);
         Rel substraitRel = visitor.apply(root.rel);
 
-        List<String> fieldNames = root.fields.stream()
-            .map(field -> field.getValue())
-            .toList();
+        List<String> fieldNames = root.fields.stream().map(field -> field.getValue()).toList();
 
-        Plan.Root substraitRoot = Plan.Root.builder()
-            .input(substraitRel)
-            .names(fieldNames)
-            .build();
+        Plan.Root substraitRoot = Plan.Root.builder().input(substraitRel).names(fieldNames).build();
 
         Plan plan = Plan.builder().addRoots(substraitRoot).build();
 
-        // TODO: The Rust query_executor registers the parquet table using just the index name
-        // (e.g. "parquet_simple"), but Calcite produces qualified names with a catalog prefix
-        // (e.g. ["opensearch", "parquet_simple"]). Strip the prefix here so the Substrait
-        // named_table matches the registered table name. Fix by aligning the table name
-        // format between the planner and the execution runtime.
-        plan = new TableNameModifier().modifyTableNames(plan);
+        if (stripPrefixes) {
+            // Strip catalog prefixes (e.g. "opensearch") from NamedScan table names
+            // so DataFusion receives just the index/stage-input name.
+            plan = new TableNameModifier().modifyTableNames(plan);
+        }
 
         io.substrait.proto.Plan protoPlan = new PlanProtoConverter().toProto(plan);
         byte[] bytes = protoPlan.toByteArray();
@@ -111,19 +135,22 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
         TypeConverter typeConverter = TypeConverter.DEFAULT;
 
         SimpleExtension.ExtensionCollection extensions = getExtensions();
-        AggregateFunctionConverter aggConverter = new AggregateFunctionConverter(
-            extensions.aggregateFunctions(), typeFactory
-        );
+        AggregateFunctionConverter aggConverter = new AggregateFunctionConverter(extensions.aggregateFunctions(), typeFactory);
         ScalarFunctionConverter scalarConverter = new ScalarFunctionConverter(
-            extensions.scalarFunctions(), List.of(), typeFactory, typeConverter
+            extensions.scalarFunctions(),
+            List.of(),
+            typeFactory,
+            typeConverter
         );
-        WindowFunctionConverter windowConverter = new WindowFunctionConverter(
-            extensions.windowFunctions(), typeFactory
-        );
+        WindowFunctionConverter windowConverter = new WindowFunctionConverter(extensions.windowFunctions(), typeFactory);
 
         return new SubstraitRelVisitor(
-            typeFactory, scalarConverter, aggConverter, windowConverter,
-            typeConverter, ImmutableFeatureBoard.builder().build()
+            typeFactory,
+            scalarConverter,
+            aggConverter,
+            windowConverter,
+            typeConverter,
+            ImmutableFeatureBoard.builder().build()
         );
     }
 
@@ -152,12 +179,7 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
                 List<String> names = namedScan.getNames();
                 if (names.size() > 1) {
                     // Keep only the last name (the index name), drop catalog/schema prefixes
-                    return Optional.of(
-                        NamedScan.builder()
-                            .from(namedScan)
-                            .names(List.of(names.get(names.size() - 1)))
-                            .build()
-                    );
+                    return Optional.of(NamedScan.builder().from(namedScan).names(List.of(names.get(names.size() - 1))).build());
                 }
                 return super.visit(namedScan, context);
             }

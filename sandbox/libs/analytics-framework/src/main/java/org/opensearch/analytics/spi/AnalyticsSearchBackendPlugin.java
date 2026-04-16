@@ -8,6 +8,9 @@
 
 package org.opensearch.analytics.spi;
 
+import org.opensearch.analytics.backend.LocalStageContext;
+import org.opensearch.analytics.backend.LocalStageRequest;
+
 import java.util.Collections;
 import java.util.Set;
 
@@ -20,7 +23,7 @@ import java.util.Set;
  * field storage via {@code FieldStorageResolver} which reads from the storage layer.
  * as needed by the {@link org.opensearch.analytics.exec.QueryPlanExecutor}
  *
- * <p>TODO: separate capability declaration (planner, coordinator) from execution engine factory
+ * <p>TODO: separate capability declaration (planner, local stage) from execution engine factory
  * (data node) into two interfaces. AnalyticsSearchBackendPlugin should only declare capabilities.
  * SearchExecEngineProvider should be discovered separately by the executor. Remove the extends
  * relationship and the default createSearchExecEngine() below once that separation is done.
@@ -100,5 +103,22 @@ public interface AnalyticsSearchBackendPlugin extends SearchExecEngineProvider {
      */
     default byte[] convertFragment(Object fragment) {
         throw new UnsupportedOperationException("convertFragment not yet implemented for " + name());
+    }
+
+    /**
+     * Create a local stage execution context for running a plan fragment
+     * in-process on the node executing the walker, with streaming inputs
+     * from child stages fed via per-child sinks.
+     * <p>
+     * Only backends that declare {@link OperatorCapability#LOCAL_STAGE}
+     * in {@link #supportedOperators()} need to implement this method.
+     *
+     * @param req the local stage request carrying query identity, fragment bytes,
+     *            allocator, downstream sink, and per-child schemas
+     * @return a new {@link LocalStageContext} instance
+     * @throws UnsupportedOperationException if this backend does not support local stage execution
+     */
+    default LocalStageContext createLocalStage(LocalStageRequest req) {
+        throw new UnsupportedOperationException("Backend " + name() + " does not support local stage execution");
     }
 }

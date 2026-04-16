@@ -20,6 +20,7 @@ import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.opensearch.action.support.PlainActionFuture;
+import org.opensearch.analytics.backend.FragmentExecutionResponse;
 import org.opensearch.analytics.planner.dag.ExchangeInfo;
 import org.opensearch.analytics.planner.dag.QueryDAG;
 import org.opensearch.analytics.planner.dag.Stage;
@@ -44,7 +45,6 @@ import org.opensearch.core.index.Index;
 import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.test.OpenSearchTestCase;
 
-import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -147,17 +147,17 @@ public class PlanWalkerAsyncTests extends OpenSearchTestCase {
 
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
 
-        TaskSubmitter submitter = (request, node, listener) -> {
+        ShardRequestClient client = (request, node, listener) -> {
             // Return 2 rows per shard with known data
             List<String> fields = List.of("field_0");
             List<Object[]> rows = new ArrayList<>();
             rows.add(new Object[] { "shard_" + request.getShardId().id() + "_row0" });
             rows.add(new Object[] { "shard_" + request.getShardId().id() + "_row1" });
-            listener.onResponse(new FragmentExecutionResponse(fields, rows));
+            listener.onStreamResponse(new FragmentExecutionResponse(fields, rows), true);
         };
 
-        PlanWalker walker = new PlanWalker(dag, clusterService, Runnable::run, null);
-        walker.walk(submitter, future);
+        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
+        walker.walk(client, future);
 
         Iterable<Object[]> result = future.actionGet();
         List<Object[]> resultList = new ArrayList<>();
@@ -180,21 +180,21 @@ public class PlanWalkerAsyncTests extends OpenSearchTestCase {
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
         AtomicInteger callCount = new AtomicInteger(0);
 
-        TaskSubmitter submitter = (request, node, listener) -> {
+        ShardRequestClient client = (request, node, listener) -> {
             int call = callCount.getAndIncrement();
             if (call == 0) {
                 // First shard succeeds
                 List<Object[]> okRows = new ArrayList<>();
                 okRows.add(new Object[] { "ok" });
-                listener.onResponse(new FragmentExecutionResponse(List.of("field_0"), okRows));
+                listener.onStreamResponse(new FragmentExecutionResponse(List.of("field_0"), okRows), true);
             } else {
                 // Second shard fails
                 listener.onFailure(new RuntimeException("shard failed"));
             }
         };
 
-        PlanWalker walker = new PlanWalker(dag, clusterService, Runnable::run, null);
-        walker.walk(submitter, future);
+        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
+        walker.walk(client, future);
 
         RuntimeException ex = expectThrows(RuntimeException.class, future::actionGet);
         assertTrue(ex.getMessage().contains("Stage 0 failed") || ex.getCause().getMessage().contains("shard failed"));
@@ -220,13 +220,13 @@ public class PlanWalkerAsyncTests extends OpenSearchTestCase {
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
         List<FragmentExecutionRequest> capturedRequests = new ArrayList<>();
 
-        TaskSubmitter submitter = (request, node, listener) -> {
+        ShardRequestClient client = (request, node, listener) -> {
             capturedRequests.add(request);
-            listener.onResponse(new FragmentExecutionResponse(List.of(), List.of()));
+            listener.onStreamResponse(new FragmentExecutionResponse(List.of(), List.of()), true);
         };
 
-        PlanWalker walker = new PlanWalker(dag, clusterService, Runnable::run, null);
-        walker.walk(submitter, future);
+        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
+        walker.walk(client, future);
 
         Iterable<Object[]> result = future.actionGet();
         List<Object[]> resultList = new ArrayList<>();
@@ -265,15 +265,15 @@ public class PlanWalkerAsyncTests extends OpenSearchTestCase {
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
         List<Integer> dispatchedStageIds = new ArrayList<>();
 
-        TaskSubmitter submitter = (request, node, listener) -> {
+        ShardRequestClient client = (request, node, listener) -> {
             dispatchedStageIds.add(request.getStageId());
             List<Object[]> dataRows = new ArrayList<>();
             dataRows.add(new Object[] { "data" });
-            listener.onResponse(new FragmentExecutionResponse(List.of("field_0"), dataRows));
+            listener.onStreamResponse(new FragmentExecutionResponse(List.of("field_0"), dataRows), true);
         };
 
-        PlanWalker walker = new PlanWalker(dag, clusterService, Runnable::run, null);
-        walker.walk(submitter, future);
+        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
+        walker.walk(client, future);
         future.actionGet();
 
         // Child stage (stageId=0) tasks should be dispatched; root stage (stageId=1)
@@ -297,17 +297,17 @@ public class PlanWalkerAsyncTests extends OpenSearchTestCase {
 
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
 
-        TaskSubmitter submitter = (request, node, listener) -> {
+        ShardRequestClient client = (request, node, listener) -> {
             // Each shard returns a distinct single row, inline (synchronous)
             int shardIdx = request.getShardId().id();
             List<String> fields = List.of("field_0");
             List<Object[]> rows = new ArrayList<>();
             rows.add(new Object[] { "value_" + shardIdx });
-            listener.onResponse(new FragmentExecutionResponse(fields, rows));
+            listener.onStreamResponse(new FragmentExecutionResponse(fields, rows), true);
         };
 
-        PlanWalker walker = new PlanWalker(dag, clusterService, Runnable::run, null);
-        walker.walk(submitter, future);
+        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
+        walker.walk(client, future);
 
         Iterable<Object[]> result = future.actionGet();
         List<Object[]> resultList = new ArrayList<>();
@@ -355,32 +355,24 @@ public class PlanWalkerAsyncTests extends OpenSearchTestCase {
         QueryDAG dag = new QueryDAG("test-query", rootStage);
 
         // Mock submitter returns metadata responses (shuffle manifests) for Stage 0
-        TaskSubmitter submitter = (request, node, listener) -> {
+        ShardRequestClient client = (request, node, listener) -> {
             Map<String, String> metadata = Map.of(
                 "0",
                 "/tmp/shuffle/shard_" + request.getShardId().id() + "/p0",
                 "1",
                 "/tmp/shuffle/shard_" + request.getShardId().id() + "/p1"
             );
-            listener.onResponse(new FragmentExecutionResponse(metadata));
+            listener.onStreamResponse(new FragmentExecutionResponse(metadata), true);
         };
 
-        PlanWalker walker = new PlanWalker(dag, clusterService, Runnable::run, null);
+        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-        walker.walk(submitter, future);
+        walker.walk(client, future);
 
         // Walk should complete (root stage is coordinator gather, no dispatch needed for it)
         future.actionGet();
 
-        // Use reflection to verify shuffleManifests contains a manifest for Stage 0
-        Field executorField2 = PlanWalker.class.getDeclaredField("stageExecutor");
-        executorField2.setAccessible(true);
-        Object stageExec2 = executorField2.get(walker);
-        Field contextField = StageExecutor.class.getDeclaredField("context");
-        contextField.setAccessible(true);
-        QueryExecutionContext dispatchContext = (QueryExecutionContext) contextField.get(stageExec2);
-        @SuppressWarnings("unchecked")
-        Map<Integer, Map<ShardId, Map<Integer, String>>> manifests = dispatchContext.shuffleManifests();
+        Map<Integer, Map<ShardId, Map<Integer, String>>> manifests = walker.getState().shuffleManifests();
 
         Map<ShardId, Map<Integer, String>> stage0Manifest = manifests.get(0);
         assertNotNull("Stage 0 should have a shuffle manifest", stage0Manifest);
@@ -463,17 +455,11 @@ public class PlanWalkerAsyncTests extends OpenSearchTestCase {
         rootStage.setPlanAlternatives(List.of(new StagePlan(rootInput, "lucene")));
 
         QueryDAG dag = new QueryDAG("test-query", rootStage);
-        PlanWalker walker = new PlanWalker(dag, clusterService, Runnable::run, null);
+        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
 
         // Pre-populate shuffleManifests with the manifest for child stage 0
-        Field executorField = PlanWalker.class.getDeclaredField("stageExecutor");
-        executorField.setAccessible(true);
-        Object stageExec = executorField.get(walker);
-        Field contextField = StageExecutor.class.getDeclaredField("context");
-        contextField.setAccessible(true);
-        QueryExecutionContext dispatchContext = (QueryExecutionContext) contextField.get(stageExec);
         @SuppressWarnings("unchecked")
-        Map<Integer, Map<ShardId, Map<Integer, String>>> shuffleManifests = dispatchContext.shuffleManifests();
+        Map<Integer, Map<ShardId, Map<Integer, String>>> shuffleManifests = walker.getState().shuffleManifests();
         shuffleManifests.put(0, manifestData);
 
         // Call resolveTargets via TargetResolver
@@ -522,7 +508,7 @@ public class PlanWalkerAsyncTests extends OpenSearchTestCase {
         rootStage.setPlanAlternatives(List.of(new StagePlan(rootInput, "lucene")));
 
         QueryDAG dag = new QueryDAG("test-query", rootStage);
-        PlanWalker walker = new PlanWalker(dag, clusterService, Runnable::run, null);
+        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
 
         // shuffleManifests is empty — no manifest for child stage 0
         Map<Integer, Map<ShardId, Map<Integer, String>>> emptyManifests = new HashMap<>();
@@ -534,14 +520,14 @@ public class PlanWalkerAsyncTests extends OpenSearchTestCase {
     }
 
     /**
-     * Task 7.5: Coordinator gather stage completing without dispatch.
-     * Builds a coordinator-only stage (StageInputScan, no exchange, no TableScan).
+     * Task 7.5: LOCAL pass-through stage completing without dispatch.
+     * Builds a LOCAL pass-through stage (StageInputScan, no exchange, no TableScan).
      * Asserts walk completes, stores RowData in stageOutputs, and signals listener
      * without submitting any tasks.
      * Validates: Requirements 4.1, 4.2
      */
     @SuppressWarnings("unchecked")
-    public void testCoordinatorGatherStageCompletesWithoutDispatch() throws Exception {
+    public void testLocalPassthroughStageCompletesWithoutDispatch() throws Exception {
         ClusterService clusterService = mock(ClusterService.class);
 
         // Coordinator-only stage with StageInputScan (no TableScan, no exchange)
@@ -553,33 +539,25 @@ public class PlanWalkerAsyncTests extends OpenSearchTestCase {
         QueryDAG dag = new QueryDAG("test-query", stage);
 
         AtomicInteger submitCount = new AtomicInteger(0);
-        TaskSubmitter submitter = (request, node, listener) -> {
+        ShardRequestClient client = (request, node, listener) -> {
             submitCount.incrementAndGet();
-            listener.onResponse(new FragmentExecutionResponse(List.of(), List.of()));
+            listener.onStreamResponse(new FragmentExecutionResponse(List.of(), List.of()), true);
         };
 
-        PlanWalker walker = new PlanWalker(dag, clusterService, Runnable::run, null);
+        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-        walker.walk(submitter, future);
+        walker.walk(client, future);
 
         // Walk should complete successfully
         Iterable<Object[]> result = future.actionGet();
         assertNotNull(result);
 
         // No tasks should have been submitted
-        assertEquals("Coordinator gather should not dispatch any tasks", 0, submitCount.get());
+        assertEquals("LOCAL pass-through should not dispatch any tasks", 0, submitCount.get());
 
-        // Verify completedStages contains the coordinator gather stage
-        Field executorField3 = PlanWalker.class.getDeclaredField("stageExecutor");
-        executorField3.setAccessible(true);
-        Object stageExec3 = executorField3.get(walker);
-        Field contextField = StageExecutor.class.getDeclaredField("context");
-        contextField.setAccessible(true);
-        QueryExecutionContext dispatchContext = (QueryExecutionContext) contextField.get(stageExec3);
-        @SuppressWarnings("unchecked")
-        Set<Integer> completed = dispatchContext.completedStages();
+        Set<Integer> completed = walker.getState().completedStages();
 
-        assertTrue("Coordinator gather stage should be in completedStages", completed.contains(1));
+        assertTrue("LOCAL pass-through stage should be in completedStages", completed.contains(1));
     }
 
     /**
@@ -603,7 +581,7 @@ public class PlanWalkerAsyncTests extends OpenSearchTestCase {
         AtomicInteger completedTasks = new AtomicInteger(0);
 
         // Shard 1 fails, shards 0 and 2 succeed. All responses are synchronous.
-        TaskSubmitter submitter = (request, node, listener) -> {
+        ShardRequestClient client = (request, node, listener) -> {
             int shardIdx = request.getShardId().id();
             if (shardIdx == 1) {
                 completedTasks.incrementAndGet();
@@ -612,13 +590,13 @@ public class PlanWalkerAsyncTests extends OpenSearchTestCase {
                 completedTasks.incrementAndGet();
                 List<Object[]> rows = new ArrayList<>();
                 rows.add(new Object[] { "value_" + shardIdx });
-                listener.onResponse(new FragmentExecutionResponse(List.of("field_0"), rows));
+                listener.onStreamResponse(new FragmentExecutionResponse(List.of("field_0"), rows), true);
             }
         };
 
-        PlanWalker walker = new PlanWalker(dag, clusterService, Runnable::run, null);
+        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-        walker.walk(submitter, future);
+        walker.walk(client, future);
 
         // The walk should fail
         RuntimeException ex = expectThrows(RuntimeException.class, future::actionGet);

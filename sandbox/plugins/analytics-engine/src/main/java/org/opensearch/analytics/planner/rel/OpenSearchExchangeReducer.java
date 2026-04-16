@@ -72,8 +72,17 @@ public class OpenSearchExchangeReducer extends SingleRel implements OpenSearchRe
         return new OpenSearchExchangeReducer(getCluster(), getTraitSet(), children.getFirst(), List.of(backend));
     }
 
+    /**
+     * Strip pass: the exchange reducer is a planner-internal marker representing
+     * "data crosses a stage boundary here". It has no semantic meaning to Substrait
+     * or any backend — at runtime the boundary is handled by the parent stage's
+     * input handle (e.g., DataFusion's StreamingTableExec substitution for
+     * StageInputTableScan). So strip removes the reducer entirely, leaving just
+     * its child as the input to whatever sits above it (typically the final
+     * aggregate / filter / sort in a local stage fragment).
+     */
     @Override
     public RelNode stripAnnotations(List<RelNode> strippedChildren) {
-        return new OpenSearchExchangeReducer(getCluster(), getTraitSet(), strippedChildren.getFirst(), viableBackends);
+        return strippedChildren.getFirst();
     }
 }

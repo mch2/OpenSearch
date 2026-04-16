@@ -220,6 +220,32 @@ public class CapabilityRegistry {
         return arrowCompatibleIndex.getOrDefault(backendName, Set.of()).contains(operator);
     }
 
+    /**
+     * Returns the names of backends eligible for local stage execution.
+     * Only backends that declare {@link OperatorCapability#LOCAL_STAGE}
+     * in their {@code supportedOperators()} are eligible.
+     */
+    public List<String> localStageBackends() {
+        return operatorIndex.getOrDefault(OperatorCapability.LOCAL_STAGE, List.of());
+    }
+
+    /**
+     * Selects the first backend from the given plan alternatives that supports
+     * local stage execution ({@link OperatorCapability#LOCAL_STAGE}).
+     *
+     * @param planAlternatives the plan alternatives to search
+     * @return the backend name, or null if no eligible backend is found
+     */
+    public String selectLocalStageBackend(List<String> planAlternatives) {
+        List<String> eligible = localStageBackends();
+        for (String backendId : planAlternatives) {
+            if (eligible.contains(backendId)) {
+                return backendId;
+            }
+        }
+        return null;
+    }
+
     /** Returns the analytics backends. */
     public List<AnalyticsSearchBackendPlugin> getBackends() {
         return backends;

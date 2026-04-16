@@ -47,7 +47,7 @@ public class MockDataFusionBackend implements AnalyticsSearchBackendPlugin, Sear
         OperatorCapability.AGGREGATE,
         OperatorCapability.SORT,
         OperatorCapability.PROJECT,
-        OperatorCapability.COORDINATOR_REDUCE
+        OperatorCapability.LOCAL_STAGE
     );
 
     private static final Set<FieldType> SUPPORTED_TYPES = new HashSet<>();

@@ -10,6 +10,7 @@ package org.opensearch.analytics.exec;
 
 import org.opensearch.action.support.ActionFilters;
 import org.opensearch.action.support.HandledTransportAction;
+import org.opensearch.analytics.backend.FragmentExecutionResponse;
 import org.opensearch.common.inject.Inject;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.index.shard.IndexShard;

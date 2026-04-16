@@ -19,6 +19,7 @@ import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.opensearch.action.support.PlainActionFuture;
+import org.opensearch.analytics.backend.FragmentExecutionResponse;
 import org.opensearch.analytics.planner.dag.QueryDAG;
 import org.opensearch.analytics.planner.dag.Stage;
 import org.opensearch.analytics.planner.dag.StagePlan;
@@ -37,8 +38,9 @@ import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.core.index.Index;
 import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.test.OpenSearchTestCase;
+import org.opensearch.transport.StreamTransportService;
+import org.opensearch.transport.Transport;
 import org.opensearch.transport.TransportRequest;
-import org.opensearch.transport.TransportService;
 
 import java.lang.reflect.Field;
 import java.util.ArrayList;
@@ -46,11 +48,13 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentMap;
+import java.util.function.BiFunction;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -58,7 +62,7 @@ import static org.mockito.Mockito.when;
 
 /**
  * Tests for {@link Scheduler}: walker pool lifecycle (success/failure) and
- * dispatch via {@code Client.execute()}.
+ * dispatch via {@link ShardTransportDispatcher}.
  */
 @SuppressWarnings("unchecked")
 public class SchedulerTests extends OpenSearchTestCase {
@@ -66,6 +70,7 @@ public class SchedulerTests extends OpenSearchTestCase {
     private RelDataTypeFactory typeFactory;
     private RelOptCluster cluster;
     private RelDataType rowType;
+    private ClusterService clusterService;
 
     @Override
     public void setUp() throws Exception {
@@ -74,6 +79,12 @@ public class SchedulerTests extends OpenSearchTestCase {
         RexBuilder rexBuilder = new RexBuilder(typeFactory);
         HepPlanner planner = new HepPlanner(new HepProgramBuilder().build());
         cluster = RelOptCluster.create(planner, rexBuilder);
+        ClusterState state = mock(ClusterState.class);
+        DiscoveryNodes nodes = mock(DiscoveryNodes.class);
+        when(nodes.get(any())).thenReturn(mock(DiscoveryNode.class));
+        when(state.nodes()).thenReturn(nodes);
+        clusterService = mock(ClusterService.class);
+        when(clusterService.state()).thenReturn(state);
         rowType = typeFactory.builder().add("field_0", SqlTypeName.VARCHAR).build();
     }
 
@@ -140,8 +151,10 @@ public class SchedulerTests extends OpenSearchTestCase {
     }
 
     public void testWalkerRemovedFromPoolAfterSuccess() throws Exception {
-        TransportService transportService = mock(TransportService.class);
-        Scheduler scheduler = new Scheduler(transportService, 5);
+        StreamTransportService transportService = mock(StreamTransportService.class);
+        BiFunction<String, String, Transport.Connection> connectionLookup = (alias, nodeId) -> mock(Transport.Connection.class);
+        ShardTransportDispatcher dispatcher = new ShardTransportDispatcher(transportService, clusterService, 5);
+        Scheduler scheduler = new Scheduler(dispatcher, new StageExecutor(clusterService));
 
         // Build a coordinator-only stage (StageInputScan, no TableScan) → empty targets → immediate success
         OpenSearchStageInputScan stageInput = new OpenSearchStageInputScan(
@@ -158,7 +171,7 @@ public class SchedulerTests extends OpenSearchTestCase {
 
         // Coordinator-only stage — no routing needed, simple mock ClusterService
         ClusterService clusterService = mock(ClusterService.class);
-        PlanWalker walker = new PlanWalker(dag, clusterService, Runnable::run, null);
+        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
 
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
         scheduler.execute(walker, future);
@@ -175,12 +188,13 @@ public class SchedulerTests extends OpenSearchTestCase {
     }
 
     public void testWalkerRemovedFromPoolOnFailure() throws Exception {
-        TransportService transportService = mock(TransportService.class);
-        Scheduler scheduler = new Scheduler(transportService, 5);
-
+        StreamTransportService transportService = mock(StreamTransportService.class);
         // Build a single-stage DAG with 1 shard so that dispatchTask is called.
-        // The mock client will trigger a failure.
-        ClusterService clusterService = buildMockClusterService("http_logs", 1);
+        ClusterService routingCs = buildMockClusterService("http_logs", 1);
+        when(transportService.getConnection(any(DiscoveryNode.class))).thenReturn(mock(Transport.Connection.class));
+
+        ShardTransportDispatcher dispatcher = new ShardTransportDispatcher(transportService, routingCs, 5);
+        Scheduler scheduler = new Scheduler(dispatcher, new StageExecutor(routingCs));
 
         OpenSearchTableScan scan = buildTableScan("http_logs", List.of("lucene"));
         StagePlan plan = new StagePlan(scan, "mock-parquet");
@@ -188,20 +202,22 @@ public class SchedulerTests extends OpenSearchTestCase {
         stage.setPlanAlternatives(List.of(plan));
         QueryDAG dag = new QueryDAG("test-query-failure", stage);
 
-        // Mock transportService.sendRequest to call onFailure on the response handler
+        // Mock transportService.sendChildRequest to call onFailure on the response handler
         doAnswer(invocation -> {
-            org.opensearch.transport.TransportResponseHandler<?> handler = invocation.getArgument(3);
+            org.opensearch.transport.TransportResponseHandler<?> handler = invocation.getArgument(5);
             handler.handleException(new org.opensearch.transport.TransportException("shard execution failed"));
             return null;
         }).when(transportService)
-            .sendRequest(
-                any(DiscoveryNode.class),
+            .sendChildRequest(
+                any(Transport.Connection.class),
                 anyString(),
                 any(TransportRequest.class),
+                nullable(org.opensearch.tasks.Task.class),
+                any(org.opensearch.transport.TransportRequestOptions.class),
                 any(org.opensearch.transport.TransportResponseHandler.class)
             );
 
-        PlanWalker walker = new PlanWalker(dag, clusterService, Runnable::run, null);
+        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(routingCs));
 
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
         scheduler.execute(walker, future);
@@ -216,24 +232,29 @@ public class SchedulerTests extends OpenSearchTestCase {
     }
 
     public void testDispatchShardRequestCallsTransportServiceSendRequest() throws Exception {
-        TransportService transportService = mock(TransportService.class);
-        Scheduler scheduler = new Scheduler(transportService, 5);
+        StreamTransportService transportService = mock(StreamTransportService.class);
+        when(transportService.getConnection(any(DiscoveryNode.class))).thenReturn(mock(Transport.Connection.class));
 
-        // Mock transportService.sendRequest to call onResponse immediately via handler
+        // Build single-stage DAG with 1 shard
+        ClusterService routingCs = buildMockClusterService("http_logs", 1);
+
+        ShardTransportDispatcher dispatcher = new ShardTransportDispatcher(transportService, routingCs, 5);
+        Scheduler scheduler = new Scheduler(dispatcher, new StageExecutor(routingCs));
+
+        // Mock transportService.sendChildRequest to call onResponse immediately via handler
         doAnswer(invocation -> {
-            org.opensearch.transport.TransportResponseHandler<FragmentExecutionResponse> handler = invocation.getArgument(3);
+            org.opensearch.transport.TransportResponseHandler<FragmentExecutionResponse> handler = invocation.getArgument(5);
             handler.handleResponse(new FragmentExecutionResponse(List.of("field_0"), List.of()));
             return null;
         }).when(transportService)
-            .sendRequest(
-                any(DiscoveryNode.class),
+            .sendChildRequest(
+                any(Transport.Connection.class),
                 anyString(),
                 any(TransportRequest.class),
+                nullable(org.opensearch.tasks.Task.class),
+                any(org.opensearch.transport.TransportRequestOptions.class),
                 any(org.opensearch.transport.TransportResponseHandler.class)
             );
-
-        // Build single-stage DAG with 1 shard
-        ClusterService clusterService = buildMockClusterService("http_logs", 1);
 
         OpenSearchTableScan scan = buildTableScan("http_logs", List.of("lucene"));
         StagePlan plan = new StagePlan(scan, "mock-parquet");
@@ -241,7 +262,7 @@ public class SchedulerTests extends OpenSearchTestCase {
         stage.setPlanAlternatives(List.of(plan));
         QueryDAG dag = new QueryDAG("test-query-dispatch", stage);
 
-        PlanWalker walker = new PlanWalker(dag, clusterService, Runnable::run, null);
+        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(routingCs));
 
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
         scheduler.execute(walker, future);
@@ -249,11 +270,13 @@ public class SchedulerTests extends OpenSearchTestCase {
         // Wait for completion
         future.actionGet();
 
-        // Verify transportService.sendRequest was called with the shard action name
-        verify(transportService).sendRequest(
-            any(DiscoveryNode.class),
+        // Verify transportService.sendChildRequest was called with the shard action name
+        verify(transportService).sendChildRequest(
+            any(Transport.Connection.class),
             eq(AnalyticsShardAction.NAME),
             any(TransportRequest.class),
+            nullable(org.opensearch.tasks.Task.class),
+            any(org.opensearch.transport.TransportRequestOptions.class),
             any(org.opensearch.transport.TransportResponseHandler.class)
         );
     }

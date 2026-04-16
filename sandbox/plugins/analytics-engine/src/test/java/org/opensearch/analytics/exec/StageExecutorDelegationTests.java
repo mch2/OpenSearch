@@ -18,6 +18,7 @@ import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.sql.type.SqlTypeName;
+import org.opensearch.analytics.backend.FragmentExecutionResponse;
 import org.opensearch.analytics.planner.dag.Stage;
 import org.opensearch.analytics.planner.dag.StagePlan;
 import org.opensearch.analytics.planner.rel.OpenSearchStageInputScan;
@@ -48,7 +49,7 @@ import static org.mockito.Mockito.when;
 
 /**
  * Tests that {@link StageExecutor#dispatch} correctly delegates to
- * {@link StageExecution} for non-coordinator-gather stages and handles
+ * {@link FanOutStageExecution} for non-coordinator-gather stages and handles
  * coordinator-gather stages inline.
  *
  * Validates: Requirements 6.1, 6.2, 6.3, 6.4, 7.3
@@ -119,9 +120,10 @@ public class StageExecutorDelegationTests extends OpenSearchTestCase {
      */
     public void testDispatchForCoordinatorGatherDoesNotCreateStageDispatchTask() {
         ClusterService clusterService = mock(ClusterService.class);
-        ExchangeSink rootSink = new SimpleExchangeSink();
 
-        StageExecutor executor = new StageExecutor("test-query", clusterService, Runnable::run, rootSink, null);
+        StageExecutor executor = new StageExecutor(clusterService);
+        QueryContext config = QueryContext.forTest("test-query", null);
+        QueryState state = new QueryState();
 
         // Coordinator-gather stage: StageInputScan, no exchange, no TableScan
         OpenSearchStageInputScan stageInput = new OpenSearchStageInputScan(cluster, RelTraitSet.createEmpty(), 0, rowType, List.of());
@@ -129,7 +131,7 @@ public class StageExecutorDelegationTests extends OpenSearchTestCase {
         stage.setPlanAlternatives(List.of(new StagePlan(stageInput, "lucene")));
 
         AtomicInteger submissions = new AtomicInteger(0);
-        TaskSubmitter submitter = (request, node, listener) -> submissions.incrementAndGet();
+        ShardRequestClient client = (request, node, listener) -> submissions.incrementAndGet();
 
         AtomicReference<Void> responseRef = new AtomicReference<>();
         AtomicReference<Exception> failureRef = new AtomicReference<>();
@@ -145,16 +147,18 @@ public class StageExecutorDelegationTests extends OpenSearchTestCase {
             }
         };
 
-        executor.dispatch(stage, submitter, listener);
+        // No-op child dispatcher — coordinator-gather has no children to recurse on
+        ChildDispatcher noOpChildren = (s, sink, c, l) -> l.onResponse(null);
+        executor.dispatch(stage, state.rootSink(), client, noOpChildren, config, state, listener);
 
         // Verify listener.onResponse was called (responseRef was set — no exception)
         assertNull("listener.onFailure should not have been called", failureRef.get());
         // Verify no submissions
-        assertEquals("No submissions should have been made for coordinator-gather", 0, submissions.get());
+        assertEquals("No submissions should have been made for LOCAL pass-through", 0, submissions.get());
     }
 
     /**
-     * Non-gather stage with 3 target shards delegates to StageExecution.
+     * Non-gather stage with 3 target shards delegates to FanOutStageExecution.
      * Verifies 3 submissions are captured and driving 3 responses completes
      * the stage with listener.onResponse called.
      *
@@ -163,9 +167,10 @@ public class StageExecutorDelegationTests extends OpenSearchTestCase {
     public void testDispatchForDataNodeStageCreatesAndRunsTask() {
         int numShards = 3;
         ClusterService clusterService = buildMockClusterService("http_logs", numShards);
-        ExchangeSink rootSink = new SimpleExchangeSink();
 
-        StageExecutor executor = new StageExecutor("test-query", clusterService, Runnable::run, rootSink, null);
+        StageExecutor executor = new StageExecutor(clusterService);
+        QueryContext config = QueryContext.forTest("test-query", null);
+        QueryState state = new QueryState();
 
         OpenSearchTableScan scan = buildTableScan("http_logs", List.of("lucene"));
         StagePlan plan = new StagePlan(scan, "lucene");
@@ -174,12 +179,12 @@ public class StageExecutorDelegationTests extends OpenSearchTestCase {
 
         // Capturing submitter that records submissions and responds synchronously
         AtomicInteger submissions = new AtomicInteger(0);
-        TaskSubmitter submitter = (request, node, listener) -> {
+        ShardRequestClient client = (request, node, listener) -> {
             submissions.incrementAndGet();
             // Respond immediately with row data
             List<Object[]> rows = new ArrayList<>();
             rows.add(new Object[] { "row_" + request.getShardId().id() });
-            listener.onResponse(new FragmentExecutionResponse(List.of("field_0"), rows));
+            listener.onStreamResponse(new FragmentExecutionResponse(List.of("field_0"), rows), true);
         };
 
         AtomicReference<Boolean> responseCalled = new AtomicReference<>(false);
@@ -196,7 +201,9 @@ public class StageExecutorDelegationTests extends OpenSearchTestCase {
             }
         };
 
-        executor.dispatch(stage, submitter, listener);
+        // No-op child dispatcher — leaf data-node stage has no children
+        ChildDispatcher noOpChildren = (s, sink, c, l) -> l.onResponse(null);
+        executor.dispatch(stage, state.rootSink(), client, noOpChildren, config, state, listener);
 
         // Verify 3 submissions were made (one per shard)
         assertEquals("Submitter should have received 3 calls", numShards, submissions.get());

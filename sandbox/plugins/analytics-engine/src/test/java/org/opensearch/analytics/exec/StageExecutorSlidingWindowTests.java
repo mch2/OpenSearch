@@ -19,6 +19,8 @@ import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.opensearch.action.support.PlainActionFuture;
+import org.opensearch.analytics.backend.ExchangeSink;
+import org.opensearch.analytics.backend.FragmentExecutionResponse;
 import org.opensearch.analytics.planner.dag.QueryDAG;
 import org.opensearch.analytics.planner.dag.Stage;
 import org.opensearch.analytics.planner.dag.StagePlan;
@@ -31,12 +33,10 @@ import org.opensearch.cluster.routing.OperationRouting;
 import org.opensearch.cluster.routing.ShardIterator;
 import org.opensearch.cluster.routing.ShardRouting;
 import org.opensearch.cluster.service.ClusterService;
-import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.index.Index;
 import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.test.OpenSearchTestCase;
 
-import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -161,17 +161,17 @@ public class StageExecutorSlidingWindowTests extends OpenSearchTestCase {
         QueryDAG dag = buildDagWithDecider("http_logs", decider);
 
         // Capture listeners so we can control when responses arrive
-        List<ActionListener<FragmentExecutionResponse>> capturedListeners = new ArrayList<>();
+        List<StreamingResponseListener> capturedListeners = new ArrayList<>();
         List<FragmentExecutionRequest> capturedRequests = new ArrayList<>();
 
-        TaskSubmitter submitter = (request, node, listener) -> {
+        ShardRequestClient client = (request, node, listener) -> {
             capturedRequests.add(request);
             capturedListeners.add(listener);
         };
 
-        PlanWalker walker = new PlanWalker(dag, clusterService, Runnable::run, null);
+        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-        walker.walk(submitter, future);
+        walker.walk(client, future);
 
         // Before any response, exactly 3 should be submitted
         assertEquals("Initial batch should be 3", 3, capturedListeners.size());
@@ -180,25 +180,25 @@ public class StageExecutorSlidingWindowTests extends OpenSearchTestCase {
         // With synchronous executor (Runnable::run), responding to listener i immediately
         // runs the completion handler which submits the next task and adds its listener.
         for (int i = 0; i < 3; i++) {
-            capturedListeners.get(i).onResponse(successResponse(capturedRequests.get(i).getShardId().id()));
+            capturedListeners.get(i).onStreamResponse(successResponse(capturedRequests.get(i).getShardId().id()), true);
         }
         // respond to 0 → submit 3, respond to 1 → submit 4, respond to 2 → submit 5
         assertEquals("After responding to 3 initial, should have 6 total submissions", 6, capturedListeners.size());
 
         // Respond to the next batch
         for (int i = 3; i < 6; i++) {
-            capturedListeners.get(i).onResponse(successResponse(capturedRequests.get(i).getShardId().id()));
+            capturedListeners.get(i).onStreamResponse(successResponse(capturedRequests.get(i).getShardId().id()), true);
         }
         assertEquals("After responding to 6, should have 9 total submissions", 9, capturedListeners.size());
 
         // Respond to the next batch
         for (int i = 6; i < 9; i++) {
-            capturedListeners.get(i).onResponse(successResponse(capturedRequests.get(i).getShardId().id()));
+            capturedListeners.get(i).onStreamResponse(successResponse(capturedRequests.get(i).getShardId().id()), true);
         }
         assertEquals("After responding to 9, should have 10 total submissions", 10, capturedListeners.size());
 
         // Respond to the last one to complete the walk
-        capturedListeners.get(9).onResponse(successResponse(capturedRequests.get(9).getShardId().id()));
+        capturedListeners.get(9).onStreamResponse(successResponse(capturedRequests.get(9).getShardId().id()), true);
 
         // Walk should complete successfully
         Iterable<Object[]> result = future.actionGet();
@@ -233,29 +233,29 @@ public class StageExecutorSlidingWindowTests extends OpenSearchTestCase {
 
         QueryDAG dag = buildDagWithDecider("http_logs", decider);
 
-        List<ActionListener<FragmentExecutionResponse>> capturedListeners = new ArrayList<>();
+        List<StreamingResponseListener> capturedListeners = new ArrayList<>();
         List<FragmentExecutionRequest> capturedRequests = new ArrayList<>();
 
-        TaskSubmitter submitter = (request, node, listener) -> {
+        ShardRequestClient client = (request, node, listener) -> {
             capturedRequests.add(request);
             capturedListeners.add(listener);
         };
 
-        PlanWalker walker = new PlanWalker(dag, clusterService, Runnable::run, null);
+        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-        walker.walk(submitter, future);
+        walker.walk(client, future);
 
         // 2 initial submissions
         assertEquals("Initial batch should be 2", 2, capturedListeners.size());
 
         // Respond to 1st → should trigger 1 more submission
-        capturedListeners.get(0).onResponse(successResponse(capturedRequests.get(0).getShardId().id()));
+        capturedListeners.get(0).onStreamResponse(successResponse(capturedRequests.get(0).getShardId().id()), true);
         assertEquals("After 1st response, should have 3 total submissions", 3, capturedListeners.size());
 
         // Respond to remaining to complete the walk
         for (int i = 1; i < capturedListeners.size();) {
             int size = capturedListeners.size();
-            capturedListeners.get(i).onResponse(successResponse(capturedRequests.get(i).getShardId().id()));
+            capturedListeners.get(i).onStreamResponse(successResponse(capturedRequests.get(i).getShardId().id()), true);
             i++;
             // New listeners may have been added
         }
@@ -294,29 +294,29 @@ public class StageExecutorSlidingWindowTests extends OpenSearchTestCase {
 
         QueryDAG dag = buildDagWithDecider("http_logs", decider);
 
-        List<ActionListener<FragmentExecutionResponse>> capturedListeners = new ArrayList<>();
+        List<StreamingResponseListener> capturedListeners = new ArrayList<>();
         List<FragmentExecutionRequest> capturedRequests = new ArrayList<>();
 
-        TaskSubmitter submitter = (request, node, listener) -> {
+        ShardRequestClient client = (request, node, listener) -> {
             capturedRequests.add(request);
             capturedListeners.add(listener);
         };
 
-        PlanWalker walker = new PlanWalker(dag, clusterService, Runnable::run, null);
+        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-        walker.walk(submitter, future);
+        walker.walk(client, future);
 
         // 2 initial submissions
         assertEquals("Initial batch should be 2", 2, capturedListeners.size());
 
         // Respond to 1st → shouldTerminate returns true → no more submissions
-        capturedListeners.get(0).onResponse(successResponse(capturedRequests.get(0).getShardId().id()));
+        capturedListeners.get(0).onStreamResponse(successResponse(capturedRequests.get(0).getShardId().id()), true);
 
         // Still only 2 total submissions — termination stopped further dispatch
         assertEquals("Should still have only 2 submissions after termination", 2, capturedListeners.size());
 
         // Respond to 2nd (late, in-flight at time of termination) — discarded
-        capturedListeners.get(1).onResponse(successResponse(capturedRequests.get(1).getShardId().id()));
+        capturedListeners.get(1).onStreamResponse(successResponse(capturedRequests.get(1).getShardId().id()), true);
 
         // Still only 2 submissions
         assertEquals("Should still have only 2 submissions", 2, capturedListeners.size());
@@ -353,22 +353,22 @@ public class StageExecutorSlidingWindowTests extends OpenSearchTestCase {
 
         QueryDAG dag = buildDagWithDecider("http_logs", decider);
 
-        List<ActionListener<FragmentExecutionResponse>> capturedListeners = new ArrayList<>();
+        List<StreamingResponseListener> capturedListeners = new ArrayList<>();
         List<FragmentExecutionRequest> capturedRequests = new ArrayList<>();
 
-        TaskSubmitter submitter = (request, node, listener) -> {
+        ShardRequestClient client = (request, node, listener) -> {
             capturedRequests.add(request);
             capturedListeners.add(listener);
         };
 
-        PlanWalker walker = new PlanWalker(dag, clusterService, Runnable::run, null);
+        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-        walker.walk(submitter, future);
+        walker.walk(client, future);
 
         assertEquals(2, capturedListeners.size());
 
         // Respond to 1st → terminates → listener signaled immediately
-        capturedListeners.get(0).onResponse(successResponse(capturedRequests.get(0).getShardId().id()));
+        capturedListeners.get(0).onStreamResponse(successResponse(capturedRequests.get(0).getShardId().id()), true);
 
         // Future should already be done (termination signals completion immediately)
         assertTrue("Future should be done after termination", future.isDone());
@@ -379,17 +379,11 @@ public class StageExecutorSlidingWindowTests extends OpenSearchTestCase {
         assertEquals("Should have 1 row from the 1st response", 1, rowCountAfterTermination);
 
         // Respond to 2nd (late) — should be discarded, sink row count should not increase
-        capturedListeners.get(1).onResponse(successResponse(capturedRequests.get(1).getShardId().id()));
+        capturedListeners.get(1).onStreamResponse(successResponse(capturedRequests.get(1).getShardId().id()), true);
 
-        // Access the root sink via reflection to verify row count didn't increase
-        try {
-            Field executorField = PlanWalker.class.getDeclaredField("rootSink");
-            executorField.setAccessible(true);
-            ExchangeSink rootSink = (ExchangeSink) executorField.get(walker);
-            assertEquals("Sink row count should not increase after late response", rowCountAfterTermination, rootSink.getRowCount());
-        } catch (Exception e) {
-            fail("Reflection failed: " + e.getMessage());
-        }
+        // Verify row count didn't increase after late response
+        ExchangeSink rootSink = walker.getState().rootSink();
+        assertEquals("Sink row count should not increase after late response", rowCountAfterTermination, rootSink.getRowCount());
     }
 
     // ---- 6.6: testInitialBatchSizeZeroCompletesImmediately ----
@@ -419,14 +413,14 @@ public class StageExecutorSlidingWindowTests extends OpenSearchTestCase {
         QueryDAG dag = buildDagWithDecider("http_logs", decider);
 
         AtomicInteger submitCount = new AtomicInteger(0);
-        TaskSubmitter submitter = (request, node, listener) -> {
+        ShardRequestClient client = (request, node, listener) -> {
             submitCount.incrementAndGet();
-            listener.onResponse(successResponse(request.getShardId().id()));
+            listener.onStreamResponse(successResponse(request.getShardId().id()), true);
         };
 
-        PlanWalker walker = new PlanWalker(dag, clusterService, Runnable::run, null);
+        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-        walker.walk(submitter, future);
+        walker.walk(client, future);
 
         // Should complete immediately with 0 submissions
         assertTrue("Future should be done immediately", future.isDone());
@@ -437,15 +431,8 @@ public class StageExecutorSlidingWindowTests extends OpenSearchTestCase {
         result.forEach(resultList::add);
         assertEquals("Should have 0 rows", 0, resultList.size());
 
-        // Verify completedStages contains stage 0 via reflection
-        Field executorField = PlanWalker.class.getDeclaredField("stageExecutor");
-        executorField.setAccessible(true);
-        Object stageExec = executorField.get(walker);
-        Field contextField = StageExecutor.class.getDeclaredField("context");
-        contextField.setAccessible(true);
-        QueryExecutionContext dispatchContext = (QueryExecutionContext) contextField.get(stageExec);
-        @SuppressWarnings("unchecked")
-        Set<Integer> completed = dispatchContext.completedStages();
+        // Verify completedStages contains stage 0
+        Set<Integer> completed = walker.getState().completedStages();
 
         assertTrue("Stage 0 should be in completedStages", completed.contains(0));
     }
@@ -477,26 +464,26 @@ public class StageExecutorSlidingWindowTests extends OpenSearchTestCase {
 
         QueryDAG dag = buildDagWithDecider("http_logs", decider);
 
-        List<ActionListener<FragmentExecutionResponse>> capturedListeners = new ArrayList<>();
+        List<StreamingResponseListener> capturedListeners = new ArrayList<>();
         List<FragmentExecutionRequest> capturedRequests = new ArrayList<>();
 
-        TaskSubmitter submitter = (request, node, listener) -> {
+        ShardRequestClient client = (request, node, listener) -> {
             capturedRequests.add(request);
             capturedListeners.add(listener);
         };
 
-        PlanWalker walker = new PlanWalker(dag, clusterService, Runnable::run, null);
+        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-        walker.walk(submitter, future);
+        walker.walk(client, future);
 
         assertEquals("Initial batch should be 3", 3, capturedListeners.size());
 
         // Respond to 1st → shouldTerminate(1, 10) = false → submits task 3
-        capturedListeners.get(0).onResponse(successResponse(capturedRequests.get(0).getShardId().id()));
+        capturedListeners.get(0).onStreamResponse(successResponse(capturedRequests.get(0).getShardId().id()), true);
         assertEquals("After 1st response, should have 4 total submissions", 4, capturedListeners.size());
 
         // Respond to 2nd → shouldTerminate(2, 10) = true → terminates
-        capturedListeners.get(1).onResponse(successResponse(capturedRequests.get(1).getShardId().id()));
+        capturedListeners.get(1).onStreamResponse(successResponse(capturedRequests.get(1).getShardId().id()), true);
 
         // Walk should be done
         assertTrue("Future should be done after termination", future.isDone());
@@ -508,13 +495,11 @@ public class StageExecutorSlidingWindowTests extends OpenSearchTestCase {
         assertEquals("Sink should contain only 2 rows from completed tasks before termination", 2, resultList.size());
 
         // Respond to 3rd and 4th (late, discarded)
-        capturedListeners.get(2).onResponse(successResponse(capturedRequests.get(2).getShardId().id()));
-        capturedListeners.get(3).onResponse(successResponse(capturedRequests.get(3).getShardId().id()));
+        capturedListeners.get(2).onStreamResponse(successResponse(capturedRequests.get(2).getShardId().id()), true);
+        capturedListeners.get(3).onStreamResponse(successResponse(capturedRequests.get(3).getShardId().id()), true);
 
         // Verify late responses were discarded — sink row count should not have increased
-        Field rootSinkField = PlanWalker.class.getDeclaredField("rootSink");
-        rootSinkField.setAccessible(true);
-        ExchangeSink rootSink = (ExchangeSink) rootSinkField.get(walker);
+        ExchangeSink rootSink = walker.getState().rootSink();
         assertEquals("Sink row count should still be 2 after late responses", 2, rootSink.getRowCount());
 
         // Total submissions: 3 initial + 1 from 1st completion = 4 (not 10)
@@ -548,17 +533,17 @@ public class StageExecutorSlidingWindowTests extends OpenSearchTestCase {
 
         QueryDAG dag = buildDagWithDecider("http_logs", decider);
 
-        List<ActionListener<FragmentExecutionResponse>> capturedListeners = new ArrayList<>();
+        List<StreamingResponseListener> capturedListeners = new ArrayList<>();
         List<FragmentExecutionRequest> capturedRequests = new ArrayList<>();
 
-        TaskSubmitter submitter = (request, node, listener) -> {
+        ShardRequestClient client = (request, node, listener) -> {
             capturedRequests.add(request);
             capturedListeners.add(listener);
         };
 
-        PlanWalker walker = new PlanWalker(dag, clusterService, Runnable::run, null);
+        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-        walker.walk(submitter, future);
+        walker.walk(client, future);
 
         assertEquals("Initial batch should be 3", 3, capturedListeners.size());
 
@@ -566,12 +551,12 @@ public class StageExecutorSlidingWindowTests extends OpenSearchTestCase {
         capturedListeners.get(0).onFailure(new RuntimeException("shard_0_failed"));
 
         // 2nd and 3rd succeed — each triggers next submission
-        capturedListeners.get(1).onResponse(successResponse(capturedRequests.get(1).getShardId().id()));
-        capturedListeners.get(2).onResponse(successResponse(capturedRequests.get(2).getShardId().id()));
+        capturedListeners.get(1).onStreamResponse(successResponse(capturedRequests.get(1).getShardId().id()), true);
+        capturedListeners.get(2).onStreamResponse(successResponse(capturedRequests.get(2).getShardId().id()), true);
 
         // Respond to remaining
         for (int i = 3; i < capturedListeners.size(); i++) {
-            capturedListeners.get(i).onResponse(successResponse(capturedRequests.get(i).getShardId().id()));
+            capturedListeners.get(i).onStreamResponse(successResponse(capturedRequests.get(i).getShardId().id()), true);
         }
 
         assertEquals("All 5 should be submitted", 5, capturedListeners.size());
@@ -608,24 +593,24 @@ public class StageExecutorSlidingWindowTests extends OpenSearchTestCase {
 
         QueryDAG dag = buildDagWithDecider("http_logs", decider);
 
-        List<ActionListener<FragmentExecutionResponse>> capturedListeners = new ArrayList<>();
+        List<StreamingResponseListener> capturedListeners = new ArrayList<>();
         List<FragmentExecutionRequest> capturedRequests = new ArrayList<>();
 
-        TaskSubmitter submitter = (request, node, listener) -> {
+        ShardRequestClient client = (request, node, listener) -> {
             capturedRequests.add(request);
             capturedListeners.add(listener);
         };
 
-        PlanWalker walker = new PlanWalker(dag, clusterService, Runnable::run, null);
+        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-        walker.walk(submitter, future);
+        walker.walk(client, future);
 
         // Should be clamped to 5 (total targets), not 100
         assertEquals("Initial batch should be clamped to 5", 5, capturedListeners.size());
 
         // Respond to all to complete the walk
         for (int i = 0; i < 5; i++) {
-            capturedListeners.get(i).onResponse(successResponse(capturedRequests.get(i).getShardId().id()));
+            capturedListeners.get(i).onStreamResponse(successResponse(capturedRequests.get(i).getShardId().id()), true);
         }
 
         // No additional submissions should have been triggered (all targets already dispatched)
@@ -671,30 +656,30 @@ public class StageExecutorSlidingWindowTests extends OpenSearchTestCase {
 
         QueryDAG dag = buildDagWithDecider("http_logs", decider);
 
-        List<ActionListener<FragmentExecutionResponse>> capturedListeners = new ArrayList<>();
+        List<StreamingResponseListener> capturedListeners = new ArrayList<>();
         List<FragmentExecutionRequest> capturedRequests = new ArrayList<>();
 
-        TaskSubmitter submitter = (request, node, listener) -> {
+        ShardRequestClient client = (request, node, listener) -> {
             capturedRequests.add(request);
             capturedListeners.add(listener);
         };
 
-        PlanWalker walker = new PlanWalker(dag, clusterService, Runnable::run, null);
+        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-        walker.walk(submitter, future);
+        walker.walk(client, future);
 
         assertEquals("Initial batch should be 3", 3, capturedListeners.size());
 
         // Respond to 1st → shouldTerminate called, returns true → terminated
-        capturedListeners.get(0).onResponse(successResponse(capturedRequests.get(0).getShardId().id()));
+        capturedListeners.get(0).onStreamResponse(successResponse(capturedRequests.get(0).getShardId().id()), true);
 
         // Walk should be done
         assertTrue("Future should be done after termination", future.isDone());
         future.actionGet();
 
         // Respond to 2nd and 3rd (late, discarded — terminated flag is checked first)
-        capturedListeners.get(1).onResponse(successResponse(capturedRequests.get(1).getShardId().id()));
-        capturedListeners.get(2).onResponse(successResponse(capturedRequests.get(2).getShardId().id()));
+        capturedListeners.get(1).onStreamResponse(successResponse(capturedRequests.get(1).getShardId().id()), true);
+        capturedListeners.get(2).onStreamResponse(successResponse(capturedRequests.get(2).getShardId().id()), true);
 
         // shouldTerminate should have been called exactly once — termination is sticky
         assertEquals("shouldTerminate should be called exactly once", 1, shouldTerminateCallCount.get());

@@ -66,6 +66,22 @@ public interface FragmentConvertor {
         throw new UnsupportedOperationException("convertInMemoryFragment not implemented for this backend");
     }
 
+    // ---- Local stage fragment conversion ----
+
+    /**
+     * Converts a local stage fragment whose leaves are {@code StageInputScan}
+     * nodes. Each leaf is rewritten to reference the corresponding child stage
+     * input ID (e.g., {@code __stage_0_input__}) so the execution engine can
+     * substitute it with a streaming partition source at runtime.
+     *
+     * @param fragment           resolved RelNode fragment with StageInputScan leaves
+     * @param childStageInputIds ordered list of stage input IDs, one per child stage
+     * @return backend-specific serialized plan bytes
+     */
+    default byte[] convertLocalStageFragment(RelNode fragment, List<String> childStageInputIds) {
+        throw new UnsupportedOperationException("convertLocalStageFragment not implemented for this backend");
+    }
+
     // ---- Sink appending (Top) ----
 
     /**

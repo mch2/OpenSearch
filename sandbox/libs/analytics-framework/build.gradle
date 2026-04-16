@@ -17,6 +17,10 @@ def calciteVersion = '1.41.0'
 dependencies {
   compileOnly project(':server')
   api "org.apache.calcite:calcite-core:${calciteVersion}"
+  // Arrow memory SPI — needed for LocalExecutionContext (BufferAllocator),
+  // InputHandle (VectorSchemaRoot), and LocalExecEngine (Schema).
+  compileOnly "org.apache.arrow:arrow-memory-core:${versions.arrow}"
+  compileOnly "org.apache.arrow:arrow-vector:${versions.arrow}"
   // Calcite's expression tree and Enumerable runtime — required by calcite-core API
   api "org.apache.calcite:calcite-linq4j:${calciteVersion}"
   // Calcite's JDBC abstraction layer — required by calcite-core internals
@@ -26,6 +30,13 @@ dependencies {
   runtimeOnly 'com.google.guava:failureaccess:1.0.2'
   // SLF4J — Calcite's logging facade
   runtimeOnly "org.slf4j:slf4j-api:${versions.slf4j}"
+
+  testImplementation project(':test:framework')
+  testImplementation "org.apache.arrow:arrow-memory-core:${versions.arrow}"
+  testImplementation "org.apache.arrow:arrow-vector:${versions.arrow}"
+  testImplementation "org.apache.arrow:arrow-format:${versions.arrow}"
+  testImplementation "org.apache.arrow:arrow-memory-unsafe:${versions.arrow}"
+  testImplementation "com.google.flatbuffers:flatbuffers-java:${versions.flatbuffers}"
 
   // Calcite's BuiltInMethod and DefaultRelMetadataProvider eagerly resolve methods via
   // reflection during RelOptCluster.create(). These optional calcite-core transitive deps

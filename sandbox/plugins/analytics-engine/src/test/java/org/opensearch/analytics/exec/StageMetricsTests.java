@@ -60,4 +60,44 @@ public class StageMetricsTests extends OpenSearchTestCase {
         metrics.recordEnd();
         assertTrue("endTimeMs must be >= startTimeMs after recordEnd()", metrics.getEndTimeMs() >= metrics.getStartTimeMs());
     }
+
+    /**
+     * addRowsProcessed accumulates correctly: two calls with 5 each yield 10.
+     *
+     * Validates: Requirements 1.1, 1.2
+     */
+    public void testAddRowsProcessedAtomic() {
+        StageMetrics metrics = new StageMetrics(randomIntBetween(0, 100));
+
+        metrics.addRowsProcessed(5);
+        metrics.addRowsProcessed(5);
+
+        assertEquals("rowsProcessed must equal the sum of addRowsProcessed calls", 10L, metrics.getRowsProcessed());
+    }
+
+    /**
+     * addBytesRead accumulates correctly: two calls with 5 each yield 10.
+     *
+     * Validates: Requirements 1.1, 1.2
+     */
+    public void testAddBytesReadAtomic() {
+        StageMetrics metrics = new StageMetrics(randomIntBetween(0, 100));
+
+        metrics.addBytesRead(5);
+        metrics.addBytesRead(5);
+
+        assertEquals("bytesRead must equal the sum of addBytesRead calls", 10L, metrics.getBytesRead());
+    }
+
+    /**
+     * Negative deltas throw IllegalArgumentException for both addRowsProcessed and addBytesRead.
+     *
+     * Validates: Requirements 1.3
+     */
+    public void testNegativeDeltaThrows() {
+        StageMetrics metrics = new StageMetrics(randomIntBetween(0, 100));
+
+        expectThrows(IllegalArgumentException.class, () -> metrics.addRowsProcessed(-1));
+        expectThrows(IllegalArgumentException.class, () -> metrics.addBytesRead(-1));
+    }
 }

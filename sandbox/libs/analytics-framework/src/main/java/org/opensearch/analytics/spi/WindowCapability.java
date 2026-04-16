@@ -20,21 +20,18 @@ import java.util.Set;
  *
  * @opensearch.internal
  */
-public record WindowCapability(WindowFunction function, FieldType fieldType,
-                                Set<String> formats) {
+public record WindowCapability(WindowFunction function, FieldType fieldType, Set<String> formats) {
 
     public WindowCapability {
         formats = Set.copyOf(formats);
     }
 
-    public static WindowCapability ranking(WindowFunction function, FieldType fieldType,
-                                            Set<String> formats) {
+    public static WindowCapability ranking(WindowFunction function, FieldType fieldType, Set<String> formats) {
         assert function.getType() == WindowFunction.Type.RANKING;
         return new WindowCapability(function, fieldType, formats);
     }
 
-    public static WindowCapability value(WindowFunction function, FieldType fieldType,
-                                          Set<String> formats) {
+    public static WindowCapability value(WindowFunction function, FieldType fieldType, Set<String> formats) {
         assert function.getType() == WindowFunction.Type.VALUE;
         return new WindowCapability(function, fieldType, formats);
     }

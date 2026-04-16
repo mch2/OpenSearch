@@ -9,6 +9,7 @@
 package org.opensearch.analytics.exec;
 
 import org.opensearch.action.support.ActionFilters;
+import org.opensearch.analytics.backend.FragmentExecutionResponse;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.index.Index;
 import org.opensearch.core.index.shard.ShardId;

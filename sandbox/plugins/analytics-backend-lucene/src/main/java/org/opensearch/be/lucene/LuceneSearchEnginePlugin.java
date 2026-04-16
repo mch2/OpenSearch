@@ -85,7 +85,7 @@ public class LuceneSearchEnginePlugin extends Plugin
             OperatorCapability.PROJECT,
             OperatorCapability.SORT,
             OperatorCapability.AGGREGATE,
-            OperatorCapability.COORDINATOR_REDUCE
+            OperatorCapability.LOCAL_STAGE
         );
     }
 

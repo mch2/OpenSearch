@@ -8,6 +8,7 @@
 
 package org.opensearch.analytics.exec;
 
+import org.opensearch.analytics.backend.ExchangeSink;
 import org.opensearch.analytics.planner.dag.Stage;
 import org.opensearch.cluster.node.DiscoveryNode;
 import org.opensearch.core.index.Index;

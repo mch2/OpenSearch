@@ -20,6 +20,7 @@ import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.opensearch.action.support.PlainActionFuture;
+import org.opensearch.analytics.backend.FragmentExecutionResponse;
 import org.opensearch.analytics.planner.dag.ExchangeInfo;
 import org.opensearch.analytics.planner.dag.QueryDAG;
 import org.opensearch.analytics.planner.dag.Stage;
@@ -147,16 +148,16 @@ public class PlanWalkerParallelTests extends OpenSearchTestCase {
         AtomicInteger listenerSignalCount = new AtomicInteger(0);
         List<Integer> dispatchedStageIds = new ArrayList<>();
 
-        TaskSubmitter submitter = (request, node, listener) -> {
+        ShardRequestClient client = (request, node, listener) -> {
             dispatchedStageIds.add(request.getStageId());
             List<Object[]> rows = new ArrayList<>();
             rows.add(new Object[] { "row_stage_" + request.getStageId() });
-            listener.onResponse(new FragmentExecutionResponse(List.of("field_0"), rows));
+            listener.onStreamResponse(new FragmentExecutionResponse(List.of("field_0"), rows), true);
         };
 
-        PlanWalker walker = new PlanWalker(dag, clusterService, Runnable::run, null);
+        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-        walker.walk(submitter, future);
+        walker.walk(client, future);
 
         Iterable<Object[]> result = future.actionGet();
         assertNotNull(result);
@@ -187,14 +188,14 @@ public class PlanWalkerParallelTests extends OpenSearchTestCase {
         QueryDAG dag = new QueryDAG("test-query", rootStage);
 
         AtomicInteger submitCount = new AtomicInteger(0);
-        TaskSubmitter submitter = (request, node, listener) -> {
+        ShardRequestClient client = (request, node, listener) -> {
             submitCount.incrementAndGet();
-            listener.onResponse(new FragmentExecutionResponse(List.of(), List.of()));
+            listener.onStreamResponse(new FragmentExecutionResponse(List.of(), List.of()), true);
         };
 
-        PlanWalker walker = new PlanWalker(dag, clusterService, Runnable::run, null);
+        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-        walker.walk(submitter, future);
+        walker.walk(client, future);
 
         Iterable<Object[]> result = future.actionGet();
         assertNotNull("Walk should complete successfully", result);
@@ -233,7 +234,7 @@ public class PlanWalkerParallelTests extends OpenSearchTestCase {
 
         AtomicInteger completedChildren = new AtomicInteger(0);
 
-        TaskSubmitter submitter = (request, node, listener) -> {
+        ShardRequestClient client = (request, node, listener) -> {
             if (request.getStageId() == 1) {
                 // Stage 1 (table_b) fails
                 completedChildren.incrementAndGet();
@@ -243,13 +244,13 @@ public class PlanWalkerParallelTests extends OpenSearchTestCase {
                 completedChildren.incrementAndGet();
                 List<Object[]> rows = new ArrayList<>();
                 rows.add(new Object[] { "ok" });
-                listener.onResponse(new FragmentExecutionResponse(List.of("field_0"), rows));
+                listener.onStreamResponse(new FragmentExecutionResponse(List.of("field_0"), rows), true);
             }
         };
 
-        PlanWalker walker = new PlanWalker(dag, clusterService, Runnable::run, null);
+        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-        walker.walk(submitter, future);
+        walker.walk(client, future);
 
         // Walk should fail with the child_b failure wrapped in a stage failure
         RuntimeException ex = expectThrows(RuntimeException.class, future::actionGet);
@@ -293,18 +294,18 @@ public class PlanWalkerParallelTests extends OpenSearchTestCase {
 
         List<Integer> dispatchOrder = new ArrayList<>();
 
-        TaskSubmitter submitter = (request, node, listener) -> {
+        ShardRequestClient client = (request, node, listener) -> {
             synchronized (dispatchOrder) {
                 dispatchOrder.add(request.getStageId());
             }
             List<Object[]> rows = new ArrayList<>();
             rows.add(new Object[] { "data" });
-            listener.onResponse(new FragmentExecutionResponse(List.of("field_0"), rows));
+            listener.onStreamResponse(new FragmentExecutionResponse(List.of("field_0"), rows), true);
         };
 
-        PlanWalker walker = new PlanWalker(dag, clusterService, Runnable::run, null);
+        PlanWalker walker = new PlanWalker(QueryContext.forTest(dag, null), new QueryState(), new StageExecutor(clusterService));
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-        walker.walk(submitter, future);
+        walker.walk(client, future);
 
         future.actionGet();
 

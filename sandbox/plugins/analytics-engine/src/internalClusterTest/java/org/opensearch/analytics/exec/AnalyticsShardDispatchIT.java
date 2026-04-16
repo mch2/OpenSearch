@@ -81,6 +81,25 @@ public class AnalyticsShardDispatchIT extends OpenSearchIntegTestCase {
                 Collections.emptyList(),
                 false
             ),
+            // Parquet data format plugin — its loadExtensions() registers ParquetDataFormat
+            // with the DataFusion backend (via DataFusionDataFormatExtension SPI). Without this,
+            // DataFusionPlugin.supportedFormats is empty and the planner errors with
+            // "Field [...] has no storage in any format". See AnalyticsCoordinatorReduceIT for
+            // the rationale on why parquet has empty extendedPlugins in tests.
+            new PluginInfo(
+                org.opensearch.parquet.ParquetDataFormatPlugin.class.getName(),
+                "classpath plugin",
+                "NA",
+                Version.CURRENT,
+                "1.8",
+                org.opensearch.parquet.ParquetDataFormatPlugin.class.getName(),
+                null,
+                Collections.emptyList(),
+                false
+            ),
+            // DataFusion plugin extends BOTH analytics-engine AND parquet-data-format so its
+            // SPI-discovered extensions (DataFusionAnalyticsExtension, DataFusionDataFormatExtension)
+            // are picked up by the right loadExtensions() call sites.
             new PluginInfo(
                 DataFusionPlugin.class.getName(),
                 "classpath plugin",
@@ -89,7 +108,7 @@ public class AnalyticsShardDispatchIT extends OpenSearchIntegTestCase {
                 "1.8",
                 DataFusionPlugin.class.getName(),
                 null,
-                List.of(AnalyticsPlugin.class.getName()),
+                List.of(AnalyticsPlugin.class.getName(), org.opensearch.parquet.ParquetDataFormatPlugin.class.getName()),
                 false
             )
         );
@@ -237,11 +256,15 @@ public class AnalyticsShardDispatchIT extends OpenSearchIntegTestCase {
     }
 
     /**
-     * Builds a {@link StageExecution} with a single target and a controllable submitter.
+     * Builds a {@link FanOutStageExecution} with a single target and a controllable client.
      * Uses a real {@link AnalyticsQueryTask} as the parentTask so that
      * {@code finishStageInternal()} can check {@code parentTask.isCancelled()}.
      */
-    private StageExecution buildBlockingStageExec(AnalyticsQueryTask parentTask, TaskSubmitter submitter, ActionListener<Void> listener) {
+    private FanOutStageExecution buildBlockingStageExec(
+        AnalyticsQueryTask parentTask,
+        ShardRequestClient client,
+        ActionListener<Void> listener
+    ) {
         Stage stage = new Stage(0, null, List.of(), null);
         stage.setPlanAlternatives(List.of(new StagePlan(null, "mock-backend", new byte[0])));
 
@@ -250,23 +273,30 @@ public class AnalyticsShardDispatchIT extends OpenSearchIntegTestCase {
             new FragmentExecutionRequest.PlanAlternative("mock-backend", new byte[0])
         );
 
-        QueryExecutionContext context = new QueryExecutionContext(
-            "test-query",
-            Runnable::run,
-            new SimpleExchangeSink(),
-            java.util.concurrent.ConcurrentHashMap.newKeySet(),
-            new java.util.concurrent.ConcurrentHashMap<>(),
-            parentTask
-        );
+        QueryState state = new QueryState(new SimpleExchangeSink());
 
-        return new StageExecution(stage, targets, planAlts, context, submitter, listener);
+        return new FanOutStageExecution(
+            stage,
+            "test-query",
+            targets,
+            planAlts,
+            Runnable::run,
+            parentTask,
+            state.rootSink(),
+            new SinkFeedingHandler(new SimpleExchangeSink()),
+            state.completedStages(),
+            state.shuffleManifests(),
+            client,
+            listener,
+            new StageMetrics(stage.getStageId())
+        );
     }
 
     /**
      * 16.1: Top-down cancellation propagates to shards.
      *
      * Registers a real AnalyticsQueryTask with the cluster's TaskManager, constructs
-     * a StageExecution with a blocking TaskSubmitter, starts execution, waits for the
+     * a StageExecution with a blocking ShardRequestClient, starts execution, waits for the
      * query to be in-flight via CountDownLatch, cancels the task via TaskManager,
      * and asserts the query fails with TaskCancelledException (not "Stage N failed").
      *
@@ -281,15 +311,15 @@ public class AnalyticsShardDispatchIT extends OpenSearchIntegTestCase {
         AnalyticsQueryTask queryTask = registerQueryTask(queryId, null);
 
         try {
-            // Latch to signal that the submitter has received a request (query is in-flight)
+            // Latch to signal that the client has received a request (query is in-flight)
             CountDownLatch inFlightLatch = new CountDownLatch(1);
-            // Latch to hold the submitter until we cancel the task
+            // Latch to hold the client until we cancel the task
             CountDownLatch blockLatch = new CountDownLatch(1);
 
             PlainActionFuture<Void> stageFuture = new PlainActionFuture<>();
 
-            // TaskSubmitter that blocks on the latch — simulates a slow shard response
-            TaskSubmitter blockingSubmitter = (request, node, listener) -> {
+            // ShardRequestClient that blocks on the latch — simulates a slow shard response
+            ShardRequestClient blockingClient = (request, node, listener) -> {
                 // Run in a separate thread so StageExecution.run() returns immediately
                 new Thread(() -> {
                     inFlightLatch.countDown();
@@ -307,10 +337,10 @@ public class AnalyticsShardDispatchIT extends OpenSearchIntegTestCase {
                     // After cancellation, respond with TaskCancelledException
                     // (simulating what a data node would do when its shard task is cancelled)
                     listener.onFailure(new TaskCancelledException("task cancelled [test]"));
-                }, "blocking-submitter").start();
+                }, "blocking-client").start();
             };
 
-            StageExecution stageExecution = buildBlockingStageExec(queryTask, blockingSubmitter, stageFuture);
+            FanOutStageExecution stageExecution = buildBlockingStageExec(queryTask, blockingClient, stageFuture);
             stageExecution.run();
 
             // Wait for the query to be in-flight
@@ -340,7 +370,7 @@ public class AnalyticsShardDispatchIT extends OpenSearchIntegTestCase {
      * 16.2: Coordinator timeout cancels the query.
      *
      * Registers an AnalyticsQueryTask with cancelAfterTimeInterval=50ms.
-     * Constructs a StageExecution with a slow TaskSubmitter. Wraps the stage listener
+     * Constructs a StageExecution with a slow ShardRequestClient. Wraps the stage listener
      * with TimeoutTaskCancellationUtility. Verifies the query fails with
      * TaskCancelledException (NOT "Stage N failed") and completes within a
      * reasonable time (not the full 10s block).
@@ -376,9 +406,9 @@ public class AnalyticsShardDispatchIT extends OpenSearchIntegTestCase {
                 e -> {}
             );
 
-            // TaskSubmitter that blocks for a long time — timeout should fire before it completes
+            // ShardRequestClient that blocks for a long time — timeout should fire before it completes
             final ActionListener<Void> finalStageListener = stageListener;
-            TaskSubmitter slowSubmitter = (request, node, listener) -> {
+            ShardRequestClient slowClient = (request, node, listener) -> {
                 new Thread(() -> {
                     try {
                         boolean released = blockLatch.await(10, TimeUnit.SECONDS);
@@ -392,10 +422,10 @@ public class AnalyticsShardDispatchIT extends OpenSearchIntegTestCase {
                         return;
                     }
                     listener.onFailure(new TaskCancelledException("task cancelled [timeout]"));
-                }, "slow-submitter").start();
+                }, "slow-client").start();
             };
 
-            StageExecution stageExecution = buildBlockingStageExec(queryTask, slowSubmitter, finalStageListener);
+            FanOutStageExecution stageExecution = buildBlockingStageExec(queryTask, slowClient, finalStageListener);
 
             long startNanos = System.nanoTime();
             stageExecution.run();

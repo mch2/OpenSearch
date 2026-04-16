@@ -72,7 +72,13 @@ pub async fn execute_query(
     let mut config = SessionConfig::new();
     config.options_mut().execution.parquet.pushdown_filters = false;
     config.options_mut().execution.target_partitions = 4;
-    config.options_mut().execution.batch_size = 8192;
+    // Honor ANALYTICS_DF_BATCH_SIZE env var (test-only) to force small batches
+    // so multi-batch streaming through the per-shard execution path is exercised.
+    let batch_size = std::env::var("ANALYTICS_DF_BATCH_SIZE")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(8192);
+    config.options_mut().execution.batch_size = batch_size;
 
     let state = SessionStateBuilder::new()
         .with_config(config)

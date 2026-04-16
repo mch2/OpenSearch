@@ -17,10 +17,8 @@ import org.apache.logging.log4j.Logger;
 import org.opensearch.action.ActionRequest;
 import org.opensearch.analytics.exec.AnalyticsQueryAction;
 import org.opensearch.analytics.exec.AnalyticsSearchService;
-import org.opensearch.analytics.exec.AnalyticsShardAction;
 import org.opensearch.analytics.exec.DefaultPlanExecutor;
 import org.opensearch.analytics.exec.QueryPlanExecutor;
-import org.opensearch.analytics.exec.TransportAnalyticsShardAction;
 import org.opensearch.analytics.planner.CapabilityRegistry;
 import org.opensearch.analytics.planner.FieldStorageResolver;
 import org.opensearch.analytics.schema.OpenSearchSchemaBuilder;
@@ -113,6 +111,11 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
 
         CapabilityRegistry capabilityRegistry = new CapabilityRegistry(backEnds, fieldStorageFactory, scanFormats);
 
+        if (backEnds.isEmpty()) {
+            throw new IllegalStateException("AnalyticsPlugin: no AnalyticsSearchBackendPlugin loaded — scheduler needs a primary backend");
+        }
+        AnalyticsSearchBackendPlugin primaryBackend = backEnds.get(0);
+
         // Build backends map for AnalyticsSearchService
         Map<String, AnalyticsSearchBackendPlugin> backEndsMap = new LinkedHashMap<>();
         for (AnalyticsSearchBackendPlugin be : backEnds) {
@@ -120,10 +123,11 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
         }
         AnalyticsSearchService searchService = new AnalyticsSearchService(backEndsMap);
 
-        // CapabilityRegistry and EngineContext are returned as components so Guice can
-        // inject them into DefaultPlanExecutor (which is a HandledTransportAction
-        // registered via getActions() — Guice constructs it after createComponents).
-        return List.of(searchService, ctx, capabilityRegistry);
+        // CapabilityRegistry, EngineContext, and the primary backend are returned as
+        // components so Guice can inject them into DefaultPlanExecutor and StageExecutor
+        // (which are HandledTransportActions registered via getActions() — Guice
+        // constructs them after createComponents).
+        return List.of(searchService, ctx, capabilityRegistry, primaryBackend);
     }
 
     @Override
@@ -133,15 +137,17 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
             b.bind(new TypeLiteral<QueryPlanExecutor<RelNode, Iterable<Object[]>>>() {
             }).to(DefaultPlanExecutor.class);
             b.bind(EngineContext.class).to(DefaultEngineContext.class);
+            // Bind the interface so StageExecutor's @Inject constructor can resolve it.
+            // loadExtensions() has already populated backEnds by the time createGuiceModules runs.
+            if (backEnds.isEmpty() == false) {
+                b.bind(AnalyticsSearchBackendPlugin.class).toInstance(backEnds.get(0));
+            }
         });
     }
 
     @Override
     public List<ActionHandler<? extends ActionRequest, ? extends ActionResponse>> getActions() {
-        return List.of(
-            new ActionHandler<>(AnalyticsShardAction.INSTANCE, TransportAnalyticsShardAction.class),
-            new ActionHandler<>(AnalyticsQueryAction.INSTANCE, DefaultPlanExecutor.class)
-        );
+        return List.of(new ActionHandler<>(AnalyticsQueryAction.INSTANCE, DefaultPlanExecutor.class));
     }
 
     private SqlOperatorTable aggregateOperatorTables() {

@@ -8,6 +8,7 @@
 
 package org.opensearch.analytics.exec;
 
+import org.opensearch.analytics.backend.FragmentExecutionResponse;
 import org.opensearch.test.OpenSearchTestCase;
 
 import java.util.ArrayList;
