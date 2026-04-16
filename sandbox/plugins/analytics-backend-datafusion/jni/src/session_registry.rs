@@ -44,8 +44,9 @@ static SESSIONS: Lazy<Mutex<HashMap<i64, SessionState>>> =
 pub struct SessionState {
     /// Registered partition streams, keyed by stage input ID (e.g. `__stage_0_input__`).
     pub partition_streams: HashMap<String, Arc<FfiPartitionStream>>,
-    /// Sender handles → mpsc senders. Java pushes batches through these.
-    pub senders: HashMap<i64, mpsc::UnboundedSender<Result<RecordBatch, DataFusionError>>>,
+    /// Sender handles → bounded mpsc senders. Java pushes batches through these.
+    /// Uses `blocking_send` to provide backpressure when the channel is full.
+    pub senders: HashMap<i64, mpsc::Sender<Result<RecordBatch, DataFusionError>>>,
     /// Output stream handle → SendableRecordBatchStream (set after execute).
     pub output_streams: HashMap<i64, SendableRecordBatchStream>,
 }
@@ -98,24 +99,39 @@ pub fn create_partition_stream(
 }
 
 /// Push a record batch through a sender handle.
+///
+/// Uses `blocking_send` on the bounded channel. If the channel is full (all
+/// slots occupied), the calling thread blocks until DataFusion's poll loop
+/// consumes a batch. This provides backpressure to the Java transport thread.
+///
+/// **Must not be called from a tokio async context** — `blocking_send` panics
+/// inside a tokio runtime. The caller (Java FFM downcall) runs on a plain
+/// OS thread, so this is safe.
 pub fn push_batch(
     sender_handle: i64,
     batch: RecordBatch,
 ) -> Result<(), DataFusionError> {
-    let sessions = SESSIONS.lock().unwrap();
-    // Search all sessions for the sender handle
-    for session in sessions.values() {
-        if let Some(tx) = session.senders.get(&sender_handle) {
-            tx.send(Ok(batch)).map_err(|_| {
-                DataFusionError::Execution("Channel closed; receiver dropped".to_string())
-            })?;
-            return Ok(());
+    // Clone the sender under the lock, then send outside the lock.
+    // This avoids holding the global sessions lock while blocking on
+    // a full channel (which would deadlock if the consumer also needs
+    // the lock).
+    let tx = {
+        let sessions = SESSIONS.lock().unwrap();
+        let mut found = None;
+        for session in sessions.values() {
+            if let Some(tx) = session.senders.get(&sender_handle) {
+                found = Some(tx.clone());
+                break;
+            }
         }
-    }
-    Err(DataFusionError::Execution(format!(
-        "Sender handle {} not found",
-        sender_handle
-    )))
+        found.ok_or_else(|| {
+            DataFusionError::Execution(format!("Sender handle {} not found", sender_handle))
+        })?
+    };
+    // Send outside the lock — may block if channel is full.
+    tx.blocking_send(Ok(batch)).map_err(|_| {
+        DataFusionError::Execution("Channel closed; receiver dropped".to_string())
+    })
 }
 
 /// Close (drop) a sender, signaling EOF to the receiver. Idempotent.

@@ -14,11 +14,13 @@
 //! No JNI types appear in this file — the `Ffi` prefix signals "fed via Foreign
 //! Function Interface"; the struct has no knowledge that the consumer is Java.
 //!
-//! ## Unbounded channel (MVP limitation)
+//! ## Bounded channel (backpressure)
 //!
-//! The channel is unbounded (`tokio::sync::mpsc::unbounded_channel`). Fast producers
-//! can outrun the consumer and grow coordinator memory without bound. Bounded
-//! backpressure is future work.
+//! The channel is bounded with capacity 2 (double-buffering). When the buffer
+//! is full, the producer blocks in `blocking_send` until DataFusion's poll loop
+//! consumes a batch. This provides natural backpressure — the Java transport
+//! thread is held, which holds the `PendingExecutions` permit, which prevents
+//! the next shard request from dispatching.
 
 use std::fmt;
 use std::sync::{Arc, Mutex};
@@ -31,16 +33,20 @@ use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::PartitionStream;
 use datafusion::physical_plan::SendableRecordBatchStream;
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio_stream::wrappers::ReceiverStream;
 
-/// A `PartitionStream` fed by an mpsc channel.
+/// Bounded channel capacity. Double-buffering: one batch being processed by
+/// DataFusion, one queued and ready. Producers block when both slots are full.
+const CHANNEL_CAPACITY: usize = 2;
+
+/// A `PartitionStream` fed by a bounded mpsc channel.
 ///
 /// Constructed via [`FfiPartitionStream::new`], which returns the stream and
 /// the corresponding sender. The sender is stored separately in the session
 /// registry and exposed to Java through a handle.
 pub struct FfiPartitionStream {
     schema: SchemaRef,
-    receiver: Arc<Mutex<Option<mpsc::UnboundedReceiver<Result<RecordBatch, DataFusionError>>>>>,
+    receiver: Arc<Mutex<Option<mpsc::Receiver<Result<RecordBatch, DataFusionError>>>>>,
 }
 
 impl FfiPartitionStream {
@@ -50,8 +56,8 @@ impl FfiPartitionStream {
     /// signals EOF — the receiver stream will yield `None` after draining.
     pub fn new(
         schema: SchemaRef,
-    ) -> (Self, mpsc::UnboundedSender<Result<RecordBatch, DataFusionError>>) {
-        let (tx, rx) = mpsc::unbounded_channel();
+    ) -> (Self, mpsc::Sender<Result<RecordBatch, DataFusionError>>) {
+        let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
         let stream = Self {
             schema,
             receiver: Arc::new(Mutex::new(Some(rx))),
@@ -80,7 +86,7 @@ impl PartitionStream for FfiPartitionStream {
             .unwrap()
             .take()
             .expect("execute() called more than once on FfiPartitionStream");
-        let stream = UnboundedReceiverStream::new(receiver);
+        let stream = ReceiverStream::new(receiver);
         Box::pin(RecordBatchStreamAdapter::new(self.schema.clone(), stream))
     }
 }
@@ -104,20 +110,24 @@ mod tests {
         .unwrap()
     }
 
-    /// Task 16.1: create, push 3 batches via sender, iterate stream → 3 batches
+    /// Task 16.1: create, push 3 batches via sender, iterate stream → 3 batches.
+    /// Producer and consumer run concurrently since the channel is bounded.
     #[tokio::test]
     async fn test_push_and_consume() {
         let schema = test_schema();
         let (stream, tx) = FfiPartitionStream::new(schema.clone());
 
-        // Push 3 batches
-        tx.send(Ok(test_batch(&schema, &[1, 2]))).unwrap();
-        tx.send(Ok(test_batch(&schema, &[3, 4]))).unwrap();
-        tx.send(Ok(test_batch(&schema, &[5]))).unwrap();
-        drop(tx); // signal EOF
-
+        // Start consuming in a separate task (bounded channel requires concurrent drain)
         let ctx = Arc::new(TaskContext::default());
         let mut output = stream.execute(ctx);
+
+        let producer_schema = schema.clone();
+        let producer = tokio::spawn(async move {
+            tx.send(Ok(test_batch(&producer_schema, &[1, 2]))).await.unwrap();
+            tx.send(Ok(test_batch(&producer_schema, &[3, 4]))).await.unwrap();
+            tx.send(Ok(test_batch(&producer_schema, &[5]))).await.unwrap();
+            drop(tx); // signal EOF
+        });
 
         let mut batch_count = 0;
         let mut total_rows = 0;
@@ -126,6 +136,7 @@ mod tests {
             batch_count += 1;
             total_rows += batch.num_rows();
         }
+        producer.await.unwrap();
         assert_eq!(batch_count, 3);
         assert_eq!(total_rows, 5);
     }
