@@ -17,6 +17,7 @@
 package org.opensearch.arrow.flight.transport;
 
 import org.apache.arrow.flight.FlightRuntimeException;
+import org.apache.arrow.vector.VectorSchemaRoot;
 import org.opensearch.Version;
 import org.opensearch.cluster.node.DiscoveryNode;
 import org.opensearch.common.io.stream.BytesStreamOutput;
@@ -155,8 +156,21 @@ class FlightOutboundHandler extends ProtocolOutboundHandler {
         }
 
         try {
-            try (VectorStreamOutput out = new VectorStreamOutput(flightChannel.getAllocator(), flightChannel.getRoot())) {
+            VectorStreamOutput out;
+            if (task.response() instanceof ArrowBatchResponse arrowResponse) {
+                // Native Arrow path: zero-copy transfer producer's vectors into shared root
+                VectorSchemaRoot sharedRoot = flightChannel.getRoot();
+                if (sharedRoot == null) {
+                    // First batch: create the shared root with the same schema
+                    sharedRoot = VectorSchemaRoot.create(arrowResponse.getRoot().getSchema(), flightChannel.getAllocator());
+                }
+                arrowResponse.transferTo(sharedRoot);
+                out = VectorStreamOutput.forNativeArrow(sharedRoot);
+            } else {
+                out = VectorStreamOutput.create(flightChannel.getAllocator(), flightChannel.getRoot());
                 task.response().writeTo(out);
+            }
+            try (out) {
                 flightChannel.sendBatch(getHeaderBuffer(task.requestId(), task.nodeVersion(), task.features()), out);
                 messageListener.onResponseSent(task.requestId(), task.action(), task.response());
             }
