@@ -28,6 +28,7 @@ import java.util.List;
 public class RowProducingSinkTests extends OpenSearchTestCase {
 
     private BufferAllocator allocator;
+    private int batchCounter;
 
     @Override
     public void setUp() throws Exception {
@@ -147,7 +148,8 @@ public class RowProducingSinkTests extends OpenSearchTestCase {
     private VectorSchemaRoot makeVsr(List<String> fieldNames, Object[][] rows) {
         List<Field> fields = fieldNames.stream().map(name -> new Field(name, FieldType.nullable(ArrowType.Utf8.INSTANCE), null)).toList();
         Schema schema = new Schema(fields);
-        VectorSchemaRoot vsr = VectorSchemaRoot.create(schema, allocator);
+        BufferAllocator childAllocator = allocator.newChildAllocator("test-batch-" + batchCounter++, 0, Long.MAX_VALUE);
+        VectorSchemaRoot vsr = VectorSchemaRoot.create(schema, childAllocator);
         vsr.allocateNew();
         int rowCount = rows.length;
         for (int col = 0; col < fieldNames.size(); col++) {

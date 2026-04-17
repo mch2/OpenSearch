@@ -52,7 +52,14 @@ public class DatafusionSearchExecEngine implements SearchExecEngine<ExecutionCon
         DatafusionSearcher searcher = datafusionContext.getSearcher();
         searcher.search(datafusionContext);
         StreamHandle handle = datafusionContext.takeStreamHandle();
-        BufferAllocator allocator = allocatorFactory.get();
+        // If the caller supplies an allocator (e.g. Flight's channel allocator), create
+        // a child from it so the stream's buffers live in the caller's tree — keeps
+        // transferTo() truly zero-copy and avoids cross-tree close races. Otherwise
+        // fall back to the backend's own root.
+        BufferAllocator parent = requestContext.getAllocator();
+        BufferAllocator allocator = parent != null
+            ? parent.newChildAllocator("datafusion-stream", 0, Long.MAX_VALUE)
+            : allocatorFactory.get();
         return new DatafusionResultStream(handle, allocator);
     }
 

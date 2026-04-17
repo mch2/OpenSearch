@@ -8,6 +8,7 @@
 
 package org.opensearch.analytics.backend;
 
+import org.apache.arrow.memory.BufferAllocator;
 import org.opensearch.action.search.SearchShardTask;
 import org.opensearch.index.engine.exec.IndexReaderProvider.Reader;
 
@@ -23,6 +24,7 @@ public class ExecutionContext {
     private final Reader reader;
     private final SearchShardTask task;
     private byte[] fragmentBytes;
+    private BufferAllocator allocator;
 
     /**
      * Constructs an execution context.
@@ -59,5 +61,23 @@ public class ExecutionContext {
     /** Sets the backend-specific serialized plan fragment bytes. */
     public void setFragmentBytes(byte[] fragmentBytes) {
         this.fragmentBytes = fragmentBytes;
+    }
+
+    /**
+     * Returns the allocator to use as the parent when creating result-stream
+     * buffers, or null if the backend should use its own default allocator.
+     *
+     * <p>Set to the transport channel's allocator for requests coming in over
+     * Arrow Flight — producing buffers in the transport's allocator tree lets
+     * the streaming framework do true zero-copy transfer into the wire-side
+     * root without cross-tree accounting races.
+     */
+    public BufferAllocator getAllocator() {
+        return allocator;
+    }
+
+    /** Sets the parent allocator for result-stream buffer allocations. */
+    public void setAllocator(BufferAllocator allocator) {
+        this.allocator = allocator;
     }
 }

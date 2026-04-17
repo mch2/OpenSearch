@@ -10,6 +10,7 @@ package org.opensearch.be.datafusion;
 
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
+import org.apache.arrow.vector.VectorSchemaRoot;
 import org.opensearch.analytics.backend.EngineResultBatch;
 import org.opensearch.be.datafusion.jni.NativeBridge;
 import org.opensearch.core.action.ActionListener;
@@ -210,6 +211,49 @@ public class DatafusionResultStreamTests extends OpenSearchTestCase {
         stream.close();
         // Second close should not throw (NativeHandle uses AtomicBoolean)
         stream.close();
+    }
+
+    /**
+     * Validates: Requirements 1.2
+     * ArrowResultBatch.getArrowRoot() returns the underlying VectorSchemaRoot.
+     */
+    public void testGetArrowRootReturnsVSR() throws Exception {
+        try (DatafusionResultStream stream = createStream("SELECT message, message2 FROM test_table")) {
+            Iterator<EngineResultBatch> it = stream.iterator();
+            assertTrue(it.hasNext());
+            EngineResultBatch batch = it.next();
+            VectorSchemaRoot root = batch.getArrowRoot();
+            assertNotNull("getArrowRoot() must return a non-null VectorSchemaRoot", root);
+            assertEquals(batch.getRowCount(), root.getRowCount());
+            assertEquals(batch.getFieldNames().size(), root.getSchema().getFields().size());
+            // Verify the same instance is returned on repeated calls
+            assertSame(root, batch.getArrowRoot());
+        }
+    }
+
+    /**
+     * Validates: Requirements 1.2
+     * ArrowResultBatch.getArrowRoot() throws IllegalStateException after the iterator advances past the batch.
+     */
+    public void testGetArrowRootAfterAdvanceThrows() throws Exception {
+        try (DatafusionResultStream stream = createStream("SELECT message FROM test_table")) {
+            Iterator<EngineResultBatch> it = stream.iterator();
+            assertTrue(it.hasNext());
+            EngineResultBatch firstBatch = it.next();
+            // Batch is valid right now
+            assertNotNull(firstBatch.getArrowRoot());
+
+            // Bump the iterator generation to simulate advancing past this batch.
+            // BatchIterator.generation is package-private, so we can access it directly.
+            DatafusionResultStream.BatchIterator batchIterator = (DatafusionResultStream.BatchIterator) it;
+            batchIterator.generation++;
+
+            IllegalStateException ex = expectThrows(IllegalStateException.class, firstBatch::getArrowRoot);
+            assertTrue(ex.getMessage().contains("no longer valid"));
+
+            // Restore generation so close() doesn't interact with a stale state
+            batchIterator.generation--;
+        }
     }
 
     private DatafusionResultStream createStream(String sql) {

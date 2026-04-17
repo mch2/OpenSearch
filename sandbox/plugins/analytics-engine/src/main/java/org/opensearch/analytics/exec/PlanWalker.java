@@ -170,15 +170,19 @@ public class PlanWalker {
     private void wireCompletionListener(SinkProvidingStageExecution rootExec) {
         rootExec.addStateListener((from, to) -> {
             switch (to) {
-                case SUCCEEDED -> fireTerminal(() -> completionListener.onResponse(rootExec.sink().readResult()));
+                case SUCCEEDED -> fireTerminal(() -> {
+                    try {
+                        completionListener.onResponse(rootExec.sink().readResult());
+                    } finally {
+                        rootExec.sink().close();
+                    }
+                });
                 case FAILED, CANCELLED -> {
+                    rootExec.sink().close();
                     Exception failure = rootExec.getFailure();
                     if (config.parentTask() instanceof CancellableTask ct && ct.isCancelled()) {
                         fireTerminal(() -> completionListener.onFailure(new TaskCancelledException("query cancelled")));
                     } else if (failure != null) {
-                        // The failure is already wrapped as "Stage N failed" at the point of origin
-                        // (see ShardScanStageExecution.dispatchShardTask.onFailure). Forward as-is
-                        // so the originating stage id is preserved through propagation.
                         fireTerminal(() -> completionListener.onFailure(failure));
                     } else {
                         fireTerminal(() -> completionListener.onFailure(

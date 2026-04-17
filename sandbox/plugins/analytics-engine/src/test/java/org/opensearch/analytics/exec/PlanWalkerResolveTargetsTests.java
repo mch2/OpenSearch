@@ -20,7 +20,8 @@ import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.opensearch.action.support.PlainActionFuture;
-import org.opensearch.analytics.backend.ScanResponse;
+import org.apache.arrow.vector.VectorSchemaRoot;
+import org.opensearch.analytics.exec.action.FragmentExecutionResponse;
 import org.opensearch.analytics.exec.action.FragmentExecutionRequest;
 import org.opensearch.analytics.exec.stage.StageExecutionBuilder;
 import org.opensearch.analytics.planner.dag.ExchangeInfo;
@@ -104,6 +105,7 @@ public class PlanWalkerResolveTargetsTests extends OpenSearchTestCase {
         DiscoveryNodes discoveryNodes = mock(DiscoveryNodes.class);
         for (int i = 0; i < numShards; i++) {
             DiscoveryNode node = mock(DiscoveryNode.class);
+            when(node.getId()).thenReturn("node_" + i);
             when(discoveryNodes.get("node_" + i)).thenReturn(node);
         }
         when(clusterState.nodes()).thenReturn(discoveryNodes);
@@ -146,19 +148,19 @@ public class PlanWalkerResolveTargetsTests extends OpenSearchTestCase {
 
         AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(mock(TransportService.class), clusterService) {
             @Override
-            public void dispatchScan(
+            public void dispatchFragment(
                 FragmentExecutionRequest request,
                 DiscoveryNode node,
-                StreamingResponseListener<ScanResponse> listener,
+                StreamingResponseListener<FragmentExecutionResponse> listener,
                 Task _parentTask,
                 PendingExecutions _pending
             ) {
                 capturedRequests.add(request);
-                listener.onStreamResponse(new ScanResponse(List.of(), List.of()), true);
+                listener.onStreamResponse(MockFragmentResponse.create(List.of(), List.of()), true);
             }
         };
 
-        new EventDrivenScheduler(
+        new QueryScheduler(
             new StageExecutionBuilder(clusterService, dispatcher, null)
         ).execute(QueryContext.forTest(dag, null), future);
         future.actionGet();
@@ -200,19 +202,19 @@ public class PlanWalkerResolveTargetsTests extends OpenSearchTestCase {
 
         AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(mock(TransportService.class), clusterService) {
             @Override
-            public void dispatchScan(
+            public void dispatchFragment(
                 FragmentExecutionRequest request,
                 DiscoveryNode node,
-                StreamingResponseListener<ScanResponse> listener,
+                StreamingResponseListener<FragmentExecutionResponse> listener,
                 Task _parentTask,
                 PendingExecutions _pending
             ) {
                 capturedRequests.add(request);
-                listener.onStreamResponse(new ScanResponse(List.of(), List.of()), true);
+                listener.onStreamResponse(MockFragmentResponse.create(List.of(), List.of()), true);
             }
         };
 
-        new EventDrivenScheduler(
+        new QueryScheduler(
             new StageExecutionBuilder(clusterService, dispatcher, null)
         ).execute(QueryContext.forTest(dag, null), future);
         future.actionGet();
@@ -249,19 +251,19 @@ public class PlanWalkerResolveTargetsTests extends OpenSearchTestCase {
 
         AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(mock(TransportService.class), clusterService) {
             @Override
-            public void dispatchScan(
+            public void dispatchFragment(
                 FragmentExecutionRequest request,
                 DiscoveryNode node,
-                StreamingResponseListener<ScanResponse> listener,
+                StreamingResponseListener<FragmentExecutionResponse> listener,
                 Task _parentTask,
                 PendingExecutions _pending
             ) {
                 capturedRequests.add(request);
-                listener.onStreamResponse(new ScanResponse(List.of(), List.of()), true);
+                listener.onStreamResponse(MockFragmentResponse.create(List.of(), List.of()), true);
             }
         };
 
-        new EventDrivenScheduler(
+        new QueryScheduler(
             new StageExecutionBuilder(clusterService, dispatcher, null)
         ).execute(QueryContext.forTest(dag, null), future);
         future.actionGet();

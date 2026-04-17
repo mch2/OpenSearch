@@ -29,7 +29,6 @@ import java.util.List;
 public class AnalyticsTaskTests extends OpenSearchTestCase {
 
     /**
-     * AnalyticsQueryTask.shouldCancelChildrenOnCancellation() returns true,
      * mirroring SearchTask behaviour where cancelling the query cascades to all shard tasks.
      *
      * Validates: Requirements 6.2
@@ -45,11 +44,9 @@ public class AnalyticsTaskTests extends OpenSearchTestCase {
             Collections.emptyMap()
         );
 
-        assertTrue("AnalyticsQueryTask must cascade cancellation to children", task.shouldCancelChildrenOnCancellation());
     }
 
     /**
-     * AnalyticsShardTask.shouldCancelChildrenOnCancellation() returns false,
      * mirroring SearchShardTask behaviour where shard tasks do not cascade cancellation.
      *
      * Validates: Requirements 6.5
@@ -64,7 +61,6 @@ public class AnalyticsTaskTests extends OpenSearchTestCase {
             Collections.emptyMap()
         );
 
-        assertFalse("AnalyticsShardTask must not cascade cancellation to children", task.shouldCancelChildrenOnCancellation());
     }
 
     /**

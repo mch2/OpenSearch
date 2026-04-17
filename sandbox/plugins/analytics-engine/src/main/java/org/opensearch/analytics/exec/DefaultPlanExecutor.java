@@ -115,11 +115,19 @@ public class DefaultPlanExecutor extends HandledTransportAction<ActionRequest, A
         // walker has already cascaded cancellations by the time we see the failure.
         ActionListener<Iterable<Object[]>> listener = ActionListener.wrap(result -> {
             config.closeBufferAllocator();
-            taskManager.unregister(queryTask);
+            try {
+                taskManager.unregister(queryTask);
+            } catch (Exception ignore) {
+                // Task may already be unregistered by timeout cancellation listener
+            }
             future.onResponse(result);
         }, e -> {
             config.closeBufferAllocator();
-            taskManager.unregister(queryTask);
+            try {
+                taskManager.unregister(queryTask);
+            } catch (Exception ignore) {
+                // Task may already be unregistered by timeout cancellation listener
+            }
             future.onFailure(e);
         });
 

@@ -65,11 +65,14 @@
 package org.opensearch.analytics.exec.stage;
 
 import org.opensearch.analytics.exec.AnalyticsSearchTransportService;
+import org.opensearch.analytics.exec.MockFragmentResponse;
+import org.opensearch.analytics.exec.PendingExecutions;
 import org.opensearch.analytics.exec.QueryContext;
 import org.opensearch.analytics.exec.RowProducingSink;
 import org.opensearch.analytics.exec.StreamingResponseListener;
 
-import org.opensearch.analytics.backend.ScanResponse;
+import org.apache.arrow.vector.VectorSchemaRoot;
+import org.opensearch.analytics.exec.action.FragmentExecutionResponse;
 import org.opensearch.analytics.exec.action.FragmentExecutionRequest;
 import org.opensearch.analytics.exec.action.ShardTarget;
 import org.opensearch.analytics.planner.dag.Stage;
@@ -113,13 +116,13 @@ public class FanOutStageExecutionMetricsTests extends OpenSearchTestCase {
         // Use the raw sink directly (RowOutput wrapper no longer exists)
         RowProducingSink rawSink = new RowProducingSink();
 
-        List<StreamingResponseListener<ScanResponse>> captured = new ArrayList<>();
+        List<StreamingResponseListener<FragmentExecutionResponse>> captured = new ArrayList<>();
         AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(mock(TransportService.class), mock(ClusterService.class)) {
             @Override
-            public void dispatchScan(
+            public void dispatchFragment(
                 FragmentExecutionRequest request,
                 DiscoveryNode node,
-                StreamingResponseListener<ScanResponse> listener,
+                StreamingResponseListener<FragmentExecutionResponse> listener,
                 Task parentTask,
                 PendingExecutions _pending
             ) {
@@ -154,7 +157,7 @@ public class FanOutStageExecutionMetricsTests extends OpenSearchTestCase {
             for (int r = 0; r < rowsPerShard; r++) {
                 rows.add(new Object[] { "value_" + r });
             }
-            ScanResponse response = new ScanResponse(List.of("field"), rows);
+            FragmentExecutionResponse response = MockFragmentResponse.create(List.of("field"), rows);
             captured.get(i).onStreamResponse(response, true);
         }
 
@@ -184,6 +187,7 @@ public class FanOutStageExecutionMetricsTests extends OpenSearchTestCase {
         for (int i = 0; i < count; i++) {
             ShardId shardId = new ShardId(index, i);
             DiscoveryNode node = mock(DiscoveryNode.class);
+            when(node.getId()).thenReturn("node_" + i);
             targets.add(new ShardTarget(shardId, node));
         }
         return targets;

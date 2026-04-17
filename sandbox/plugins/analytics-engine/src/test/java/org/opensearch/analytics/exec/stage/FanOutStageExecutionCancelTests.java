@@ -65,12 +65,15 @@
 package org.opensearch.analytics.exec.stage;
 
 import org.opensearch.analytics.exec.AnalyticsSearchTransportService;
+import org.opensearch.analytics.exec.MockFragmentResponse;
+import org.opensearch.analytics.exec.PendingExecutions;
 import org.opensearch.analytics.exec.QueryContext;
 import org.opensearch.analytics.exec.RowProducingSink;
 import org.opensearch.analytics.exec.StreamingResponseListener;
 
 import org.opensearch.analytics.backend.ExchangeSink;
-import org.opensearch.analytics.backend.ScanResponse;
+import org.apache.arrow.vector.VectorSchemaRoot;
+import org.opensearch.analytics.exec.action.FragmentExecutionResponse;
 import org.opensearch.analytics.exec.action.FragmentExecutionRequest;
 import org.opensearch.analytics.exec.action.ShardTarget;
 import org.opensearch.analytics.planner.dag.Stage;
@@ -110,7 +113,7 @@ public class FanOutStageExecutionCancelTests extends OpenSearchTestCase {
 
     public void testCancelFromRunningTransitionsAndFiresStateListener() {
         int numTargets = 3;
-        List<StreamingResponseListener<ScanResponse>> captured = new ArrayList<>();
+        List<StreamingResponseListener<FragmentExecutionResponse>> captured = new ArrayList<>();
         ShardScanStageExecution task = buildExec(numTargets, captured);
 
         AtomicInteger cancelledTransitions = new AtomicInteger(0);
@@ -129,7 +132,7 @@ public class FanOutStageExecutionCancelTests extends OpenSearchTestCase {
 
     public void testDoubleCancelIdempotent() {
         int numTargets = 3;
-        List<StreamingResponseListener<ScanResponse>> captured = new ArrayList<>();
+        List<StreamingResponseListener<FragmentExecutionResponse>> captured = new ArrayList<>();
         ShardScanStageExecution task = buildExec(numTargets, captured);
 
         AtomicInteger cancelledTransitions = new AtomicInteger(0);
@@ -148,7 +151,7 @@ public class FanOutStageExecutionCancelTests extends OpenSearchTestCase {
     public void testInFlightResponsesAfterCancelIgnored() {
         int numTargets = 3;
         ExchangeSink rootSink = mock(ExchangeSink.class);
-        List<StreamingResponseListener<ScanResponse>> captured = new ArrayList<>();
+        List<StreamingResponseListener<FragmentExecutionResponse>> captured = new ArrayList<>();
         ShardScanStageExecution task = buildExec(numTargets, rootSink, captured);
 
         task.start();
@@ -157,8 +160,8 @@ public class FanOutStageExecutionCancelTests extends OpenSearchTestCase {
         task.cancel("cancelled");
         assertEquals(StageExecution.State.CANCELLED, task.getState());
 
-        ScanResponse response = new ScanResponse(List.of("field"), Collections.singletonList(new Object[] { "value" }));
-        for (StreamingResponseListener<ScanResponse> srl : captured) {
+        FragmentExecutionResponse response = MockFragmentResponse.create(List.of("field"), Collections.singletonList(new Object[] { "value" }));
+        for (StreamingResponseListener<FragmentExecutionResponse> srl : captured) {
             srl.onStreamResponse(response, true);
         }
 
@@ -168,7 +171,7 @@ public class FanOutStageExecutionCancelTests extends OpenSearchTestCase {
 
     public void testCancelFromCreatedState() {
         int numTargets = 3;
-        List<StreamingResponseListener<ScanResponse>> captured = new ArrayList<>();
+        List<StreamingResponseListener<FragmentExecutionResponse>> captured = new ArrayList<>();
         ShardScanStageExecution task = buildExec(numTargets, captured);
 
         assertEquals(StageExecution.State.CREATED, task.getState());
@@ -193,6 +196,7 @@ public class FanOutStageExecutionCancelTests extends OpenSearchTestCase {
         for (int i = 0; i < count; i++) {
             ShardId shardId = new ShardId(index, i);
             DiscoveryNode node = mock(DiscoveryNode.class);
+            when(node.getId()).thenReturn("node_" + i);
             targets.add(new ShardTarget(shardId, node));
         }
         return targets;
@@ -202,13 +206,13 @@ public class FanOutStageExecutionCancelTests extends OpenSearchTestCase {
         return target -> new FragmentExecutionRequest("test-query", stage.getStageId(), target.shardId(), List.of());
     }
 
-    private static AnalyticsSearchTransportService capturingDispatcher(List<StreamingResponseListener<ScanResponse>> captured) {
+    private static AnalyticsSearchTransportService capturingDispatcher(List<StreamingResponseListener<FragmentExecutionResponse>> captured) {
         return new AnalyticsSearchTransportService(mock(TransportService.class), mock(ClusterService.class)) {
             @Override
-            public void dispatchScan(
+            public void dispatchFragment(
                 FragmentExecutionRequest request,
                 DiscoveryNode node,
-                StreamingResponseListener<ScanResponse> streamListener,
+                StreamingResponseListener<FragmentExecutionResponse> streamListener,
                 Task parentTask,
                 PendingExecutions _pending
             ) {
@@ -217,7 +221,7 @@ public class FanOutStageExecutionCancelTests extends OpenSearchTestCase {
         };
     }
 
-    private ShardScanStageExecution buildExec(int numTargets, List<StreamingResponseListener<ScanResponse>> captured) {
+    private ShardScanStageExecution buildExec(int numTargets, List<StreamingResponseListener<FragmentExecutionResponse>> captured) {
         Stage stage = mockStage(numTargets);
         QueryContext config = QueryContext.forTest("test-query", null);
         RowProducingSink sinkForExec = new RowProducingSink();
@@ -234,7 +238,7 @@ public class FanOutStageExecutionCancelTests extends OpenSearchTestCase {
     private ShardScanStageExecution buildExec(
         int numTargets,
         ExchangeSink rootSink,
-        List<StreamingResponseListener<ScanResponse>> captured
+        List<StreamingResponseListener<FragmentExecutionResponse>> captured
     ) {
         Stage stage = mockStage(numTargets);
         QueryContext config = QueryContext.forTest("test-query", null);

@@ -8,6 +8,7 @@
 
 package org.opensearch.analytics.exec;
 
+import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
@@ -43,7 +44,13 @@ public class RowProducingSink implements ExchangeSink {
     @Override
     public void close() {
         for (VectorSchemaRoot batch : batches) {
+            BufferAllocator allocator = batch.getFieldVectors().isEmpty()
+                ? null
+                : batch.getFieldVectors().get(0).getAllocator();
             batch.close();
+            if (allocator != null) {
+                allocator.close();
+            }
         }
         batches.clear();
     }

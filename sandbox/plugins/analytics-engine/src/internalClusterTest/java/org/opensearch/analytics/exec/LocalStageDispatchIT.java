@@ -22,9 +22,9 @@ import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.opensearch.action.support.PlainActionFuture;
 import org.opensearch.analytics.AnalyticsPlugin;
-import org.opensearch.analytics.backend.ScanResponse;
-import org.opensearch.analytics.exec.action.AnalyticsScanAction;
+import org.opensearch.analytics.exec.action.FragmentExecutionAction;
 import org.opensearch.analytics.exec.action.FragmentExecutionRequest;
+import org.opensearch.analytics.exec.action.FragmentExecutionResponse;
 import org.opensearch.analytics.exec.stage.StageExecutionBuilder;
 import org.opensearch.analytics.exec.task.AnalyticsQueryTask;
 import org.opensearch.analytics.planner.dag.ExchangeInfo;
@@ -34,12 +34,12 @@ import org.opensearch.analytics.planner.dag.StageExecutionType;
 import org.opensearch.analytics.planner.dag.StagePlan;
 import org.opensearch.analytics.planner.rel.OpenSearchStageInputScan;
 import org.opensearch.analytics.planner.rel.OpenSearchTableScan;
+import org.opensearch.arrow.flight.transport.FlightStreamPlugin;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.core.tasks.TaskId;
 import org.opensearch.plugins.Plugin;
-import org.opensearch.tasks.Task;
 import org.opensearch.tasks.TaskManager;
 import org.opensearch.test.OpenSearchIntegTestCase;
 import org.opensearch.test.transport.MockTransportService;
@@ -56,6 +56,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
+import static org.opensearch.common.util.FeatureFlags.STREAM_TRANSPORT;
 
 /**
  * Integration tests for local stage dispatch through a real cluster.
@@ -76,7 +77,7 @@ public class LocalStageDispatchIT extends OpenSearchIntegTestCase {
 
     @Override
     protected Collection<Class<? extends Plugin>> nodePlugins() {
-        return List.of(AnalyticsPlugin.class, MockTransportService.TestPlugin.class, TestLocalStageBackendPlugin.class);
+        return List.of(AnalyticsPlugin.class, MockTransportService.TestPlugin.class, TestLocalStageBackendPlugin.class, FlightStreamPlugin.class);
     }
 
     // ─── Calcite helpers ────────────────────────────────────────────────
@@ -185,12 +186,13 @@ public class LocalStageDispatchIT extends OpenSearchIntegTestCase {
         for (String nodeName : internalCluster().getNodeNames()) {
             MockTransportService transportService = (MockTransportService) internalCluster().getInstance(TransportService.class, nodeName);
             transportService.<FragmentExecutionRequest>addRequestHandlingBehavior(
-                AnalyticsScanAction.NAME,
+                FragmentExecutionAction.NAME,
                 (handler, request, channel, task) -> {
                     for (int i = 0; i < batchesPerShard; i++) {
-                        ScanResponse response = new ScanResponse(List.of("val"), rows);
-                        channel.sendResponse(response);
+                        FragmentExecutionResponse response = MockArrowResponse.create(List.of("val"), rows);
+                        channel.sendResponseBatch(response);
                     }
+                    channel.completeStream();
                 }
             );
         }
@@ -204,12 +206,14 @@ public class LocalStageDispatchIT extends OpenSearchIntegTestCase {
         for (String nodeName : internalCluster().getNodeNames()) {
             MockTransportService transportService = (MockTransportService) internalCluster().getInstance(TransportService.class, nodeName);
             transportService.<FragmentExecutionRequest>addRequestHandlingBehavior(
-                AnalyticsScanAction.NAME,
+                FragmentExecutionAction.NAME,
                 (handler, request, channel, task) -> {
                     if (requestCount.incrementAndGet() == failOnN) {
                         channel.sendResponse(new RuntimeException("shard execution failed [mock]"));
                     } else {
-                        channel.sendResponse(new ScanResponse(List.of("val"), rows));
+                        FragmentExecutionResponse response = MockArrowResponse.create(List.of("val"), rows);
+                        channel.sendResponseBatch(response);
+                        channel.completeStream();
                     }
                 }
             );
@@ -223,10 +227,12 @@ public class LocalStageDispatchIT extends OpenSearchIntegTestCase {
         for (String nodeName : internalCluster().getNodeNames()) {
             MockTransportService transportService = (MockTransportService) internalCluster().getInstance(TransportService.class, nodeName);
             transportService.<FragmentExecutionRequest>addRequestHandlingBehavior(
-                AnalyticsScanAction.NAME,
+                FragmentExecutionAction.NAME,
                 (handler, request, channel, task) -> {
                     capturedParentTaskIds.add(task.getParentTaskId());
-                    channel.sendResponse(new ScanResponse(List.of("val"), rows));
+                    FragmentExecutionResponse response = MockArrowResponse.create(List.of("val"), rows);
+                    channel.sendResponseBatch(response);
+                    channel.completeStream();
                 }
             );
         }
@@ -252,15 +258,14 @@ public class LocalStageDispatchIT extends OpenSearchIntegTestCase {
     private Scheduler buildScheduler() {
         TransportService transportService = internalCluster().getInstance(TransportService.class, coordinatorNode());
         ClusterService clusterService = internalCluster().getInstance(ClusterService.class, coordinatorNode());
-        ShardTransportDispatcher dispatcher = new AnalyticsSearchTransportService(transportService, clusterService);
+        AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(transportService, clusterService);
         TestLocalStageBackendPlugin testBackend = new TestLocalStageBackendPlugin();
-        return new EventDrivenScheduler(
-            new StageExecutionBuilder(clusterService, dispatcher, testBackend, null, null),
-            dispatcher
+        return new QueryScheduler(
+            new StageExecutionBuilder(clusterService, dispatcher, java.util.Map.of(BACKEND_ID, testBackend))
         );
     }
 
-    private QueryContext buildConfig(QueryDAG dag, Task parentTask) {
+    private QueryContext buildConfig(QueryDAG dag, AnalyticsQueryTask parentTask) {
         return QueryContext.forTest(dag, parentTask);
     }
 
@@ -286,6 +291,7 @@ public class LocalStageDispatchIT extends OpenSearchIntegTestCase {
      * all routed to __stage_0_input__, future returns synthesized output,
      * rootSink is non-empty.
      */
+    @LockFeatureFlag(STREAM_TRANSPORT)
     public void testSingleChildAccumulatesBatches() throws Exception {
         int numShards = 3;
         createTestIndex(numShards);
@@ -327,6 +333,7 @@ public class LocalStageDispatchIT extends OpenSearchIntegTestCase {
      * 2 shards × 1 canned batch with 4 rows each → totalBatchesReceived == 2.
      * Each batch carries multiple rows to verify row-level data flows through.
      */
+    @LockFeatureFlag(STREAM_TRANSPORT)
     public void testMultipleBatchesPerShardArrivePipelined() throws Exception {
         int numShards = 2;
         createTestIndex(numShards);
@@ -369,6 +376,7 @@ public class LocalStageDispatchIT extends OpenSearchIntegTestCase {
      * 2 child stages × 2 shards each → batches routed to correct inputs,
      * no cross-routing.
      */
+    @LockFeatureFlag(STREAM_TRANSPORT)
     public void testMultipleChildStagesEachWithShards() throws Exception {
         int numShards = 2;
         createTestIndex(numShards);
@@ -407,6 +415,7 @@ public class LocalStageDispatchIT extends OpenSearchIntegTestCase {
      * After all shard responses arrive, all inputs should be closed and
      * the blocking output stream should have unblocked.
      */
+    @LockFeatureFlag(STREAM_TRANSPORT)
     public void testInputClosedAfterAllShardsComplete() throws Exception {
         int numShards = 2;
         createTestIndex(numShards);
@@ -443,6 +452,7 @@ public class LocalStageDispatchIT extends OpenSearchIntegTestCase {
      * Mock shards return zero rows → engine sees N empty batches →
      * produces output → rootSink result is empty (no data rows from shards).
      */
+    @LockFeatureFlag(STREAM_TRANSPORT)
     public void testEmptyChildStageProducesEmptyOutput() throws Exception {
         int numShards = 2;
         createTestIndex(numShards);
@@ -482,6 +492,7 @@ public class LocalStageDispatchIT extends OpenSearchIntegTestCase {
      * ExecutionException wrapping RuntimeException("Stage 0 failed").
      * All inputs are closed and engine is closed.
      */
+    @LockFeatureFlag(STREAM_TRANSPORT)
     public void testSingleShardFailureClosesAllInputsAndFails() throws Exception {
         int numShards = 3;
         createTestIndex(numShards);
@@ -524,6 +535,7 @@ public class LocalStageDispatchIT extends OpenSearchIntegTestCase {
      * After successful dispatch, the drain thread captured by the engine
      * should be a virtual thread.
      */
+    @LockFeatureFlag(STREAM_TRANSPORT)
     public void testEngineDrainRunsOnVirtualThread() throws Exception {
         int numShards = 2;
         createTestIndex(numShards);
@@ -561,6 +573,7 @@ public class LocalStageDispatchIT extends OpenSearchIntegTestCase {
     /**
      * After a happy-path dispatch, engine.closeCount() == 1.
      */
+    @LockFeatureFlag(STREAM_TRANSPORT)
     public void testEngineCloseInvokedOnSuccess() throws Exception {
         int numShards = 2;
         createTestIndex(numShards);
@@ -596,6 +609,7 @@ public class LocalStageDispatchIT extends OpenSearchIntegTestCase {
     /**
      * After a failure-path dispatch, engine.closeCount() == 1.
      */
+    @LockFeatureFlag(STREAM_TRANSPORT)
     public void testEngineCloseInvokedOnShardFailure() throws Exception {
         int numShards = 2;
         createTestIndex(numShards);
@@ -632,6 +646,7 @@ public class LocalStageDispatchIT extends OpenSearchIntegTestCase {
      * Wraps the dispatcher's ActionListener in a CAS once-checker.
      * Verifies no double-signal occurs across happy and failure paths.
      */
+    @LockFeatureFlag(STREAM_TRANSPORT)
     public void testListenerSignaledExactlyOnce() throws Exception {
         int numShards = 2;
         createTestIndex(numShards);
@@ -690,6 +705,7 @@ public class LocalStageDispatchIT extends OpenSearchIntegTestCase {
      * Captures the incoming task's parentTaskId from mock shard handlers.
      * Asserts it equals the registered AnalyticsQueryTask's id.
      */
+    @LockFeatureFlag(STREAM_TRANSPORT)
     public void testParentTaskPropagatesToShardRequests() throws Exception {
         int numShards = 2;
         createTestIndex(numShards);

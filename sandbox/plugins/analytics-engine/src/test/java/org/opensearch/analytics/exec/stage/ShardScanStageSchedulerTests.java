@@ -257,6 +257,8 @@
 package org.opensearch.analytics.exec.stage;
 
 import org.opensearch.analytics.exec.AnalyticsSearchTransportService;
+import org.opensearch.analytics.exec.MockFragmentResponse;
+import org.opensearch.analytics.exec.PendingExecutions;
 import org.opensearch.analytics.exec.QueryContext;
 import org.opensearch.analytics.exec.RowProducingSink;
 import org.opensearch.analytics.exec.StreamingResponseListener;
@@ -271,7 +273,8 @@ import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.sql.type.SqlTypeName;
-import org.opensearch.analytics.backend.ScanResponse;
+import org.apache.arrow.vector.VectorSchemaRoot;
+import org.opensearch.analytics.exec.action.FragmentExecutionResponse;
 import org.opensearch.analytics.exec.action.FragmentExecutionRequest;
 // REMOVED stale scheduler import: ShardScanStageScheduler;
 import org.opensearch.analytics.planner.dag.Stage;
@@ -373,16 +376,16 @@ public class ShardScanStageSchedulerTests extends OpenSearchTestCase {
     private AnalyticsSearchTransportService immediateRowDispatcher(ClusterService clusterService) {
         return new AnalyticsSearchTransportService(mock(TransportService.class), clusterService) {
             @Override
-            public void dispatchScan(
+            public void dispatchFragment(
                 FragmentExecutionRequest request,
                 DiscoveryNode node,
-                StreamingResponseListener<ScanResponse> listener,
+                StreamingResponseListener<FragmentExecutionResponse> listener,
                 Task parentTask,
                 PendingExecutions _pending
             ) {
                 List<Object[]> rows = new ArrayList<>();
                 rows.add(new Object[] { "row_" + request.getShardId().id() });
-                listener.onStreamResponse(new ScanResponse(List.of("field_0"), rows), true);
+                listener.onStreamResponse(MockFragmentResponse.create(List.of("field_0"), rows), true);
             }
         };
     }

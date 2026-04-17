@@ -58,12 +58,14 @@ public class QueryScheduler implements Scheduler {
         walkerPool.put(queryId, walker);
 
         final AnalyticsQueryTask queryTask = config.parentTask();
-        queryTask.setOnCancelCallback(() -> {
-                String reason = "task cancelled: "
-                    + (queryTask.getReasonCancelled() != null ? queryTask.getReasonCancelled() : "unknown");
-                logger.info("[QueryScheduler] AnalyticsQueryTask.onCancelled fired, reason={}", reason);
-                walker.cancelAll(reason);
-            });
+        if (queryTask != null) {
+            queryTask.setOnCancelCallback(() -> {
+                    String reason = "task cancelled: "
+                        + (queryTask.getReasonCancelled() != null ? queryTask.getReasonCancelled() : "unknown");
+                    logger.info("[QueryScheduler] AnalyticsQueryTask.onCancelled fired, reason={}", reason);
+                    walker.cancelAll(reason);
+                });
+        }
         walker.walk();
     }
 

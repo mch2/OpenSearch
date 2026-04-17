@@ -45,9 +45,14 @@ dependencies {
   // Also provides calcite-core transitively via api.
   api project(':sandbox:libs:analytics-framework')
 
-  // Arrow — needed by RowBatchToArrowConverter and ArrowSchemaFromCalcite (main source)
+  // Arrow — needed by ArrowSchemaFromCalcite and FragmentExecutionResponse (main source)
   implementation "org.apache.arrow:arrow-vector:${versions.arrow}"
   implementation "org.apache.arrow:arrow-memory-core:${versions.arrow}"
+
+  // Arrow Flight RPC — compile-only for ArrowBatchResponse interface implemented by FragmentExecutionResponse.
+  // At runtime the arrow-flight-rpc plugin provides this on the classpath.
+  compileOnly project(':plugins:arrow-flight-rpc')
+  testCompileOnly project(':plugins:arrow-flight-rpc')
 
   // Guava — required at compile time because Calcite base classes expose guava types.
   // Uses custom config to bypass forbidden-dependencies.gradle check on compileClasspath.
@@ -77,7 +82,7 @@ dependencies {
   // Shared contract test suites from analytics-framework (e.g. ShuffleExchangeServiceContractTests)
   testImplementation testFixtures(project(':sandbox:libs:analytics-framework'))
 
-  // Arrow — needed for RowBatchToArrowConverter and ArrowSchemaFromCalcite unit tests
+  // Arrow — needed for ArrowSchemaFromCalcite and FragmentExecutionResponse unit tests
   testImplementation "org.apache.arrow:arrow-vector:${versions.arrow}"
   testImplementation "org.apache.arrow:arrow-memory-core:${versions.arrow}"
   testImplementation "org.apache.arrow:arrow-memory-unsafe:${versions.arrow}"

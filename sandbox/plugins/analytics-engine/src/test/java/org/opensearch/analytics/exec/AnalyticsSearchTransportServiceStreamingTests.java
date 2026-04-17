@@ -8,9 +8,10 @@
 
 package org.opensearch.analytics.exec;
 
-import org.opensearch.analytics.backend.ScanResponse;
-import org.opensearch.analytics.exec.action.AnalyticsScanAction;
+import org.apache.arrow.vector.VectorSchemaRoot;
+import org.opensearch.analytics.exec.action.FragmentExecutionAction;
 import org.opensearch.analytics.exec.action.FragmentExecutionRequest;
+import org.opensearch.analytics.exec.action.FragmentExecutionResponse;
 import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.node.DiscoveryNode;
 import org.opensearch.cluster.node.DiscoveryNodes;
@@ -21,11 +22,9 @@ import org.opensearch.transport.StreamTransportService;
 import org.opensearch.transport.Transport;
 import org.opensearch.transport.TransportException;
 import org.opensearch.transport.TransportRequest;
-import org.opensearch.transport.TransportRequestOptions;
 import org.opensearch.transport.TransportResponseHandler;
 import org.opensearch.transport.stream.StreamTransportResponse;
 
-import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -44,7 +43,7 @@ import static org.mockito.Mockito.when;
 /**
  * Tests for streaming transport dispatch in {@link AnalyticsSearchTransportService}.
  *
- * <p>These tests use {@link AnalyticsSearchTransportService#dispatchScan} and verify
+ * <p>These tests use {@link AnalyticsSearchTransportService#dispatchFragment} and verify
  * the look-ahead pattern that detects {@code isLast}.
  *
  * Validates: Requirements 3.1, 3.2, 3.3, 3.4, 3.5, 4.1, 4.2, 4.5
@@ -63,8 +62,10 @@ public class AnalyticsSearchTransportServiceStreamingTests extends OpenSearchTes
         );
     }
 
-    private ScanResponse dummyBatch(String label) {
-        return new ScanResponse(List.of("field"), Collections.singletonList(new Object[] { label }));
+    private FragmentExecutionResponse dummyBatch(String label) {
+        VectorSchemaRoot root = mock(VectorSchemaRoot.class);
+        when(root.getRowCount()).thenReturn(1);
+        return new FragmentExecutionResponse(root);
     }
 
     private StreamTransportService mockStreamTransportService() {
@@ -83,39 +84,40 @@ public class AnalyticsSearchTransportServiceStreamingTests extends OpenSearchTes
         return cs;
     }
 
-    private TransportResponseHandler<ScanResponse> captureHandler(
+    private TransportResponseHandler<FragmentExecutionResponse> captureHandler(
         StreamTransportService transportService,
         AnalyticsSearchTransportService dispatcher,
-        StreamingResponseListener<ScanResponse> listener
+        StreamingResponseListener<FragmentExecutionResponse> listener
     ) {
-        ArgumentCaptor<TransportResponseHandler<ScanResponse>> captor = ArgumentCaptor.forClass(TransportResponseHandler.class);
+        ArgumentCaptor<TransportResponseHandler<FragmentExecutionResponse>> captor = ArgumentCaptor.forClass(
+            TransportResponseHandler.class
+        );
 
         DiscoveryNode node = mock(DiscoveryNode.class);
         when(node.getId()).thenReturn("node-1");
         Task parentTask = mock(Task.class);
 
-        dispatcher.dispatchScan(dummyRequest(), node, listener, parentTask, new PendingExecutions(5));
+        dispatcher.dispatchFragment(dummyRequest(), node, listener, parentTask, new PendingExecutions(5));
 
         verify(transportService).sendChildRequest(
             any(Transport.Connection.class),
-            eq(AnalyticsScanAction.NAME),
+            eq(FragmentExecutionAction.NAME),
             any(TransportRequest.class),
             any(Task.class),
-            any(TransportRequestOptions.class),
             captor.capture()
         );
 
         return captor.getValue();
     }
 
-    private StreamTransportResponse<ScanResponse> mockStream(ScanResponse... batches) {
-        StreamTransportResponse<ScanResponse> stream = mock(StreamTransportResponse.class);
+    private StreamTransportResponse<FragmentExecutionResponse> mockStream(FragmentExecutionResponse... batches) {
+        StreamTransportResponse<FragmentExecutionResponse> stream = mock(StreamTransportResponse.class);
         if (batches.length == 0) {
             when(stream.nextResponse()).thenReturn(null);
         } else if (batches.length == 1) {
             when(stream.nextResponse()).thenReturn(batches[0]).thenReturn(null);
         } else {
-            ScanResponse[] rest = new ScanResponse[batches.length];
+            FragmentExecutionResponse[] rest = new FragmentExecutionResponse[batches.length];
             System.arraycopy(batches, 1, rest, 0, batches.length - 1);
             rest[batches.length - 1] = null;
             when(stream.nextResponse()).thenReturn(batches[0], rest);
@@ -126,12 +128,12 @@ public class AnalyticsSearchTransportServiceStreamingTests extends OpenSearchTes
     public void testSingleBatchStream() {
         StreamTransportService transportService = mockStreamTransportService();
         AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(transportService, mockClusterService());
-        StreamingResponseListener<ScanResponse> listener = mock(StreamingResponseListener.class);
+        StreamingResponseListener<FragmentExecutionResponse> listener = mock(StreamingResponseListener.class);
 
-        TransportResponseHandler<ScanResponse> handler = captureHandler(transportService, dispatcher, listener);
+        TransportResponseHandler<FragmentExecutionResponse> handler = captureHandler(transportService, dispatcher, listener);
 
-        ScanResponse batch = dummyBatch("batch-1");
-        StreamTransportResponse<ScanResponse> stream = mockStream(batch);
+        FragmentExecutionResponse batch = dummyBatch("batch-1");
+        StreamTransportResponse<FragmentExecutionResponse> stream = mockStream(batch);
 
         handler.handleStreamResponse(stream);
 
@@ -143,14 +145,14 @@ public class AnalyticsSearchTransportServiceStreamingTests extends OpenSearchTes
     public void testMultiBatchStream() {
         StreamTransportService transportService = mockStreamTransportService();
         AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(transportService, mockClusterService());
-        StreamingResponseListener<ScanResponse> listener = mock(StreamingResponseListener.class);
+        StreamingResponseListener<FragmentExecutionResponse> listener = mock(StreamingResponseListener.class);
 
-        TransportResponseHandler<ScanResponse> handler = captureHandler(transportService, dispatcher, listener);
+        TransportResponseHandler<FragmentExecutionResponse> handler = captureHandler(transportService, dispatcher, listener);
 
-        ScanResponse b1 = dummyBatch("b1");
-        ScanResponse b2 = dummyBatch("b2");
-        ScanResponse b3 = dummyBatch("b3");
-        StreamTransportResponse<ScanResponse> stream = mockStream(b1, b2, b3);
+        FragmentExecutionResponse b1 = dummyBatch("b1");
+        FragmentExecutionResponse b2 = dummyBatch("b2");
+        FragmentExecutionResponse b3 = dummyBatch("b3");
+        StreamTransportResponse<FragmentExecutionResponse> stream = mockStream(b1, b2, b3);
 
         handler.handleStreamResponse(stream);
 
@@ -163,15 +165,15 @@ public class AnalyticsSearchTransportServiceStreamingTests extends OpenSearchTes
     public void testStreamExceptionMidFlight() {
         StreamTransportService transportService = mockStreamTransportService();
         AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(transportService, mockClusterService());
-        StreamingResponseListener<ScanResponse> listener = mock(StreamingResponseListener.class);
+        StreamingResponseListener<FragmentExecutionResponse> listener = mock(StreamingResponseListener.class);
 
-        TransportResponseHandler<ScanResponse> handler = captureHandler(transportService, dispatcher, listener);
+        TransportResponseHandler<FragmentExecutionResponse> handler = captureHandler(transportService, dispatcher, listener);
 
-        ScanResponse b1 = dummyBatch("b1");
-        ScanResponse b2 = dummyBatch("b2");
+        FragmentExecutionResponse b1 = dummyBatch("b1");
+        FragmentExecutionResponse b2 = dummyBatch("b2");
         RuntimeException midFlightError = new RuntimeException("stream broke");
 
-        StreamTransportResponse<ScanResponse> stream = mock(StreamTransportResponse.class);
+        StreamTransportResponse<FragmentExecutionResponse> stream = mock(StreamTransportResponse.class);
         when(stream.nextResponse()).thenReturn(b1).thenReturn(b2).thenThrow(midFlightError);
 
         handler.handleStreamResponse(stream);
@@ -185,12 +187,12 @@ public class AnalyticsSearchTransportServiceStreamingTests extends OpenSearchTes
     public void testStreamClosedInFinally() throws Exception {
         StreamTransportService transportService = mockStreamTransportService();
         AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(transportService, mockClusterService());
-        StreamingResponseListener<ScanResponse> listener = mock(StreamingResponseListener.class);
+        StreamingResponseListener<FragmentExecutionResponse> listener = mock(StreamingResponseListener.class);
 
-        TransportResponseHandler<ScanResponse> handler = captureHandler(transportService, dispatcher, listener);
+        TransportResponseHandler<FragmentExecutionResponse> handler = captureHandler(transportService, dispatcher, listener);
 
         RuntimeException error = new RuntimeException("stream error");
-        StreamTransportResponse<ScanResponse> stream = mock(StreamTransportResponse.class);
+        StreamTransportResponse<FragmentExecutionResponse> stream = mock(StreamTransportResponse.class);
         when(stream.nextResponse()).thenThrow(error);
 
         handler.handleStreamResponse(stream);
@@ -201,11 +203,11 @@ public class AnalyticsSearchTransportServiceStreamingTests extends OpenSearchTes
     public void testNonStreamingFallback() {
         StreamTransportService transportService = mockStreamTransportService();
         AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(transportService, mockClusterService());
-        StreamingResponseListener<ScanResponse> listener = mock(StreamingResponseListener.class);
+        StreamingResponseListener<FragmentExecutionResponse> listener = mock(StreamingResponseListener.class);
 
-        TransportResponseHandler<ScanResponse> handler = captureHandler(transportService, dispatcher, listener);
+        TransportResponseHandler<FragmentExecutionResponse> handler = captureHandler(transportService, dispatcher, listener);
 
-        ScanResponse response = dummyBatch("single-response");
+        FragmentExecutionResponse response = dummyBatch("single-response");
 
         handler.handleResponse(response);
 
@@ -221,9 +223,9 @@ public class AnalyticsSearchTransportServiceStreamingTests extends OpenSearchTes
         when(node.getId()).thenReturn("node-1");
         Task parentTask = mock(Task.class);
 
-        AtomicReference<TransportResponseHandler<ScanResponse>> handler1Ref = new AtomicReference<>();
+        AtomicReference<TransportResponseHandler<FragmentExecutionResponse>> handler1Ref = new AtomicReference<>();
         doAnswer(invocation -> {
-            handler1Ref.set(invocation.getArgument(5));
+            handler1Ref.set(invocation.getArgument(4));
             return null;
         }).when(transportService)
             .sendChildRequest(
@@ -231,17 +233,17 @@ public class AnalyticsSearchTransportServiceStreamingTests extends OpenSearchTes
                 anyString(),
                 any(TransportRequest.class),
                 any(Task.class),
-                any(TransportRequestOptions.class),
                 any(TransportResponseHandler.class)
             );
 
-        StreamingResponseListener<ScanResponse> listener1 = mock(StreamingResponseListener.class);
-        dispatcher.dispatchScan(dummyRequest(), node, listener1, parentTask, new PendingExecutions(5));
+        StreamingResponseListener<FragmentExecutionResponse> listener1 = mock(StreamingResponseListener.class);
+        PendingExecutions pending = new PendingExecutions(1);
+        dispatcher.dispatchFragment(dummyRequest(), node, listener1, parentTask, pending);
         assertNotNull("handler1 must be captured", handler1Ref.get());
 
-        AtomicReference<TransportResponseHandler<ScanResponse>> handler2Ref = new AtomicReference<>();
+        AtomicReference<TransportResponseHandler<FragmentExecutionResponse>> handler2Ref = new AtomicReference<>();
         doAnswer(invocation -> {
-            handler2Ref.set(invocation.getArgument(5));
+            handler2Ref.set(invocation.getArgument(4));
             return null;
         }).when(transportService)
             .sendChildRequest(
@@ -249,12 +251,11 @@ public class AnalyticsSearchTransportServiceStreamingTests extends OpenSearchTes
                 anyString(),
                 any(TransportRequest.class),
                 any(Task.class),
-                any(TransportRequestOptions.class),
                 any(TransportResponseHandler.class)
             );
 
-        StreamingResponseListener<ScanResponse> listener2 = mock(StreamingResponseListener.class);
-        dispatcher.dispatchScan(dummyRequest(), node, listener2, parentTask, new PendingExecutions(5));
+        StreamingResponseListener<FragmentExecutionResponse> listener2 = mock(StreamingResponseListener.class);
+        dispatcher.dispatchFragment(dummyRequest(), node, listener2, parentTask, pending);
         assertNull("handler2 must be queued (not dispatched yet)", handler2Ref.get());
 
         handler1Ref.get().handleResponse(dummyBatch("done"));
@@ -270,9 +271,9 @@ public class AnalyticsSearchTransportServiceStreamingTests extends OpenSearchTes
         when(node.getId()).thenReturn("node-1");
         Task parentTask = mock(Task.class);
 
-        AtomicReference<TransportResponseHandler<ScanResponse>> handler1Ref = new AtomicReference<>();
+        AtomicReference<TransportResponseHandler<FragmentExecutionResponse>> handler1Ref = new AtomicReference<>();
         doAnswer(invocation -> {
-            handler1Ref.set(invocation.getArgument(5));
+            handler1Ref.set(invocation.getArgument(4));
             return null;
         }).when(transportService)
             .sendChildRequest(
@@ -280,17 +281,17 @@ public class AnalyticsSearchTransportServiceStreamingTests extends OpenSearchTes
                 anyString(),
                 any(TransportRequest.class),
                 any(Task.class),
-                any(TransportRequestOptions.class),
                 any(TransportResponseHandler.class)
             );
 
-        StreamingResponseListener<ScanResponse> listener1 = mock(StreamingResponseListener.class);
-        dispatcher.dispatchScan(dummyRequest(), node, listener1, parentTask, new PendingExecutions(5));
+        StreamingResponseListener<FragmentExecutionResponse> listener1 = mock(StreamingResponseListener.class);
+        PendingExecutions pendingF = new PendingExecutions(1);
+        dispatcher.dispatchFragment(dummyRequest(), node, listener1, parentTask, pendingF);
         assertNotNull("handler1 must be captured", handler1Ref.get());
 
-        AtomicReference<TransportResponseHandler<ScanResponse>> handler2Ref = new AtomicReference<>();
+        AtomicReference<TransportResponseHandler<FragmentExecutionResponse>> handler2Ref = new AtomicReference<>();
         doAnswer(invocation -> {
-            handler2Ref.set(invocation.getArgument(5));
+            handler2Ref.set(invocation.getArgument(4));
             return null;
         }).when(transportService)
             .sendChildRequest(
@@ -298,12 +299,11 @@ public class AnalyticsSearchTransportServiceStreamingTests extends OpenSearchTes
                 anyString(),
                 any(TransportRequest.class),
                 any(Task.class),
-                any(TransportRequestOptions.class),
                 any(TransportResponseHandler.class)
             );
 
-        StreamingResponseListener<ScanResponse> listener2 = mock(StreamingResponseListener.class);
-        dispatcher.dispatchScan(dummyRequest(), node, listener2, parentTask, new PendingExecutions(5));
+        StreamingResponseListener<FragmentExecutionResponse> listener2 = mock(StreamingResponseListener.class);
+        dispatcher.dispatchFragment(dummyRequest(), node, listener2, parentTask, pendingF);
         assertNull("handler2 must be queued", handler2Ref.get());
 
         handler1Ref.get().handleException(new TransportException("connection lost"));
@@ -325,10 +325,10 @@ public class AnalyticsSearchTransportServiceStreamingTests extends OpenSearchTes
         when(node.getId()).thenReturn("node-1");
         Task parentTask = mock(Task.class);
 
-        StreamingResponseListener<ScanResponse> listener = mock(StreamingResponseListener.class);
+        StreamingResponseListener<FragmentExecutionResponse> listener = mock(StreamingResponseListener.class);
 
         doAnswer(invocation -> {
-            TransportResponseHandler<ScanResponse> handler = invocation.getArgument(5);
+            TransportResponseHandler<FragmentExecutionResponse> handler = invocation.getArgument(4);
             handler.handleResponse(dummyBatch("done"));
             return null;
         }).when(transportService)
@@ -337,20 +337,18 @@ public class AnalyticsSearchTransportServiceStreamingTests extends OpenSearchTes
                 anyString(),
                 any(TransportRequest.class),
                 any(Task.class),
-                any(TransportRequestOptions.class),
                 any(TransportResponseHandler.class)
             );
 
-        dispatcher.dispatchScan(dummyRequest(), node, listener, parentTask, new PendingExecutions(5));
+        dispatcher.dispatchFragment(dummyRequest(), node, listener, parentTask, new PendingExecutions(5));
 
         verify(transportService).getConnection(resolvedNode);
 
         verify(transportService).sendChildRequest(
             eq(mockConnection),
-            eq(AnalyticsScanAction.NAME),
+            eq(FragmentExecutionAction.NAME),
             any(TransportRequest.class),
             eq(parentTask),
-            any(TransportRequestOptions.class),
             any(TransportResponseHandler.class)
         );
     }
@@ -368,15 +366,15 @@ public class AnalyticsSearchTransportServiceStreamingTests extends OpenSearchTes
         when(node.getId()).thenReturn("node-1");
         Task parentTask = mock(Task.class);
 
-        StreamingResponseListener<ScanResponse> listener = mock(StreamingResponseListener.class);
-        dispatcher.dispatchScan(dummyRequest(), node, listener, parentTask, new PendingExecutions(5));
+        StreamingResponseListener<FragmentExecutionResponse> listener = mock(StreamingResponseListener.class);
+        dispatcher.dispatchFragment(dummyRequest(), node, listener, parentTask, new PendingExecutions(5));
 
         verify(listener, times(1)).onFailure(lookupFailure);
         verify(listener, never()).onStreamResponse(any(), eq(true));
         verify(listener, never()).onStreamResponse(any(), eq(false));
 
-        StreamingResponseListener<ScanResponse> listener2 = mock(StreamingResponseListener.class);
-        dispatcher.dispatchScan(dummyRequest(), node, listener2, parentTask, new PendingExecutions(5));
+        StreamingResponseListener<FragmentExecutionResponse> listener2 = mock(StreamingResponseListener.class);
+        dispatcher.dispatchFragment(dummyRequest(), node, listener2, parentTask, new PendingExecutions(5));
 
         verify(listener2, times(1)).onFailure(lookupFailure);
     }

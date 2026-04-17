@@ -8,6 +8,7 @@
 
 package org.opensearch.analytics.exec;
 
+import org.opensearch.analytics.exec.stage.StageMetrics;
 import org.opensearch.test.OpenSearchTestCase;
 
 /**

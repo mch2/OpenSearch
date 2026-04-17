@@ -20,9 +20,9 @@ import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.opensearch.action.support.PlainActionFuture;
 import org.opensearch.analytics.AnalyticsPlugin;
-import org.opensearch.analytics.backend.ScanResponse;
-import org.opensearch.analytics.exec.action.AnalyticsScanAction;
+import org.opensearch.analytics.exec.action.FragmentExecutionAction;
 import org.opensearch.analytics.exec.action.FragmentExecutionRequest;
+import org.opensearch.analytics.exec.action.FragmentExecutionResponse;
 import org.opensearch.analytics.exec.stage.StageExecutionBuilder;
 import org.opensearch.analytics.exec.task.AnalyticsQueryTask;
 import org.opensearch.analytics.planner.dag.ExchangeInfo;
@@ -30,11 +30,11 @@ import org.opensearch.analytics.planner.dag.QueryDAG;
 import org.opensearch.analytics.planner.dag.Stage;
 import org.opensearch.analytics.planner.dag.StagePlan;
 import org.opensearch.analytics.planner.rel.OpenSearchTableScan;
+import org.opensearch.arrow.flight.transport.FlightStreamPlugin;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.plugins.Plugin;
-import org.opensearch.tasks.Task;
 import org.opensearch.tasks.TaskManager;
 import org.opensearch.test.OpenSearchIntegTestCase;
 import org.opensearch.test.transport.MockTransportService;
@@ -59,7 +59,7 @@ import static org.mockito.Mockito.when;
  * {@code Scheduler → PlanWalker → StageExecution → TransportService → mock handler → response → sink}
  *
  * <p>No analytics backends (DataFusion, Lucene) are loaded. The transport action
- * handler is replaced with a mock that returns canned {@link ScanResponse}s.
+ * handler is replaced with a mock that returns canned {@link FragmentExecutionResponse}s.
  */
 @OpenSearchIntegTestCase.ClusterScope(scope = OpenSearchIntegTestCase.Scope.SUITE, numDataNodes = 2)
 public class SchedulerDispatchIT extends OpenSearchIntegTestCase {
@@ -70,7 +70,7 @@ public class SchedulerDispatchIT extends OpenSearchIntegTestCase {
 
     @Override
     protected Collection<Class<? extends Plugin>> nodePlugins() {
-        return List.of(AnalyticsPlugin.class, MockTransportService.TestPlugin.class);
+        return List.of(AnalyticsPlugin.class, MockTransportService.TestPlugin.class, FlightStreamPlugin.class);
     }
 
     // ─── Calcite helpers for building mock RelNodes ─────────────────────
@@ -131,10 +131,11 @@ public class SchedulerDispatchIT extends OpenSearchIntegTestCase {
         for (String nodeName : internalCluster().getNodeNames()) {
             MockTransportService transportService = (MockTransportService) internalCluster().getInstance(TransportService.class, nodeName);
             transportService.<FragmentExecutionRequest>addRequestHandlingBehavior(
-                AnalyticsScanAction.NAME,
+                FragmentExecutionAction.NAME,
                 (handler, request, channel, task) -> {
-                    ScanResponse response = new ScanResponse(List.of("field_0", "field_1"), rows);
-                    channel.sendResponse(response);
+                    FragmentExecutionResponse response = MockArrowResponse.create(List.of("field_0", "field_1"), rows);
+                    channel.sendResponseBatch(response);
+                    channel.completeStream();
                 }
             );
         }
@@ -152,7 +153,7 @@ public class SchedulerDispatchIT extends OpenSearchIntegTestCase {
         for (String nodeName : internalCluster().getNodeNames()) {
             MockTransportService transportService = (MockTransportService) internalCluster().getInstance(TransportService.class, nodeName);
             transportService.<FragmentExecutionRequest>addRequestHandlingBehavior(
-                AnalyticsScanAction.NAME,
+                FragmentExecutionAction.NAME,
                 (handler, request, channel, task) -> {
                     int inflight = currentInFlight.incrementAndGet();
                     maxObservedInFlight.updateAndGet(prev -> Math.max(prev, inflight));
@@ -163,7 +164,9 @@ public class SchedulerDispatchIT extends OpenSearchIntegTestCase {
                         currentInFlight.decrementAndGet();
                         allDispatched.countDown();
                     }
-                    channel.sendResponse(new ScanResponse(List.of("field_0", "field_1"), rows));
+                    FragmentExecutionResponse response = MockArrowResponse.create(List.of("field_0", "field_1"), rows);
+                    channel.sendResponseBatch(response);
+                    channel.completeStream();
                 }
             );
         }
@@ -177,12 +180,14 @@ public class SchedulerDispatchIT extends OpenSearchIntegTestCase {
         for (String nodeName : internalCluster().getNodeNames()) {
             MockTransportService transportService = (MockTransportService) internalCluster().getInstance(TransportService.class, nodeName);
             transportService.<FragmentExecutionRequest>addRequestHandlingBehavior(
-                AnalyticsScanAction.NAME,
+                FragmentExecutionAction.NAME,
                 (handler, request, channel, task) -> {
                     if (requestCount.incrementAndGet() == failOnN) {
                         channel.sendResponse(new RuntimeException("shard execution failed [mock]"));
                     } else {
-                        channel.sendResponse(new ScanResponse(List.of("field_0", "field_1"), rows));
+                        FragmentExecutionResponse response = MockArrowResponse.create(List.of("field_0", "field_1"), rows);
+                        channel.sendResponseBatch(response);
+                        channel.completeStream();
                     }
                 }
             );
@@ -206,11 +211,11 @@ public class SchedulerDispatchIT extends OpenSearchIntegTestCase {
         // Use regular TransportService for dispatch since MockTransportService
         // intercepts requests on the regular transport. The handleResponse fallback
         ClusterService clusterService = internalCluster().getInstance(ClusterService.class, coordinatorNode());
-        ShardTransportDispatcher dispatcher = new AnalyticsSearchTransportService(transportService, clusterService);
-        return new EventDrivenScheduler(new StageExecutionBuilder(clusterService, dispatcher, null, null, null), dispatcher);
+        AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(transportService, clusterService);
+        return new QueryScheduler(new StageExecutionBuilder(clusterService, dispatcher, java.util.Collections.emptyMap()));
     }
 
-    private QueryContext buildConfig(QueryDAG dag, Task parentTask) {
+    private QueryContext buildConfig(QueryDAG dag, AnalyticsQueryTask parentTask) {
         return QueryContext.forTest(dag, parentTask);
     }
 

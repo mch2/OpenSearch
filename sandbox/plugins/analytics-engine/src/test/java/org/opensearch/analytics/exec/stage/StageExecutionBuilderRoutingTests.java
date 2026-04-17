@@ -135,6 +135,7 @@ import org.opensearch.analytics.exec.RowProducingSink;
 import org.opensearch.analytics.exec.StreamingResponseListener;
 
 import org.opensearch.analytics.exec.action.FragmentExecutionRequest;
+import org.opensearch.analytics.exec.action.FragmentExecutionResponse;
 import org.opensearch.analytics.planner.dag.Stage;
 import org.opensearch.analytics.planner.dag.StageExecutionType;
 import org.opensearch.cluster.node.DiscoveryNode;
@@ -162,10 +163,10 @@ public class StageExecutionBuilderRoutingTests extends OpenSearchTestCase {
     private static AnalyticsSearchTransportService failingDispatcher() {
         return new AnalyticsSearchTransportService(mock(TransportService.class), mock(ClusterService.class)) {
             @Override
-            public void dispatchScan(
+            public void dispatchFragment(
                 FragmentExecutionRequest r,
                 DiscoveryNode n,
-                StreamingResponseListener<org.opensearch.analytics.backend.ScanResponse> l,
+                StreamingResponseListener<FragmentExecutionResponse> l,
                 Task t,
                 PendingExecutions p
             ) {

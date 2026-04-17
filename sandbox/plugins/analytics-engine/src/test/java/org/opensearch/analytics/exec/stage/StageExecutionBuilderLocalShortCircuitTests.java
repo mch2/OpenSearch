@@ -513,13 +513,15 @@
 package org.opensearch.analytics.exec.stage;
 
 import org.opensearch.analytics.exec.AnalyticsSearchTransportService;
+import org.opensearch.analytics.exec.PendingExecutions;
 import org.opensearch.analytics.exec.QueryContext;
 import org.opensearch.analytics.exec.RowProducingSink;
 import org.opensearch.analytics.exec.StreamingResponseListener;
-import org.opensearch.analytics.exec.EventDrivenScheduler;
+import org.opensearch.analytics.exec.QueryScheduler;
 import org.opensearch.analytics.exec.PlanWalker;
 
-import org.opensearch.analytics.backend.ScanResponse;
+import org.apache.arrow.vector.VectorSchemaRoot;
+import org.opensearch.analytics.exec.action.FragmentExecutionResponse;
 import org.opensearch.analytics.exec.action.FragmentExecutionRequest;
 import org.opensearch.analytics.planner.dag.QueryDAG;
 import org.opensearch.analytics.planner.dag.Stage;
@@ -549,7 +551,7 @@ public class StageExecutionBuilderLocalShortCircuitTests extends OpenSearchTestC
     private static AnalyticsSearchTransportService failingDispatcher() {
         return new AnalyticsSearchTransportService(mock(TransportService.class), mock(ClusterService.class)) {
             @Override
-            public void dispatchScan(FragmentExecutionRequest r, DiscoveryNode n, StreamingResponseListener<ScanResponse> l, Task t, PendingExecutions p) {
+            public void dispatchFragment(FragmentExecutionRequest r, DiscoveryNode n, StreamingResponseListener<FragmentExecutionResponse> l, Task t, PendingExecutions p) {
                 fail("should not be called");
             }
         };
@@ -573,7 +575,7 @@ public class StageExecutionBuilderLocalShortCircuitTests extends OpenSearchTestC
 
         QueryDAG dag = new QueryDAG("test-query", stage);
         QueryContext config = QueryContext.forTest(dag, null);
-        new EventDrivenScheduler(executor).execute(
+        new QueryScheduler(executor).execute(
             config,
             ActionListener.wrap(v -> responseCalled.set(true), failureRef::set)
         );
@@ -612,7 +614,7 @@ public class StageExecutionBuilderLocalShortCircuitTests extends OpenSearchTestC
 
         QueryDAG dag = new QueryDAG("test-query", stage);
         QueryContext config = QueryContext.forTest(dag, null);
-        new EventDrivenScheduler(executor).execute(
+        new QueryScheduler(executor).execute(
             config,
             ActionListener.wrap(v -> responseCalled.set(true), e -> {})
         );

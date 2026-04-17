@@ -15,8 +15,8 @@ import org.opensearch.Version;
 import org.opensearch.action.support.PlainActionFuture;
 import org.opensearch.action.support.TimeoutTaskCancellationUtility;
 import org.opensearch.analytics.AnalyticsPlugin;
-import org.opensearch.analytics.backend.ScanResponse;
 import org.opensearch.analytics.exec.action.FragmentExecutionRequest;
+import org.opensearch.analytics.exec.action.FragmentExecutionResponse;
 import org.opensearch.analytics.exec.action.ShardTarget;
 import org.opensearch.analytics.exec.stage.ShardScanStageExecution;
 import org.opensearch.analytics.exec.task.AnalyticsQueryTask;
@@ -52,6 +52,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 
 import static org.mockito.Mockito.mock;
+import static org.opensearch.common.util.FeatureFlags.STREAM_TRANSPORT;
 
 /**
  * End-to-end integration test for the analytics shard dispatch pipeline
@@ -174,6 +175,7 @@ public class AnalyticsShardDispatchIT extends OpenSearchIntegTestCase {
     /**
      * Scan + project: fields Title, URL → 100 rows, 2 columns from clickbench mock data.
      */
+    @LockFeatureFlag(STREAM_TRANSPORT)
     public void testFieldsProjection() throws Exception {
         createTestIndex();
 
@@ -191,6 +193,7 @@ public class AnalyticsShardDispatchIT extends OpenSearchIntegTestCase {
     /**
      * COUNT(*) → 100 (DataFusion's mock parquet has 100 rows).
      */
+    @LockFeatureFlag(STREAM_TRANSPORT)
     public void testCountAggregate() throws Exception {
         createTestIndex();
 
@@ -210,6 +213,7 @@ public class AnalyticsShardDispatchIT extends OpenSearchIntegTestCase {
      * SUM(Age) → 4275 for a single shard of clickbench_hits_100.parquet.
      * Matches the per-shard sum constant from {@code AnalyticsCoordinatorReduceIT}.
      */
+    @LockFeatureFlag(STREAM_TRANSPORT)
     public void testSumAggregate() throws Exception {
         createTestIndex();
 
@@ -230,6 +234,7 @@ public class AnalyticsShardDispatchIT extends OpenSearchIntegTestCase {
      * Age column isn't published. Verifies the query runs, returns one row, and the
      * min/max bracket is valid (min ≤ max, both non-negative).
      */
+    @LockFeatureFlag(STREAM_TRANSPORT)
     public void testMinMaxAggregate() throws Exception {
         createTestIndex();
 
@@ -254,6 +259,7 @@ public class AnalyticsShardDispatchIT extends OpenSearchIntegTestCase {
      * isn't published; we assert the query runs, returns ≥ 1 group, and each group
      * count is positive and bounded by the total row count (100).
      */
+    @LockFeatureFlag(STREAM_TRANSPORT)
     public void testCountGroupBy() throws Exception {
         createTestIndex();
 
@@ -308,7 +314,7 @@ public class AnalyticsShardDispatchIT extends OpenSearchIntegTestCase {
      */
     private ShardScanStageExecution buildBlockingStageExec(
         AnalyticsQueryTask parentTask,
-        ShardTransportDispatcher dispatcher,
+        AnalyticsSearchTransportService dispatcher,
         ActionListener<Void> listener
     ) {
         Stage stage = new Stage(0, null, List.of(), null);
@@ -344,6 +350,7 @@ public class AnalyticsShardDispatchIT extends OpenSearchIntegTestCase {
      *
      * Requirements: 1.1, 3.1
      */
+    @LockFeatureFlag(STREAM_TRANSPORT)
     public void testTopDownCancellationPropagatesToShards() throws Exception {
         createTestIndex();
 
@@ -362,13 +369,14 @@ public class AnalyticsShardDispatchIT extends OpenSearchIntegTestCase {
 
             // Dispatcher that blocks on the latch — simulates a slow shard response
             ClusterService clusterService = internalCluster().getInstance(ClusterService.class);
-            AnalyticsSearchTransportService blockingDispatcher = new ShardTransportDispatcher(mock(TransportService.class), clusterService) {
+            AnalyticsSearchTransportService blockingDispatcher = new AnalyticsSearchTransportService(mock(TransportService.class), clusterService) {
                 @Override
-                public void dispatchScan(
+                public void dispatchFragment(
                     FragmentExecutionRequest request,
                     DiscoveryNode node,
-                    StreamingResponseListener<ScanResponse> listener,
-                    Task parentTaskArg
+                    StreamingResponseListener<FragmentExecutionResponse> listener,
+                    Task parentTaskArg,
+                    PendingExecutions pending
                 ) {
                     // Run in a separate thread so StageExecution.run() returns immediately
                     new Thread(() -> {
@@ -428,6 +436,7 @@ public class AnalyticsShardDispatchIT extends OpenSearchIntegTestCase {
      *
      * Requirements: 2.2, 2.4, 2.6
      */
+    @LockFeatureFlag(STREAM_TRANSPORT)
     public void testCoordinatorTimeoutCancelsQuery() throws Exception {
         createTestIndex();
 
@@ -460,13 +469,14 @@ public class AnalyticsShardDispatchIT extends OpenSearchIntegTestCase {
             // Dispatcher that blocks for a long time — timeout should fire before it completes
             final ActionListener<Void> finalStageListener = stageListener;
             ClusterService clusterService = internalCluster().getInstance(ClusterService.class);
-            ShardTransportDispatcher slowDispatcher = new ShardTransportDispatcher(mock(TransportService.class), clusterService) {
+            AnalyticsSearchTransportService slowDispatcher = new AnalyticsSearchTransportService(mock(TransportService.class), clusterService) {
                 @Override
-                public void dispatchScan(
+                public void dispatchFragment(
                     FragmentExecutionRequest request,
                     DiscoveryNode node,
-                    StreamingResponseListener<ScanResponse> listener,
-                    Task parentTaskArg
+                    StreamingResponseListener<FragmentExecutionResponse> listener,
+                    Task parentTaskArg,
+                    PendingExecutions pending
                 ) {
                     new Thread(() -> {
                         try {
@@ -526,6 +536,7 @@ public class AnalyticsShardDispatchIT extends OpenSearchIntegTestCase {
      *
      * Requirements: 5.1
      */
+    @LockFeatureFlag(STREAM_TRANSPORT)
     public void testNormalQueryWithoutTimeoutSucceeds() throws Exception {
         createTestIndex();
 

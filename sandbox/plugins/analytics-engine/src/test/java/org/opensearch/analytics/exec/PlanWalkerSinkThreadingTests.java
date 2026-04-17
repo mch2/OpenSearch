@@ -20,7 +20,8 @@ import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.opensearch.action.support.PlainActionFuture;
-import org.opensearch.analytics.backend.ScanResponse;
+import org.apache.arrow.vector.VectorSchemaRoot;
+import org.opensearch.analytics.exec.action.FragmentExecutionResponse;
 import org.opensearch.analytics.exec.action.FragmentExecutionRequest;
 import org.opensearch.analytics.exec.stage.StageExecutionBuilder;
 import org.opensearch.analytics.planner.dag.ExchangeInfo;
@@ -88,6 +89,7 @@ public class PlanWalkerSinkThreadingTests extends OpenSearchTestCase {
         DiscoveryNodes discoveryNodes = mock(DiscoveryNodes.class);
         for (int i = 0; i < numShards; i++) {
             DiscoveryNode node = mock(DiscoveryNode.class);
+            when(node.getId()).thenReturn("node_" + i);
             when(discoveryNodes.get("node_" + i)).thenReturn(node);
         }
         when(clusterState.nodes()).thenReturn(discoveryNodes);
@@ -152,21 +154,21 @@ public class PlanWalkerSinkThreadingTests extends OpenSearchTestCase {
         // Dispatcher returns one row per shard
         AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(mock(TransportService.class), clusterService) {
             @Override
-            public void dispatchScan(
+            public void dispatchFragment(
                 FragmentExecutionRequest request,
                 DiscoveryNode node,
-                StreamingResponseListener<ScanResponse> listener,
+                StreamingResponseListener<FragmentExecutionResponse> listener,
                 Task parentTask,
                 PendingExecutions _pending
             ) {
                 List<Object[]> rows = new ArrayList<>();
                 rows.add(new Object[] { "row_" + request.getShardId().id() });
-                listener.onStreamResponse(new ScanResponse(List.of("field_0"), rows), true);
+                listener.onStreamResponse(MockFragmentResponse.create(List.of("field_0"), rows), true);
             }
         };
 
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-        new EventDrivenScheduler(
+        new QueryScheduler(
             new StageExecutionBuilder(clusterService, dispatcher, null)
         ).execute(QueryContext.forTest(dag, null), future);
 
@@ -197,21 +199,21 @@ public class PlanWalkerSinkThreadingTests extends OpenSearchTestCase {
 
         AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(mock(TransportService.class), clusterService) {
             @Override
-            public void dispatchScan(
+            public void dispatchFragment(
                 FragmentExecutionRequest request,
                 DiscoveryNode node,
-                StreamingResponseListener<ScanResponse> listener,
+                StreamingResponseListener<FragmentExecutionResponse> listener,
                 Task parentTask,
                 PendingExecutions _pending
             ) {
                 List<Object[]> rows = new ArrayList<>();
                 rows.add(new Object[] { "value_" + request.getShardId().id() });
-                listener.onStreamResponse(new ScanResponse(List.of("field_0"), rows), true);
+                listener.onStreamResponse(MockFragmentResponse.create(List.of("field_0"), rows), true);
             }
         };
 
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-        new EventDrivenScheduler(
+        new QueryScheduler(
             new StageExecutionBuilder(clusterService, dispatcher, null)
         ).execute(QueryContext.forTest(dag, null), future);
 
@@ -260,21 +262,21 @@ public class PlanWalkerSinkThreadingTests extends OpenSearchTestCase {
 
         AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(mock(TransportService.class), clusterService) {
             @Override
-            public void dispatchScan(
+            public void dispatchFragment(
                 FragmentExecutionRequest request,
                 DiscoveryNode node,
-                StreamingResponseListener<ScanResponse> listener,
+                StreamingResponseListener<FragmentExecutionResponse> listener,
                 Task parentTask,
                 PendingExecutions _pending
             ) {
                 List<Object[]> rows = new ArrayList<>();
                 rows.add(new Object[] { "stage_" + request.getStageId() });
-                listener.onStreamResponse(new ScanResponse(List.of("field_0"), rows), true);
+                listener.onStreamResponse(MockFragmentResponse.create(List.of("field_0"), rows), true);
             }
         };
 
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-        new EventDrivenScheduler(
+        new QueryScheduler(
             new StageExecutionBuilder(clusterService, dispatcher, null)
         ).execute(QueryContext.forTest(dag, null), future);
 
@@ -295,6 +297,7 @@ public class PlanWalkerSinkThreadingTests extends OpenSearchTestCase {
             for (int i = 0; i < numShards; i++) {
                 String nodeId = "node_" + tableName + "_" + i;
                 DiscoveryNode node = mock(DiscoveryNode.class);
+                when(node.getId()).thenReturn(nodeId);
                 when(discoveryNodes.get(nodeId)).thenReturn(node);
             }
         }

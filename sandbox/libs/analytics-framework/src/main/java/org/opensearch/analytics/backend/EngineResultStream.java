@@ -17,7 +17,7 @@ import java.util.Iterator;
  *
  * @opensearch.internal
  */
-public interface EngineResultStream extends AutoCloseable {
+public interface EngineResultStream extends Iterable<EngineResultBatch>, AutoCloseable {
 
     /**
      * Returns an iterator over the record batches in this stream.

@@ -10,6 +10,8 @@ package org.opensearch.analytics.backend;
 
 import java.util.List;
 
+import org.apache.arrow.vector.VectorSchemaRoot;
+
 /**
  * Read-only view of a single record batch. Provides field names, row count,
  * and positional access to field values.
@@ -42,4 +44,16 @@ public interface EngineResultBatch {
      * @return the value (may be null)
      */
     Object getFieldValue(String fieldName, int rowIndex);
+
+    /**
+     * Returns the underlying Arrow {@link VectorSchemaRoot} for this batch,
+     * or {@code null} if the backend does not produce Arrow-native results.
+     * <p>
+     * Backends that produce Arrow natively (e.g. DataFusion) should override
+     * this method to return their existing VSR. The default returns {@code null},
+     * which signals the engine to fall back to row-based collection.
+     */
+    default VectorSchemaRoot getArrowRoot() {
+        return null;
+    }
 }

@@ -194,8 +194,8 @@ public class LocalStageSchedulerTests extends OpenSearchTestCase {
             () -> scheduler.createExecution(stage, parentExec.sink(stage.getStageId()), config)
         );
         assertTrue(
-            "Message should mention primaryBackend, got: " + e.getMessage(),
-            e.getMessage() != null && e.getMessage().contains("primaryBackend")
+            "Message should mention backends, got: " + e.getMessage(),
+            e.getMessage() != null && e.getMessage().contains("No analytics backends registered")
         );
     }
 
@@ -278,7 +278,7 @@ public class LocalStageSchedulerTests extends OpenSearchTestCase {
             IllegalStateException.class,
             () -> scheduler.createExecution(stage, parentExec.sink(stage.getStageId()), config)
         );
-        assertTrue("Should mention primaryBackend", e.getMessage().contains("primaryBackend"));
+        assertTrue("Should mention backends", e.getMessage().contains("No analytics backends registered"));
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────

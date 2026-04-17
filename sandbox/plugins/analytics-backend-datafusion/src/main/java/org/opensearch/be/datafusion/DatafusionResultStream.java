@@ -127,6 +127,11 @@ public class DatafusionResultStream implements EngineResultStream {
             );
             if (arrayAddr == 0) return false;
             try (ArrowArray arrowArray = ArrowArray.wrap(arrayAddr)) {
+                // Create a fresh root per batch so each batch owns independent
+                // buffers. Downstream (Flight's async sendResponseBatch +
+                // transferTo) processes batches without racing against the next
+                // import overwriting shared buffers.
+                vectorSchemaRoot = VectorSchemaRoot.create(vectorSchemaRoot.getSchema(), allocator);
                 Data.importIntoVectorSchemaRoot(allocator, arrowArray, vectorSchemaRoot, dictionaryProvider);
             }
             return true;
@@ -217,6 +222,12 @@ public class DatafusionResultStream implements EngineResultStream {
                 throw new IllegalArgumentException("Unknown field: " + fieldName);
             }
             return vector.getObject(rowIndex);
+        }
+
+        @Override
+        public VectorSchemaRoot getArrowRoot() {
+            checkValid();
+            return root;
         }
     }
 }

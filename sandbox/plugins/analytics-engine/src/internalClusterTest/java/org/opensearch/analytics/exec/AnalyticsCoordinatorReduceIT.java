@@ -38,6 +38,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
+import static org.opensearch.common.util.FeatureFlags.STREAM_TRANSPORT;
+
 /**
  * End-to-end integration test for coordinator-local reduction via DataFusion.
  *
@@ -274,6 +276,7 @@ public class AnalyticsCoordinatorReduceIT extends OpenSearchIntegTestCase {
      *
      * Requirements: 8.1
      */
+    @LockFeatureFlag(STREAM_TRANSPORT)
     public void testScalarSumAcrossShards() throws Exception {
         createTestIndex();
 
@@ -344,6 +347,7 @@ public class AnalyticsCoordinatorReduceIT extends OpenSearchIntegTestCase {
      *
      * Requirements: 8.2
      */
+    @LockFeatureFlag(STREAM_TRANSPORT)
     public void testGroupByAggregateAcrossShards() throws Exception {
         createTestIndex();
 
@@ -423,6 +427,7 @@ public class AnalyticsCoordinatorReduceIT extends OpenSearchIntegTestCase {
      *
      * Requirements: 8.3
      */
+    @LockFeatureFlag(STREAM_TRANSPORT)
     public void testHavingFilterAcrossShards() throws Exception {
         createTestIndex();
 
@@ -452,6 +457,7 @@ public class AnalyticsCoordinatorReduceIT extends OpenSearchIntegTestCase {
      *
      * Requirements: 8.4, 10.3
      */
+    @LockFeatureFlag(STREAM_TRANSPORT)
     public void testEmptyResultSet() throws Exception {
         createTestIndex();
 
@@ -497,6 +503,7 @@ public class AnalyticsCoordinatorReduceIT extends OpenSearchIntegTestCase {
      *
      * Requirements: 8.5
      */
+    @LockFeatureFlag(STREAM_TRANSPORT)
     public void testPlainScanStillCoordinatorGather() throws Exception {
         // See the javadoc above. Re-enable once the TaskManager assertion bug
         // in the plain-scan data-node handler path is fixed.
@@ -515,6 +522,7 @@ public class AnalyticsCoordinatorReduceIT extends OpenSearchIntegTestCase {
      *
      * Requirements: 8.6, 10.3
      */
+    @LockFeatureFlag(STREAM_TRANSPORT)
     public void testChildStageFailurePropagates() throws Exception {
         // Query a non-existent index — should fail during planning or dispatch
         String nonExistentIndex = "non_existent_index_" + randomAlphaOfLength(8);
@@ -559,6 +567,7 @@ public class AnalyticsCoordinatorReduceIT extends OpenSearchIntegTestCase {
      *
      * Requirements: 4.3
      */
+    @LockFeatureFlag(STREAM_TRANSPORT)
     public void testCancellationDuringDrain() throws Exception {
         createTestIndex();
 
@@ -634,6 +643,7 @@ public class AnalyticsCoordinatorReduceIT extends OpenSearchIntegTestCase {
      *
      * Requirements: 4.3
      */
+    @LockFeatureFlag(STREAM_TRANSPORT)
     public void testTimeoutCancellationDuringDrain() throws Exception {
         createTestIndex();
 

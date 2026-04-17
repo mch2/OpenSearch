@@ -16,6 +16,7 @@ import org.apache.calcite.jdbc.JavaTypeFactoryImpl;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.sql.type.SqlTypeName;
+import org.opensearch.analytics.exec.stage.ArrowSchemaFromCalcite;
 import org.opensearch.test.OpenSearchTestCase;
 
 /**

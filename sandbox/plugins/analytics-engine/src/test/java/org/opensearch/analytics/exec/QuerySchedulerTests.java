@@ -8,6 +8,8 @@
 
 package org.opensearch.analytics.exec;
 
+import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.calcite.jdbc.JavaTypeFactoryImpl;
 import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelOptTable;
@@ -19,8 +21,8 @@ import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.opensearch.action.support.PlainActionFuture;
-import org.opensearch.analytics.backend.ScanResponse;
-import org.opensearch.analytics.exec.action.AnalyticsScanAction;
+import org.opensearch.analytics.exec.action.FragmentExecutionAction;
+import org.opensearch.analytics.exec.action.FragmentExecutionResponse;
 import org.opensearch.analytics.exec.stage.StageExecutionBuilder;
 import org.opensearch.analytics.planner.dag.QueryDAG;
 import org.opensearch.analytics.planner.dag.Stage;
@@ -55,12 +57,12 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * Tests for {@link EventDrivenScheduler}: end-to-end dispatch via
+ * Tests for {@link QueryScheduler}: end-to-end dispatch via
  * {@link AnalyticsSearchTransportService} through the scheduler's
  * {@code execute(QueryContext, ActionListener)} contract.
  */
 @SuppressWarnings("unchecked")
-public class EventDrivenSchedulerTests extends OpenSearchTestCase {
+public class QuerySchedulerTests extends OpenSearchTestCase {
 
     private RelDataTypeFactory typeFactory;
     private RelOptCluster cluster;
@@ -86,7 +88,6 @@ public class EventDrivenSchedulerTests extends OpenSearchTestCase {
     private ClusterService buildMockClusterService(String tableName, int numShards) {
         Index index = new Index(tableName, "_na_");
 
-        // Build mock ClusterState with DiscoveryNodes
         ClusterState clusterState = mock(ClusterState.class);
         DiscoveryNodes discoveryNodes = mock(DiscoveryNodes.class);
         for (int i = 0; i < numShards; i++) {
@@ -96,7 +97,6 @@ public class EventDrivenSchedulerTests extends OpenSearchTestCase {
         }
         when(clusterState.nodes()).thenReturn(discoveryNodes);
 
-        // Build mock OperationRouting with searchShards
         List<ShardIterator> iterators = new ArrayList<>();
         for (int i = 0; i < numShards; i++) {
             ShardIterator shardIt = mock(ShardIterator.class);
@@ -122,18 +122,20 @@ public class EventDrivenSchedulerTests extends OpenSearchTestCase {
         StreamTransportService transportService = mock(StreamTransportService.class);
         when(transportService.getConnection(any(DiscoveryNode.class))).thenReturn(mock(Transport.Connection.class));
 
-        // Build single-stage DAG with 1 shard
         ClusterService routingCs = buildMockClusterService("http_logs", 1);
 
         AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(transportService, routingCs);
-        EventDrivenScheduler scheduler = new EventDrivenScheduler(
+        QueryScheduler scheduler = new QueryScheduler(
             new StageExecutionBuilder(routingCs, dispatcher, null)
         );
 
-        // Mock transportService.sendChildRequest to call onResponse immediately via handler
         doAnswer(invocation -> {
-            org.opensearch.transport.TransportResponseHandler<ScanResponse> handler = invocation.getArgument(5);
-            handler.handleResponse(new ScanResponse(List.of("field_0"), List.of()));
+            org.opensearch.transport.TransportResponseHandler<FragmentExecutionResponse> handler = invocation.getArgument(5);
+            VectorSchemaRoot mockRoot = mock(VectorSchemaRoot.class);
+            when(mockRoot.getRowCount()).thenReturn(0);
+            when(mockRoot.getSchema()).thenReturn(new Schema(List.of()));
+            when(mockRoot.getFieldVectors()).thenReturn(List.of());
+            handler.handleResponse(new FragmentExecutionResponse(mockRoot));
             return null;
         }).when(transportService)
             .sendChildRequest(
@@ -154,13 +156,11 @@ public class EventDrivenSchedulerTests extends OpenSearchTestCase {
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
         scheduler.execute(QueryContext.forTest(dag, null), future);
 
-        // Wait for completion
         future.actionGet();
 
-        // Verify transportService.sendChildRequest was called with the shard action name
         verify(transportService).sendChildRequest(
             any(Transport.Connection.class),
-            eq(AnalyticsScanAction.NAME),
+            eq(FragmentExecutionAction.NAME),
             any(TransportRequest.class),
             nullable(org.opensearch.tasks.Task.class),
             any(org.opensearch.transport.TransportRequestOptions.class),

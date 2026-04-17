@@ -129,13 +129,17 @@
 package org.opensearch.analytics.exec.stage;
 
 import org.opensearch.analytics.exec.AnalyticsSearchTransportService;
+import org.opensearch.analytics.exec.MockFragmentResponse;
+import org.opensearch.analytics.exec.PendingExecutions;
 import org.opensearch.analytics.exec.QueryContext;
 import org.opensearch.analytics.exec.RowProducingSink;
 import org.opensearch.analytics.exec.StreamingResponseListener;
 
-import org.opensearch.analytics.backend.ScanResponse;
+import org.apache.arrow.vector.VectorSchemaRoot;
+import org.opensearch.analytics.exec.action.FragmentExecutionResponse;
 import org.opensearch.analytics.exec.action.FragmentExecutionRequest;
 import org.opensearch.analytics.exec.action.ShardTarget;
+import org.opensearch.analytics.exec.task.AnalyticsQueryTask;
 import org.opensearch.analytics.planner.dag.Stage;
 import org.opensearch.cluster.node.DiscoveryNode;
 import org.opensearch.cluster.service.ClusterService;
@@ -167,15 +171,15 @@ public class StageExecutionCancellationTests extends OpenSearchTestCase {
 
     public void testPartialFailureCapturesWrappedStageFailure() {
         int numTargets = 3;
-        CancellableTask parentTask = mockParentTask(false);
+        AnalyticsQueryTask parentTask = mockParentTask(false);
 
-        List<StreamingResponseListener<ScanResponse>> captured = new ArrayList<>();
+        List<StreamingResponseListener<FragmentExecutionResponse>> captured = new ArrayList<>();
         ShardScanStageExecution task = buildStageExec(numTargets, parentTask, captured);
         task.start();
 
         captured.get(0).onFailure(new TaskCancelledException("task cancelled"));
 
-        ScanResponse response = new ScanResponse(List.of("field"), Collections.singletonList(new Object[] { "value" }));
+        FragmentExecutionResponse response = MockFragmentResponse.create(List.of("field"), Collections.singletonList(new Object[] { "value" }));
         captured.get(1).onStreamResponse(response, true);
         captured.get(2).onStreamResponse(response, true);
 
@@ -192,9 +196,9 @@ public class StageExecutionCancellationTests extends OpenSearchTestCase {
 
     public void testAllShardsFailTransitionsToFailedAndRecordsEndTime() {
         int numTargets = 3;
-        CancellableTask parentTask = mockParentTask(true);
+        AnalyticsQueryTask parentTask = mockParentTask(true);
 
-        List<StreamingResponseListener<ScanResponse>> captured = new ArrayList<>();
+        List<StreamingResponseListener<FragmentExecutionResponse>> captured = new ArrayList<>();
         ShardScanStageExecution task = buildStageExec(numTargets, parentTask, captured);
         task.start();
 
@@ -210,11 +214,11 @@ public class StageExecutionCancellationTests extends OpenSearchTestCase {
     public void testFinalizeWaitsForInFlightDrain() {
         int numTargets = 3;
 
-        List<StreamingResponseListener<ScanResponse>> captured = new ArrayList<>();
+        List<StreamingResponseListener<FragmentExecutionResponse>> captured = new ArrayList<>();
         ShardScanStageExecution task = buildStageExec(numTargets, mockParentTask(true), captured);
         task.start();
 
-        ScanResponse response = new ScanResponse(List.of("field"), Collections.singletonList(new Object[] { "value" }));
+        FragmentExecutionResponse response = MockFragmentResponse.create(List.of("field"), Collections.singletonList(new Object[] { "value" }));
 
         captured.get(0).onFailure(new TaskCancelledException("task cancelled"));
         assertEquals("Still RUNNING while other tasks are in flight", StageExecution.State.RUNNING, task.getState());
@@ -230,7 +234,7 @@ public class StageExecutionCancellationTests extends OpenSearchTestCase {
     public void testMetricsCountFailedTasks() {
         int numTargets = 3;
 
-        List<StreamingResponseListener<ScanResponse>> captured = new ArrayList<>();
+        List<StreamingResponseListener<FragmentExecutionResponse>> captured = new ArrayList<>();
         ShardScanStageExecution task = buildStageExec(numTargets, mockParentTask(false), captured);
         task.start();
 
@@ -245,7 +249,7 @@ public class StageExecutionCancellationTests extends OpenSearchTestCase {
     public void testNullParentTaskStillWrapsFailureAsStageFailed() {
         int numTargets = 1;
 
-        List<StreamingResponseListener<ScanResponse>> captured = new ArrayList<>();
+        List<StreamingResponseListener<FragmentExecutionResponse>> captured = new ArrayList<>();
         ShardScanStageExecution task = buildStageExec(numTargets, null, captured);
         task.start();
 
@@ -274,21 +278,22 @@ public class StageExecutionCancellationTests extends OpenSearchTestCase {
         for (int i = 0; i < count; i++) {
             ShardId shardId = new ShardId(index, i);
             DiscoveryNode node = mock(DiscoveryNode.class);
+            when(node.getId()).thenReturn("node_" + i);
             targets.add(new ShardTarget(shardId, node));
         }
         return targets;
     }
 
-    private CancellableTask mockParentTask(boolean cancelled) {
-        CancellableTask parentTask = mock(CancellableTask.class);
+    private AnalyticsQueryTask mockParentTask(boolean cancelled) {
+        AnalyticsQueryTask parentTask = mock(AnalyticsQueryTask.class);
         when(parentTask.isCancelled()).thenReturn(cancelled);
         return parentTask;
     }
 
     private ShardScanStageExecution buildStageExec(
         int numTargets,
-        Task parentTask,
-        List<StreamingResponseListener<ScanResponse>> captured
+        AnalyticsQueryTask parentTask,
+        List<StreamingResponseListener<FragmentExecutionResponse>> captured
     ) {
         Stage stage = mockStage(numTargets);
         QueryContext config = QueryContext.forTest("test-query", parentTask);
@@ -301,10 +306,10 @@ public class StageExecutionCancellationTests extends OpenSearchTestCase {
         );
         AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(mock(TransportService.class), mock(ClusterService.class)) {
             @Override
-            public void dispatchScan(
+            public void dispatchFragment(
                 FragmentExecutionRequest request,
                 DiscoveryNode node,
-                StreamingResponseListener<ScanResponse> streamListener,
+                StreamingResponseListener<FragmentExecutionResponse> streamListener,
                 Task parentTaskArg,
                 PendingExecutions _pending
             ) {

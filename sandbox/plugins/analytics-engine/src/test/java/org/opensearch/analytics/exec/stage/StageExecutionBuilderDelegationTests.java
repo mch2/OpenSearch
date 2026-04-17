@@ -257,10 +257,12 @@
 package org.opensearch.analytics.exec.stage;
 
 import org.opensearch.analytics.exec.AnalyticsSearchTransportService;
+import org.opensearch.analytics.exec.MockFragmentResponse;
+import org.opensearch.analytics.exec.PendingExecutions;
 import org.opensearch.analytics.exec.QueryContext;
 import org.opensearch.analytics.exec.RowProducingSink;
 import org.opensearch.analytics.exec.StreamingResponseListener;
-import org.opensearch.analytics.exec.EventDrivenScheduler;
+import org.opensearch.analytics.exec.QueryScheduler;
 
 import org.apache.calcite.jdbc.JavaTypeFactoryImpl;
 import org.apache.calcite.plan.RelOptCluster;
@@ -272,7 +274,8 @@ import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.sql.type.SqlTypeName;
-import org.opensearch.analytics.backend.ScanResponse;
+import org.apache.arrow.vector.VectorSchemaRoot;
+import org.opensearch.analytics.exec.action.FragmentExecutionResponse;
 import org.opensearch.analytics.exec.action.FragmentExecutionRequest;
 import org.opensearch.analytics.planner.dag.Stage;
 import org.opensearch.analytics.planner.dag.StagePlan;
@@ -381,10 +384,10 @@ public class StageExecutionBuilderDelegationTests extends OpenSearchTestCase {
         AtomicInteger submissions = new AtomicInteger(0);
         AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(mock(TransportService.class), clusterService) {
             @Override
-            public void dispatchScan(
+            public void dispatchFragment(
                 FragmentExecutionRequest request,
                 DiscoveryNode node,
-                StreamingResponseListener<ScanResponse> listener,
+                StreamingResponseListener<FragmentExecutionResponse> listener,
                 Task parentTask,
                 PendingExecutions _pending
             ) {
@@ -403,7 +406,7 @@ public class StageExecutionBuilderDelegationTests extends OpenSearchTestCase {
 
         AtomicReference<Iterable<Object[]>> responseRef = new AtomicReference<>();
         AtomicReference<Exception> failureRef = new AtomicReference<>();
-        new EventDrivenScheduler(executor).execute(
+        new QueryScheduler(executor).execute(
             walkerConfig,
             ActionListener.wrap(responseRef::set, failureRef::set)
         );
@@ -428,10 +431,10 @@ public class StageExecutionBuilderDelegationTests extends OpenSearchTestCase {
         AtomicInteger submissions = new AtomicInteger(0);
         AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(mock(TransportService.class), clusterService) {
             @Override
-            public void dispatchScan(
+            public void dispatchFragment(
                 FragmentExecutionRequest request,
                 DiscoveryNode node,
-                StreamingResponseListener<ScanResponse> listener,
+                StreamingResponseListener<FragmentExecutionResponse> listener,
                 Task parentTask,
                 PendingExecutions _pending
             ) {
@@ -439,7 +442,7 @@ public class StageExecutionBuilderDelegationTests extends OpenSearchTestCase {
                 // Respond immediately with row data
                 List<Object[]> rows = new ArrayList<>();
                 rows.add(new Object[] { "row_" + request.getShardId().id() });
-                listener.onStreamResponse(new ScanResponse(List.of("field_0"), rows), true);
+                listener.onStreamResponse(MockFragmentResponse.create(List.of("field_0"), rows), true);
             }
         };
 

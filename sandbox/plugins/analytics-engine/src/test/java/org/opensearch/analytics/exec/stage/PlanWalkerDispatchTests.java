@@ -257,9 +257,11 @@
 package org.opensearch.analytics.exec.stage;
 
 import org.opensearch.analytics.exec.AnalyticsSearchTransportService;
+import org.opensearch.analytics.exec.MockFragmentResponse;
+import org.opensearch.analytics.exec.PendingExecutions;
 import org.opensearch.analytics.exec.StreamingResponseListener;
 import org.opensearch.analytics.exec.AnalyticsSearchTransportService;
-import org.opensearch.analytics.exec.EventDrivenScheduler;
+import org.opensearch.analytics.exec.QueryScheduler;
 import org.opensearch.analytics.exec.Scheduler;
 import org.opensearch.analytics.exec.PlanWalker;
 import org.opensearch.analytics.exec.QueryContext;
@@ -276,7 +278,8 @@ import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.opensearch.analytics.backend.ExchangeSink;
-import org.opensearch.analytics.backend.ScanResponse;
+import org.apache.arrow.vector.VectorSchemaRoot;
+import org.opensearch.analytics.exec.action.FragmentExecutionResponse;
 import org.opensearch.analytics.exec.action.FragmentExecutionRequest;
 import org.opensearch.analytics.planner.dag.ExchangeInfo;
 import org.opensearch.analytics.planner.dag.QueryDAG;
@@ -336,7 +339,7 @@ public class PlanWalkerDispatchTests extends OpenSearchTestCase {
     private static AnalyticsSearchTransportService failingDispatcher() {
         return new AnalyticsSearchTransportService(mock(TransportService.class), mock(ClusterService.class)) {
             @Override
-            public void dispatchScan(FragmentExecutionRequest r, DiscoveryNode n, StreamingResponseListener<ScanResponse> l, Task t, PendingExecutions p) {
+            public void dispatchFragment(FragmentExecutionRequest r, DiscoveryNode n, StreamingResponseListener<FragmentExecutionResponse> l, Task t, PendingExecutions p) {
                 fail("should not be called");
             }
         };
@@ -362,12 +365,11 @@ public class PlanWalkerDispatchTests extends OpenSearchTestCase {
         AnalyticsSearchTransportService dispatcher = failingDispatcher();
         StageExecutionBuilder executor = new StageExecutionBuilder(clusterService, dispatcher, null) {
             @Override
-            public StageExecution buildExecution(Stage rootStage, StageExecution parentExec, QueryContext cfg) {
+            public StageExecution buildRootExecution(Stage rootStage, QueryContext cfg) {
                 buildRootCalled.set(true);
                 capturedStage.set(rootStage);
                 capturedConfig.set(cfg);
-                ExchangeSink rootSink = ((SinkProvidingStageExecution) parentExec).sink(rootStage.getStageId());
-                return new PassThroughStageExecution(rootStage, rootSink);
+                return new PassThroughStageExecution(rootStage, new org.opensearch.analytics.exec.RowProducingSink());
             }
         };
 
@@ -377,12 +379,12 @@ public class PlanWalkerDispatchTests extends OpenSearchTestCase {
         QueryContext config = QueryContext.forTest(dag, null);
 
         AtomicBoolean success = new AtomicBoolean(false);
-        new EventDrivenScheduler(executor).execute(
+        new QueryScheduler(executor).execute(
             config,
             ActionListener.wrap(v -> success.set(true), e -> fail("unexpected: " + e))
         );
 
-        assertTrue("buildExecution should have been called", buildRootCalled.get());
+        assertTrue("buildRootExecution should have been called", buildRootCalled.get());
         assertSame("Stage should pass through unchanged", stage, capturedStage.get());
         assertSame("Config should pass through unchanged", config, capturedConfig.get());
     }
@@ -405,12 +407,11 @@ public class PlanWalkerDispatchTests extends OpenSearchTestCase {
         AnalyticsSearchTransportService dispatcher = failingDispatcher();
         StageExecutionBuilder executor = new StageExecutionBuilder(clusterService, dispatcher, null) {
             @Override
-            public StageExecution buildExecution(Stage rootStage, StageExecution parentExec, QueryContext cfg) {
+            public StageExecution buildRootExecution(Stage rootStage, QueryContext cfg) {
                 called.set(true);
                 capturedStage.set(rootStage);
                 capturedConfig.set(cfg);
-                ExchangeSink rootSink = ((SinkProvidingStageExecution) parentExec).sink(rootStage.getStageId());
-                return new PassThroughStageExecution(rootStage, rootSink);
+                return new PassThroughStageExecution(rootStage, new org.opensearch.analytics.exec.RowProducingSink());
             }
         };
 
@@ -420,12 +421,12 @@ public class PlanWalkerDispatchTests extends OpenSearchTestCase {
         QueryContext config = QueryContext.forTest(dag, null);
 
         AtomicBoolean success = new AtomicBoolean(false);
-        new EventDrivenScheduler(executor).execute(
+        new QueryScheduler(executor).execute(
             config,
             ActionListener.wrap(v -> success.set(true), e -> fail("unexpected: " + e))
         );
 
-        assertTrue("buildExecution should have been called", called.get());
+        assertTrue("buildRootExecution should have been called", called.get());
         assertSame("Stage should pass through unchanged", stage, capturedStage.get());
         assertSame("Config should pass through unchanged", config, capturedConfig.get());
     }
@@ -466,16 +467,16 @@ public class PlanWalkerDispatchTests extends OpenSearchTestCase {
 
         AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(mock(TransportService.class), clusterService) {
             @Override
-            public void dispatchScan(FragmentExecutionRequest r, DiscoveryNode n, StreamingResponseListener<ScanResponse> l, Task t, PendingExecutions p) {
+            public void dispatchFragment(FragmentExecutionRequest r, DiscoveryNode n, StreamingResponseListener<FragmentExecutionResponse> l, Task t, PendingExecutions p) {
                 List<Object[]> rows = new ArrayList<>();
                 rows.add(new Object[] { "v" });
-                l.onStreamResponse(new ScanResponse(List.of("field_0"), rows), true);
+                l.onStreamResponse(MockFragmentResponse.create(List.of("field_0"), rows), true);
             }
         };
 
         AtomicBoolean success = new AtomicBoolean(false);
         AtomicReference<Iterable<Object[]>> resultRef = new AtomicReference<>();
-        new EventDrivenScheduler(
+        new QueryScheduler(
             new StageExecutionBuilder(clusterService, dispatcher, null)
         ).execute(config, ActionListener.wrap(v -> {
             success.set(true);

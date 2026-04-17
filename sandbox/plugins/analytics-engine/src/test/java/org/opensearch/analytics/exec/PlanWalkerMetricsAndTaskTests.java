@@ -19,8 +19,9 @@ import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.opensearch.action.support.PlainActionFuture;
-import org.opensearch.analytics.backend.ScanResponse;
-import org.opensearch.analytics.exec.action.AnalyticsScanAction;
+import org.apache.arrow.vector.VectorSchemaRoot;
+import org.opensearch.analytics.exec.action.FragmentExecutionResponse;
+import org.opensearch.analytics.exec.action.FragmentExecutionAction;
 import org.opensearch.analytics.exec.action.FragmentExecutionRequest;
 import org.opensearch.analytics.exec.stage.StageExecutionBuilder;
 import org.opensearch.analytics.exec.task.AnalyticsQueryTask;
@@ -175,14 +176,14 @@ public class PlanWalkerMetricsAndTaskTests extends OpenSearchTestCase {
         // Use a fully-mocked ClusterService with routing for both dispatch and target resolution
         ClusterService routingCs = buildMockClusterService("http_logs", 1);
         AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(transportService, routingCs);
-        EventDrivenScheduler scheduler = new EventDrivenScheduler(
+        QueryScheduler scheduler = new QueryScheduler(
             new StageExecutionBuilder(routingCs, dispatcher, null)
         );
 
         // Mock the non-final sendChildRequest(Connection, ...) to respond immediately
         doAnswer(invocation -> {
-            org.opensearch.transport.TransportResponseHandler<ScanResponse> handler = invocation.getArgument(5);
-            handler.handleResponse(new ScanResponse(List.of("field_0"), List.of()));
+            org.opensearch.transport.TransportResponseHandler<FragmentExecutionResponse> handler = invocation.getArgument(5);
+            handler.handleResponse(MockFragmentResponse.create(List.of("field_0"), List.of()));
             return null;
         }).when(transportService)
             .sendChildRequest(
@@ -216,7 +217,7 @@ public class PlanWalkerMetricsAndTaskTests extends OpenSearchTestCase {
         // Verify sendChildRequest(Connection, ...) was called
         verify(transportService).sendChildRequest(
             eq(mockConnection),
-            eq(AnalyticsScanAction.NAME),
+            eq(FragmentExecutionAction.NAME),
             any(TransportRequest.class),
             eq(queryTask),
             any(TransportRequestOptions.class),
@@ -246,14 +247,14 @@ public class PlanWalkerMetricsAndTaskTests extends OpenSearchTestCase {
 
         ClusterService routingCs = buildMockClusterService("http_logs", 1);
         AnalyticsSearchTransportService dispatcher = new AnalyticsSearchTransportService(transportService, routingCs);
-        EventDrivenScheduler scheduler = new EventDrivenScheduler(
+        QueryScheduler scheduler = new QueryScheduler(
             new StageExecutionBuilder(routingCs, dispatcher, null)
         );
 
         // Mock sendChildRequest to respond immediately
         doAnswer(invocation -> {
-            org.opensearch.transport.TransportResponseHandler<ScanResponse> handler = invocation.getArgument(5);
-            handler.handleResponse(new ScanResponse(List.of("field_0"), List.of()));
+            org.opensearch.transport.TransportResponseHandler<FragmentExecutionResponse> handler = invocation.getArgument(5);
+            handler.handleResponse(MockFragmentResponse.create(List.of("field_0"), List.of()));
             return null;
         }).when(transportService)
             .sendChildRequest(
@@ -278,7 +279,7 @@ public class PlanWalkerMetricsAndTaskTests extends OpenSearchTestCase {
         // Verify sendChildRequest was called (always used now, even with null parentTask)
         verify(transportService).sendChildRequest(
             eq(mockConnection),
-            eq(AnalyticsScanAction.NAME),
+            eq(FragmentExecutionAction.NAME),
             any(TransportRequest.class),
             nullable(Task.class),
             any(TransportRequestOptions.class),
@@ -320,25 +321,24 @@ public class PlanWalkerMetricsAndTaskTests extends OpenSearchTestCase {
 
         AnalyticsSearchTransportService dispatcher2 = new AnalyticsSearchTransportService(mock(TransportService.class), clusterService) {
             @Override
-            public void dispatchScan(
+            public void dispatchFragment(
                 FragmentExecutionRequest request,
                 DiscoveryNode node,
-                StreamingResponseListener<ScanResponse> listener,
+                StreamingResponseListener<FragmentExecutionResponse> listener,
                 Task parentTask,
                 PendingExecutions _pending
             ) {
                 int shardIdx = request.getShardId().id();
                 List<Object[]> rows = new ArrayList<>();
                 rows.add(new Object[] { "value_" + shardIdx });
-                listener.onStreamResponse(new ScanResponse(List.of("field_0"), rows), true);
+                listener.onStreamResponse(MockFragmentResponse.create(List.of("field_0"), rows), true);
             }
         };
 
         // Use Runnable::run as executor (synchronous, same as existing test behavior)
         PlainActionFuture<Iterable<Object[]>> future = new PlainActionFuture<>();
-        new EventDrivenScheduler(
-            new StageExecutionBuilder(clusterService, dispatcher2, null),
-            dispatcher2
+        new QueryScheduler(
+            new StageExecutionBuilder(clusterService, dispatcher2, null)
         ).execute(QueryContext.forTest(dag, null), future);
 
         Iterable<Object[]> result = future.actionGet();
