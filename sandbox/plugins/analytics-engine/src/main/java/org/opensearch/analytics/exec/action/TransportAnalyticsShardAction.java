@@ -10,18 +10,23 @@ package org.opensearch.analytics.exec.action;
 
 import org.opensearch.action.support.ActionFilters;
 import org.opensearch.action.support.HandledTransportAction;
+import org.opensearch.analytics.exec.action.FragmentExecutionResponse;
 import org.opensearch.analytics.exec.AnalyticsSearchService;
+import org.opensearch.analytics.exec.task.AnalyticsShardTask;
 import org.opensearch.common.inject.Inject;
 import org.opensearch.core.action.ActionListener;
+import org.opensearch.index.shard.IndexShard;
 import org.opensearch.indices.IndicesService;
 import org.opensearch.tasks.Task;
 import org.opensearch.transport.TransportService;
 
 /**
- * Legacy transport action for shard-level fragment execution.
- * Superseded by the streaming handler registered in
- * {@code AnalyticsSearchTransportService} which uses
- * {@code FragmentExecutionAction.NAME}.
+ * Transport action registered on data nodes that resolves an {@link IndexShard}
+ * from {@link IndicesService} and delegates to {@link AnalyticsSearchService}
+ * for shard-level fragment execution.
+ *
+ * <p>This is the only component that holds {@code IndicesService} —
+ * {@code AnalyticsSearchService} receives an already-resolved shard.
  */
 public class TransportAnalyticsShardAction extends HandledTransportAction<FragmentExecutionRequest, FragmentExecutionResponse> {
 
@@ -44,12 +49,12 @@ public class TransportAnalyticsShardAction extends HandledTransportAction<Fragme
 
     @Override
     protected void doExecute(Task task, FragmentExecutionRequest request, ActionListener<FragmentExecutionResponse> listener) {
-        // Legacy action — fragment execution now uses the streaming path registered in
-        // AnalyticsSearchTransportService (FragmentExecutionAction.NAME).
-        listener.onFailure(
-            new UnsupportedOperationException(
-                "AnalyticsShardAction is superseded by FragmentExecutionAction with streaming transport"
-            )
-        );
+        try {
+            AnalyticsShardTask shardTask = task instanceof AnalyticsShardTask ? (AnalyticsShardTask) task : null;
+            IndexShard shard = indicesService.indexServiceSafe(request.getShardId().getIndex()).getShard(request.getShardId().id());
+            listener.onResponse(searchService.executeFragment(request, shard, shardTask));
+        } catch (Exception e) {
+            listener.onFailure(e);
+        }
     }
 }
