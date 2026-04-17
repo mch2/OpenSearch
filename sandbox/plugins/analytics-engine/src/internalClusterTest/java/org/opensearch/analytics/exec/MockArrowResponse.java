@@ -23,8 +23,9 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Test utility that builds a {@link FragmentExecutionResponse} from field names
- * and row data for integration tests. All columns are treated as VARCHAR.
+ * Test utility that builds a {@link FragmentExecutionResponse} wrapping a real
+ * {@link VectorSchemaRoot} populated from the given rows. All columns are
+ * emitted as VARCHAR for simplicity — callers stringify values as needed.
  */
 final class MockArrowResponse {
 
@@ -32,10 +33,6 @@ final class MockArrowResponse {
 
     private MockArrowResponse() {}
 
-    /**
-     * Build a {@link FragmentExecutionResponse} wrapping a real {@link VectorSchemaRoot}
-     * with VARCHAR columns populated from the given rows.
-     */
     static FragmentExecutionResponse create(List<String> fieldNames, List<Object[]> rows) {
         List<Field> fields = new ArrayList<>();
         for (String name : fieldNames) {
@@ -47,10 +44,10 @@ final class MockArrowResponse {
         for (int col = 0; col < fieldNames.size(); col++) {
             VarCharVector vec = (VarCharVector) root.getVector(col);
             vec.allocateNew();
-            for (int row = 0; row < rows.size(); row++) {
-                Object val = rows.get(row)[col];
+            for (int r = 0; r < rows.size(); r++) {
+                Object val = rows.get(r)[col];
                 if (val != null) {
-                    vec.setSafe(row, String.valueOf(val).getBytes(StandardCharsets.UTF_8));
+                    vec.setSafe(r, String.valueOf(val).getBytes(StandardCharsets.UTF_8));
                 }
             }
             vec.setValueCount(rows.size());

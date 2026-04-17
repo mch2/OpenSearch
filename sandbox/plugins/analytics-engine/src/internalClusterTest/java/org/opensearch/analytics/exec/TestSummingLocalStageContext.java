@@ -66,21 +66,6 @@ public class TestSummingLocalStageContext implements LocalStageContext {
 
             @Override
             public void close() {}
-
-            @Override
-            public Iterable<Object[]> readResult() {
-                return List.of();
-            }
-
-            @Override
-            public long getRowCount() {
-                return 0;
-            }
-
-            @Override
-            public Object getValueAt(String column, int rowIndex) {
-                return null;
-            }
         };
     }
 

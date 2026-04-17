@@ -22,7 +22,7 @@ import java.util.List;
 
 /**
  * Translates a Calcite {@link RelDataType} (row type) to an Arrow {@link Schema}.
- * Used to derive the target schema for {@code RowBatchToArrowConverter} from the
+ * Used to derive an Arrow target schema from the
  * child stage's resolved fragment row type.
  *
  * <p>All fields are nullable for MVP.

@@ -33,6 +33,23 @@ public interface ArrowFlightChannel {
     BufferAllocator getAllocator();
 
     /**
+     * Blocks until the channel's outbound executor has drained every task
+     * submitted before this call — all in-flight {@code sendResponseBatch}
+     * transfers and any queued {@code completeStream} task. After this
+     * returns, producer-side resources (e.g. the engine's result-stream
+     * allocator) can be torn down without racing against pending async
+     * transfers.
+     *
+     * <p>Implementations that process outbound work synchronously on the
+     * caller thread may return immediately.
+     *
+     * @throws InterruptedException if the wait is interrupted
+     */
+    default void awaitDrained() throws InterruptedException {
+        // default: no queued work to drain
+    }
+
+    /**
      * Unwraps the given {@link TransportChannel} to find the {@link ArrowFlightChannel}.
      * Walks through {@link TaskTransportChannel} and {@link BaseTcpTransportChannel}
      * wrapper layers to find the underlying channel.

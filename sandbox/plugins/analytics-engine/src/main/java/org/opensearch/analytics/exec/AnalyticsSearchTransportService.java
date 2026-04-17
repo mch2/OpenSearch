@@ -11,6 +11,7 @@ package org.opensearch.analytics.exec;
 import org.opensearch.analytics.exec.action.FragmentExecutionResponse;
 import org.opensearch.analytics.exec.action.FragmentExecutionAction;
 import org.opensearch.analytics.exec.action.FragmentExecutionRequest;
+import org.opensearch.analytics.exec.task.AnalyticsShardTask;
 import org.opensearch.cluster.node.DiscoveryNode;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.Nullable;
@@ -82,8 +83,9 @@ public class AnalyticsSearchTransportService {
 
     /**
      * Registers the server-side handler for {@link FragmentExecutionAction#NAME}.
-     * Routes {@link FragmentExecutionRequest} to {@link AnalyticsSearchService}
-     * and responds with a {@link FragmentExecutionResponse}.
+     * Routes {@link FragmentExecutionRequest} to
+     * {@link AnalyticsSearchService#executeFragmentStreaming} which streams
+     * batches back through the transport channel.
      */
     private static void registerFragmentHandler(
         TransportService transportService,
@@ -99,8 +101,8 @@ public class AnalyticsSearchTransportService {
             FragmentExecutionRequest::new,
             (request, channel, task) -> {
                 IndexShard shard = indicesService.indexServiceSafe(request.getShardId().getIndex()).getShard(request.getShardId().id());
-                FragmentExecutionResponse response = searchService.executeFragment(request, shard);
-                channel.sendResponse(response);
+                AnalyticsShardTask shardTask = task instanceof AnalyticsShardTask ast ? ast : null;
+                searchService.executeFragmentStreaming(request, shard, shardTask, channel);
             }
         );
     }

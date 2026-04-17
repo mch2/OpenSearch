@@ -62,19 +62,4 @@ class DatafusionChildSink implements ExchangeSink {
     public void close() {
         // no-op: input handle close happens in asyncFinalize
     }
-
-    @Override
-    public Iterable<Object[]> readResult() {
-        return List.of();
-    }
-
-    @Override
-    public long getRowCount() {
-        return 0;
-    }
-
-    @Override
-    public Object getValueAt(String column, int rowIndex) {
-        return null;
-    }
 }

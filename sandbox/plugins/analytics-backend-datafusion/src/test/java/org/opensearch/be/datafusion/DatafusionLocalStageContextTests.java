@@ -191,24 +191,6 @@ public class DatafusionLocalStageContextTests extends OpenSearchTestCase {
         assertFalse("close() on DatafusionChildSink should NOT close the InputHandle", handleClosed.get());
     }
 
-    /**
-     * readResult returns empty, getRowCount returns 0, getValueAt returns null.
-     */
-    public void testChildSinkReadMethodsReturnDefaults() {
-        InputHandle handle = new InputHandle() {
-            @Override
-            public void pushBatch(VectorSchemaRoot batch) {}
-
-            @Override
-            public void closeInput() {}
-        };
-
-        DatafusionChildSink sink = new DatafusionChildSink(handle, twoColumnSchema(), allocator, 1);
-        assertFalse("readResult should be empty", sink.readResult().iterator().hasNext());
-        assertEquals(0, sink.getRowCount());
-        assertNull(sink.getValueAt("id", 0));
-    }
-
     // ---- batchToVsr tests ----
 
     /**
