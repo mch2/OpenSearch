@@ -100,23 +100,29 @@ final class ShardFragmentStageExecution extends AbstractStageExecution implement
             public void onStreamResponse(FragmentExecutionResponse response, boolean isLast) {
                 if (isDone()) return;
 
-                // Flight reuses its client-side root across batches, so we must
-                // transfer the buffers out into an independent VSR before the
-                // next nextResponse() overwrites them. onStreamResponse runs
-                // synchronously in the handleStreamResponse loop, so the next
-                // batch hasn't been read yet — transfer here is a safe pointer
-                // move (O(1)).
-                VectorSchemaRoot flightRoot = response.getArrowRoot();
-                BufferAllocator flightAlloc = flightRoot.getFieldVectors().get(0).getAllocator();
-                BufferAllocator batchAlloc = flightAlloc.newChildAllocator("batch", 0, Long.MAX_VALUE);
-                VectorSchemaRoot transferred = VectorSchemaRoot.create(flightRoot.getSchema(), batchAlloc);
-                for (int i = 0; i < flightRoot.getFieldVectors().size(); i++) {
-                    flightRoot.getFieldVectors().get(i).makeTransferPair(transferred.getFieldVectors().get(i)).transfer();
-                }
-                transferred.setRowCount(flightRoot.getRowCount());
+                // response is null only on the completion signal — the transport
+                // handler fires (null, true) once after the last data batch so the
+                // stage knows the shard is done. Data batches always arrive with
+                // isLast=false.
+                if (response != null) {
+                    // Flight reuses its client-side root across batches, so we
+                    // transfer the buffers out into an independent VSR before the
+                    // next nextResponse() overwrites them. onStreamResponse runs
+                    // synchronously inside the handleStreamResponse loop, so the
+                    // next batch hasn't been read yet — transfer here is a safe
+                    // pointer move (O(1)).
+                    VectorSchemaRoot flightRoot = response.getArrowRoot();
+                    BufferAllocator flightAlloc = flightRoot.getFieldVectors().get(0).getAllocator();
+                    BufferAllocator batchAlloc = flightAlloc.newChildAllocator("batch", 0, Long.MAX_VALUE);
+                    VectorSchemaRoot transferred = VectorSchemaRoot.create(flightRoot.getSchema(), batchAlloc);
+                    for (int i = 0; i < flightRoot.getFieldVectors().size(); i++) {
+                        flightRoot.getFieldVectors().get(i).makeTransferPair(transferred.getFieldVectors().get(i)).transfer();
+                    }
+                    transferred.setRowCount(flightRoot.getRowCount());
 
-                outputSink.feed(transferred);
-                metrics.addRowsProcessed(transferred.getRowCount());
+                    outputSink.feed(transferred);
+                    metrics.addRowsProcessed(transferred.getRowCount());
+                }
 
                 if (isLast) {
                     metrics.incrementTasksCompleted();

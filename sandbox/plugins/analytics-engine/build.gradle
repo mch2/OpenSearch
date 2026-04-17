@@ -197,6 +197,11 @@ internalClusterTest {
   // ~7 batches instead of 1, validating the streaming pipeline rather than
   // single-batch fast paths.
   environment 'ANALYTICS_DF_BATCH_SIZE', '16'
+  // All analytics ITs use the streaming transport — enable Flight's StreamTransportService
+  // at node startup by setting the feature flag before the cluster is built. Without this,
+  // AnalyticsSearchTransportService falls back to the non-streaming TransportService and
+  // `sendChildRequest` fails with "can't select channel size is 0" on dispatch.
+  systemProperty 'opensearch.experimental.feature.transport.stream.enabled', 'true'
 }
 
 // ---- JMH benchmark source set ----

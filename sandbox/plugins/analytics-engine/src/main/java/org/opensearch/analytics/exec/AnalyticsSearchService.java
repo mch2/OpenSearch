@@ -104,9 +104,9 @@ public class AnalyticsSearchService {
             try (SearchExecEngine<ExecutionContext, EngineResultStream> engine = backend.createSearchExecEngine(ctx)) {
                 try (EngineResultStream stream = engine.execute(ctx)) {
                     for (EngineResultBatch batch : stream) {
-                        if (task != null && task.isCancelled()) {
-                            throw new TaskCancelledException("task cancelled: " + task.getReasonCancelled());
-                        }
+                        // TODO: cancellation — the shard task is not a CancellableTask
+                        // (see AnalyticsShardTask javadoc), so per-batch cancellation
+                        // polling is moved to the query-level AnalyticsQueryTask path.
                         channel.sendResponseBatch(new FragmentExecutionResponse(batch.getArrowRoot()));
                     }
                     channel.completeStream();

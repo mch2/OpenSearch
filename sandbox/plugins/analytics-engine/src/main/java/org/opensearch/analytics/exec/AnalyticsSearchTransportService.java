@@ -26,7 +26,6 @@ import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.StreamTransportService;
 import org.opensearch.transport.Transport;
 import org.opensearch.transport.TransportException;
-import org.opensearch.transport.TransportRequestOptions;
 import org.opensearch.transport.TransportResponseHandler;
 import org.opensearch.transport.TransportService;
 import org.opensearch.transport.stream.StreamTransportResponse;
@@ -149,17 +148,18 @@ public class AnalyticsSearchTransportService {
             @Override
             public void handleStreamResponse(StreamTransportResponse<FragmentExecutionResponse> stream) {
                 try {
+                    // Emit each batch immediately: Flight reuses its client-side root
+                    // across batches, so a one-iteration-delay pattern (buffering the
+                    // previous batch and emitting it after the next read) would fire
+                    // listener.onStreamResponse against a root whose data had already
+                    // been overwritten by the next nextResponse(). Process in-line,
+                    // then fire a final null-response completion signal that the
+                    // listener uses to transition the stage to terminal.
                     FragmentExecutionResponse current;
-                    FragmentExecutionResponse last = null;
                     while ((current = stream.nextResponse()) != null) {
-                        if (last != null) {
-                            listener.onStreamResponse(last, false);
-                        }
-                        last = current;
+                        listener.onStreamResponse(current, false);
                     }
-                    if (last != null) {
-                        listener.onStreamResponse(last, true);
-                    }
+                    listener.onStreamResponse(null, true);
                 } catch (Exception e) {
                     listener.onFailure(e);
                 } finally {
@@ -192,12 +192,15 @@ public class AnalyticsSearchTransportService {
         pending.tryRun(() -> {
             try {
                 Transport.Connection connection = getConnection(null, targetNode.getId());
+                // Use the 4-arg overload so StreamTransportService can inject its
+                // STREAM type + streaming timeout options internally; the 6-arg form
+                // with TransportRequestOptions.EMPTY would land on the regular channel
+                // pool and fail with "can't select channel size is 0" on Flight-only nodes.
                 transportService.sendChildRequest(
                     connection,
                     FragmentExecutionAction.NAME,
                     request,
                     parentTask,
-                    TransportRequestOptions.EMPTY,
                     handler
                 );
             } catch (Exception e) {
