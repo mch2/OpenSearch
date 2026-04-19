@@ -42,6 +42,7 @@ import org.opensearch.core.transport.TransportResponse;
 import org.opensearch.transport.stream.StreamErrorCode;
 import org.opensearch.transport.stream.StreamException;
 
+import java.io.Closeable;
 import java.io.IOException;
 import java.util.Optional;
 
@@ -81,6 +82,33 @@ public interface TransportChannel {
     @ExperimentalApi
     default void completeStream() {
         throw new UnsupportedOperationException();
+    }
+
+    /**
+     * Completes the stream and invokes {@code onComplete} after the transport has flushed
+     * any pending batches and released its own stream resources. Intended for producers that
+     * hold resources (e.g. result streams, native allocators) which must outlive any
+     * asynchronous transfers but be released promptly once the stream is drained.
+     *
+     * <p>Default implementation invokes {@link #completeStream()} and closes {@code onComplete}
+     * synchronously. Transports with asynchronous send pipelines (e.g. Arrow Flight) should
+     * override this to defer the callback until the pipeline is drained.
+     *
+     * @param onComplete callback invoked after the stream is fully drained; may be {@code null}
+     */
+    @ExperimentalApi
+    default void completeStream(Closeable onComplete) {
+        try {
+            completeStream();
+        } finally {
+            if (onComplete != null) {
+                try {
+                    onComplete.close();
+                } catch (IOException e) {
+                    logger.warn("Failed to invoke onComplete callback after completeStream", e);
+                }
+            }
+        }
     }
 
     void sendResponse(TransportResponse response) throws IOException;

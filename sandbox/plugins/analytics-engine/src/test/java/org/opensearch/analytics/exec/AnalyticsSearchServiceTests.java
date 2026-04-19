@@ -52,8 +52,9 @@ import static org.mockito.Mockito.withSettings;
  * Unit tests for {@link AnalyticsSearchService#executeFragmentStreaming}.
  *
  * <p>Covers the data-node-side streaming path: per-batch
- * {@code channel.sendResponseBatch}, terminal {@code completeStream}, and
- * the post-completion {@code awaitDrained} barrier. The transport channel
+ * {@code channel.sendResponseBatch}, terminal {@code completeStream(Closeable)}
+ * with a deferred-cleanup callback that closes the engine and stream after
+ * the transport has drained pending transfers. The transport channel
  * is a mock implementing both {@link TransportChannel} and
  * {@link ArrowFlightChannel}, so {@link ArrowFlightChannel#from(TransportChannel)}
  * resolves it without walking a real wrapper chain.
@@ -80,7 +81,8 @@ public class AnalyticsSearchServiceTests extends OpenSearchTestCase {
         List<VectorSchemaRoot> batches = List.of(newIntRoot("x", 3), newIntRoot("x", 2));
         RecordingChannel channel = new RecordingChannel(allocator);
         IndexShard shard = mockShard();
-        AnalyticsSearchService svc = new AnalyticsSearchService(Map.of(BACKEND_ID, backendEmitting(batches)));
+        AllocatorCapturingBackend backend = new AllocatorCapturingBackend(batches);
+        AnalyticsSearchService svc = new AnalyticsSearchService(Map.of(BACKEND_ID, backend));
 
         try {
             svc.executeFragmentStreaming(request(), shard, null, channel);
@@ -89,12 +91,17 @@ public class AnalyticsSearchServiceTests extends OpenSearchTestCase {
         }
 
         assertEquals("one sendResponseBatch per engine batch", 2, channel.batchCount.get());
-        assertTrue("completeStream was called", channel.completeStreamCalled.get());
-        assertTrue("awaitDrained was called after completeStream", channel.awaitDrainedCalled.get());
-        assertTrue(
-            "awaitDrained must come AFTER completeStream to drain any pending async work",
-            channel.awaitDrainedAfterComplete.get()
+        assertTrue("completeStream(Closeable) was called", channel.completeStreamCalled.get());
+        assertNotNull("onComplete callback supplied to completeStream", channel.onComplete.get());
+        assertFalse(
+            "engine stays open until onComplete fires (deferred cleanup pattern)",
+            backend.engineClosed.get()
         );
+
+        // Simulate the transport invoking the onComplete callback after draining pending transfers.
+        channel.onComplete.get().close();
+        assertTrue("engine closed once onComplete fires", backend.engineClosed.get());
+        assertTrue("stream closed once onComplete fires", backend.streamClosed.get());
     }
 
     public void testMissingCompositeEngineThrowsIllegalState() {
@@ -232,8 +239,7 @@ public class AnalyticsSearchServiceTests extends OpenSearchTestCase {
         private final BufferAllocator flightAllocator;
         final AtomicInteger batchCount = new AtomicInteger();
         final AtomicBoolean completeStreamCalled = new AtomicBoolean();
-        final AtomicBoolean awaitDrainedCalled = new AtomicBoolean();
-        final AtomicBoolean awaitDrainedAfterComplete = new AtomicBoolean();
+        final java.util.concurrent.atomic.AtomicReference<java.io.Closeable> onComplete = new java.util.concurrent.atomic.AtomicReference<>();
         final java.util.concurrent.atomic.AtomicReference<Exception> sentError = new java.util.concurrent.atomic.AtomicReference<>();
 
         RecordingChannel(BufferAllocator flightAllocator) {
@@ -242,21 +248,20 @@ public class AnalyticsSearchServiceTests extends OpenSearchTestCase {
 
         @Override public BufferAllocator getAllocator() { return flightAllocator; }
 
-        @Override public void awaitDrained() {
-            awaitDrainedCalled.set(true);
-            awaitDrainedAfterComplete.set(completeStreamCalled.get());
-        }
-
         @Override public String getProfileName() { return "test"; }
         @Override public String getChannelType() { return "test-channel"; }
         @Override public void sendResponse(TransportResponse response) { }
         @Override public void sendResponse(Exception exception) { sentError.set(exception); }
         @Override public void sendResponseBatch(TransportResponse response) { batchCount.incrementAndGet(); }
         @Override public void completeStream() { completeStreamCalled.set(true); }
+        @Override public void completeStream(java.io.Closeable cb) {
+            completeStreamCalled.set(true);
+            onComplete.set(cb);
+        }
     }
 
     /** {@link EngineResultStream} that emits a fixed list of pre-built VSRs, one per batch. */
-    static final class StaticEngineResultStream implements EngineResultStream {
+    static class StaticEngineResultStream implements EngineResultStream {
         private final List<VectorSchemaRoot> batches;
 
         StaticEngineResultStream(List<VectorSchemaRoot> batches) { this.batches = batches; }
@@ -290,6 +295,8 @@ public class AnalyticsSearchServiceTests extends OpenSearchTestCase {
     /** Backend whose engine captures the allocator set on the {@link ExecutionContext}. */
     static final class AllocatorCapturingBackend implements AnalyticsSearchBackendPlugin {
         final java.util.concurrent.atomic.AtomicReference<BufferAllocator> capturedAllocator = new java.util.concurrent.atomic.AtomicReference<>();
+        final AtomicBoolean engineClosed = new AtomicBoolean();
+        final AtomicBoolean streamClosed = new AtomicBoolean();
         private final List<VectorSchemaRoot> batches;
 
         AllocatorCapturingBackend(List<VectorSchemaRoot> batches) { this.batches = batches; }
@@ -302,9 +309,15 @@ public class AnalyticsSearchServiceTests extends OpenSearchTestCase {
             return new SearchExecEngine<>() {
                 @Override public void prepare(ExecutionContext requestContext) { }
                 @Override public EngineResultStream execute(ExecutionContext requestContext) {
-                    return new StaticEngineResultStream(batches);
+                    return new StaticEngineResultStream(batches) {
+                        @Override public void close() {
+                            streamClosed.set(true);
+                        }
+                    };
                 }
-                @Override public void close() { }
+                @Override public void close() {
+                    engineClosed.set(true);
+                }
             };
         }
     }

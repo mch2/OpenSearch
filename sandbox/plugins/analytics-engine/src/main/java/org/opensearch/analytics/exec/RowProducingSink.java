@@ -8,9 +8,11 @@
 
 package org.opensearch.analytics.exec;
 
+import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.types.pojo.Field;
 import org.opensearch.analytics.backend.ExchangeSink;
 import org.opensearch.analytics.backend.ExchangeSource;
 
@@ -35,7 +37,7 @@ public class RowProducingSink implements ExchangeSink, ExchangeSource {
     @Override
     public void feed(VectorSchemaRoot batch) {
         if (fieldNames.isEmpty() && batch.getSchema().getFields().isEmpty() == false) {
-            for (org.apache.arrow.vector.types.pojo.Field f : batch.getSchema().getFields()) {
+            for (Field f : batch.getSchema().getFields()) {
                 fieldNames.add(f.getName());
             }
         }
@@ -45,7 +47,11 @@ public class RowProducingSink implements ExchangeSink, ExchangeSource {
     @Override
     public void close() {
         for (VectorSchemaRoot batch : batches) {
+            BufferAllocator allocator = batch.getFieldVectors().isEmpty() ? null : batch.getFieldVectors().get(0).getAllocator();
             batch.close();
+            if (allocator != null) {
+                allocator.close();
+            }
         }
         batches.clear();
     }

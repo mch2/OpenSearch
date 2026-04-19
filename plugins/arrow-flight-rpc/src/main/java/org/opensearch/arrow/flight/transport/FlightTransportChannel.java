@@ -20,6 +20,7 @@ import org.opensearch.transport.TcpTransportChannel;
 import org.opensearch.transport.stream.StreamErrorCode;
 import org.opensearch.transport.stream.StreamException;
 
+import java.io.Closeable;
 import java.io.IOException;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -118,9 +119,22 @@ class FlightTransportChannel extends TcpTransportChannel implements ArrowFlightC
 
     @Override
     public void completeStream() {
+        completeStream(null);
+    }
+
+    @Override
+    public void completeStream(Closeable onComplete) {
         if (streamOpen.compareAndSet(true, false)) {
             try {
-                ((FlightOutboundHandler) outboundHandler).completeStream(version, features, getChannel(), this, requestId, action);
+                ((FlightOutboundHandler) outboundHandler).completeStream(
+                    version,
+                    features,
+                    getChannel(),
+                    this,
+                    requestId,
+                    action,
+                    onComplete
+                );
             } catch (Exception e) {
                 release(true);
                 if (e instanceof StreamException se) {

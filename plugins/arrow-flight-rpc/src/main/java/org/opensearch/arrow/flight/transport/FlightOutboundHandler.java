@@ -35,6 +35,7 @@ import org.opensearch.transport.TransportRequestOptions;
 import org.opensearch.transport.nativeprotocol.NativeOutboundMessage;
 import org.opensearch.transport.stream.StreamException;
 
+import java.io.Closeable;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Set;
@@ -130,7 +131,8 @@ class FlightOutboundHandler extends ProtocolOutboundHandler {
             false,
             false,
             null,
-            storedContext
+            storedContext,
+            null
         );
 
         if (!(channel instanceof FlightServerChannel flightChannel)) {
@@ -158,13 +160,24 @@ class FlightOutboundHandler extends ProtocolOutboundHandler {
         try {
             VectorStreamOutput out;
             if (task.response() instanceof ArrowBatchResponse arrowResponse) {
-                // Native Arrow path: zero-copy transfer producer's vectors into shared root
+                // Native Arrow path: zero-copy transfer producer's vectors into shared root.
                 VectorSchemaRoot sharedRoot = flightChannel.getRoot();
                 if (sharedRoot == null) {
-                    // First batch: create the shared root with the same schema
-                    sharedRoot = VectorSchemaRoot.create(arrowResponse.getRoot().getSchema(), flightChannel.getAllocator());
+                    // First batch: create the shared root using the producer's allocator.
+                    // Using the same allocator as the producer's vectors avoids a known
+                    // Arrow Java issue where cross-allocator transferOwnership of
+                    // foreign-backed buffers (from C data import, e.g. DataFusion) fails
+                    // to invoke ForeignAllocation.close(), leaving the ArrowArray C
+                    // struct buffer permanently allocated in the source allocator.
+                    // With a shared allocator the transfer is intra-allocator and safe.
+                    sharedRoot = VectorSchemaRoot.create(
+                        arrowResponse.getRoot().getSchema(),
+                        arrowResponse.getRoot().getFieldVectors().get(0).getAllocator()
+                    );
                 }
                 arrowResponse.transferTo(sharedRoot);
+                // Release the producer's now-empty root — buffers have been moved to sharedRoot.
+                arrowResponse.getRoot().close();
                 out = VectorStreamOutput.forNativeArrow(sharedRoot);
             } else {
                 out = VectorStreamOutput.create(flightChannel.getAllocator(), flightChannel.getRoot());
@@ -189,6 +202,18 @@ class FlightOutboundHandler extends ProtocolOutboundHandler {
         final long requestId,
         final String action
     ) {
+        completeStream(nodeVersion, features, channel, transportChannel, requestId, action, null);
+    }
+
+    public void completeStream(
+        final Version nodeVersion,
+        final Set<String> features,
+        final TcpChannel channel,
+        final FlightTransportChannel transportChannel,
+        final long requestId,
+        final String action,
+        final Closeable onComplete
+    ) {
         ThreadContext.StoredContext storedContext = threadPool.getThreadContext().stashContext();
         BatchTask completeTask = new BatchTask(
             nodeVersion,
@@ -203,7 +228,8 @@ class FlightOutboundHandler extends ProtocolOutboundHandler {
             true,
             false,
             null,
-            storedContext
+            storedContext,
+            onComplete
         );
 
         if (!(channel instanceof FlightServerChannel flightChannel)) {
@@ -230,6 +256,16 @@ class FlightOutboundHandler extends ProtocolOutboundHandler {
 
         try {
             flightChannel.completeStream(getHeaderBuffer(task.requestId(), task.nodeVersion(), task.features()));
+            // Close the shared root to release buffers before the onComplete callback,
+            // which may close the producer's allocator. Doing this here guarantees the
+            // producer's resources outlive every queued sendResponseBatch task because
+            // completeStream is the last task on the single-threaded executor.
+            if (flightChannel.getRoot() != null) {
+                flightChannel.getRoot().close();
+            }
+            if (task.onComplete() != null) {
+                task.onComplete().close();
+            }
             messageListener.onResponseSent(task.requestId(), task.action(), TransportResponse.Empty.INSTANCE);
         } catch (Exception e) {
             messageListener.onResponseSent(task.requestId(), task.action(), e);
@@ -259,7 +295,8 @@ class FlightOutboundHandler extends ProtocolOutboundHandler {
             false,
             true,
             error,
-            storedContext
+            storedContext,
+            null
         );
 
         if (!(channel instanceof FlightServerChannel flightChannel)) {
@@ -325,7 +362,7 @@ class FlightOutboundHandler extends ProtocolOutboundHandler {
 
     record BatchTask(Version nodeVersion, Set<String> features, TcpChannel channel, FlightTransportChannel transportChannel, long requestId,
         String action, TransportResponse response, boolean compress, boolean isHandshake, boolean isComplete, boolean isError,
-        Exception error, ThreadContext.StoredContext storedContext) implements AutoCloseable {
+        Exception error, ThreadContext.StoredContext storedContext, Closeable onComplete) implements AutoCloseable {
 
         @Override
         public void close() {

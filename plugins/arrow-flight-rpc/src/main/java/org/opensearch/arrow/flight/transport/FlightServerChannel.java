@@ -29,8 +29,6 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -85,22 +83,6 @@ class FlightServerChannel implements TcpChannel, ArrowFlightChannel {
 
     public BufferAllocator getAllocator() {
         return allocator;
-    }
-
-    @Override
-    public void awaitDrained() throws InterruptedException {
-        // The executor is single-threaded and FIFO; a sentinel task can only
-        // run after every task submitted before it (sendResponseBatch /
-        // completeStream) has finished running. When the sentinel's future
-        // completes, the queue is drained.
-        CompletableFuture<Void> barrier = new CompletableFuture<>();
-        executor.execute(() -> barrier.complete(null));
-        try {
-            barrier.get();
-        } catch (ExecutionException e) {
-            // sentinel itself never throws; surface as interrupted-like
-            throw new InterruptedException("Executor drain barrier failed: " + e.getMessage());
-        }
     }
 
     VectorSchemaRoot getRoot() {

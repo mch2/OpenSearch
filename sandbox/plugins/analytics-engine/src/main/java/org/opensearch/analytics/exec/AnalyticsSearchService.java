@@ -101,23 +101,29 @@ public class AnalyticsSearchService {
 
             AnalyticsSearchBackendPlugin backend = backends.get(selectedPlan.getBackendId());
 
-            try (SearchExecEngine<ExecutionContext, EngineResultStream> engine = backend.createSearchExecEngine(ctx)) {
-                try (EngineResultStream stream = engine.execute(ctx)) {
-                    for (EngineResultBatch batch : stream) {
-                        // TODO: cancellation — the shard task is not a CancellableTask
-                        // (see AnalyticsShardTask javadoc), so per-batch cancellation
-                        // polling is moved to the query-level AnalyticsQueryTask path.
-                        channel.sendResponseBatch(new FragmentExecutionResponse(batch.getArrowRoot()));
-                    }
-                    channel.completeStream();
-                    // Block until Flight's single-threaded executor has drained every
-                    // queued transferTo + completeStream task before try-with-resources
-                    // closes the engine's allocator. Without this barrier, pending async
-                    // transfers race against allocator.close() ("Memory leaked" error)
-                    // or read from native buffers the engine stream has just released
-                    // (silent data corruption — aggregates come back null/zero).
-                    flightChannel.awaitDrained();
+            SearchExecEngine<ExecutionContext, EngineResultStream> engine = backend.createSearchExecEngine(ctx);
+            EngineResultStream stream = engine.execute(ctx);
+            try {
+                for (EngineResultBatch batch : stream) {
+                    // TODO: cancellation — the shard task is not a CancellableTask
+                    // (see AnalyticsShardTask javadoc), so per-batch cancellation
+                    // polling is moved to the query-level AnalyticsQueryTask path.
+                    channel.sendResponseBatch(new FragmentExecutionResponse(batch.getArrowRoot()));
                 }
+                // Defer stream and engine close until after Flight's single-threaded
+                // executor has drained every queued sendResponseBatch + completeStream
+                // task. Flight guarantees the onComplete callback runs after the last
+                // transfer and after the shared root is closed, so producer resources
+                // (engine stream's allocator) are released exactly once, with no race
+                // against pending async transfers.
+                channel.completeStream(() -> {
+                    stream.close();
+                    engine.close();
+                });
+            } catch (Exception inner) {
+                stream.close();
+                engine.close();
+                throw inner;
             }
         } catch (TaskCancelledException e) {
             throw e; // do NOT wrap — preserve type

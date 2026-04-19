@@ -14,6 +14,7 @@ import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.backend.ExchangeSink;
 import org.opensearch.analytics.exec.QueryContext;
 import org.opensearch.analytics.exec.AnalyticsSearchTransportService;
+import org.opensearch.analytics.exec.RowProducingSink;
 import org.opensearch.analytics.planner.dag.ExchangeInfo;
 import org.opensearch.analytics.planner.dag.Stage;
 import org.opensearch.analytics.planner.dag.StageExecutionType;
@@ -97,8 +98,7 @@ public class StageExecutionBuilder {
      * {@code outputSink().readResult()}.
      */
     public StageExecution buildRootExecution(Stage rootStage, QueryContext config) {
-        org.opensearch.analytics.exec.RowProducingSink rootSink = new org.opensearch.analytics.exec.RowProducingSink();
-        return dispatchRowStage(rootStage, rootSink, config);
+        return dispatchRowStage(rootStage, new RowProducingSink(), config);
     }
 
     /**

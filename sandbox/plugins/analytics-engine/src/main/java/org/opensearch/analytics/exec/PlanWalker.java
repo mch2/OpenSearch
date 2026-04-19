@@ -157,8 +157,6 @@ public class PlanWalker {
         return g != null ? g.allExecutions() : List.of();
     }
 
-    // ─── Internal graph construction ────────────────────────────────────
-
     private void buildChildrenRecursively(Map<Integer, StageExecution> executions, StageExecution parentExec, Stage parentStage) {
         List<Stage> children = parentStage.getChildStages();
         if (children.isEmpty()) {
@@ -202,8 +200,15 @@ public class PlanWalker {
         final DataProducer producer = (DataProducer) rootExec;
         rootExec.addStateListener((from, to) -> {
             switch (to) {
-                case SUCCEEDED -> fireTerminal(() -> completionListener.onResponse(producer.outputSource().readResult()));
+                case SUCCEEDED -> fireTerminal(() -> {
+                    try {
+                        completionListener.onResponse(producer.outputSource().readResult());
+                    } finally {
+                        producer.outputSink().close();
+                    }
+                });
                 case FAILED, CANCELLED -> {
+                    producer.outputSink().close();
                     Exception failure = rootExec.getFailure();
                     if (config.parentTask() instanceof CancellableTask ct && ct.isCancelled()) {
                         fireTerminal(() -> completionListener.onFailure(new TaskCancelledException("query cancelled")));
