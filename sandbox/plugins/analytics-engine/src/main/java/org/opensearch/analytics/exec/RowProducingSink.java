@@ -8,7 +8,6 @@
 
 package org.opensearch.analytics.exec;
 
-import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
@@ -16,69 +15,69 @@ import org.apache.arrow.vector.types.pojo.Field;
 import org.opensearch.analytics.backend.ExchangeSink;
 import org.opensearch.analytics.backend.ExchangeSource;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Default exchange implementation that collects Arrow
- * {@link VectorSchemaRoot} batches via {@link ExchangeSink#feed} and
- * converts to {@code Object[]} rows on {@link ExchangeSource#readResult}.
+ * Terminal coordinator sink that eagerly materializes each incoming
+ * {@link VectorSchemaRoot} into {@code Object[]} rows and releases the VSR
+ * immediately. Accumulates only Java rows; no Arrow buffers are held past
+ * {@link #feed} returning.
  *
- * <p>Implements both {@link ExchangeSink} (write side for producers) and
- * {@link ExchangeSource} (read side for consumers). The builder passes
- * the {@link ExchangeSink} view to child stages and the walker reads
- * results via the {@link ExchangeSource} view.
+ * <p>Releasing the VSR on each feed means the caller's buffers are returned
+ * to their allocator synchronously — so the sink never needs to own or close
+ * an allocator, and callers don't need to give it a dedicated child.
+ *
+ * <p>Not thread-safe: concurrent {@code feed} callers must synchronize
+ * externally.
+ *
+ * <p>Implements both {@link ExchangeSink} and {@link ExchangeSource}:
+ * producers write via {@code feed}, consumers read via {@code readResult}.
  */
 public class RowProducingSink implements ExchangeSink, ExchangeSource {
 
-    private final List<VectorSchemaRoot> batches = new ArrayList<>();
+    private final List<Object[]> rows = new ArrayList<>();
     private final List<String> fieldNames = new ArrayList<>();
 
     @Override
     public void feed(VectorSchemaRoot batch) {
-        if (fieldNames.isEmpty() && batch.getSchema().getFields().isEmpty() == false) {
-            for (Field f : batch.getSchema().getFields()) {
-                fieldNames.add(f.getName());
+        try {
+            if (fieldNames.isEmpty() && batch.getSchema().getFields().isEmpty() == false) {
+                for (Field f : batch.getSchema().getFields()) {
+                    fieldNames.add(f.getName());
+                }
             }
-        }
-        batches.add(batch);
-    }
-
-    @Override
-    public void close() {
-        for (VectorSchemaRoot batch : batches) {
-            BufferAllocator allocator = batch.getFieldVectors().isEmpty() ? null : batch.getFieldVectors().get(0).getAllocator();
-            batch.close();
-            if (allocator != null) {
-                allocator.close();
-            }
-        }
-        batches.clear();
-    }
-
-    @Override
-    public Iterable<Object[]> readResult() {
-        List<Object[]> rows = new ArrayList<>();
-        for (VectorSchemaRoot batch : batches) {
             int colCount = batch.getFieldVectors().size();
-            for (int r = 0; r < batch.getRowCount(); r++) {
+            int rowCount = batch.getRowCount();
+            for (int r = 0; r < rowCount; r++) {
                 Object[] row = new Object[colCount];
                 for (int c = 0; c < colCount; c++) {
                     row[c] = toJavaValue(batch.getVector(c), r);
                 }
                 rows.add(row);
             }
+        } finally {
+            batch.close();
         }
+    }
+
+    @Override
+    public void close() {
+        // No-op: rows hold only Java objects; the walker's terminal path calls
+        // close() after readResult() has been handed to the listener, and the
+        // listener may still be reading the rows reference when close() fires.
+        // GC reclaims the rows list when the sink itself becomes unreachable.
+    }
+
+    @Override
+    public Iterable<Object[]> readResult() {
         return rows;
     }
 
     @Override
     public long getRowCount() {
-        long total = 0;
-        for (VectorSchemaRoot batch : batches) {
-            total += batch.getRowCount();
-        }
-        return total;
+        return rows.size();
     }
 
     /**
@@ -91,23 +90,15 @@ public class RowProducingSink implements ExchangeSink, ExchangeSource {
     public Object getValueAt(String column, int rowIndex) {
         int colIdx = fieldNames.indexOf(column);
         if (colIdx < 0) return null;
-
-        int offset = 0;
-        for (VectorSchemaRoot batch : batches) {
-            int batchRows = batch.getRowCount();
-            if (rowIndex < offset + batchRows) {
-                return toJavaValue(batch.getVector(colIdx), rowIndex - offset);
-            }
-            offset += batchRows;
-        }
-        return null;
+        if (rowIndex < 0 || rowIndex >= rows.size()) return null;
+        return rows.get(rowIndex)[colIdx];
     }
 
     private static Object toJavaValue(FieldVector vector, int index) {
         if (vector.isNull(index)) return null;
         if (vector instanceof VarCharVector) {
             byte[] bytes = ((VarCharVector) vector).get(index);
-            return new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
+            return new String(bytes, StandardCharsets.UTF_8);
         }
         return vector.getObject(index);
     }

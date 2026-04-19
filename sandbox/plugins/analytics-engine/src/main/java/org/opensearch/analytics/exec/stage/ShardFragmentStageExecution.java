@@ -105,23 +105,24 @@ final class ShardFragmentStageExecution extends AbstractStageExecution implement
                 // stage knows the shard is done. Data batches always arrive with
                 // isLast=false.
                 if (response != null) {
-                    // Flight reuses its client-side root across batches, so we
-                    // transfer the buffers out into an independent VSR before the
-                    // next nextResponse() overwrites them. onStreamResponse runs
-                    // synchronously inside the handleStreamResponse loop, so the
-                    // next batch hasn't been read yet — transfer here is a safe
-                    // pointer move (O(1)).
+                    // Flight reuses its client-side root across batches, so we transfer
+                    // the buffers out into an independent VSR before the next
+                    // nextResponse() overwrites them. The sink consumes the VSR
+                    // synchronously (RowProducingSink materializes rows and closes the
+                    // VSR in feed()), so the transferred VSR can live in flightAlloc
+                    // directly — no per-batch child allocator needed; buffers return to
+                    // flightAlloc as soon as feed() returns.
                     VectorSchemaRoot flightRoot = response.getArrowRoot();
                     BufferAllocator flightAlloc = flightRoot.getFieldVectors().get(0).getAllocator();
-                    BufferAllocator batchAlloc = flightAlloc.newChildAllocator("batch", 0, Long.MAX_VALUE);
-                    VectorSchemaRoot transferred = VectorSchemaRoot.create(flightRoot.getSchema(), batchAlloc);
+                    VectorSchemaRoot transferred = VectorSchemaRoot.create(flightRoot.getSchema(), flightAlloc);
                     for (int i = 0; i < flightRoot.getFieldVectors().size(); i++) {
                         flightRoot.getFieldVectors().get(i).makeTransferPair(transferred.getFieldVectors().get(i)).transfer();
                     }
                     transferred.setRowCount(flightRoot.getRowCount());
 
+                    int rowCount = transferred.getRowCount();
                     outputSink.feed(transferred);
-                    metrics.addRowsProcessed(transferred.getRowCount());
+                    metrics.addRowsProcessed(rowCount);
                 }
 
                 if (isLast) {
