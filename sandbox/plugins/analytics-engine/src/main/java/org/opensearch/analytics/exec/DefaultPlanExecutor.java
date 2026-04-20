@@ -111,19 +111,28 @@ public class DefaultPlanExecutor extends HandledTransportAction<ActionRequest, A
         // Per-query cleanup on terminal. Stage-execution cancellation on external
         // task-cancel/timeout is wired inside the Scheduler — on this path the
         // walker has already cascaded cancellations by the time we see the failure.
+        // Per-query cleanup must never swallow the terminal signal. If any cleanup step
+        // throws (e.g. closeBufferAllocator raising "Memory was leaked" when backend native
+        // code still holds refs at failure time), the future still has to fire so callers
+        // don't hang on actionGet(). Each cleanup call is isolated; any exception becomes
+        // a suppressed on the original cause (failure path) or supersedes the result
+        // (success path, because reporting success while leaking memory is a lie).
         ActionListener<Iterable<Object[]>> listener = ActionListener.wrap(result -> {
-            config.closeBufferAllocator();
-            try {
-                taskManager.unregister(queryTask);
-            } catch (Exception ignore) {
+            Exception cleanup = null;
+            try { config.closeBufferAllocator(); } catch (Exception x) { cleanup = x; }
+            try { taskManager.unregister(queryTask); } catch (Exception ignore) {
                 // Task may already be unregistered by timeout cancellation listener
             }
-            future.onResponse(result);
+            if (cleanup != null) {
+                future.onFailure(cleanup);
+            } else {
+                future.onResponse(result);
+            }
         }, e -> {
-            config.closeBufferAllocator();
-            try {
-                taskManager.unregister(queryTask);
-            } catch (Exception ignore) {
+            try { config.closeBufferAllocator(); } catch (Exception suppressed) {
+                e.addSuppressed(suppressed);
+            }
+            try { taskManager.unregister(queryTask); } catch (Exception ignore) {
                 // Task may already be unregistered by timeout cancellation listener
             }
             future.onFailure(e);

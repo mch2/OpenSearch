@@ -107,14 +107,21 @@ final class ShardFragmentStageExecution extends AbstractStageExecution implement
                 if (response != null) {
                     // Flight reuses its client-side root across batches, so we transfer
                     // the buffers out into an independent VSR before the next
-                    // nextResponse() overwrites them. The sink consumes the VSR
-                    // synchronously (RowProducingSink materializes rows and closes the
-                    // VSR in feed()), so the transferred VSR can live in flightAlloc
-                    // directly — no per-batch child allocator needed; buffers return to
-                    // flightAlloc as soon as feed() returns.
+                    // nextResponse() overwrites them. Target lives on a per-batch child
+                    // allocator of flightAlloc so the transfer is intra-tree
+                    // (direct-target transfer into flightAlloc breaks Arrow's
+                    // buffer-association check on the downstream C-data export path).
+                    //
+                    // batchAlloc is NOT closed synchronously: when the sink is a
+                    // Datafusion input, feed() → pushBatch exports via Arrow C-data,
+                    // which increments native ref counts that Rust releases
+                    // asynchronously. A sync close would see those still-held refs as
+                    // leaked. batchAlloc remains a child of flightAlloc and is cleaned
+                    // up when flightAlloc tears down, by which time Rust has released.
                     VectorSchemaRoot flightRoot = response.getArrowRoot();
                     BufferAllocator flightAlloc = flightRoot.getFieldVectors().get(0).getAllocator();
-                    VectorSchemaRoot transferred = VectorSchemaRoot.create(flightRoot.getSchema(), flightAlloc);
+                    BufferAllocator batchAlloc = flightAlloc.newChildAllocator("batch", 0, Long.MAX_VALUE);
+                    VectorSchemaRoot transferred = VectorSchemaRoot.create(flightRoot.getSchema(), batchAlloc);
                     for (int i = 0; i < flightRoot.getFieldVectors().size(); i++) {
                         flightRoot.getFieldVectors().get(i).makeTransferPair(transferred.getFieldVectors().get(i)).transfer();
                     }
