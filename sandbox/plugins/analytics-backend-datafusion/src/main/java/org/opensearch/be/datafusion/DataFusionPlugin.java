@@ -115,9 +115,32 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
         ClassLoader previous = t.getContextClassLoader();
         try {
             t.setContextClassLoader(DataFusionPlugin.class.getClassLoader());
-            return DefaultExtensionCatalog.DEFAULT_COLLECTION;
+            SimpleExtension.ExtensionCollection collection = DefaultExtensionCatalog.DEFAULT_COLLECTION;
+            // Layer in OpenSearch-specific aggregates — currently the PPL `take(x, n)` UDAF backed
+            // by a custom Rust impl. The YAML lives at /extensions/opensearch_aggregate.yaml on
+            // the plugin classpath.
+            collection = loadCustomYaml(collection, "/extensions/opensearch_aggregate.yaml");
+            collection = loadCustomYaml(collection, "/extensions/opensearch_scalar.yaml");
+            return collection;
         } finally {
             t.setContextClassLoader(previous);
+        }
+    }
+
+    /** Loads {@code resource} from the plugin classpath and merges into {@code collection}. Logs and skips on miss. */
+    private static SimpleExtension.ExtensionCollection loadCustomYaml(
+        SimpleExtension.ExtensionCollection collection, String resource) {
+        try (java.io.InputStream stream = DataFusionPlugin.class.getResourceAsStream(resource)) {
+            if (stream == null) {
+                logger.warn("{} not found on plugin classpath", resource);
+                return collection;
+            }
+            // substrait-java 0.89+: load(InputStream) parses a single YAML; the urn is
+            // taken from the file's `urn:` header.
+            SimpleExtension.ExtensionCollection custom = SimpleExtension.load(stream);
+            return collection.merge(custom);
+        } catch (java.io.IOException e) {
+            throw new RuntimeException("Failed to load " + resource, e);
         }
     }
 

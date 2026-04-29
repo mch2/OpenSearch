@@ -10,29 +10,60 @@ package org.opensearch.analytics.exec;
 
 import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.VarCharVector;
+import org.apache.arrow.vector.complex.ListVector;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Helpers for reading Arrow vector cells as plain Java values at the
  * external query API edge.
  */
-final class ArrowValues {
+public final class ArrowValues {
 
     private ArrowValues() {}
 
     /**
      * Returns the cell at {@code index} in {@code vector} as a Java value:
-     * {@code null} when the cell is null, a UTF-8 {@link String} for
-     * {@link VarCharVector} cells (rather than the raw {@code Text} that
-     * {@code getObject} returns), and {@link FieldVector#getObject} for
-     * every other vector type.
+     * <ul>
+     *   <li>{@code null} when the cell is null</li>
+     *   <li>UTF-8 {@link String} for {@link VarCharVector} cells (rather than
+     *       the raw {@code Text} that {@code getObject} returns)</li>
+     *   <li>plain {@link List} for {@link ListVector} cells, recursively
+     *       unwrapping each element via this method (avoids leaking Arrow's
+     *       {@code JsonStringArrayList<Text>} into downstream code that
+     *       only recognises standard Java types)</li>
+     *   <li>{@link FieldVector#getObject} for every other vector type</li>
+     * </ul>
      */
-    static Object toJavaValue(FieldVector vector, int index) {
+    public static Object toJavaValue(FieldVector vector, int index) {
         if (vector.isNull(index)) return null;
         if (vector instanceof VarCharVector v) {
             return new String(v.get(index), StandardCharsets.UTF_8);
         }
-        return vector.getObject(index);
+        if (vector instanceof ListVector listVector) {
+            return listToJavaValue(listVector, index);
+        }
+        Object obj = vector.getObject(index);
+        // Catch-all for any Arrow vector whose getObject() returns Arrow's Text wrapper
+        // (e.g. ViewVarCharVector / Utf8View, LargeVarCharVector). Downstream serializers
+        // — FragmentExecutionResponse via writeGenericValue, in particular — only know
+        // standard Java types; letting Text leak through crashes the transport channel.
+        if (obj instanceof org.apache.arrow.vector.util.Text) {
+            return obj.toString();
+        }
+        return obj;
+    }
+
+    private static List<Object> listToJavaValue(ListVector listVector, int index) {
+        int start = listVector.getOffsetBuffer().getInt((long) index * ListVector.OFFSET_WIDTH);
+        int end = listVector.getOffsetBuffer().getInt((long) (index + 1) * ListVector.OFFSET_WIDTH);
+        FieldVector inner = listVector.getDataVector();
+        List<Object> result = new ArrayList<>(end - start);
+        for (int i = start; i < end; i++) {
+            result.add(toJavaValue(inner, i));
+        }
+        return result;
     }
 }

@@ -8,7 +8,9 @@
 
 package org.opensearch.analytics.planner;
 
+import org.apache.calcite.plan.RelOptTable;
 import org.apache.calcite.plan.RelOptUtil;
+import org.apache.calcite.rel.RelCollations;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.AggregateCall;
 import org.apache.calcite.sql.fun.SqlStdOperatorTable;
@@ -40,8 +42,8 @@ public class AggregateRuleTests extends BasePlannerRulesTests {
     /** Every agg call must have an annotation with non-empty viableBackends. */
     public void testPerCallAnnotation() {
         OpenSearchAggregate agg = runAggregate(1, sumCall());
-        for (AggregateCall call : agg.getAggCallList()) {
-            AggregateCallAnnotation annotation = AggregateCallAnnotation.find(call);
+        for (int i = 0; i < agg.getAggCallList().size(); i++) {
+            AggregateCallAnnotation annotation = agg.getCallAnnotations().get(i);
             assertNotNull("Every AggregateCall must have an annotation", annotation);
             assertFalse("Annotation viableBackends must not be empty", annotation.getViableBackends().isEmpty());
             assertTrue(annotation.getViableBackends().contains(MockDataFusionBackend.NAME));
@@ -119,7 +121,7 @@ public class AggregateRuleTests extends BasePlannerRulesTests {
         OpenSearchAggregate agg = (OpenSearchAggregate) result;
         assertFalse(agg.getViableBackends().contains(MockLuceneBackend.NAME));
         // Per-call annotation includes both — Lucene is viable for SUM on this field
-        assertCallAnnotation(agg.getAggCallList().get(0), MockDataFusionBackend.NAME, MockLuceneBackend.NAME);
+        assertCallAnnotation(agg, 0, MockDataFusionBackend.NAME, MockLuceneBackend.NAME);
     }
 
     /**
@@ -148,7 +150,7 @@ public class AggregateRuleTests extends BasePlannerRulesTests {
         );
         OpenSearchAggregate agg = (OpenSearchAggregate) result;
         assertTrue(agg.getViableBackends().contains(MockLuceneBackend.NAME));
-        assertCallAnnotation(agg.getAggCallList().get(0), MockDataFusionBackend.NAME, MockLuceneBackend.NAME);
+        assertCallAnnotation(agg, 0, MockDataFusionBackend.NAME, MockLuceneBackend.NAME);
     }
 
     // ---- Composed pipeline shapes ----
@@ -195,17 +197,17 @@ public class AggregateRuleTests extends BasePlannerRulesTests {
             "Lucene not viable at operator level — can handle SUM but not COUNT",
             agg.getViableBackends().contains(MockLuceneBackend.NAME)
         );
-        assertCallAnnotation(agg.getAggCallList().get(0), MockDataFusionBackend.NAME, MockLuceneBackend.NAME);
-        assertCallAnnotation(agg.getAggCallList().get(1), MockDataFusionBackend.NAME);
+        assertCallAnnotation(agg, 0, MockDataFusionBackend.NAME, MockLuceneBackend.NAME);
+        assertCallAnnotation(agg, 1, MockDataFusionBackend.NAME);
         assertEquals(
             "SUM viable for both backends",
             2,
-            AggregateCallAnnotation.find(agg.getAggCallList().get(0)).getViableBackends().size()
+            agg.getCallAnnotations().get(0).getViableBackends().size()
         );
         assertEquals(
             "COUNT viable for DF only (Lucene not declared)",
             1,
-            AggregateCallAnnotation.find(agg.getAggCallList().get(1)).getViableBackends().size()
+            agg.getCallAnnotations().get(1).getViableBackends().size()
         );
     }
 
@@ -247,6 +249,86 @@ public class AggregateRuleTests extends BasePlannerRulesTests {
         );
     }
 
+    // ---- State-expanding aggregates over multi-shard input ----
+    //
+    // PERCENTILE_DISC, COLLECT, LISTAGG were declared STATE_EXPANDING in
+    // {@link AggregateFunction} prior to this PR adding TAKE. These tests
+    // exercise each one through the SplitRule on a multi-shard input to
+    // document whether they hit the same FINAL-constructor type mismatch
+    // as TAKE. The OpenSearchAggregateSplitRule currently gates only on
+    // input distribution (single-shard → no split), so multi-shard inputs
+    // still funnel state-expanding aggs into the broken PARTIAL+FINAL path.
+
+    /**
+     * COLLECT(int) → MULTISET[int] over a multi-shard input must crash:
+     * PARTIAL emits MULTISET[int]; FINAL infers COLLECT(MULTISET[int]) →
+     * MULTISET[MULTISET[int]] which mismatches the declared MULTISET[int].
+     * Mirrors the TAKE failure mode (state shape ≠ result shape).
+     */
+    public void testCollectFailsOnMultiShard() {
+        PlannerContext context = buildContext("parquet", 5, intFields(), List.of(stateExpandingDataFusion(AggregateFunction.COLLECT)));
+        AssertionError error = expectThrows(AssertionError.class, () -> runPlanner(makeAggregate(collectCall()), context));
+        assertTrue(
+            "Expected type mismatch from FINAL constructor, got: " + error.getMessage(),
+            error.getMessage() != null && error.getMessage().contains("type mismatch")
+        );
+    }
+
+    /**
+     * PERCENTILE_DISC(int) → int over a multi-shard input does NOT crash the
+     * SplitRule: PARTIAL emits INTEGER, FINAL infers PERCENTILE_DISC(INTEGER)
+     * → INTEGER, types match. But computing percentile-of-percentiles is
+     * semantically wrong. The test documents the silent-corruption case —
+     * type validation alone is insufficient to catch state-expanding aggs
+     * whose result type happens to coincide with their state type.
+     */
+    public void testPercentileDiscSilentlyMisaggregatesOnMultiShard() {
+        PlannerContext context = buildContext(
+            "parquet",
+            5,
+            intFields(),
+            List.of(stateExpandingDataFusion(AggregateFunction.PERCENTILE_DISC))
+        );
+        RelNode result = runPlanner(makeAggregate(percentileDiscCall()), context);
+        logger.info("Plan:\n{}", RelOptUtil.toString(result));
+        OpenSearchAggregate finalAgg = (OpenSearchAggregate) unwrapExchange(result);
+        assertEquals(
+            "PERCENTILE_DISC slips through as FINAL — split fired but type validation missed it",
+            AggregateMode.FINAL,
+            finalAgg.getMode()
+        );
+    }
+
+    /**
+     * LISTAGG(varchar) → varchar over a multi-shard input does NOT crash
+     * the SplitRule because LISTAGG's input and output types coincide
+     * (LISTAGG(VARCHAR) → VARCHAR). The FINAL constructor's typeMatchesInferred
+     * check passes, but the resulting plan is semantically wrong: it would
+     * concatenate already-concatenated strings at the coordinator. Same
+     * silent-corruption pattern as PERCENTILE_DISC.
+     */
+    public void testListaggSilentlyMisaggregatesOnMultiShard() {
+        PlannerContext context = buildContext(
+            "parquet",
+            5,
+            keywordFields(),
+            List.of(stateExpandingDataFusion(AggregateFunction.LISTAGG))
+        );
+        RelOptTable table = mockTable(
+            "test_index",
+            new String[] { "status", "name" },
+            new SqlTypeName[] { SqlTypeName.INTEGER, SqlTypeName.VARCHAR }
+        );
+        RelNode result = runPlanner(makeAggregate(stubScan(table), listaggCall()), context);
+        logger.info("Plan:\n{}", RelOptUtil.toString(result));
+        OpenSearchAggregate finalAgg = (OpenSearchAggregate) unwrapExchange(result);
+        assertEquals(
+            "LISTAGG slips through as FINAL — split fired but type validation missed it",
+            AggregateMode.FINAL,
+            finalAgg.getMode()
+        );
+    }
+
     public void testAggregateErrorsWithoutDelegation() {
         MockLuceneBackend luceneWithStddev = new MockLuceneBackend() {
             @Override
@@ -279,6 +361,77 @@ public class AggregateRuleTests extends BasePlannerRulesTests {
         );
     }
 
+    private AggregateCall collectCall() {
+        return AggregateCall.create(
+            SqlStdOperatorTable.COLLECT,
+            false,
+            List.of(1),
+            -1,
+            stubScan(mockTable("test_index", "status", "size")),
+            typeFactory.createMultisetType(typeFactory.createSqlType(SqlTypeName.INTEGER), -1),
+            "collected"
+        );
+    }
+
+    private AggregateCall percentileDiscCall() {
+        // Calcite's PERCENTILE_DISC reads its return type from the ORDER BY collation —
+        // the fraction lives in argList, the field-to-percentile in the collation.
+        return AggregateCall.create(
+            SqlStdOperatorTable.PERCENTILE_DISC,
+            false,
+            false,
+            List.of(1),
+            -1,
+            RelCollations.of(1),
+            typeFactory.createSqlType(SqlTypeName.INTEGER),
+            "p50"
+        );
+    }
+
+    private AggregateCall listaggCall() {
+        // LISTAGG operand 0 must be CHAR/VARCHAR — use a keyword field at index 1.
+        RelOptTable table = mockTable(
+            "test_index",
+            new String[] { "status", "name" },
+            new SqlTypeName[] { SqlTypeName.INTEGER, SqlTypeName.VARCHAR }
+        );
+        return AggregateCall.create(
+            SqlStdOperatorTable.LISTAGG,
+            false,
+            List.of(1),
+            -1,
+            stubScan(table),
+            typeFactory.createSqlType(SqlTypeName.VARCHAR),
+            "concat"
+        );
+    }
+
+    private static Map<String, Map<String, Object>> keywordFields() {
+        return Map.of("status", Map.of("type", "integer"), "name", Map.of("type", "keyword"));
+    }
+
+    /**
+     * MockDataFusionBackend that declares a single state-expanding aggregate
+     * capability (in addition to the base SUM/COUNT/etc), so the
+     * OpenSearchAggregateRule routes the call to it.
+     */
+    private static MockDataFusionBackend stateExpandingDataFusion(AggregateFunction func) {
+        return new MockDataFusionBackend() {
+            @Override
+            protected Set<AggregateCapability> aggregateCapabilities() {
+                Set<AggregateCapability> caps = new java.util.HashSet<>(super.aggregateCapabilities());
+                caps.add(
+                    AggregateCapability.stateExpanding(
+                        func,
+                        Set.of(FieldType.INTEGER, FieldType.LONG, FieldType.KEYWORD),
+                        Set.of(MockDataFusionBackend.PARQUET_DATA_FORMAT)
+                    )
+                );
+                return caps;
+            }
+        };
+    }
+
     private AggregateCall stddevCall() {
         return AggregateCall.create(
             SqlStdOperatorTable.STDDEV_POP,
@@ -295,9 +448,9 @@ public class AggregateRuleTests extends BasePlannerRulesTests {
         return buildContext("parquet", shardCount, intFields());
     }
 
-    private void assertCallAnnotation(AggregateCall call, String... expectedBackends) {
-        AggregateCallAnnotation annotation = AggregateCallAnnotation.find(call);
-        assertNotNull("AggregateCall must have annotation", annotation);
+    private void assertCallAnnotation(OpenSearchAggregate agg, int callIndex, String... expectedBackends) {
+        AggregateCallAnnotation annotation = agg.getCallAnnotations().get(callIndex);
+        assertNotNull("AggregateCall at index " + callIndex + " must have annotation", annotation);
         for (String backend : expectedBackends)
             assertTrue("Annotation must contain backend " + backend, annotation.getViableBackends().contains(backend));
     }

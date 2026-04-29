@@ -1,0 +1,220 @@
+%YAML 1.2
+---
+# Override list for DataFusion's substrait function vocabulary.
+#
+# The full set of function names DF's substrait consumer accepts is:
+#   1. Substrait spec functions DF's consumer maps to its own (add, subtract, sin,
+#      cos, lt, equal, ...). We get these for free by loading substrait core's
+#      YAMLs — no entries here needed.
+#   2. Names DF only recognises via direct match against its function registry —
+#      either DF built-ins whose name differs from the substrait spec (signum vs
+#      sign, trunc vs truncate, random vs rand) or UDFs we registered ourselves
+#      (expm1, rint, conv, e, cbrt, pi, etc.).
+#
+# This file declares (2). Each entry's name is the function name DF will see in
+# the substrait plan and resolve via its registry; the impls list the operand /
+# return types DF actually accepts. Calcite-name → name-here mapping lives in
+# the `calcite_aliases` block below, loaded by NameBasedScalarFunctionConverter
+# for the few cases where Calcite's operator name differs (e.g. SIGN → signum,
+# TRUNCATE → trunc).
+urn: extension:org.opensearch:opensearch_scalar
+
+# Calcite operator name (lowercased) → name DataFusion's substrait consumer accepts.
+# Two purposes:
+#  1. Operator symbols. Calcite's getName() for arithmetic and comparison is the literal symbol;
+#     substrait spec uses words and DF's consumer maps them to its operators.
+#  2. Calcite-name → DF-name overrides. A few functions where Calcite emits one name (SIGN,
+#     TRUNCATE, RAND, LOG, ILIKE, MOD) but DF's consumer recognises a different one — either a
+#     substrait spec name (logb) or a name registered via this YAML (signum, trunc, random).
+#
+# substrait-java's parser ignores this block (ExtensionSignatures has @JsonIgnoreProperties).
+calcite_aliases:
+  # Operator symbols → substrait spec words
+  "+": add
+  "-": subtract
+  "*": multiply
+  "/": divide
+  "%": modulus
+  "=": equal
+  "<>": not_equal
+  "!=": not_equal
+  "<": lt
+  "<=": lte
+  ">": gt
+  ">=": gte
+
+  # Calcite name → name DF's substrait consumer recognises
+  mod: modulus
+  character_length: char_length
+  ilike: like
+  log: logb
+  sign: signum
+  truncate: trunc
+  rand: random
+
+scalar_functions:
+  # ── Integer variants for substrait-core fp-only math functions ──
+  # Substrait core declares sin/cos/tan/etc. only on fp32/fp64. DataFusion
+  # handles integer inputs fine (its own planner inserts implicit casts), but
+  # isthmus needs a matching variant to emit the substrait call. Adding i64
+  # variants here lets isthmus resolve the call; DF coerces internally.
+  -
+    name: "sin"
+    impls:
+      - args: [{ value: i64, name: "x" }]
+        return: fp64
+  -
+    name: "cos"
+    impls:
+      - args: [{ value: i64, name: "x" }]
+        return: fp64
+  -
+    name: "tan"
+    impls:
+      - args: [{ value: i64, name: "x" }]
+        return: fp64
+  -
+    name: "asin"
+    impls:
+      - args: [{ value: i64, name: "x" }]
+        return: fp64
+  -
+    name: "acos"
+    impls:
+      - args: [{ value: i64, name: "x" }]
+        return: fp64
+  -
+    name: "atan"
+    impls:
+      - args: [{ value: i64, name: "x" }]
+        return: fp64
+  -
+    name: "exp"
+    impls:
+      - args: [{ value: i64, name: "x" }]
+        return: fp64
+  -
+    name: "sqrt"
+    impls:
+      - args: [{ value: i64, name: "x" }]
+        return: fp64
+  -
+    name: "ln"
+    impls:
+      - args: [{ value: i64, name: "x" }]
+        return: fp64
+  -
+    name: "log2"
+    impls:
+      - args: [{ value: i64, name: "x" }]
+        return: fp64
+  -
+    name: "log10"
+    impls:
+      - args: [{ value: i64, name: "x" }]
+        return: fp64
+  -
+    name: "logb"
+    impls:
+      - args: [{ value: i64, name: "x" }]
+        return: fp64
+  -
+    name: "degrees"
+    impls:
+      - args: [{ value: i64, name: "x" }]
+        return: fp64
+  -
+    name: "radians"
+    impls:
+      - args: [{ value: i64, name: "x" }]
+        return: fp64
+
+  # ── Custom UDFs (not in substrait core) ──
+  -
+    name: "cbrt"
+    description: "Cube root."
+    impls:
+      - args: [{ value: fp64, name: "x" }]
+        return: fp64
+      - args: [{ value: i64, name: "x" }]
+        return: fp64
+  -
+    name: "trunc"
+    description: "Truncate toward zero."
+    impls:
+      - args: [{ value: fp64, name: "x" }]
+        return: fp64
+      - args: [{ value: fp64, name: "x" }, { value: i32, name: "digits" }]
+        return: fp64
+  -
+    name: "pi"
+    impls:
+      - args: []
+        return: fp64
+  -
+    name: "random"
+    impls:
+      - args: []
+        return: fp64
+  -
+    name: "signum"
+    description: "Sign of value (-1, 0, +1). DataFusion calls this signum, not sign."
+    impls:
+      - args: [{ value: fp64, name: "x" }]
+        return: fp64
+      - args: [{ value: i64, name: "x" }]
+        return: i64
+  -
+    name: "cosh"
+    impls:
+      - args: [{ value: fp64, name: "x" }]
+        return: fp64
+      - args: [{ value: i64, name: "x" }]
+        return: fp64
+  -
+    name: "sinh"
+    impls:
+      - args: [{ value: fp64, name: "x" }]
+        return: fp64
+      - args: [{ value: i64, name: "x" }]
+        return: fp64
+  -
+    name: "cot"
+    impls:
+      - args: [{ value: fp64, name: "x" }]
+        return: fp64
+      - args: [{ value: i64, name: "x" }]
+        return: fp64
+  -
+    name: "e"
+    impls:
+      - args: []
+        return: fp64
+  -
+    name: "expm1"
+    impls:
+      - args: [{ value: fp64, name: "x" }]
+        return: fp64
+      - args: [{ value: i64, name: "x" }]
+        return: fp64
+  -
+    name: "rint"
+    impls:
+      - args: [{ value: fp64, name: "x" }]
+        return: fp64
+      - args: [{ value: i64, name: "x" }]
+        return: fp64
+  -
+    name: "conv"
+    impls:
+      - args: [{ value: i64, name: "value" }, { value: i64, name: "from_base" }, { value: i64, name: "to_base" }]
+        return: string
+  -
+    name: "coalesce"
+    impls:
+      - args: [{ value: "any1", name: "a" }, { value: "any1", name: "b" }]
+        return: "any1"
+      - args: [{ value: "any1", name: "a" }, { value: "any1", name: "b" }, { value: "any1", name: "c" }]
+        return: "any1"
+      - args: [{ value: "any1", name: "a" }, { value: "any1", name: "b" }, { value: "any1", name: "c" }, { value: "any1", name: "d" }]
+        return: "any1"

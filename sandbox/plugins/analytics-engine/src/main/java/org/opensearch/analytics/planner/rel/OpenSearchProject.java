@@ -116,14 +116,27 @@ public class OpenSearchProject extends Project implements OpenSearchRelNode {
 
     @Override
     public RelNode stripAnnotations(List<RelNode> strippedChildren) {
+        // The project rule wraps every RexCall in the expression tree (including nested
+        // operands) — strip recursively so AnnotatedProjectExpression doesn't leak into
+        // Substrait conversion as a phantom function call.
+        //
+        // The annotation must be detected BEFORE super.visitCall recurses, because
+        // RexShuttle's default impl rebuilds via call.clone(type, operands) which
+        // produces a plain RexCall (loses the AnnotatedProjectExpression subclass)
+        // while keeping the ANNOTATED_PROJECT_EXPR operator — so a post-recursion
+        // instanceof check would miss it.
+        org.apache.calcite.rex.RexShuttle stripShuttle = new org.apache.calcite.rex.RexShuttle() {
+            @Override
+            public RexNode visitCall(org.apache.calcite.rex.RexCall call) {
+                if (call instanceof AnnotatedProjectExpression annotated) {
+                    return annotated.unwrap().accept(this);
+                }
+                return super.visitCall(call);
+            }
+        };
         List<RexNode> strippedExprs = new ArrayList<>();
         for (RexNode expr : getProjects()) {
-            if (expr instanceof AnnotatedProjectExpression annotated) {
-                strippedExprs.add(annotated.unwrap());
-            } else {
-                // Plain expressions have no annotation to strip — pass through.
-                strippedExprs.add(expr);
-            }
+            strippedExprs.add(expr.accept(stripShuttle));
         }
         return LogicalProject.create(strippedChildren.getFirst(), List.of(), strippedExprs, getRowType());
     }

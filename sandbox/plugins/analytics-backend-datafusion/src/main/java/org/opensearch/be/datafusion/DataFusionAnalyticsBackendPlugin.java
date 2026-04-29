@@ -8,6 +8,9 @@
 
 package org.opensearch.be.datafusion;
 
+import org.apache.calcite.rex.RexBuilder;
+import org.apache.calcite.rex.RexCall;
+import org.apache.calcite.sql.SqlKind;
 import org.opensearch.analytics.spi.AggregateCapability;
 import org.opensearch.analytics.spi.AggregateFunction;
 import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
@@ -17,11 +20,14 @@ import org.opensearch.analytics.spi.FieldType;
 import org.opensearch.analytics.spi.FilterCapability;
 import org.opensearch.analytics.spi.FilterOperator;
 import org.opensearch.analytics.spi.FragmentConvertor;
+import org.opensearch.analytics.spi.ProjectCapability;
+import org.opensearch.analytics.spi.ScalarFunction;
 import org.opensearch.analytics.spi.ScanCapability;
 import org.opensearch.analytics.spi.SearchExecEngineProvider;
 import org.opensearch.index.engine.dataformat.DataFormatRegistry;
 
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 
 /**
@@ -69,6 +75,15 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
         AggregateFunction.AVG
     );
 
+    /**
+     * Scalar functions DataFusion supports natively. Anything in this set will be
+     * routed to DataFusion by {@code OpenSearchProjectRule}; runtime correctness
+     * depends on the Substrait core extension catalog already covering it
+     * (which is true for the bulk of arithmetic, string, math, and conditional
+     * functions). Per-function ITs verify each one.
+     */
+    private static final Set<ScalarFunction> SCALAR_FUNCTIONS = Set.copyOf(java.util.Arrays.asList(ScalarFunction.values()));
+
     private final DataFusionPlugin plugin;
 
     public DataFusionAnalyticsBackendPlugin(DataFusionPlugin plugin) {
@@ -107,6 +122,16 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
             }
 
             @Override
+            public Set<ProjectCapability> projectCapabilities() {
+                Set<String> formats = Set.copyOf(plugin.getSupportedFormats());
+                Set<ProjectCapability> caps = new HashSet<>();
+                for (ScalarFunction func : SCALAR_FUNCTIONS) {
+                    caps.add(new ProjectCapability.Scalar(func, Set.copyOf(SUPPORTED_FIELD_TYPES), formats, true));
+                }
+                return Set.copyOf(caps);
+            }
+
+            @Override
             public Set<AggregateCapability> aggregateCapabilities() {
                 Set<String> formats = Set.copyOf(plugin.getSupportedFormats());
                 Set<AggregateCapability> caps = new HashSet<>();
@@ -115,6 +140,8 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
                         caps.add(AggregateCapability.simple(func, Set.of(type), formats));
                     }
                 }
+                // PPL TAKE — collect first N values into a list. State-expanding (state grows with N).
+                caps.add(AggregateCapability.stateExpanding(AggregateFunction.TAKE, Set.copyOf(SUPPORTED_FIELD_TYPES), formats));
                 return Set.copyOf(caps);
             }
         };
@@ -123,6 +150,23 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
     @Override
     public FragmentConvertor getFragmentConvertor() {
         return new DataFusionFragmentConvertor(plugin.getSubstraitExtensions());
+    }
+
+    @Override
+    public RexCall handleProjectCall(RexCall call, RexBuilder rb) {
+        call = rewriteLikeDropEscape(call);
+        return call;
+    }
+
+    @Override
+    public RexCall handleFilterCall(RexCall call, RexBuilder rb) {
+        return handleProjectCall(call, rb);
+    }
+
+    private static RexCall rewriteLikeDropEscape(RexCall call) {
+        if (call.getKind() != SqlKind.LIKE) return call;
+        if (call.getOperands().size() != 3) return call;
+        return call.clone(call.getType(), call.getOperands().subList(0, 2));
     }
 
     @Override

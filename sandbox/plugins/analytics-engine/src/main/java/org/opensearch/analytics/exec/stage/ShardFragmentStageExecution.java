@@ -9,6 +9,8 @@
 package org.opensearch.analytics.exec.stage;
 
 import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.backend.ExchangeSource;
 import org.opensearch.analytics.exec.AnalyticsSearchTransportService;
 import org.opensearch.analytics.exec.PendingExecutions;
@@ -52,6 +54,8 @@ import java.util.function.Function;
  * @opensearch.internal
  */
 final class ShardFragmentStageExecution extends AbstractStageExecution implements DataProducer {
+
+    private static final Logger logger = LogManager.getLogger(ShardFragmentStageExecution.class);
 
     private final AtomicInteger inFlight = new AtomicInteger(0);
 
@@ -121,6 +125,7 @@ final class ShardFragmentStageExecution extends AbstractStageExecution implement
 
             @Override
             public void onFailure(Exception e) {
+                logger.error("Failure", e);
                 captureFailure(new RuntimeException("Stage " + stage.getStageId() + " failed", e));
                 metrics.incrementTasksFailed();
                 onShardTerminated();
