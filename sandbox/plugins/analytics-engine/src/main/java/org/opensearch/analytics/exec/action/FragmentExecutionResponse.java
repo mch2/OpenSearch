@@ -60,9 +60,30 @@ public class FragmentExecutionResponse extends ActionResponse {
         for (Object[] row : rows) {
             out.writeVInt(row.length);
             for (Object cell : row) {
-                out.writeGenericValue(cell);
+                out.writeGenericValue(coerce(cell));
             }
         }
+    }
+
+    /**
+     * Coerces a cell value into a type that {@link StreamOutput#writeGenericValue}
+     * can serialize. Arrow's materializer can produce types (Text, JsonStringArrayList)
+     * that writeGenericValue doesn't handle — convert them to standard Java types here
+     * so serialization failures don't cascade into framework-level assertion errors.
+     */
+    private static Object coerce(Object cell) {
+        if (cell == null) return null;
+        if (cell instanceof List<?> list) {
+            List<Object> coerced = new ArrayList<>(list.size());
+            for (Object elem : list) {
+                coerced.add(coerce(elem));
+            }
+            return coerced;
+        }
+        if (cell instanceof Number || cell instanceof String || cell instanceof Boolean || cell instanceof byte[]) {
+            return cell;
+        }
+        return cell.toString();
     }
 
     public List<String> getFieldNames() {

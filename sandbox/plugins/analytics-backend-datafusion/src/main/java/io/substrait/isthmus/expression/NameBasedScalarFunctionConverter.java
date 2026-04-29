@@ -39,7 +39,7 @@ import io.substrait.type.Type;
 
 /**
  * Scalar function converter with a name-based fallback that picks a variant whose declared
- * arg types match the call's (already-normalized) operand types.
+ * arg types match the call's operand types.
  *
  * <p>Two problems this solves that the stock {@link ScalarFunctionConverter} doesn't:
  *
@@ -48,17 +48,19 @@ import io.substrait.type.Type;
  *       {@link SqlOperator} identity. PPL ships its own SqlOperator instances (e.g. PPL's
  *       own {@code abs}, {@code sin}); they miss identity lookup against
  *       {@code SqlStdOperatorTable} entries even when the names line up.</li>
- *   <li><b>Calcite-name → DataFusion-registry-name aliasing.</b> Some built-ins resolve to
- *       names DataFusion's registry doesn't recognise ({@code SIGN → sign} — DF calls it
- *       {@code signum}; {@code RAND → rand} — DF calls it {@code random}; {@code TRUNCATE →
- *       truncate} — DF calls it {@code trunc}). The aliases come from the
- *       {@code calcite_aliases} block in {@code opensearch_scalar.yaml}.</li>
+ *   <li><b>Calcite-name → DataFusion-registry-name aliasing.</b> Some Calcite operators
+ *       resolve to names DataFusion's registry doesn't recognise ({@code SIGN → sign} —
+ *       DF calls it {@code signum}; {@code RAND → rand} — DF calls it {@code random};
+ *       {@code TRUNCATE → truncate} — DF calls it {@code trunc}). The aliases come from
+ *       the {@code calcite_aliases} block in {@code opensearch_scalar.yaml}.</li>
  * </ol>
  *
- * <p>Operand-type coercion and other substrait-spec impedance fixes live in
- * {@code SubstraitSpecNormalizer} (analytics-engine). By the time a call reaches this
- * converter, its operand types already fit a substrait variant; this class just has to
- * find the variant by name+arity and, where needed, by alias.
+ * <p>Operand-type coverage (e.g. {@code sin(i64)}) is handled by declaring additional
+ * variants in {@code opensearch_scalar.yaml}. Structural rewrites (e.g. dropping
+ * LIKE's 3rd escape arg) are handled by
+ * {@code AnalyticsSearchBackendPlugin.handleProjectCall} in the planner. By the time a
+ * call reaches this converter, its operand types and arity already match a variant in the
+ * loaded catalog; this class just finds it by name and, where needed, by alias.
  */
 public class NameBasedScalarFunctionConverter extends ScalarFunctionConverter {
 
@@ -132,9 +134,7 @@ public class NameBasedScalarFunctionConverter extends ScalarFunctionConverter {
 
     /**
      * Looks up the catalog variant by (aliased) name and exact operand type signature,
-     * falling back to first arity-matching variant if no exact-type match exists. The
-     * caller (post-normalizer) typically presents operands whose types line up with one
-     * variant precisely.
+     * falling back to first arity-matching variant if no exact-type match exists.
      */
     private Optional<Expression> convertByName(RexCall call, Function<RexNode, Expression> topLevelConverter) {
         String callName = call.getOperator().getName();

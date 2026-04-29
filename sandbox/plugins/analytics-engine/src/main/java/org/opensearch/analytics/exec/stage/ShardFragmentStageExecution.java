@@ -125,7 +125,6 @@ final class ShardFragmentStageExecution extends AbstractStageExecution implement
 
             @Override
             public void onFailure(Exception e) {
-                logger.error("Failure", e);
                 captureFailure(new RuntimeException("Stage " + stage.getStageId() + " failed", e));
                 metrics.incrementTasksFailed();
                 onShardTerminated();

@@ -11,13 +11,9 @@ package org.opensearch.be.datafusion;
 /**
  * End-to-end tests for scalar math functions routed through PPL → Calcite →
  * Substrait → DataFusion. Tests use natural PPL form against the bank fixture
- * row 1 (firstname='Amber', balance=39225). Functions whose Substrait variants
- * are fp64-only (sin, cos, ln, sqrt, …) get implicit i64→fp64 casts inserted by
- * {@code SubstraitSpecNormalizer} in the planner — users don't have to write
- * the cast themselves.
- *
- * <p>Functions not yet covered (need YAML extension declaring the variant +
- * matching DataFusion impl): cbrt, truncate, pi, rand, log(base, x).
+ * row 1 (firstname='Amber', balance=39225). Integer-typed operands on fp-only
+ * substrait functions (sin, cos, ln, sqrt, …) are handled by declaring i64
+ * variants in {@code opensearch_scalar.yaml} — DataFusion coerces internally.
  */
 public class ScalarMathFunctionIT extends BaseScalarFunctionIT {
 
@@ -77,4 +73,5 @@ public class ScalarMathFunctionIT extends BaseScalarFunctionIT {
     public void testAtan2() { assertScalarDouble("atan2(balance - balance, balance / balance)", 0.0, 1e-9); }
     public void testDegrees() { assertScalarDouble("degrees(balance - balance)", 0.0, 1e-9); }
     public void testRadians() { assertScalarDouble("radians(balance - balance)", 0.0, 1e-9); }
+    public void testConv() { assertScalarString("conv(15, 10, 2)", "1111"); }
 }

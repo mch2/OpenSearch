@@ -139,7 +139,7 @@ public class DefaultPlanExecutor extends HandledTransportAction<ActionRequest, A
         final AnalyticsQueryTask queryTask = (AnalyticsQueryTask) taskManager.register(
             "transport",
             "analytics_query",
-            new AnalyticsQueryTaskRequest(dag.queryId(), null)
+            new AnalyticsQueryTaskRequest("thefuck", null)
         );
         final QueryContext config = new QueryContext(dag, searchExecutor, queryTask);
 

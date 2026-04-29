@@ -18,25 +18,6 @@ import org.apache.calcite.sql.SqlKind;
  * @opensearch.internal
  */
 public enum ScalarFunction {
-    // String
-    UPPER(SqlKind.OTHER),
-    LOWER(SqlKind.OTHER),
-    TRIM(SqlKind.TRIM),
-    SUBSTRING(SqlKind.OTHER),
-    CONCAT(SqlKind.OTHER),
-    CONCAT_WS(SqlKind.OTHER),
-    CHAR_LENGTH(SqlKind.OTHER),
-    ASCII(SqlKind.OTHER),
-    LEFT(SqlKind.OTHER),
-    RIGHT(SqlKind.OTHER),
-    REVERSE(SqlKind.OTHER),
-    REPLACE(SqlKind.OTHER),
-    REGEXP_REPLACE(SqlKind.OTHER),
-    POSITION(SqlKind.POSITION),
-    LOCATE(SqlKind.OTHER),
-    LTRIM(SqlKind.OTHER),
-    RTRIM(SqlKind.OTHER),
-
     // Arithmetic
     PLUS(SqlKind.PLUS),
     MINUS(SqlKind.MINUS),
@@ -59,8 +40,6 @@ public enum ScalarFunction {
     LOG10(SqlKind.OTHER),
     POWER(SqlKind.OTHER),
     SIGN(SqlKind.OTHER),
-    GREATEST(SqlKind.OTHER),
-    LEAST(SqlKind.OTHER),
     PI(SqlKind.OTHER),
     RAND(SqlKind.OTHER),
     E(SqlKind.OTHER),
@@ -71,14 +50,9 @@ public enum ScalarFunction {
     // Trigonometric
     SIN(SqlKind.OTHER),
     COS(SqlKind.OTHER),
-    TAN(SqlKind.OTHER),
     COT(SqlKind.OTHER),
     SINH(SqlKind.OTHER),
     COSH(SqlKind.OTHER),
-    TANH(SqlKind.OTHER),
-    ASINH(SqlKind.OTHER),
-    ACOSH(SqlKind.OTHER),
-    ATANH(SqlKind.OTHER),
     ASIN(SqlKind.OTHER),
     ACOS(SqlKind.OTHER),
     ATAN(SqlKind.OTHER),
@@ -89,7 +63,7 @@ public enum ScalarFunction {
     // Cast / type
     CAST(SqlKind.CAST),
 
-    // Comparison / logical (kind enum entries — enum lookup falls through to name)
+    // Comparison / logical
     EQUALS(SqlKind.EQUALS),
     NOT_EQUALS(SqlKind.NOT_EQUALS),
     LESS_THAN(SqlKind.LESS_THAN),
@@ -109,15 +83,7 @@ public enum ScalarFunction {
     CASE(SqlKind.CASE),
     COALESCE(SqlKind.COALESCE),
     NULLIF(SqlKind.NULLIF),
-    IF(SqlKind.OTHER),
-
-    // Crypto
-    MD5(SqlKind.OTHER),
-    SHA1(SqlKind.OTHER),
-    SHA2(SqlKind.OTHER),
-
-    // Date/time
-    EXTRACT(SqlKind.EXTRACT);
+    IF(SqlKind.OTHER);
 
     private final SqlKind sqlKind;
 

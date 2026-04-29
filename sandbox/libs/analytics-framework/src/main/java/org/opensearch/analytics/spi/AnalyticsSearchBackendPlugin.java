@@ -75,9 +75,9 @@ public interface AnalyticsSearchBackendPlugin {
 
     /**
      * Called by the planner during marking to let a backend rewrite a scalar projection
-     * call into the Calcite form it needs for execution. For example, DataFusion's
-     * substrait consumer needs {@code SIN(BIGINT)} rewritten to {@code SIN(CAST(BIGINT AS
-     * DOUBLE))} because the substrait spec only declares fp variants.
+     * call into the Calcite form it needs for execution. For example, Calcite emits
+     * 3-arg {@code LIKE(input, pattern, escape)} but the substrait spec only declares
+     * a 2-arg variant — a backend can drop the escape operand here.
      *
      * <p>The planner walks bottom-up, so operands are already rewritten when this is called.
      * Default returns the call unchanged.
@@ -88,7 +88,7 @@ public interface AnalyticsSearchBackendPlugin {
 
     /**
      * Called by the planner during marking to let a backend rewrite a filter predicate
-     * call. Same semantics as {@link #handleProjectCall} but for filter conditions.
+     * call. Same contract as {@link #handleProjectCall} but for filter conditions.
      * Default returns the call unchanged.
      */
     default RexCall handleFilterCall(RexCall call, RexBuilder rexBuilder) {
