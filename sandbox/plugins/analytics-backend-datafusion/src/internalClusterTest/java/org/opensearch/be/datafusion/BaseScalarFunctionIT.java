@@ -107,6 +107,7 @@ public abstract class BaseScalarFunctionIT extends OpenSearchIntegTestCase {
             .startObject("account_number").field("type", "long").endObject()
             .startObject("firstname").field("type", "keyword").endObject()
             .startObject("balance").field("type", "long").endObject()
+            .startObject("created_at").field("type", "date").endObject()
             .endObject()
             .endObject();
 
@@ -125,9 +126,11 @@ public abstract class BaseScalarFunctionIT extends OpenSearchIntegTestCase {
 
     private void indexBankDocs() {
         client().prepareIndex(BANK_INDEX).setId("1")
-            .setSource("account_number", 1, "firstname", "Amber", "balance", 39225L).get();
+            .setSource("account_number", 1, "firstname", "Amber", "balance", 39225L,
+                "created_at", "2024-06-15T10:30:00Z").get();
         client().prepareIndex(BANK_INDEX).setId("6")
-            .setSource("account_number", 6, "firstname", "Hattie", "balance", 5686L).get();
+            .setSource("account_number", 6, "firstname", "Hattie", "balance", 5686L,
+                "created_at", "2024-01-20T14:45:30Z").get();
     }
 
     // ---- Assert helpers ----

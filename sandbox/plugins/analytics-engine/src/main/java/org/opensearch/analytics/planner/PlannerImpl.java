@@ -33,8 +33,6 @@ import org.opensearch.analytics.planner.rules.OpenSearchFilterRule;
 import org.opensearch.analytics.planner.rules.OpenSearchProjectRule;
 import org.opensearch.analytics.planner.rules.OpenSearchSortRule;
 import org.opensearch.analytics.planner.rules.OpenSearchTableScanRule;
-import org.opensearch.analytics.planner.rules.TimestampLiteralReduceRule;
-
 import java.util.List;
 
 /**
@@ -82,10 +80,6 @@ public class PlannerImpl {
         hepBuilder.addMatchOrder(HepMatchOrder.ARBITRARY);
         hepBuilder.addRuleCollection(
             List.of(
-                // Fold TIMESTAMP('2024-01-01T00:00:00Z') → TIMESTAMP(3) literal before
-                // ReduceExpressions runs, otherwise the PPL-emitted TIMESTAMP(varchar) call
-                // survives into substrait where isthmus can't convert it (it's a SQL-plugin UDF).
-                TimestampLiteralReduceRule.INSTANCE,
                 new ReduceExpressionsRule.FilterReduceExpressionsRule(Filter.class, RelBuilder.proto(Contexts.empty())),
                 new ReduceExpressionsRule.ProjectReduceExpressionsRule(Project.class, RelBuilder.proto(Contexts.empty()))
             )

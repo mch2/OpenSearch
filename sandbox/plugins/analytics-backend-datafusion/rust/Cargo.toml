@@ -39,6 +39,14 @@ num_cpus = { workspace = true }
 mimalloc = { workspace = true }
 native-bridge-common = { workspace = true }
 
+# Hash / crypto / IP / JSON for UDFs
+md-5 = { workspace = true }
+sha1 = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+ipnet = { workspace = true }
+serde_json = { workspace = true }
+
 [dev-dependencies]
 criterion = { workspace = true }
 tempfile = { workspace = true }

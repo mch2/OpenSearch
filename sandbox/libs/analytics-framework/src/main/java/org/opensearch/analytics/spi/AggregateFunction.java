@@ -33,15 +33,27 @@ public enum AggregateFunction {
     VAR_POP(Type.STATISTICAL, SqlKind.VAR_POP),
     VAR_SAMP(Type.STATISTICAL, SqlKind.VAR_SAMP),
 
+    // Simple — first/last value (no time semantics; DF first_value/last_value)
+    FIRST(Type.SIMPLE, SqlKind.OTHER),
+    LAST(Type.SIMPLE, SqlKind.OTHER),
+    FIRST_VALUE(Type.SIMPLE, SqlKind.FIRST_VALUE),
+    LAST_VALUE(Type.SIMPLE, SqlKind.LAST_VALUE),
+
     // State-expanding — state grows with input rows per key
     PERCENTILE_CONT(Type.STATE_EXPANDING, SqlKind.PERCENTILE_CONT),
     PERCENTILE_DISC(Type.STATE_EXPANDING, SqlKind.PERCENTILE_DISC),
+    PERCENTILE(Type.STATE_EXPANDING, SqlKind.OTHER),
+    MEDIAN(Type.STATE_EXPANDING, SqlKind.OTHER),
     COLLECT(Type.STATE_EXPANDING, SqlKind.COLLECT),
+    VALUES(Type.STATE_EXPANDING, SqlKind.OTHER),
+    LIST(Type.STATE_EXPANDING, SqlKind.OTHER),
     LISTAGG(Type.STATE_EXPANDING, SqlKind.LISTAGG),
     TAKE(Type.STATE_EXPANDING, SqlKind.OTHER),
 
     // Approximate — probabilistic, fixed-size state
-    APPROX_COUNT_DISTINCT(Type.APPROXIMATE, SqlKind.OTHER);
+    APPROX_COUNT_DISTINCT(Type.APPROXIMATE, SqlKind.OTHER),
+    DISTINCT_COUNT(Type.APPROXIMATE, SqlKind.OTHER),
+    DC(Type.APPROXIMATE, SqlKind.OTHER);
 
     /** Category of aggregate function. Affects execution strategy (shuffle vs map-reduce). */
     public enum Type {

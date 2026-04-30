@@ -46,11 +46,51 @@ calcite_aliases:
   # Calcite name → name DF's substrait consumer recognises
   mod: modulus
   character_length: char_length
+  length: char_length
+  len: char_length
   ilike: like
   log: logb
   sign: signum
   truncate: trunc
   rand: random
+
+  # Crypto aliases — PPL emits md5/sha1/sha2/sha256 but DF's built-ins return
+  # different bytes than expected. Route to our Rust UDF wrappers (ppl_*) which
+  # do standard hashing of the UTF-8 bytes.
+  md5: ppl_md5
+  sha1: ppl_sha1
+  sha2: ppl_sha2
+  sha256: ppl_sha256
+
+  # Aggregate aliases — PPL operator name → DF built-in name
+  first: first_value
+  last: last_value
+  dc: count
+  distinct_count: count
+  percentile: approx_percentile_cont
+
+  # Multi-value aliases — PPL operator name → DF array_* built-in
+  mvcount: array_length
+  mvjoin: array_to_string
+  mvindex: array_element
+  mvappend: array_concat
+  mvdedup: array_distinct
+  split: string_to_array
+
+  # Date/time aliases — PPL operator name → DF built-in name
+  sysdate: now
+  date_format: to_char
+  str_to_date: to_timestamp
+  strftime: to_char
+  strptime: to_timestamp
+  time_format: to_char
+  date: to_date
+  time: to_time
+  datetime: to_timestamp
+  makedate: make_date
+  maketime: make_time
+  unix_timestamp: to_unixtime
+  extract: date_part
 
 scalar_functions:
   # ── Integer variants for substrait-core fp-only math functions ──
@@ -205,10 +245,85 @@ scalar_functions:
       - args: [{ value: i64, name: "x" }]
         return: fp64
   -
+    name: "crc32"
+    impls:
+      - args: [{ value: string, name: "value" }]
+        return: i64
+  -
     name: "conv"
     impls:
       - args: [{ value: i64, name: "value" }, { value: i64, name: "from_base" }, { value: i64, name: "to_base" }]
         return: string
+  # ── Date/time functions (DF built-ins not in substrait core) ──
+  -
+    name: "now"
+    impls:
+      - args: []
+        return: "timestamp"
+  -
+    name: "current_date"
+    impls:
+      - args: []
+        return: "date"
+  -
+    name: "current_time"
+    impls:
+      - args: []
+        return: "time"
+  -
+    name: "current_timestamp"
+    impls:
+      - args: []
+        return: "timestamp"
+  -
+    name: "from_unixtime"
+    impls:
+      - args: [{ value: i64, name: "unixtime" }]
+        return: "timestamp"
+  -
+    name: "to_unixtime"
+    impls:
+      - args: [{ value: "any1", name: "ts" }]
+        return: i64
+  -
+    name: "make_date"
+    impls:
+      - args: [{ value: i32, name: "year" }, { value: i32, name: "month" }, { value: i32, name: "day" }]
+        return: "date"
+  -
+    name: "make_time"
+    impls:
+      - args: [{ value: i32, name: "hour" }, { value: i32, name: "minute" }, { value: fp64, name: "second" }]
+        return: "time"
+  -
+    name: "to_date"
+    impls:
+      - args: [{ value: "any1", name: "value" }]
+        return: "date"
+  -
+    name: "to_time"
+    impls:
+      - args: [{ value: "any1", name: "value" }]
+        return: "time"
+  -
+    name: "to_timestamp"
+    impls:
+      - args: [{ value: "any1", name: "value" }]
+        return: "any1"
+      - args: [{ value: "any1", name: "value" }, { value: string, name: "format" }]
+        return: "any1"
+  -
+    name: "to_char"
+    impls:
+      - args: [{ value: "any1", name: "value" }, { value: string, name: "format" }]
+        return: string
+  -
+    name: "date_part"
+    impls:
+      - args: [{ value: string, name: "part" }, { value: "any1", name: "value" }]
+        return: fp64
+
+  # ── Conditional ──
   -
     name: "coalesce"
     impls:
@@ -218,3 +333,85 @@ scalar_functions:
         return: "any1"
       - args: [{ value: "any1", name: "a" }, { value: "any1", name: "b" }, { value: "any1", name: "c" }, { value: "any1", name: "d" }]
         return: "any1"
+
+  # ── String functions (DF built-ins / DF-flavor) ──
+  # concat — substrait spec declares concat as variadic, but isthmus's
+  # matcher needs explicit arity variants for nullable string inputs.
+  -
+    name: "concat"
+    impls:
+      - args: [{ value: string, name: "a" }, { value: string, name: "b" }]
+        return: string
+      - args: [{ value: string, name: "a" }, { value: string, name: "b" }, { value: string, name: "c" }]
+        return: string
+      - args: [{ value: string, name: "a" }, { value: string, name: "b" }, { value: string, name: "c" }, { value: string, name: "d" }]
+        return: string
+  -
+    name: "concat_ws"
+    impls:
+      - args: [{ value: string, name: "sep" }, { value: string, name: "a" }, { value: string, name: "b" }]
+        return: string
+      - args: [{ value: string, name: "sep" }, { value: string, name: "a" }, { value: string, name: "b" }, { value: string, name: "c" }]
+        return: string
+      - args: [{ value: string, name: "sep" }, { value: string, name: "a" }, { value: string, name: "b" }, { value: string, name: "c" }, { value: string, name: "d" }]
+        return: string
+  -
+    name: "ascii"
+    impls:
+      - args: [{ value: string, name: "value" }]
+        return: i64
+  -
+    name: "ltrim"
+    impls:
+      - args: [{ value: string, name: "value" }]
+        return: string
+  -
+    name: "rtrim"
+    impls:
+      - args: [{ value: string, name: "value" }]
+        return: string
+
+  # ── Crypto / hash UDFs (registered by analytics-backend-datafusion rust/udf/mod.rs) ──
+  # Names prefixed ppl_* to override DF's built-in md5/sha1/sha2/sha256, which compute
+  # different hashes than standard MD5/SHA over the UTF-8 bytes.
+  -
+    name: "ppl_md5"
+    impls:
+      - args: [{ value: string, name: "value" }]
+        return: string
+  -
+    name: "ppl_sha1"
+    impls:
+      - args: [{ value: string, name: "value" }]
+        return: string
+  -
+    name: "ppl_sha2"
+    impls:
+      - args: [{ value: string, name: "value" }, { value: i32, name: "bits" }]
+        return: string
+  -
+    name: "ppl_sha256"
+    impls:
+      - args: [{ value: string, name: "value" }]
+        return: string
+
+  # ── IP UDFs ──
+  -
+    name: "cidrmatch"
+    impls:
+      - args: [{ value: string, name: "cidr" }, { value: string, name: "ip" }]
+        return: boolean
+
+  # ── JSON UDFs ──
+  -
+    name: "json_valid"
+    impls:
+      - args: [{ value: string, name: "value" }]
+        return: boolean
+  -
+    name: "json_object"
+    impls:
+      - args: [{ value: string, name: "k1" }, { value: string, name: "v1" }]
+        return: string
+      - args: [{ value: string, name: "k1" }, { value: string, name: "v1" }, { value: string, name: "k2" }, { value: string, name: "v2" }]
+        return: string

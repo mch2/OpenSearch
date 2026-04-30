@@ -107,6 +107,11 @@ dependencies {
   // can't satisfy classloads triggered by parent-loaded classes.
   runtimeOnly "org.apache.commons:commons-math3:3.6.1"
 
+  // commons-text — Calcite's SqlFunctions.<clinit> references
+  // org.apache.commons.text.similarity.LevenshteinDistance. Same parent-classloader
+  // rationale as commons-math3 above.
+  runtimeOnly "org.apache.commons:commons-text:1.11.0"
+
   // httpcore5 — Avatica's BuiltInConnectionProperty static initializer references
   // org.apache.hc.core5.util.Timeout. Must live in this parent plugin's classloader
   // because calcite-core/avatica-core are loaded here; child plugins (test-ppl-frontend)

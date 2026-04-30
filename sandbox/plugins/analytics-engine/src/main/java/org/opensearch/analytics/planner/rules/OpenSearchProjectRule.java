@@ -12,7 +12,6 @@ import org.apache.calcite.plan.RelOptRule;
 import org.apache.calcite.plan.RelOptRuleCall;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.Project;
-import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.rex.RexCall;
 import org.apache.calcite.rex.RexInputRef;
 import org.apache.calcite.rex.RexNode;
@@ -65,11 +64,10 @@ public class OpenSearchProjectRule extends RelOptRule {
         // Note: if JMH benchmarks show this as a hotspot, consider (a) precomputing a
         // SqlKind → viable backends map once per onMatch() call, and (b) returning
         // childViableBackends directly when all candidates pass to avoid allocation.
-        RexBuilder rexBuilder = project.getCluster().getRexBuilder();
         List<RexNode> annotatedExprs = new ArrayList<>(project.getProjects().size());
         boolean requiresBackendCapabilityEvaluation = false;
         for (RexNode expr : project.getProjects()) {
-            RexNode annotated = annotateExpr(expr, childViableBackends, rexBuilder);
+            RexNode annotated = annotateExpr(expr, childViableBackends);
             annotatedExprs.add(annotated);
             if (annotated instanceof AnnotatedProjectExpression) {
                 requiresBackendCapabilityEvaluation = true;
@@ -97,8 +95,12 @@ public class OpenSearchProjectRule extends RelOptRule {
         );
     }
 
-    private RexNode annotateExpr(RexNode expr, List<String> childViableBackends, RexBuilder rexBuilder) {
+    private RexNode annotateExpr(RexNode expr, List<String> childViableBackends) {
         if (!(expr instanceof RexCall rexCall)) {
+            // TODO: RexInputRef and RexLiteral are left unannotated — they are implicitly handled
+            // by whichever backend executes the operator (pass-through for refs, constant for literals).
+            // Revisit if delegation requires knowing which backend evaluates each expression
+            // independently, or if a backend cannot handle pass-through refs natively.
             return expr;
         }
 
@@ -122,11 +124,11 @@ public class OpenSearchProjectRule extends RelOptRule {
             );
         }
 
-        // Recurse into operands (bottom-up: children rewritten before parent)
+        // Recurse into operands
         boolean changed = false;
         List<RexNode> newOperands = new ArrayList<>(rexCall.getOperands().size());
         for (RexNode operand : rexCall.getOperands()) {
-            RexNode annotated = annotateExpr(operand, childViableBackends, rexBuilder);
+            RexNode annotated = annotateExpr(operand, childViableBackends);
             newOperands.add(annotated);
             if (annotated != operand) {
                 changed = true;
@@ -134,17 +136,6 @@ public class OpenSearchProjectRule extends RelOptRule {
         }
 
         RexCall target = changed ? rexCall.clone(rexCall.getType(), newOperands) : rexCall;
-
-        // Let the viable backend rewrite the call (e.g. insert CASTs for type coercion).
-        CapabilityRegistry registry = context.getCapabilityRegistry();
-        for (String backendName : scalarViable) {
-            RexCall rewritten = registry.getBackend(backendName).handleProjectCall(target, rexBuilder);
-            if (rewritten != target) {
-                target = rewritten;
-                break;
-            }
-        }
-
         return new AnnotatedProjectExpression(target.getType(), target, scalarViable, context.nextAnnotationId());
     }
 
@@ -167,16 +158,12 @@ public class OpenSearchProjectRule extends RelOptRule {
     }
 
     private List<String> resolveScalarViableBackends(RexCall rexCall, List<String> childViableBackends) {
-        // SqlKind first (covers PLUS, MINUS, CASE, etc. — enum entries with explicit kinds).
-        // Fall back to the operator's name for SqlKind.OTHER functions (ABS, UPPER, SQRT, etc.) —
-        // mirrors the OpenSearchAggregateRule fromSqlKind/fromName pattern.
         ScalarFunction scalarFunc = ScalarFunction.fromSqlKind(rexCall.getKind());
+        if (scalarFunc == null && rexCall.getOperator() instanceof SqlFunction sqlFunction) {
+            scalarFunc = ScalarFunction.fromSqlFunction(sqlFunction);
+        }
         if (scalarFunc == null) {
-            try {
-                scalarFunc = ScalarFunction.fromNameOrError(rexCall.getOperator().getName().toUpperCase(java.util.Locale.ROOT));
-            } catch (IllegalStateException ignored) {
-                return List.of();
-            }
+            return List.of();
         }
         FieldType fieldType = FieldType.fromSqlTypeName(rexCall.getType().getSqlTypeName());
         if (fieldType == null) {

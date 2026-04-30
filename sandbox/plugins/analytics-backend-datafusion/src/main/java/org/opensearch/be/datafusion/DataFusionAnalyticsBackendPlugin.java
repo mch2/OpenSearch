@@ -8,9 +8,6 @@
 
 package org.opensearch.be.datafusion;
 
-import org.apache.calcite.rex.RexBuilder;
-import org.apache.calcite.rex.RexCall;
-import org.apache.calcite.sql.SqlKind;
 import org.opensearch.analytics.spi.AggregateCapability;
 import org.opensearch.analytics.spi.AggregateFunction;
 import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
@@ -19,16 +16,16 @@ import org.opensearch.analytics.spi.EngineCapability;
 import org.opensearch.analytics.spi.ExchangeSinkProvider;
 import org.opensearch.analytics.spi.FieldType;
 import org.opensearch.analytics.spi.FilterCapability;
-import org.opensearch.analytics.spi.FilterOperator;
 import org.opensearch.analytics.spi.FragmentConvertor;
 import org.opensearch.analytics.spi.ProjectCapability;
 import org.opensearch.analytics.spi.ScalarFunction;
+import org.opensearch.analytics.spi.ScalarFunctionAdapter;
 import org.opensearch.analytics.spi.ScanCapability;
 import org.opensearch.analytics.spi.SearchExecEngineProvider;
 import org.opensearch.index.engine.dataformat.DataFormatRegistry;
 
 import java.util.HashSet;
-import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -54,17 +51,17 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
         SUPPORTED_FIELD_TYPES.add(FieldType.TEXT);
     }
 
-    private static final Set<FilterOperator> STANDARD_FILTER_OPS = Set.of(
-        FilterOperator.EQUALS,
-        FilterOperator.NOT_EQUALS,
-        FilterOperator.GREATER_THAN,
-        FilterOperator.GREATER_THAN_OR_EQUAL,
-        FilterOperator.LESS_THAN,
-        FilterOperator.LESS_THAN_OR_EQUAL,
-        FilterOperator.IS_NULL,
-        FilterOperator.IS_NOT_NULL,
-        FilterOperator.IN,
-        FilterOperator.LIKE
+    private static final Set<ScalarFunction> STANDARD_FILTER_OPS = Set.of(
+        ScalarFunction.EQUALS,
+        ScalarFunction.NOT_EQUALS,
+        ScalarFunction.GREATER_THAN,
+        ScalarFunction.GREATER_THAN_OR_EQUAL,
+        ScalarFunction.LESS_THAN,
+        ScalarFunction.LESS_THAN_OR_EQUAL,
+        ScalarFunction.IS_NULL,
+        ScalarFunction.IS_NOT_NULL,
+        ScalarFunction.IN,
+        ScalarFunction.LIKE
     );
 
     private static final Set<AggregateFunction> AGG_FUNCTIONS = Set.of(
@@ -73,7 +70,16 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
         AggregateFunction.MIN,
         AggregateFunction.MAX,
         AggregateFunction.COUNT,
-        AggregateFunction.AVG
+        AggregateFunction.AVG,
+        AggregateFunction.FIRST_VALUE,
+        AggregateFunction.LAST_VALUE,
+        AggregateFunction.FIRST,
+        AggregateFunction.LAST,
+        AggregateFunction.MEDIAN,
+        AggregateFunction.PERCENTILE,
+        AggregateFunction.PERCENTILE_CONT,
+        AggregateFunction.DISTINCT_COUNT,
+        AggregateFunction.DC
     );
 
     /**
@@ -84,6 +90,23 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
      * functions). Per-function ITs verify each one.
      */
     private static final Set<ScalarFunction> SCALAR_FUNCTIONS = Set.copyOf(java.util.Arrays.asList(ScalarFunction.values()));
+
+    private static final Map<ScalarFunction, ScalarFunctionAdapter> SCALAR_FUNCTION_ADAPTERS;
+    static {
+        ScalarFunctionAdapter likeAdapter = new LikeEscapeTransformer();
+        ScalarFunctionAdapter timestampAdapter = new TimestampFunctionTransformer();
+        ScalarFunctionAdapter divisionAdapter = new SafeDivisionTransformer();
+        ScalarFunctionAdapter toNumberAdapter = new ToNumberAdapter();
+        ScalarFunctionAdapter toStringAdapter = new ToStringAdapter();
+        SCALAR_FUNCTION_ADAPTERS = Map.of(
+            ScalarFunction.LIKE, likeAdapter,
+            ScalarFunction.TIMESTAMP, timestampAdapter,
+            ScalarFunction.DIVIDE, divisionAdapter,
+            ScalarFunction.MOD, divisionAdapter,
+            ScalarFunction.TONUMBER, toNumberAdapter,
+            ScalarFunction.TOSTRING, toStringAdapter
+        );
+    }
 
     private final DataFusionPlugin plugin;
 
@@ -114,7 +137,7 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
             public Set<FilterCapability> filterCapabilities() {
                 Set<String> formats = Set.copyOf(plugin.getSupportedFormats());
                 Set<FilterCapability> caps = new HashSet<>();
-                for (FilterOperator op : STANDARD_FILTER_OPS) {
+                for (ScalarFunction op : STANDARD_FILTER_OPS) {
                     for (FieldType type : SUPPORTED_FIELD_TYPES) {
                         caps.add(new FilterCapability.Standard(op, Set.of(type), formats));
                     }
@@ -138,12 +161,22 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
                 Set<AggregateCapability> caps = new HashSet<>();
                 for (AggregateFunction func : AGG_FUNCTIONS) {
                     for (FieldType type : SUPPORTED_FIELD_TYPES) {
-                        caps.add(AggregateCapability.simple(func, Set.of(type), formats));
+                        caps.add(switch (func.getType()) {
+                            case SIMPLE -> AggregateCapability.simple(func, Set.of(type), formats);
+                            case STATISTICAL -> AggregateCapability.statistical(func, Set.of(type), formats);
+                            case STATE_EXPANDING -> AggregateCapability.stateExpanding(func, Set.of(type), formats);
+                            case APPROXIMATE -> AggregateCapability.approximate(func, Set.of(type), formats);
+                        });
                     }
                 }
                 // PPL TAKE — collect first N values into a list. State-expanding (state grows with N).
                 caps.add(AggregateCapability.stateExpanding(AggregateFunction.TAKE, Set.copyOf(SUPPORTED_FIELD_TYPES), formats));
                 return Set.copyOf(caps);
+            }
+
+            @Override
+            public Map<ScalarFunction, ScalarFunctionAdapter> scalarFunctionAdapters() {
+                return SCALAR_FUNCTION_ADAPTERS;
             }
         };
     }
@@ -151,23 +184,6 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
     @Override
     public FragmentConvertor getFragmentConvertor() {
         return new DataFusionFragmentConvertor(plugin.getSubstraitExtensions());
-    }
-
-    @Override
-    public RexCall handleProjectCall(RexCall call, RexBuilder rb) {
-        call = rewriteLikeDropEscape(call);
-        return call;
-    }
-
-    @Override
-    public RexCall handleFilterCall(RexCall call, RexBuilder rb) {
-        return handleProjectCall(call, rb);
-    }
-
-    private static RexCall rewriteLikeDropEscape(RexCall call) {
-        if (call.getKind() != SqlKind.LIKE) return call;
-        if (call.getOperands().size() != 3) return call;
-        return call.clone(call.getType(), call.getOperands().subList(0, 2));
     }
 
     @Override
