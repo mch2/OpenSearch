@@ -27,4 +27,12 @@ public class ScalarConditionalFunctionIT extends BaseScalarFunctionIT {
     public void testIsnullOnNull() { assertScalarBoolean("isnull(nullif(firstname, firstname))", true); }
     public void testIsnotnullOnValue() { assertScalarBoolean("isnotnull(firstname)", true); }
     public void testIspresentOnValue() { assertScalarBoolean("ispresent(firstname)", true); }
+
+    // ── isblank / isempty ─────────────────────────────────────────────
+    // PPL-frontend gap: `isempty(x)` / `isblank(x)` decompose into Calcite's
+    // `SqlStdOperatorTable.IS_EMPTY(x)`, which is the MULTISET `IS EMPTY` postfix
+    // operator — valid on collections, not strings. Isthmus correctly rejects it with
+    // "Unable to convert call IS EMPTY(string?)." The fix belongs in the SQL plugin's
+    // `PPLFuncImpTable` (e.g. decompose into `length(x) = 0` / `length(trim(x)) = 0`
+    // for string inputs), after which no backend change is needed.
 }

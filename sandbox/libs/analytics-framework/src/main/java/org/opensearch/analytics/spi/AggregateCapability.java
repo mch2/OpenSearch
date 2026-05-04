@@ -21,22 +21,12 @@ import java.util.Set;
  * validate the function type at construction and make backend declarations
  * self-documenting.
  *
- * <p>{@link #decomposition()} is null for most functions — the planner applies
- * Calcite's standard decomposition (AVG → SUM/COUNT, STDDEV → SUM(x²)+SUM(x)+COUNT).
- * Backends with non-standard partial state (e.g. HLL sketches, Welford STDDEV)
- * provide a custom {@link AggregateDecomposition}.
- *
- * <p>TODO (plan forking): during resolution of a plan alternative, after a single
- * backend is chosen for an aggregate operator, apply decomposition as a paired
- * rewrite of PARTIAL output schema + FINAL input schema:
- * <ol>
- *   <li>If decomposition == null: apply Calcite's AggregateReduceFunctionsRule
- *       to the PARTIAL+FINAL pair.</li>
- *   <li>If decomposition != null: use decomposition.partialCalls() to rewrite
- *       PARTIAL's aggCalls and output row type, then use decomposition.finalExpression()
- *       to rewrite FINAL's aggCalls. Both must be updated together — the exchange
- *       row type between them must be consistent.</li>
- * </ol>
+ * <p>{@link #decomposition()} is null for most functions — defaults treat the
+ * partial state as identical to the result type (correct for SUM/MIN/MAX/COUNT
+ * once the native side rewrites the coord-side {@code AggregateExec} to
+ * {@code Final} mode). Backends override for functions whose partial state
+ * differs from the result: AVG → {@code [sum, count]}, STDDEV/VAR → Welford
+ * triple, HLL → {@code [sketch BINARY]}, etc.
  *
  * @opensearch.internal
  */

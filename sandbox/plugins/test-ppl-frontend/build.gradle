@@ -15,8 +15,11 @@
 
 apply plugin: 'opensearch.opensearchplugin'
 
+// Match the rest of sandbox/* — unified-query-* in mavenLocal is built with JDK 25.
+java { sourceCompatibility = JavaVersion.toVersion(25); targetCompatibility = JavaVersion.toVersion(25) }
+
 // SQL Unified Query API version (aligned with OpenSearch build version)
-def sqlUnifiedQueryVersion = '3.6.0.0-SNAPSHOT'
+def sqlUnifiedQueryVersion = '3.7.0.0-SNAPSHOT'
 
 opensearchplugin {
   description = 'Test PPL front-end: REST endpoint backed by the unified PPL pipeline.'
@@ -25,6 +28,9 @@ opensearchplugin {
 }
 
 repositories {
+  // mavenLocal first so local sql-repo builds (e.g. the IP VARBINARY→IP
+  // ExprType patch) take precedence over the OpenSearch snapshots remote.
+  mavenLocal()
   maven {
     name = 'OpenSearch Snapshots'
     url = 'https://ci.opensearch.org/ci/dbc/snapshots/maven/'

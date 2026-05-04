@@ -17,3 +17,132 @@ aggregate_functions:
         nullability: DECLARED_OUTPUT
         decomposable: NONE
         return: LIST?<any1>
+
+  - name: "stddev_pop"
+    description: "Population standard deviation."
+    impls:
+      - args:
+          - name: x
+            value: any
+        nullability: DECLARED_OUTPUT
+        decomposable: MANY
+        return: fp64
+
+  - name: "stddev_samp"
+    description: "Sample standard deviation."
+    impls:
+      - args:
+          - name: x
+            value: any
+        nullability: DECLARED_OUTPUT
+        decomposable: MANY
+        return: fp64
+
+  - name: "var_pop"
+    description: "Population variance."
+    impls:
+      - args:
+          - name: x
+            value: any
+        nullability: DECLARED_OUTPUT
+        decomposable: MANY
+        return: fp64
+
+  - name: "var_samp"
+    description: "Sample variance."
+    impls:
+      - args:
+          - name: x
+            value: any
+        nullability: DECLARED_OUTPUT
+        decomposable: MANY
+        return: fp64
+
+  - name: "approx_percentile_cont"
+    description: "Approximate percentile (continuous)."
+    impls:
+      - args:
+          - name: x
+            value: any
+          - name: percentile
+            value: fp64
+        nullability: DECLARED_OUTPUT
+        decomposable: NONE
+        return: fp64
+
+  - name: "approx_median"
+    description: "Approximate median."
+    impls:
+      - args:
+          - name: x
+            value: any
+        nullability: DECLARED_OUTPUT
+        decomposable: NONE
+        return: fp64
+
+  - name: "first_value"
+    description: "Returns the first value in the input."
+    impls:
+      - args:
+          - name: x
+            value: any1
+        nullability: DECLARED_OUTPUT
+        decomposable: NONE
+        return: any1?
+
+  - name: "last_value"
+    description: "Returns the last value in the input."
+    impls:
+      - args:
+          - name: x
+            value: any1
+        nullability: DECLARED_OUTPUT
+        decomposable: NONE
+        return: any1?
+
+  - name: "array_agg"
+    description: "Aggregate values into an array."
+    impls:
+      - args:
+          - name: x
+            value: any1
+        nullability: DECLARED_OUTPUT
+        decomposable: NONE
+        return: LIST?<any1>
+
+  - name: "approx_distinct"
+    description: "Approximate distinct count (alias for approx_count_distinct over the substrait wire)."
+    impls:
+      - args:
+          - name: x
+            value: any
+        nullability: DECLARED_OUTPUT
+        decomposable: MANY
+        intermediate: binary
+        return: i64
+
+  # PPL `stats earliest(field, ts)` decomposes to ARG_MIN(field, ts);
+  # NAME_ALIASES remaps arg_min → min_by so DataFusion recognizes the call.
+  - name: "min_by"
+    description: "Value of `x` corresponding to the minimum `key`."
+    impls:
+      - args:
+          - name: x
+            value: any1
+          - name: key
+            value: any2
+        nullability: DECLARED_OUTPUT
+        decomposable: NONE
+        return: any1?
+
+  - name: "max_by"
+    description: "Value of `x` corresponding to the maximum `key`."
+    impls:
+      - args:
+          - name: x
+            value: any1
+          - name: key
+            value: any2
+        nullability: DECLARED_OUTPUT
+        decomposable: NONE
+        return: any1?

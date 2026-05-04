@@ -33,11 +33,20 @@ import static org.apache.arrow.c.Data.importField;
  * DataFusion local session. Subclasses customise per-batch handling and the close-time
  * native handoff via {@link #feedBatchUnderLock} and {@link #closeUnderLock}.
  *
+ * <p>Multi-input contract: this base manages one or more {@code (inputId, schema)}
+ * registrations against a shared {@link DatafusionLocalSession}. Each input maps 1:1
+ * to one entry in {@link ExchangeSinkContext#inputs()}; the index of an input in
+ * {@code ctx.inputs()} is the {@code inputIndex} passed through every multi-input
+ * call ({@link #feed(int, VectorSchemaRoot)}, {@link #feedBatchUnderLock}). The
+ * legacy single-arg {@link #feed(VectorSchemaRoot)} throws — multi-input sinks must
+ * be fed via the indexed entry point.
+ *
  * <p>Lifecycle invariants enforced by this base:
  * <ul>
- *   <li>{@link #feed} synchronises on {@link #feedLock}, short-circuits when {@link #closed},
- *       and always closes the supplied {@link VectorSchemaRoot} in {@code finally} regardless
- *       of whether {@link #feedBatchUnderLock} succeeds.</li>
+ *   <li>{@link #feed(int, VectorSchemaRoot)} synchronises on {@link #feedLock},
+ *       short-circuits when {@link #closed}, and always closes the supplied
+ *       {@link VectorSchemaRoot} in {@code finally} regardless of whether
+ *       {@link #feedBatchUnderLock} succeeds.</li>
  *   <li>{@link #close} flips {@link #closed} once under {@link #feedLock}, runs the
  *       subclass-specific {@link #closeUnderLock} hook, and unconditionally closes
  *       {@link #session} in {@code finally}, accumulating any failures and rethrowing.</li>
@@ -50,15 +59,11 @@ import static org.apache.arrow.c.Data.importField;
  */
 abstract class AbstractDatafusionReduceSink implements ExchangeSink {
 
-    /** Substrait/DataFusion table name for the single registered input partition. */
-    // TODO: This will change to represent child ID and taken as input in context
-    // for now we have a single partition.
-    static final String INPUT_ID = "input-0";
-
     protected final ExchangeSinkContext ctx;
     protected final NativeRuntimeHandle runtimeHandle;
     protected final DatafusionLocalSession session;
-    protected final byte[] schemaIpc;
+    /** One IPC schema per input, indexed parallel to {@link ExchangeSinkContext#inputs()}. */
+    protected final byte[][] schemaIpcs;
 
     /** Guards {@link #closed} and serialises {@link #feed}/{@link #close} against producers. */
     protected final Object feedLock = new Object();
@@ -69,19 +74,36 @@ abstract class AbstractDatafusionReduceSink implements ExchangeSink {
     protected AbstractDatafusionReduceSink(ExchangeSinkContext ctx, NativeRuntimeHandle runtimeHandle) {
         this.ctx = ctx;
         this.runtimeHandle = runtimeHandle;
-        this.schemaIpc = ArrowSchemaIpc.toBytes(ctx.inputSchema());
+        int n = ctx.inputs().size();
+        if (n == 0) {
+            throw new IllegalArgumentException("ExchangeSinkContext must have at least one input");
+        }
+        this.schemaIpcs = new byte[n][];
+        for (int i = 0; i < n; i++) {
+            schemaIpcs[i] = ArrowSchemaIpc.toBytes(ctx.inputs().get(i).schema());
+        }
         this.session = new DatafusionLocalSession(runtimeHandle.get());
     }
 
     @Override
     public void feed(VectorSchemaRoot batch) {
+        // Reduce sinks are multi-input — callers must use feed(int, batch). The default
+        // ExchangeSink.feed(int, batch) routes inputIndex==0 here, so this throw catches
+        // both unindexed feeds and indexed feeds with index 0 from a non-indexed caller.
+        // (Single-input call sites should still go through feed(int=0, batch); this throw
+        // exists to prevent silent fan-in collapse if feed(batch) is called directly.)
+        throw new UnsupportedOperationException(getClass().getSimpleName() + " is multi-input — use feed(int inputIndex, batch)");
+    }
+
+    @Override
+    public void feed(int inputIndex, VectorSchemaRoot batch) {
         synchronized (feedLock) {
             if (closed) {
                 batch.close();
                 return;
             }
             try {
-                feedBatchUnderLock(batch);
+                feedBatchUnderLock(inputIndex, batch);
             } finally {
                 batch.close();
             }
@@ -114,10 +136,10 @@ abstract class AbstractDatafusionReduceSink implements ExchangeSink {
     /**
      * Per-batch hook. Called inside {@code synchronized(feedLock)} after {@code closed} is
      * verified false. Implementations export and hand off (or buffer) {@code batch} via the
-     * native bridge. Implementations MUST NOT close {@code batch} — the base class does that
-     * in {@code finally}.
+     * native bridge using the registration corresponding to {@code inputIndex}.
+     * Implementations MUST NOT close {@code batch} — the base class does that in {@code finally}.
      */
-    protected abstract void feedBatchUnderLock(VectorSchemaRoot batch);
+    protected abstract void feedBatchUnderLock(int inputIndex, VectorSchemaRoot batch);
 
     /**
      * Subclass-specific shutdown. Runs after {@link #closed} is set and before

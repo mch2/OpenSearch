@@ -68,12 +68,41 @@ public class FieldStorageResolver {
         }
 
         this.fieldStorage = new HashMap<>();
+        addProperties(properties, "", primaryFormat);
+    }
+
+    /**
+     * Recursively walks a {@code properties} map, flattening object containers into
+     * dotted field names (e.g. {@code agent.name}, {@code resource.attributes.sdk.version}).
+     *
+     * <p>OpenSearch's {@link MappingMetadata#sourceAsMap()} normalizes object fields:
+     * when a field has a {@code "properties"} subkey, the explicit {@code "type": "object"}
+     * is stripped. Containers are therefore identified by the presence of {@code "properties"}
+     * rather than by an explicit type. Containers with {@code "enabled": false} are skipped
+     * entirely — they are excluded from the index and cannot be resolved.
+     */
+    @SuppressWarnings("unchecked")
+    private void addProperties(Map<String, Object> properties, String prefix, String primaryFormat) {
         for (Map.Entry<String, Object> entry : properties.entrySet()) {
-            String fieldName = entry.getKey();
+            String fieldName = prefix.isEmpty() ? entry.getKey() : prefix + "." + entry.getKey();
             Map<String, Object> fieldProps = (Map<String, Object>) entry.getValue();
+
+            // Object/nested container: either no type at all (type stripped on reserialization)
+            // or an explicit object/nested type with a nested properties map.
+            Object nestedProps = fieldProps.get("properties");
+            if (nestedProps instanceof Map) {
+                if (Boolean.FALSE.equals(fieldProps.get("enabled"))) {
+                    continue;
+                }
+                addProperties((Map<String, Object>) nestedProps, fieldName, primaryFormat);
+                continue;
+            }
+
             String fieldType = (String) fieldProps.get("type");
             if (fieldType == null) {
-                throw new IllegalStateException("Field [" + fieldName + "] has no type in mapping");
+                // No type and no properties: nothing to resolve (e.g. a disabled leaf).
+                // Skip rather than throw; the field is simply absent from resolved storage.
+                continue;
             }
             this.fieldStorage.put(fieldName, resolveField(fieldName, fieldType, fieldProps, primaryFormat));
         }

@@ -31,7 +31,6 @@ import org.opensearch.analytics.exec.action.FragmentExecutionResponse;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Iterator;
 import java.util.List;
 
 /**
@@ -145,8 +144,12 @@ public final class RowResponseCodec implements ResponseCodec<FragmentExecutionRe
                 if (element instanceof Integer) return new ArrowType.Int(32, true);
                 if (element instanceof Short) return new ArrowType.Int(16, true);
                 if (element instanceof Byte) return new ArrowType.Int(8, true);
-                if (element instanceof Double) return new ArrowType.FloatingPoint(org.apache.arrow.vector.types.FloatingPointPrecision.DOUBLE);
-                if (element instanceof Float) return new ArrowType.FloatingPoint(org.apache.arrow.vector.types.FloatingPointPrecision.SINGLE);
+                if (element instanceof Double) return new ArrowType.FloatingPoint(
+                    org.apache.arrow.vector.types.FloatingPointPrecision.DOUBLE
+                );
+                if (element instanceof Float) return new ArrowType.FloatingPoint(
+                    org.apache.arrow.vector.types.FloatingPointPrecision.SINGLE
+                );
                 if (element instanceof Boolean) return ArrowType.Bool.INSTANCE;
                 if (element instanceof CharSequence) return ArrowType.Utf8.INSTANCE;
                 if (element instanceof org.apache.arrow.vector.util.Text) return ArrowType.Utf8.INSTANCE;
@@ -243,9 +246,7 @@ public final class RowResponseCodec implements ResponseCodec<FragmentExecutionRe
         } else if (element instanceof Number n) {
             writer.bigInt().writeBigInt(n.longValue());
         } else {
-            throw new IllegalArgumentException(
-                "Unsupported list element type: " + element.getClass().getSimpleName()
-            );
+            throw new IllegalArgumentException("Unsupported list element type: " + element.getClass().getSimpleName());
         }
     }
 }

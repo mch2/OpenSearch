@@ -38,4 +38,7 @@ public class ScalarOperatorIT extends BaseScalarFunctionIT {
     public void testOr() { assertScalarBoolean("balance > 100000 or balance > 0", true); }
     public void testNot() { assertScalarBoolean("not (balance > 100000)", true); }
     public void testXor() { assertScalarBoolean("(balance > 0) xor (balance > 100000)", true); }
+
+    /** ilike: case-insensitive LIKE; PPL emits Calcite ILIKE which is YAML-aliased to substrait `like`. */
+    public void testIlike() { assertScalarBoolean("ilike(firstname, 'a%')", true); }
 }

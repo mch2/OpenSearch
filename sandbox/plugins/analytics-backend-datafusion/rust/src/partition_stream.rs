@@ -225,11 +225,16 @@ mod tests {
     async fn receiver_yields_sent_batches_then_eof() {
         let schema = test_schema();
         let (sender, mut receiver) = channel(Arc::clone(&schema));
+        let handle = Handle::current();
 
         let producer_schema = Arc::clone(&schema);
-        let producer = tokio::spawn(async move {
-            sender.tx.send(Ok(test_batch(&producer_schema, &[1, 2]))).await.unwrap();
-            sender.tx.send(Ok(test_batch(&producer_schema, &[3]))).await.unwrap();
+        std::thread::spawn(move || {
+            sender
+                .send_blocking(Ok(test_batch(&producer_schema, &[1, 2])), &handle)
+                .unwrap();
+            sender
+                .send_blocking(Ok(test_batch(&producer_schema, &[3])), &handle)
+                .unwrap();
             drop(sender);
         });
 
@@ -238,37 +243,41 @@ mod tests {
         let second = receiver.next().await.unwrap().unwrap();
         assert_eq!(second.num_rows(), 1);
         assert!(receiver.next().await.is_none());
-        producer.await.unwrap();
     }
 
     #[tokio::test]
-    async fn send_blocking_pushes_through_handle() {
+    async fn single_receiver_partition_executes_once_then_empty() {
         let schema = test_schema();
-        let (sender, mut receiver) = channel(Arc::clone(&schema));
+        let (sender, receiver) = channel(Arc::clone(&schema));
         let handle = Handle::current();
 
-        let sender_schema = Arc::clone(&schema);
-        let producer = std::thread::spawn(move || {
+        let producer_schema = Arc::clone(&schema);
+        std::thread::spawn(move || {
             sender
-                .send_blocking(Ok(test_batch(&sender_schema, &[7, 8, 9])), &handle)
+                .send_blocking(Ok(test_batch(&producer_schema, &[42])), &handle)
                 .unwrap();
             drop(sender);
         });
 
-        let batch = receiver.next().await.unwrap().unwrap();
-        assert_eq!(batch.num_rows(), 3);
-        assert!(receiver.next().await.is_none());
-        producer.join().unwrap();
+        let partition = SingleReceiverPartition::new(receiver);
+        assert_eq!(partition.schema(), &schema);
+
+        let ctx = Arc::new(TaskContext::default());
+        let mut first = partition.execute(Arc::clone(&ctx));
+        let batch = first.next().await.unwrap().unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        assert!(first.next().await.is_none());
+
+        let mut second = partition.execute(ctx);
+        assert!(second.next().await.is_none());
     }
 
-    #[test]
-    fn send_blocking_reports_receiver_dropped() {
-        let rt = tokio::runtime::Runtime::new().expect("runtime builds");
-        let handle = rt.handle().clone();
-
+    #[tokio::test]
+    async fn send_blocking_reports_receiver_dropped() {
         let schema = test_schema();
         let (sender, receiver) = channel(Arc::clone(&schema));
         drop(receiver);
+        let handle = Handle::current();
 
         let err = std::thread::spawn(move || {
             sender
@@ -278,30 +287,5 @@ mod tests {
         .join()
         .unwrap();
         assert!(err.to_string().contains("receiver dropped"));
-    }
-
-    #[tokio::test]
-    async fn single_receiver_partition_executes_once_then_empty() {
-        let schema = test_schema();
-        let (sender, receiver) = channel(Arc::clone(&schema));
-        let partition = SingleReceiverPartition::new(receiver);
-        assert_eq!(partition.schema(), &schema);
-
-        let producer_schema = Arc::clone(&schema);
-        let producer = tokio::spawn(async move {
-            sender.tx.send(Ok(test_batch(&producer_schema, &[42]))).await.unwrap();
-            drop(sender);
-        });
-
-        let ctx = Arc::new(TaskContext::default());
-        let mut first = partition.execute(Arc::clone(&ctx));
-        let batch = first.next().await.unwrap().unwrap();
-        assert_eq!(batch.num_rows(), 1);
-        assert!(first.next().await.is_none());
-        producer.await.unwrap();
-
-        // Second execute() must not panic and must yield an empty stream.
-        let mut second = partition.execute(ctx);
-        assert!(second.next().await.is_none());
     }
 }

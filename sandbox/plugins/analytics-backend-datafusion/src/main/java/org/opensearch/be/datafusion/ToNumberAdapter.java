@@ -8,13 +8,10 @@
 
 package org.opensearch.be.datafusion;
 
+import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.rel.type.RelDataType;
-import org.apache.calcite.rel.type.RelDataTypeFactory;
-import org.apache.calcite.rel.type.RelDataTypeSystem;
-import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.rex.RexCall;
 import org.apache.calcite.rex.RexNode;
-import org.apache.calcite.sql.type.SqlTypeFactoryImpl;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.opensearch.analytics.spi.FieldStorageInfo;
 import org.opensearch.analytics.spi.ScalarFunctionAdapter;
@@ -31,17 +28,16 @@ import java.util.List;
  */
 class ToNumberAdapter implements ScalarFunctionAdapter {
 
-    private static final RelDataTypeFactory TYPE_FACTORY = new SqlTypeFactoryImpl(RelDataTypeSystem.DEFAULT);
-    private static final RexBuilder REX_BUILDER = new RexBuilder(TYPE_FACTORY);
-    private static final RelDataType DOUBLE_TYPE = TYPE_FACTORY.createSqlType(SqlTypeName.DOUBLE);
-    private static final RelDataType NULLABLE_DOUBLE_TYPE = TYPE_FACTORY.createTypeWithNullability(DOUBLE_TYPE, true);
-
     @Override
-    public RexNode adapt(RexCall original, List<FieldStorageInfo> fieldStorage) {
-        if (original.getOperands().size() != 1) return original;
+    public RexNode adapt(RexCall original, List<FieldStorageInfo> fieldStorage, RelOptCluster cluster) {
+        if (original.getOperands().size() != 1) {
+            throw new IllegalArgumentException("TONUMBER expects 1 operand, got " + original.getOperands().size());
+        }
         RexNode operand = original.getOperands().get(0);
-        // Preserve operand nullability in the CAST result type.
-        RelDataType target = operand.getType().isNullable() ? NULLABLE_DOUBLE_TYPE : DOUBLE_TYPE;
-        return REX_BUILDER.makeCast(target, operand);
+        RelDataType doubleType = cluster.getTypeFactory().createSqlType(SqlTypeName.DOUBLE);
+        RelDataType target = operand.getType().isNullable()
+            ? cluster.getTypeFactory().createTypeWithNullability(doubleType, true)
+            : doubleType;
+        return cluster.getRexBuilder().makeCast(target, operand);
     }
 }

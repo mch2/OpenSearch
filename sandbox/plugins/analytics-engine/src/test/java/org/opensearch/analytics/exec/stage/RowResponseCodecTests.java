@@ -57,10 +57,7 @@ public class RowResponseCodecTests extends OpenSearchTestCase {
 
         try (VectorSchemaRoot vsr = RowResponseCodec.INSTANCE.decode(response, allocator)) {
             FieldVector vec = vsr.getVector("take");
-            assertTrue(
-                "expected ListVector for list-typed cell, got " + vec.getClass().getSimpleName(),
-                vec instanceof ListVector
-            );
+            assertTrue("expected ListVector for list-typed cell, got " + vec.getClass().getSimpleName(), vec instanceof ListVector);
             assertEquals(1, vsr.getRowCount());
 
             ListVector listVector = (ListVector) vec;
@@ -68,8 +65,7 @@ public class RowResponseCodecTests extends OpenSearchTestCase {
             int end = listVector.getElementEndIndex(0);
             assertEquals(2, end - start);
 
-            org.apache.arrow.vector.VarCharVector inner =
-                (org.apache.arrow.vector.VarCharVector) listVector.getDataVector();
+            org.apache.arrow.vector.VarCharVector inner = (org.apache.arrow.vector.VarCharVector) listVector.getDataVector();
             assertEquals("Amber JOHnny", new String(inner.get(start), java.nio.charset.StandardCharsets.UTF_8));
             assertEquals("Hattie", new String(inner.get(start + 1), java.nio.charset.StandardCharsets.UTF_8));
         }
@@ -122,8 +118,7 @@ public class RowResponseCodecTests extends OpenSearchTestCase {
             int end = listVector.getElementEndIndex(0);
             assertEquals(2, end - start);
 
-            org.apache.arrow.vector.VarCharVector inner =
-                (org.apache.arrow.vector.VarCharVector) listVector.getDataVector();
+            org.apache.arrow.vector.VarCharVector inner = (org.apache.arrow.vector.VarCharVector) listVector.getDataVector();
             assertEquals("Amber JOHnny", new String(inner.get(start), java.nio.charset.StandardCharsets.UTF_8));
             assertEquals("Hattie", new String(inner.get(start + 1), java.nio.charset.StandardCharsets.UTF_8));
         }

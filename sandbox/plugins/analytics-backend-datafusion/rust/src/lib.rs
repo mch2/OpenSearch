@@ -11,6 +11,7 @@
 //! The bridge-agnostic API lives in [`api`]. The FFM bridge (`ffm.rs`) exports
 //! `extern "C"` functions for JDK FFM.
 
+pub mod agg_phase;
 pub mod api;
 pub mod cross_rt_stream;
 pub mod executor;

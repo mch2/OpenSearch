@@ -62,10 +62,15 @@ public class OpenSearchSortRule extends RelOptRule {
             throw new IllegalStateException("No backend supports SORT capability among " + childViableBackends);
         }
 
+        // Calcite's Sort.<init> asserts the trait set carries the sort's collation — merge it
+        // in explicitly. Child trait sets sourced from OpenSearchUnion / OpenSearchJoin /
+        // OpenSearchExchangeReducer have empty collation by construction, so passing
+        // child.getTraitSet() unmodified would fail the assertion whenever a real sort
+        // (collation non-EMPTY) sits above one of them.
         call.transformTo(
             new OpenSearchSort(
                 sort.getCluster(),
-                child.getTraitSet(),
+                child.getTraitSet().replace(sort.getCollation()),
                 RelNodeUtils.unwrapHep(sort.getInput()),
                 sort.getCollation(),
                 sort.offset,

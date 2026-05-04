@@ -14,12 +14,13 @@ import org.apache.calcite.sql.SqlKind;
 import java.util.Locale;
 
 /**
- * All scalar functions a backend may support — comparisons, full-text, math, string,
- * conditional, date/time, and cast operations. Used across filter, project, and
- * aggregate expression capability declarations.
+ * All scalar functions a backend may support — comparisons, full-text search,
+ * math, string, conditional, date/time, and cast operations. Used across filter,
+ * project, and aggregate expression capability declarations.
  *
- * <p>Each function carries a {@link Category} indicating its type and whether
- * it supports parameters (e.g., full-text operators accept analyzer, slop, etc.).
+ * <p>Each function carries a {@link Category} indicating its type. SCALAR is a
+ * catch-all for functions that don't fit comparison/full-text/string/math
+ * (CAST, CASE, COALESCE, EXTRACT, datetime, conversion, etc.).
  *
  * @opensearch.internal
  */
@@ -40,12 +41,20 @@ public enum ScalarFunction {
     IS_NOT_FALSE(Category.COMPARISON, SqlKind.IS_NOT_FALSE),
     IN(Category.COMPARISON, SqlKind.IN),
     LIKE(Category.COMPARISON, SqlKind.LIKE),
+    ILIKE(Category.COMPARISON, SqlKind.OTHER),
     BETWEEN(Category.COMPARISON, SqlKind.BETWEEN),
     SEARCH(Category.COMPARISON, SqlKind.SEARCH),
     AND(Category.COMPARISON, SqlKind.AND),
     OR(Category.COMPARISON, SqlKind.OR),
     NOT(Category.COMPARISON, SqlKind.NOT),
     PREFIX(Category.COMPARISON, SqlKind.OTHER),
+    CIDRMATCH(Category.COMPARISON, SqlKind.OTHER),
+    EQUALS_IP(Category.COMPARISON, SqlKind.OTHER),
+    NOT_EQUALS_IP(Category.COMPARISON, SqlKind.OTHER),
+    LESS_IP(Category.COMPARISON, SqlKind.OTHER),
+    LTE_IP(Category.COMPARISON, SqlKind.OTHER),
+    GREATER_IP(Category.COMPARISON, SqlKind.OTHER),
+    GTE_IP(Category.COMPARISON, SqlKind.OTHER),
 
     // ── Full-text search ─────────────────────────────────────────────
     MATCH(Category.FULL_TEXT, SqlKind.OTHER),
@@ -80,13 +89,23 @@ public enum ScalarFunction {
     SHA256(Category.STRING, SqlKind.OTHER),
     JSON_VALID(Category.STRING, SqlKind.OTHER),
     JSON_OBJECT(Category.STRING, SqlKind.OTHER),
-    CIDRMATCH(Category.COMPARISON, SqlKind.OTHER),
+    JSON(Category.STRING, SqlKind.OTHER),
+    JSON_ARRAY(Category.STRING, SqlKind.OTHER),
+    JSON_ARRAY_LENGTH(Category.STRING, SqlKind.OTHER),
+    JSON_KEYS(Category.STRING, SqlKind.OTHER),
+    JSON_EXTRACT(Category.STRING, SqlKind.OTHER),
+    JSON_EXTRACT_ALL(Category.STRING, SqlKind.OTHER),
+    JSON_SET(Category.STRING, SqlKind.OTHER),
+    JSON_DELETE(Category.STRING, SqlKind.OTHER),
+    JSON_APPEND(Category.STRING, SqlKind.OTHER),
+    JSON_EXTEND(Category.STRING, SqlKind.OTHER),
     // Multi-value functions (mapped to DF array_* via calcite_aliases)
     MVCOUNT(Category.STRING, SqlKind.OTHER),
     MVJOIN(Category.STRING, SqlKind.OTHER),
     MVINDEX(Category.STRING, SqlKind.OTHER),
     MVAPPEND(Category.STRING, SqlKind.OTHER),
     MVDEDUP(Category.STRING, SqlKind.OTHER),
+    MVZIP(Category.STRING, SqlKind.OTHER),
     SPLIT(Category.STRING, SqlKind.OTHER),
 
     // ── Math ─────────────────────────────────────────────────────────
@@ -136,65 +155,162 @@ public enum ScalarFunction {
     DEGREES(Category.MATH, SqlKind.OTHER),
     RADIANS(Category.MATH, SqlKind.OTHER),
 
-    // ── Cast / type ──────────────────────────────────────────────────
-    CAST(Category.TYPE, SqlKind.CAST),
+    // ── Cast / type / conditional / datetime / conversion (SCALAR catch-all) ──
+    CAST(Category.SCALAR, SqlKind.CAST),
+    CASE(Category.SCALAR, SqlKind.CASE),
+    COALESCE(Category.SCALAR, SqlKind.COALESCE),
+    NULLIF(Category.SCALAR, SqlKind.NULLIF),
+    IF(Category.SCALAR, SqlKind.OTHER),
 
-    // ── Conditional ──────────────────────────────────────────────────
-    CASE(Category.CONDITIONAL, SqlKind.CASE),
-    COALESCE(Category.CONDITIONAL, SqlKind.COALESCE),
-    NULLIF(Category.CONDITIONAL, SqlKind.NULLIF),
-    IF(Category.CONDITIONAL, SqlKind.OTHER),
+    // Date/time
+    DATE(Category.SCALAR, SqlKind.OTHER),
+    NOW(Category.SCALAR, SqlKind.OTHER),
+    CURRENT_DATE(Category.SCALAR, SqlKind.OTHER),
+    CURRENT_TIME(Category.SCALAR, SqlKind.OTHER),
+    CURRENT_TIMESTAMP(Category.SCALAR, SqlKind.OTHER),
+    SYSDATE(Category.SCALAR, SqlKind.OTHER),
+    FROM_UNIXTIME(Category.SCALAR, SqlKind.OTHER),
+    UNIX_TIMESTAMP(Category.SCALAR, SqlKind.OTHER),
+    TO_UNIXTIME(Category.SCALAR, SqlKind.OTHER),
+    MAKE_DATE(Category.SCALAR, SqlKind.OTHER),
+    MAKE_TIME(Category.SCALAR, SqlKind.OTHER),
+    TO_DATE(Category.SCALAR, SqlKind.OTHER),
+    TO_TIME(Category.SCALAR, SqlKind.OTHER),
+    TO_TIMESTAMP(Category.SCALAR, SqlKind.OTHER),
+    TIMESTAMP(Category.SCALAR, SqlKind.OTHER),
+    TO_CHAR(Category.SCALAR, SqlKind.OTHER),
+    DATE_FORMAT(Category.SCALAR, SqlKind.OTHER),
+    EXTRACT(Category.SCALAR, SqlKind.EXTRACT),
+    DATE_PART(Category.SCALAR, SqlKind.OTHER),
+    STRFTIME(Category.SCALAR, SqlKind.OTHER),
+    STRPTIME(Category.SCALAR, SqlKind.OTHER),
+    TIME(Category.SCALAR, SqlKind.OTHER),
+    DATETIME(Category.SCALAR, SqlKind.OTHER),
 
-    // ── Date/time — zero-arg or direct DF built-in match ─────────────
-    DATE(Category.DATETIME, SqlKind.OTHER),
-    NOW(Category.DATETIME, SqlKind.OTHER),
-    CURRENT_DATE(Category.DATETIME, SqlKind.OTHER),
-    CURRENT_TIME(Category.DATETIME, SqlKind.OTHER),
-    CURRENT_TIMESTAMP(Category.DATETIME, SqlKind.OTHER),
-    SYSDATE(Category.DATETIME, SqlKind.OTHER),
-    FROM_UNIXTIME(Category.DATETIME, SqlKind.OTHER),
-    UNIX_TIMESTAMP(Category.DATETIME, SqlKind.OTHER),
-    TO_UNIXTIME(Category.DATETIME, SqlKind.OTHER),
-    MAKE_DATE(Category.DATETIME, SqlKind.OTHER),
-    MAKE_TIME(Category.DATETIME, SqlKind.OTHER),
-    TO_DATE(Category.DATETIME, SqlKind.OTHER),
-    TO_TIME(Category.DATETIME, SqlKind.OTHER),
-    TO_TIMESTAMP(Category.DATETIME, SqlKind.OTHER),
-    TIMESTAMP(Category.DATETIME, SqlKind.OTHER),
-    TO_CHAR(Category.DATETIME, SqlKind.OTHER),
-    DATE_FORMAT(Category.DATETIME, SqlKind.OTHER),
-    EXTRACT(Category.DATETIME, SqlKind.EXTRACT),
-    DATE_PART(Category.DATETIME, SqlKind.OTHER),
-    STRFTIME(Category.DATETIME, SqlKind.OTHER),
-    STRPTIME(Category.DATETIME, SqlKind.OTHER),
-    TIME(Category.DATETIME, SqlKind.OTHER),
-    DATETIME(Category.DATETIME, SqlKind.OTHER),
+    // Date-part extraction (rewritten to EXTRACT by DatePartAdapter)
+    YEAR(Category.SCALAR, SqlKind.OTHER),
+    MONTH(Category.SCALAR, SqlKind.OTHER),
+    MONTH_OF_YEAR(Category.SCALAR, SqlKind.OTHER),
+    DAY(Category.SCALAR, SqlKind.OTHER),
+    DAYOFMONTH(Category.SCALAR, SqlKind.OTHER),
+    DAY_OF_MONTH(Category.SCALAR, SqlKind.OTHER),
+    HOUR(Category.SCALAR, SqlKind.OTHER),
+    HOUR_OF_DAY(Category.SCALAR, SqlKind.OTHER),
+    MINUTE(Category.SCALAR, SqlKind.OTHER),
+    MINUTE_OF_HOUR(Category.SCALAR, SqlKind.OTHER),
+    SECOND(Category.SCALAR, SqlKind.OTHER),
+    SECOND_OF_MINUTE(Category.SCALAR, SqlKind.OTHER),
+    DAYOFWEEK(Category.SCALAR, SqlKind.OTHER),
+    DAY_OF_WEEK(Category.SCALAR, SqlKind.OTHER),
+    DAYOFYEAR(Category.SCALAR, SqlKind.OTHER),
+    DAY_OF_YEAR(Category.SCALAR, SqlKind.OTHER),
+    WEEK(Category.SCALAR, SqlKind.OTHER),
+    WEEKOFYEAR(Category.SCALAR, SqlKind.OTHER),
+    WEEK_OF_YEAR(Category.SCALAR, SqlKind.OTHER),
+    QUARTER(Category.SCALAR, SqlKind.OTHER),
+    MICROSECOND(Category.SCALAR, SqlKind.OTHER),
 
-    // ── Conversion (mapped to CAST in PPL frontend) ──────────────────
-    TONUMBER(Category.TYPE, SqlKind.OTHER),
-    TOSTRING(Category.TYPE, SqlKind.OTHER);
+    // Date arithmetic + formatting (rewritten by adapters)
+    ADDDATE(Category.SCALAR, SqlKind.OTHER),
+    SUBDATE(Category.SCALAR, SqlKind.OTHER),
+    DATE_ADD(Category.SCALAR, SqlKind.OTHER),
+    DATE_SUB(Category.SCALAR, SqlKind.OTHER),
+    ADDTIME(Category.SCALAR, SqlKind.OTHER),
+    SUBTIME(Category.SCALAR, SqlKind.OTHER),
+    DATEDIFF(Category.SCALAR, SqlKind.OTHER),
+    TIMEDIFF(Category.SCALAR, SqlKind.OTHER),
+    TIMESTAMPADD(Category.SCALAR, SqlKind.OTHER),
+    TIMESTAMPDIFF(Category.SCALAR, SqlKind.OTHER),
+    DAYNAME(Category.SCALAR, SqlKind.OTHER),
+    MONTHNAME(Category.SCALAR, SqlKind.OTHER),
+    LAST_DAY(Category.SCALAR, SqlKind.OTHER),
+    STR_TO_DATE(Category.SCALAR, SqlKind.OTHER),
+    TIME_TO_SEC(Category.SCALAR, SqlKind.OTHER),
+    SEC_TO_TIME(Category.SCALAR, SqlKind.OTHER),
+    CONVERT_TZ(Category.SCALAR, SqlKind.OTHER),
+    WEEKDAY(Category.SCALAR, SqlKind.OTHER),
+    YEARWEEK(Category.SCALAR, SqlKind.OTHER),
+    MINUTE_OF_DAY(Category.SCALAR, SqlKind.OTHER),
+    UTC_DATE(Category.SCALAR, SqlKind.OTHER),
+    UTC_TIME(Category.SCALAR, SqlKind.OTHER),
+    UTC_TIMESTAMP(Category.SCALAR, SqlKind.OTHER),
+    FROM_DAYS(Category.SCALAR, SqlKind.OTHER),
+    TO_DAYS(Category.SCALAR, SqlKind.OTHER),
+    TO_SECONDS(Category.SCALAR, SqlKind.OTHER),
+    PERIOD_ADD(Category.SCALAR, SqlKind.OTHER),
+    PERIOD_DIFF(Category.SCALAR, SqlKind.OTHER),
+    GET_FORMAT(Category.SCALAR, SqlKind.OTHER),
+
+    // Binning. SPAN: PPL visitor emits OPENSEARCH_SPAN Rust UDF directly.
+    // This enum entry is kept as a capability-declaration anchor but is not
+    // on the live emission path.
+    SPAN(Category.SCALAR, SqlKind.OTHER),
+    SPAN_BUCKET(Category.SCALAR, SqlKind.OTHER),
+    WIDTH_BUCKET(Category.SCALAR, SqlKind.OTHER),
+    RANGE_BUCKET(Category.SCALAR, SqlKind.OTHER),
+    MINSPAN_BUCKET(Category.SCALAR, SqlKind.OTHER),
+
+    // PPL's string-to-IP cast. Calcite emits this as a named UDF wrapping the
+    // literal on one side of an IP comparison (e.g. `where ip_field = '1.2.3.4'`
+    // becomes `equals_ip(ip_field, IP('1.2.3.4'))`). Rewritten to a no-op by
+    // IpCastAdapter since the downstream UDFs accept Utf8 strings directly.
+    IP(Category.SCALAR, SqlKind.OTHER),
+
+    // Conversion (rewritten to CAST by ToNumberAdapter / ToStringAdapter)
+    TONUMBER(Category.SCALAR, SqlKind.OTHER),
+    TOSTRING(Category.SCALAR, SqlKind.OTHER),
+    /** PPL alias for {@code tonumber}. Rewritten to {@code CAST AS DOUBLE}. */
+    NUM(Category.SCALAR, SqlKind.OTHER),
+    /** PPL alias for {@code tostring}. Rewritten to {@code CAST AS VARCHAR}. */
+    NUMBER_TO_STRING(Category.SCALAR, SqlKind.OTHER),
+
+    // String adapters (PPL UDFs not in DataFusion / substrait core)
+    /** PPL {@code strcmp(a,b)} → {@code CASE WHEN a<b THEN -1 WHEN a>b THEN 1 ELSE 0 END}. */
+    STRCMP(Category.STRING, SqlKind.OTHER),
+    /** PPL convert subfunction {@code rmcomma(s)} → {@code regexp_replace(s, ',', '')}. */
+    RMCOMMA(Category.STRING, SqlKind.OTHER),
+    /** PPL convert subfunction {@code rmunit(s)} → {@code regexp_replace(s, '[A-Za-z]+$', '')}. */
+    RMUNIT(Category.STRING, SqlKind.OTHER),
+
+    // Pairwise min/max (PPL UDFs SCALAR_MAX / SCALAR_MIN)
+    SCALAR_MAX(Category.MATH, SqlKind.OTHER),
+    SCALAR_MIN(Category.MATH, SqlKind.OTHER),
+
+    /** Calcite {@code REGEXP_CONTAINS(value, pattern)} (PPL {@code regexp_match} / {@code regex_match}). */
+    REGEXP_CONTAINS(Category.STRING, SqlKind.OTHER),
+
+    /**
+     * Calcite's {@code ITEM($container, $index)} — used both for struct field access
+     * and array element access (PPL's {@code mvindex} lowers to this for arrays).
+     * Backends may adapt the array-typed variant to a backend-native {@code array_element}
+     * while passing struct-typed variants through untouched.
+     */
+    ITEM(Category.SCALAR, SqlKind.ITEM),
+
+    /** PPL UDF {@code REX_EXTRACT(field, pattern, group_name)} emitted by the {@code rex} command
+     *  for each named capture group. Backends may rewrite to e.g.
+     *  {@code array_element(regexp_match(...), index)} when they can resolve the named group's
+     *  1-based position at plan time (pattern must be a literal). */
+    REX_EXTRACT(Category.STRING, SqlKind.OTHER),
+
+    /**
+     * Calcite's {@code ARRAY_COMPACT(array)} — removes NULL elements from {@code array}.
+     * Emitted by PPL's {@code nomv} command via {@code array_compact(field)}. Backends
+     * without a native {@code array_compact} may rewrite it (e.g. DataFusion's
+     * {@code array_remove_all(array, CAST(NULL AS T))}).
+     */
+    ARRAY_COMPACT(Category.SCALAR, SqlKind.ARRAY_COMPACT);
 
     /**
      * Category of scalar function.
      */
     public enum Category {
-        COMPARISON(false),
-        FULL_TEXT(true),
-        STRING(false),
-        MATH(false),
-        TYPE(false),
-        CONDITIONAL(false),
-        DATETIME(false);
-
-        private final boolean supportsParams;
-
-        Category(boolean supportsParams) {
-            this.supportsParams = supportsParams;
-        }
-
-        public boolean supportsParams() {
-            return supportsParams;
-        }
+        COMPARISON,
+        FULL_TEXT,
+        STRING,
+        MATH,
+        /** Catch-all for functions that don't fit other categories (CAST, CASE, COALESCE, EXTRACT, datetime, conversion). */
+        SCALAR
     }
 
     private final Category category;
@@ -228,6 +344,8 @@ public enum ScalarFunction {
 
     /** Maps a Calcite SqlFunction to a ScalarFunction by name, or null if not recognized. */
     public static ScalarFunction fromSqlFunction(SqlFunction function) {
+        // TODO: Add an explicit functionName field per enum constant instead of relying on
+        // valueOf(toUpperCase). This couples enum constant naming to SQL function naming convention.
         try {
             return ScalarFunction.valueOf(function.getName().toUpperCase(Locale.ROOT));
         } catch (IllegalArgumentException ignored) {

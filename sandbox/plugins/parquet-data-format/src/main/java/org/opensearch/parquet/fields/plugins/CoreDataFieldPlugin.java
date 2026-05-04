@@ -13,6 +13,7 @@ import org.opensearch.index.mapper.BooleanFieldMapper;
 import org.opensearch.index.mapper.DateFieldMapper;
 import org.opensearch.index.mapper.IpFieldMapper;
 import org.opensearch.index.mapper.KeywordFieldMapper;
+import org.opensearch.index.mapper.MatchOnlyTextFieldMapper;
 import org.opensearch.index.mapper.NumberFieldMapper;
 import org.opensearch.index.mapper.TextFieldMapper;
 import org.opensearch.parquet.fields.ParquetField;
@@ -79,6 +80,12 @@ public class CoreDataFieldPlugin implements ParquetFieldPlugin {
 
     private static void registerTextFields(Map<String, ParquetField> fieldMap) {
         fieldMap.put(TextFieldMapper.CONTENT_TYPE, new TextParquetField());
+        // match_only_text extends text; its parseCreateFieldForPluggableFormat emits the
+        // raw string to documentInput, so the text serializer is a direct fit. Without
+        // this registration, big5-style ECS data-stream mappings that use match_only_text
+        // for the message field yield a parquet schema missing the column, breaking
+        // downstream scans that enumerate mapper fields.
+        fieldMap.put(MatchOnlyTextFieldMapper.CONTENT_TYPE, new TextParquetField());
         fieldMap.put(KeywordFieldMapper.CONTENT_TYPE, new KeywordParquetField());
         fieldMap.put(IpFieldMapper.CONTENT_TYPE, new IpParquetField());
     }

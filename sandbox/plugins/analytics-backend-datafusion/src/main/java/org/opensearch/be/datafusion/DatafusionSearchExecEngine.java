@@ -49,7 +49,9 @@ public class DatafusionSearchExecEngine implements SearchExecEngine<ExecutionCon
     public void prepare(ExecutionContext requestContext) {
         byte[] substraitBytes = requestContext.getFragmentBytes();
         long contextId = datafusionContext.task() != null ? datafusionContext.task().getId() : 0L;
-        datafusionContext.setDatafusionQuery(new DatafusionQuery(requestContext.getTableName(), substraitBytes, contextId));
+        datafusionContext.setDatafusionQuery(
+            new DatafusionQuery(requestContext.getTableName(), substraitBytes, contextId, requestContext.isSingleShard())
+        );
     }
 
     @Override

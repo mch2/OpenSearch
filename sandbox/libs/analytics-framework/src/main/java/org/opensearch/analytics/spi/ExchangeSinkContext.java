@@ -11,34 +11,68 @@ package org.opensearch.analytics.spi;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.types.pojo.Schema;
 
+import java.util.List;
+
 /**
  * Context passed to {@link ExchangeSinkProvider#createSink} when a
  * coordinator-reduce stage is being set up. Carries everything the backend
  * needs to build an {@link ExchangeSink}: serialized plan, buffer allocator,
- * input schema, and the downstream sink the backend writes results to.
+ * one or more input descriptors (one per child stage), and the downstream
+ * sink the backend writes results to.
  *
- * <p>Fields:
- * <ul>
- *   <li>{@code queryId} / {@code stageId} — correlation ids for backend logs
- *       and metrics.</li>
- *   <li>{@code fragmentBytes} — backend-specific serialized plan (e.g.
- *       Substrait) the backend will execute over the fed batches.</li>
- *   <li>{@code allocator} — the parent buffer allocator the backend should
- *       derive its own child allocators from. Sharing the allocator tree
- *       keeps output batches within the query's memory accounting.</li>
- *   <li>{@code inputSchema} — Arrow schema of batches fed into the sink
- *       (derived from the single child stage's fragment rowtype).</li>
- *   <li>{@code downstream} — sink the backend drains its reduced output
- *       into. The backend owns {@code downstream}'s lifecycle: it must
- *       feed every produced batch and close it when draining is complete.</li>
- * </ul>
+ * <p>Multi-input shapes (e.g. coord-side joins) carry one {@link InputDescriptor}
+ * per child stage; the {@code inputId} of each descriptor is the substrait
+ * {@code NamedScan} reference the backend uses to register the corresponding
+ * input stream. The convention is {@code "input-" + i} where {@code i} is the
+ * child's index in the parent stage's {@code getChildStages()} list — same
+ * convention used by the substrait fragment's {@code NamedScan} table names,
+ * so registration and lookup line up by string equality.
  *
- * <p>Single-sink simplification: this context assumes exactly one input
- * stream. Per-child routing (e.g., joins with multiple inputs of different
- * schemas) will require a richer context and is not modeled yet.
+ * <p>Single-input shapes (every reduce shape today outside joins) construct
+ * via {@link #singleInput} and carry one descriptor named {@code "input-0"}.
  *
  * @opensearch.internal
  */
-public record ExchangeSinkContext(String queryId, int stageId, byte[] fragmentBytes, BufferAllocator allocator, Schema inputSchema,
-    ExchangeSink downstream) {
+public record ExchangeSinkContext(
+    String queryId,
+    int stageId,
+    byte[] fragmentBytes,
+    BufferAllocator allocator,
+    List<InputDescriptor> inputs,
+    ExchangeSink downstream
+) {
+
+    /**
+     * Describes one input stream into the sink. The {@code childStageId} identifies
+     * the producing stage; the {@code inputId} is the substrait {@code NamedScan}
+     * reference the backend resolves against its session catalog.
+     *
+     * @param childStageId stage id of the child producing this input
+     * @param inputId      substrait NamedScan reference; conventionally {@code "input-" + i}
+     * @param schema       Arrow schema of batches arriving on this input
+     */
+    public record InputDescriptor(int childStageId, String inputId, Schema schema) {}
+
+    /**
+     * Convenience for callers with a single input — wraps the schema as a one-element
+     * list with {@code inputId = "input-0"}. Equivalent to today's single-input behavior.
+     */
+    public static ExchangeSinkContext singleInput(
+        String queryId,
+        int stageId,
+        byte[] fragmentBytes,
+        BufferAllocator allocator,
+        Schema inputSchema,
+        int childStageId,
+        ExchangeSink downstream
+    ) {
+        return new ExchangeSinkContext(
+            queryId,
+            stageId,
+            fragmentBytes,
+            allocator,
+            List.of(new InputDescriptor(childStageId, "input-0", inputSchema)),
+            downstream
+        );
+    }
 }

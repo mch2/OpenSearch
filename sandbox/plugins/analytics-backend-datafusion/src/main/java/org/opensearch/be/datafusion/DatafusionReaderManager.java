@@ -29,6 +29,20 @@ import java.util.stream.Collectors;
  * File lifecycle events (add/delete) are delegated to the node-level
  * {@link DataFusionService} for cache management.
  *
+ * <p>If {@link #getReader(CatalogSnapshot)} is called for a catalog snapshot that
+ * {@link #afterRefresh(boolean, CatalogSnapshot)} has not yet populated (for
+ * example: the first query against a freshly-created shard arrives before the
+ * background refresh hook has fired), the reader is built lazily from the
+ * snapshot's current searchable files and cached. This closes the gap where a
+ * valid snapshot would otherwise produce a gratuitous {@code "No DataFusion
+ * reader available"} I/O error.
+ *
+ * <p>If the snapshot carries zero searchable files (ingest buffered but not yet
+ * flushed to parquet), the lazily-built reader will see zero files and the
+ * query will return empty results. That is a correctness signal the caller must
+ * address — typically by issuing a refresh before querying — not a failure mode
+ * this manager should mask.
+ *
  * @opensearch.experimental
  */
 @ExperimentalApi
@@ -54,15 +68,30 @@ public class DatafusionReaderManager implements EngineReaderManager<DatafusionRe
     }
 
     @Override
-    public DatafusionReader getReader(CatalogSnapshot catalogSnapshot) throws IOException {
+    public synchronized DatafusionReader getReader(CatalogSnapshot catalogSnapshot) throws IOException {
         if (readers.containsKey(catalogSnapshot)) {
             return readers.get(catalogSnapshot);
         }
-        throw new IOException("No DataFusion reader available");
+        DatafusionReader reader = buildReader(catalogSnapshot);
+        readers.put(catalogSnapshot, reader);
+        logger.debug(
+            "DatafusionReader lazily built for snapshot [generation={}] on [{}]",
+            catalogSnapshot.getGeneration(),
+            directoryPath
+        );
+        return reader;
+    }
+
+    /**
+     * Package-private factory hook. Production code constructs a native-backed
+     * {@link DatafusionReader}; tests override this to stub native allocation.
+     */
+    DatafusionReader buildReader(CatalogSnapshot catalogSnapshot) {
+        return new DatafusionReader(directoryPath, catalogSnapshot.getSearchableFiles(dataFormat.name()));
     }
 
     @Override
-    public void onDeleted(CatalogSnapshot catalogSnapshot) throws IOException {
+    public synchronized void onDeleted(CatalogSnapshot catalogSnapshot) throws IOException {
         DatafusionReader removed = readers.remove(catalogSnapshot);
         if (removed != null) {
             removed.close();
@@ -85,10 +114,10 @@ public class DatafusionReaderManager implements EngineReaderManager<DatafusionRe
     public void beforeRefresh() throws IOException {}
 
     @Override
-    public void afterRefresh(boolean didRefresh, CatalogSnapshot catalogSnapshot) throws IOException {
+    public synchronized void afterRefresh(boolean didRefresh, CatalogSnapshot catalogSnapshot) throws IOException {
         if (didRefresh == false) return;
         if (readers.containsKey(catalogSnapshot)) return;
-        DatafusionReader reader = new DatafusionReader(directoryPath, catalogSnapshot.getSearchableFiles(dataFormat.name()));
+        DatafusionReader reader = buildReader(catalogSnapshot);
         readers.put(catalogSnapshot, reader);
     }
 
@@ -97,7 +126,7 @@ public class DatafusionReaderManager implements EngineReaderManager<DatafusionRe
     }
 
     @Override
-    public void close() throws IOException {
+    public synchronized void close() throws IOException {
         for (DatafusionReader reader : readers.values()) {
             reader.close();
         }

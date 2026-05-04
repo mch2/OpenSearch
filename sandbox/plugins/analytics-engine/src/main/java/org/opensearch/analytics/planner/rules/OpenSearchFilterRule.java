@@ -171,22 +171,21 @@ public class OpenSearchFilterRule extends RelOptRule {
             FieldType fieldType = storageInfo.getFieldType();
 
             // TODO: for FULL_TEXT operators, extract required params from RexCall
+            Set<String> fieldViable;
             if (storageInfo.isDerived()) {
-                // Derived column marking is not yet implemented.
-                // Requires DelegationType split (NATIVE_INDEX vs ARROW_BATCH) and
-                // DataTransferCapability-based execution model for within-stage delegation.
-                throw new UnsupportedOperationException(
-                    "Filter on derived column ["
-                        + storageInfo.getFieldName()
-                        + "] is not yet supported. Marking on derived/expression columns requires "
-                        + "a implementation for delegation model."
-                );
+                // Derived column (expression output, aggregate result) — no physical storage
+                // to be format-aware about. The filter runs against the Arrow batch produced
+                // by the upstream operator inside the same fragment, so the viable set is
+                // any backend that declared this filter function on this fieldType.
+                // Mirrors OpenSearchAggregateRule's derived-column handling.
+                fieldViable = new HashSet<>(registry.filterBackendsAnyFormat(function, fieldType));
+            } else {
+                // Format-aware: backends that can access this field's storage (doc values + index).
+                // A backend is viable only if it has the field in its own storage formats — ensuring
+                // delegation targets are also field-storage-aware (e.g. Lucene is viable for a keyword
+                // field only when the field has indexFormats=[lucene] set in the mapping).
+                fieldViable = new HashSet<>(registry.filterBackendsForField(function, storageInfo));
             }
-            // Format-aware: backends that can access this field's storage (doc values + index).
-            // A backend is viable only if it has the field in its own storage formats — ensuring
-            // delegation targets are also field-storage-aware (e.g. Lucene is viable for a keyword
-            // field only when the field has indexFormats=[lucene] set in the mapping).
-            Set<String> fieldViable = new HashSet<>(registry.filterBackendsForField(function, storageInfo));
 
             viableSet.retainAll(fieldViable);
         }

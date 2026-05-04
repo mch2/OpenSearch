@@ -141,6 +141,14 @@ public class DataStreamFieldMapper extends MetadataFieldMapper {
             return;
         }
 
+        // In pluggable-dataformat mode, DateFieldMapper.parseCreateFieldForPluggableFormat
+        // emits the timestamp to context.documentInput() rather than context.doc(), so the
+        // SORTED_NUMERIC scan below always counts zero and throws. The secondary-format
+        // writer enforces single-valued timestamp invariants in its own path.
+        if (context.indexSettings().isPluggableDataFormatEnabled()) {
+            return;
+        }
+
         // It is expected that the timestamp field will be parsed by the DateFieldMapper during the parseCreateField step.
         // The parsed field will be added to the document as:
         // 1. LongPoint (indexed = true; an indexed long field to allow fast range filters on the timestamp field value)

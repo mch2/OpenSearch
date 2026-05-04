@@ -73,9 +73,42 @@ public class PlanForker {
             return results;
         }
 
-        // TODO: multi-input operators (joins) — each side is typically a separate stage
-        // connected via StageInputScan, so this path may not be needed in practice.
-        throw new UnsupportedOperationException("Multi-input plan forking not yet supported for: " + node.getClass().getSimpleName());
+        // Multi-input operator (e.g. coord-side join). Produce the cartesian product of
+        // child alternatives, requiring all children to agree on the chosen backend.
+        List<Resolved> results = new ArrayList<>();
+        crossProduct(childAlternativeSets, 0, new ArrayList<>(), null, (chosenBackend, combo) -> {
+            results.addAll(resolveOperator(node, combo, chosenBackend));
+        });
+        return results;
+    }
+
+    private interface ComboHandler {
+        void accept(String chosenBackend, List<RelNode> combo);
+    }
+
+    private static void crossProduct(
+        List<List<Resolved>> childAlternativeSets,
+        int depth,
+        List<RelNode> partial,
+        String agreedBackend,
+        ComboHandler handler
+    ) {
+        if (depth == childAlternativeSets.size()) {
+            handler.accept(agreedBackend, List.copyOf(partial));
+            return;
+        }
+        for (Resolved alt : childAlternativeSets.get(depth)) {
+            // All children must converge on the same backend so the parent operator's
+            // backend resolution stays unambiguous. With a single backend (today), every
+            // alternative shares the same backend and this filter is a no-op.
+            String next = agreedBackend == null ? alt.chosenBackend : agreedBackend;
+            if (agreedBackend != null && !agreedBackend.equals(alt.chosenBackend)) {
+                continue;
+            }
+            partial.add(alt.node);
+            crossProduct(childAlternativeSets, depth + 1, partial, next, handler);
+            partial.removeLast();
+        }
     }
 
     private static List<Resolved> resolveOperator(RelNode node, List<RelNode> children, String childBackend) {

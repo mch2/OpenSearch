@@ -125,6 +125,43 @@ public final class NativeCall implements AutoCloseable {
         return new StrArray(ptrs, lens, strings.length);
     }
 
+    // ---- Byte-array array marshaling ----
+
+    /**
+     * Parallel pointer and length arrays for passing a {@code byte[][]} to native code.
+     * Matches the Rust convention of {@code (*const *const u8, *const i64, count)}.
+     *
+     * @param ptrs memory segment containing pointers to each buffer
+     * @param lens memory segment containing the length of each buffer
+     * @param count the number of buffers
+     */
+    public record BytesArray(MemorySegment ptrs, MemorySegment lens, long count) {
+    }
+
+    /**
+     * Marshal a {@code byte[][]} into parallel native arrays of pointers and lengths.
+     *
+     * @param buffers the buffers to marshal (must not be null, elements must not be null)
+     * @return a {@link BytesArray} with pointer array, length array, and count
+     */
+    public BytesArray bytesArray(byte[][] buffers) {
+        ensureOpen();
+        if (buffers == null) {
+            throw new NullPointerException("Cannot marshal null byte array array to native");
+        }
+        MemorySegment ptrs = arena.allocate(ValueLayout.ADDRESS, buffers.length);
+        MemorySegment lens = arena.allocate(ValueLayout.JAVA_LONG, buffers.length);
+        for (int i = 0; i < buffers.length; i++) {
+            byte[] buf = buffers[i];
+            if (buf == null) {
+                throw new NullPointerException("Cannot marshal null byte[] at index " + i);
+            }
+            ptrs.setAtIndex(ValueLayout.ADDRESS, i, arena.allocateFrom(ValueLayout.JAVA_BYTE, buf));
+            lens.setAtIndex(ValueLayout.JAVA_LONG, i, buf.length);
+        }
+        return new BytesArray(ptrs, lens, buffers.length);
+    }
+
     // ---- Out-buffer with overflow detection ----
 
     /**

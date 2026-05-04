@@ -22,6 +22,13 @@
 //! - `cidrmatch(cidr, ip)` → boolean, true iff `ip` is in `cidr`
 //! - `json_valid(string)` → boolean, true iff input parses as JSON
 //! - `json_object(k, v, ...)` → JSON object string from alternating key/value pairs
+//! - `convert_tz(ts, from_tz, to_tz)` → DST-aware timezone shift (chrono-tz)
+//! - `last_day(ts)` → last date of the ts's calendar month
+//! - `timestampdiff_calendar(unit, a, b)` → MONTH/QUARTER/YEAR diff
+//! - `timestampadd_calendar(unit, n, ts)` → MONTH/QUARTER/YEAR add
+//! - `span_bucket(field, span)` → fixed-width bucket label 'start-end'
+//! - `width_bucket(field, bins, range, max)` → power-of-10 histogram label
+//! - `rex_extract(field, pattern, group)` → extract named/indexed capture group
 
 use std::any::Any;
 use std::sync::Arc;
@@ -29,10 +36,121 @@ use std::sync::Arc;
 use datafusion::arrow::array::{
     Array, ArrayRef, BooleanBuilder, Float64Array, Float64Builder, Int64Array, StringBuilder,
 };
-use datafusion::arrow::datatypes::DataType;
+use datafusion::arrow::datatypes::{DataType, TimeUnit};
+use datafusion::common::plan_err;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::context::SessionContext;
 use datafusion::logical_expr::{ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility};
+
+/// Categories of input type a UDF slot can accept. Each mode declares a
+/// canonical target arrow type plus the set of sources that coerce to it.
+/// UDFs in Stream 3 use `Signature::user_defined()` and call
+/// [`coerce_slot`] per argument position to produce the `coerce_types` output.
+///
+/// Stream 2 pattern: invalid sources produce an explicit `plan_err!` — no
+/// silent fallback. The failure message names the UDF, the slot index, the
+/// observed type and the expected canonical type so planning errors are
+/// actionable.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum CoerceMode {
+    /// Accept Utf8 / Date32 / Timestamp(any precision, any tz) → canonicalize
+    /// to Timestamp(Millisecond, None). DF has built-in casts for each source.
+    TimestampMs,
+    /// Accept Utf8 / Date32 / Timestamp(any, any) → canonicalize to Date32.
+    /// Currently unused by any live UDF but kept for consistency — Stream-3
+    /// UDFs normalize temporals to TimestampMs. Do not delete without
+    /// re-examining the Stream-2 adapter path.
+    #[allow(dead_code)]
+    Date32,
+    /// Accept any integer or float → Int64.
+    Int64,
+    /// Accept any integer or float → Float64.
+    Float64,
+    /// Accept Utf8 / LargeUtf8 / Utf8View → Utf8.
+    Utf8,
+}
+
+/// Coerce a single argument slot. Returns the canonical target type for this
+/// slot when the input is compatible, or a planning error otherwise.
+pub(crate) fn coerce_slot(
+    udf_name: &str,
+    slot_index: usize,
+    observed: &DataType,
+    mode: CoerceMode,
+) -> Result<DataType> {
+    use DataType::*;
+    match mode {
+        CoerceMode::TimestampMs => match observed {
+            Timestamp(_, _) | Date32 | Date64 | Utf8 | LargeUtf8 | Utf8View => {
+                Ok(Timestamp(TimeUnit::Millisecond, None))
+            }
+            other => plan_err!(
+                "{udf_name}: arg {slot_index} expected timestamp/date/string, got {other:?}"
+            ),
+        },
+        CoerceMode::Date32 => match observed {
+            Date32 | Date64 | Timestamp(_, _) | Utf8 | LargeUtf8 | Utf8View => Ok(Date32),
+            other => plan_err!(
+                "{udf_name}: arg {slot_index} expected date/timestamp/string, got {other:?}"
+            ),
+        },
+        CoerceMode::Int64 => match observed {
+            Int8 | Int16 | Int32 | Int64 | UInt8 | UInt16 | UInt32 | UInt64 | Float32 | Float64 => {
+                Ok(Int64)
+            }
+            other => plan_err!(
+                "{udf_name}: arg {slot_index} expected integer or float, got {other:?}"
+            ),
+        },
+        CoerceMode::Float64 => match observed {
+            Int8 | Int16 | Int32 | Int64 | UInt8 | UInt16 | UInt32 | UInt64 | Float32 | Float64 => {
+                Ok(Float64)
+            }
+            other => plan_err!(
+                "{udf_name}: arg {slot_index} expected integer or float, got {other:?}"
+            ),
+        },
+        CoerceMode::Utf8 => match observed {
+            Utf8 | LargeUtf8 | Utf8View => Ok(Utf8),
+            other => plan_err!(
+                "{udf_name}: arg {slot_index} expected string, got {other:?}"
+            ),
+        },
+    }
+}
+
+/// Coerce an entire argument vector against a fixed template. Enforces arity
+/// and delegates per-slot coercion to [`coerce_slot`].
+pub(crate) fn coerce_args(
+    udf_name: &str,
+    observed: &[DataType],
+    template: &[CoerceMode],
+) -> Result<Vec<DataType>> {
+    if observed.len() != template.len() {
+        return plan_err!(
+            "{udf_name} expects {} arguments, got {}",
+            template.len(),
+            observed.len()
+        );
+    }
+    template
+        .iter()
+        .enumerate()
+        .map(|(i, mode)| coerce_slot(udf_name, i, &observed[i], *mode))
+        .collect()
+}
+
+pub mod convert_tz;
+pub mod ip_compare;
+pub mod json;
+pub mod last_day;
+pub mod mvzip;
+pub mod opensearch_span;
+pub mod rex_extract;
+pub mod span_bucket;
+pub mod timestampadd_calendar;
+pub mod timestampdiff_calendar;
+pub mod width_bucket;
 
 pub fn register_all(ctx: &SessionContext) {
     ctx.register_udf(ScalarUDF::from(EulerUdf::new()));
@@ -47,7 +165,18 @@ pub fn register_all(ctx: &SessionContext) {
     ctx.register_udf(ScalarUDF::from(CidrMatchUdf::new()));
     ctx.register_udf(ScalarUDF::from(JsonValidUdf::new()));
     ctx.register_udf(ScalarUDF::from(JsonObjectUdf::new()));
-    log::info!("OpenSearch UDF register_all: e, expm1, rint, conv, crc32, md5, sha1, sha2, cidrmatch, json_valid, json_object registered");
+    convert_tz::register_all(ctx);
+    ip_compare::register_all(ctx);
+    json::register_all(ctx);
+    last_day::register_all(ctx);
+    mvzip::register_all(ctx);
+    opensearch_span::register_all(ctx);
+    rex_extract::register_all(ctx);
+    span_bucket::register_all(ctx);
+    timestampadd_calendar::register_all(ctx);
+    timestampdiff_calendar::register_all(ctx);
+    width_bucket::register_all(ctx);
+    log::info!("OpenSearch UDF register_all: e, expm1, rint, conv, crc32, md5, sha1, sha2, cidrmatch, ip comparison UDFs, json_valid, json_object, convert_tz, last_day, timestampadd_calendar, timestampdiff_calendar, span_bucket, width_bucket, rex_extract, mvzip, opensearch_span registered");
 }
 
 // ---- e() ------------------------------------------------------------------
@@ -598,5 +727,88 @@ impl ScalarUDFImpl for JsonObjectUdf {
             }
         }
         Ok(ColumnarValue::Array(Arc::new(builder.finish()) as ArrayRef))
+    }
+}
+
+// ─── coerce_slot / coerce_args tests ─────────────────────────────────────
+
+#[cfg(test)]
+mod coerce_tests {
+    use super::*;
+
+    #[test]
+    fn timestamp_ms_accepts_string_date_and_timestamp_variants() {
+        assert_eq!(
+            coerce_slot("f", 0, &DataType::Utf8, CoerceMode::TimestampMs).unwrap(),
+            DataType::Timestamp(TimeUnit::Millisecond, None)
+        );
+        assert_eq!(
+            coerce_slot("f", 0, &DataType::Date32, CoerceMode::TimestampMs).unwrap(),
+            DataType::Timestamp(TimeUnit::Millisecond, None)
+        );
+        assert_eq!(
+            coerce_slot(
+                "f",
+                0,
+                &DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
+                CoerceMode::TimestampMs
+            )
+            .unwrap(),
+            DataType::Timestamp(TimeUnit::Millisecond, None)
+        );
+    }
+
+    #[test]
+    fn timestamp_ms_rejects_non_temporal() {
+        let err = coerce_slot("f", 2, &DataType::Boolean, CoerceMode::TimestampMs).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("f") && msg.contains("Boolean"), "{msg}");
+    }
+
+    #[test]
+    fn int64_accepts_numeric_and_rejects_other() {
+        assert_eq!(
+            coerce_slot("f", 1, &DataType::Int32, CoerceMode::Int64).unwrap(),
+            DataType::Int64
+        );
+        assert_eq!(
+            coerce_slot("f", 1, &DataType::Float64, CoerceMode::Int64).unwrap(),
+            DataType::Int64
+        );
+        assert!(coerce_slot("f", 1, &DataType::Utf8, CoerceMode::Int64).is_err());
+    }
+
+    #[test]
+    fn float64_accepts_numeric() {
+        assert_eq!(
+            coerce_slot("f", 0, &DataType::Int64, CoerceMode::Float64).unwrap(),
+            DataType::Float64
+        );
+        assert_eq!(
+            coerce_slot("f", 0, &DataType::Float32, CoerceMode::Float64).unwrap(),
+            DataType::Float64
+        );
+        assert!(coerce_slot("f", 0, &DataType::Boolean, CoerceMode::Float64).is_err());
+    }
+
+    #[test]
+    fn utf8_accepts_string_family() {
+        assert_eq!(
+            coerce_slot("f", 0, &DataType::LargeUtf8, CoerceMode::Utf8).unwrap(),
+            DataType::Utf8
+        );
+        assert!(coerce_slot("f", 0, &DataType::Int64, CoerceMode::Utf8).is_err());
+    }
+
+    #[test]
+    fn coerce_args_checks_arity() {
+        let t = [CoerceMode::Utf8, CoerceMode::Utf8];
+        assert!(coerce_args("f", &[DataType::Utf8], &t).is_err());
+        assert!(coerce_args(
+            "f",
+            &[DataType::Utf8, DataType::Utf8, DataType::Utf8],
+            &t
+        )
+        .is_err());
     }
 }

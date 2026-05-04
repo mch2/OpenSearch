@@ -15,6 +15,8 @@ datafusion-expr = { workspace = true }
 datafusion-datasource = { workspace = true }
 datafusion-common = { workspace = true }
 datafusion-execution = { workspace = true }
+datafusion-physical-optimizer = { workspace = true }
+datafusion-optimizer = { workspace = true }
 datafusion-substrait = { workspace = true }
 
 arrow = { workspace = true }
@@ -46,6 +48,13 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 ipnet = { workspace = true }
 serde_json = { workspace = true }
+
+# Calendar arithmetic for opensearch_span UDF (month/quarter/year truncation).
+chrono = { workspace = true }
+# IANA timezone database for convert_tz UDF (DST-aware wall-clock conversion).
+chrono-tz = { workspace = true }
+# Regex engine for rex_extract UDF (named-group support).
+regex = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

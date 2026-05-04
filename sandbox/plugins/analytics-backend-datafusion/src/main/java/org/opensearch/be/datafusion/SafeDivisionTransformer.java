@@ -8,13 +8,11 @@
 
 package org.opensearch.be.datafusion;
 
-import org.apache.calcite.rel.type.RelDataTypeFactory;
-import org.apache.calcite.rel.type.RelDataTypeSystem;
+import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.rex.RexCall;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.sql.fun.SqlStdOperatorTable;
-import org.apache.calcite.sql.type.SqlTypeFactoryImpl;
 import org.opensearch.analytics.spi.FieldStorageInfo;
 import org.opensearch.analytics.spi.ScalarFunctionAdapter;
 
@@ -29,22 +27,17 @@ import java.util.List;
  */
 class SafeDivisionTransformer implements ScalarFunctionAdapter {
 
-    private static final RelDataTypeFactory TYPE_FACTORY = new SqlTypeFactoryImpl(RelDataTypeSystem.DEFAULT);
-    private static final RexBuilder REX_BUILDER = new RexBuilder(TYPE_FACTORY);
-
     @Override
-    public RexNode adapt(RexCall original, List<FieldStorageInfo> fieldStorage) {
+    public RexNode adapt(RexCall original, List<FieldStorageInfo> fieldStorage, RelOptCluster cluster) {
         if (original.getOperands().size() != 2) return original;
 
+        RexBuilder rexBuilder = cluster.getRexBuilder();
         RexNode right = original.getOperands().get(1);
 
-        RexNode zero = REX_BUILDER.makeLiteral(0, right.getType(), false);
-        RexNode isZero = REX_BUILDER.makeCall(SqlStdOperatorTable.EQUALS, right, zero);
-        RexNode nullLit = REX_BUILDER.makeNullLiteral(original.getType());
+        RexNode zero = rexBuilder.makeLiteral(0, right.getType(), false);
+        RexNode isZero = rexBuilder.makeCall(SqlStdOperatorTable.EQUALS, right, zero);
+        RexNode nullLit = rexBuilder.makeNullLiteral(original.getType());
 
-        return REX_BUILDER.makeCall(
-            SqlStdOperatorTable.CASE,
-            List.of(isZero, nullLit, original)
-        );
+        return rexBuilder.makeCall(SqlStdOperatorTable.CASE, List.of(isZero, nullLit, original));
     }
 }

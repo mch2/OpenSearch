@@ -10,7 +10,7 @@ apply plugin: 'opensearch.internal-cluster-test'
 
 // SQL Unified Query API version (aligned with OpenSearch build version) — required by
 // the PPL transport plugin used in CoordinatorReduceIT.
-def sqlUnifiedQueryVersion = '3.6.0.0-SNAPSHOT'
+def sqlUnifiedQueryVersion = '3.7.0.0-SNAPSHOT'
 
 opensearchplugin {
   description = 'DataFusion native execution engine plugin for the query engine.'
@@ -19,6 +19,10 @@ opensearchplugin {
 }
 
 repositories {
+  // mavenLocal must come first so local builds of the sql repo are picked up
+  // ahead of the OpenSearch snapshots remote (e.g. for the IP VARBINARY→IP
+  // ExprType patch in unified-query-core 3.7.0.0-SNAPSHOT).
+  mavenLocal()
   maven {
     name = 'OpenSearch Snapshots'
     url = 'https://ci.opensearch.org/ci/dbc/snapshots/maven/'
@@ -163,6 +167,8 @@ configurations.all {
     force "org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.8.21"
     force "org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.21"
     force "org.jetbrains.kotlin:kotlin-stdlib-common:1.9.10"
+    force "org.apache.logging.log4j:log4j-api:${versions.log4j}"
+    force "org.apache.logging.log4j:log4j-core:${versions.log4j}"
   }
 }
 

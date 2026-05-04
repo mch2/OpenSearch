@@ -12,9 +12,12 @@ import org.apache.calcite.plan.RelOptRule;
 import org.apache.calcite.plan.RelOptRuleCall;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.Project;
+import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.rex.RexCall;
 import org.apache.calcite.rex.RexInputRef;
 import org.apache.calcite.rex.RexNode;
+import org.apache.calcite.rex.RexOver;
+import org.apache.calcite.rex.RexWindow;
 import org.apache.calcite.sql.SqlFunction;
 import org.opensearch.analytics.planner.CapabilityRegistry;
 import org.opensearch.analytics.planner.PlannerContext;
@@ -60,6 +63,7 @@ public class OpenSearchProjectRule extends RelOptRule {
         }
 
         List<String> childViableBackends = openSearchChild.getViableBackends();
+        RexBuilder rexBuilder = project.getCluster().getRexBuilder();
 
         // Note: if JMH benchmarks show this as a hotspot, consider (a) precomputing a
         // SqlKind → viable backends map once per onMatch() call, and (b) returning
@@ -67,7 +71,7 @@ public class OpenSearchProjectRule extends RelOptRule {
         List<RexNode> annotatedExprs = new ArrayList<>(project.getProjects().size());
         boolean requiresBackendCapabilityEvaluation = false;
         for (RexNode expr : project.getProjects()) {
-            RexNode annotated = annotateExpr(expr, childViableBackends);
+            RexNode annotated = annotateExpr(expr, childViableBackends, rexBuilder);
             annotatedExprs.add(annotated);
             if (annotated instanceof AnnotatedProjectExpression) {
                 requiresBackendCapabilityEvaluation = true;
@@ -95,7 +99,7 @@ public class OpenSearchProjectRule extends RelOptRule {
         );
     }
 
-    private RexNode annotateExpr(RexNode expr, List<String> childViableBackends) {
+    private RexNode annotateExpr(RexNode expr, List<String> childViableBackends, RexBuilder rexBuilder) {
         if (!(expr instanceof RexCall rexCall)) {
             // TODO: RexInputRef and RexLiteral are left unannotated — they are implicitly handled
             // by whichever backend executes the operator (pass-through for refs, constant for literals).
@@ -128,15 +132,41 @@ public class OpenSearchProjectRule extends RelOptRule {
         boolean changed = false;
         List<RexNode> newOperands = new ArrayList<>(rexCall.getOperands().size());
         for (RexNode operand : rexCall.getOperands()) {
-            RexNode annotated = annotateExpr(operand, childViableBackends);
+            RexNode annotated = annotateExpr(operand, childViableBackends, rexBuilder);
             newOperands.add(annotated);
             if (annotated != operand) {
                 changed = true;
             }
         }
 
-        RexCall target = changed ? rexCall.clone(rexCall.getType(), newOperands) : rexCall;
+        RexCall target = changed ? rebuildWithOperands(rexCall, newOperands, rexBuilder) : rexCall;
         return new AnnotatedProjectExpression(target.getType(), target, scalarViable, context.nextAnnotationId());
+    }
+
+    /**
+     * Rebuilds {@code rexCall} with replacement operands. {@link RexOver#clone} throws
+     * {@link UnsupportedOperationException}, so window functions must go through
+     * {@link RexBuilder#makeOver} which preserves the original window spec.
+     */
+    private static RexCall rebuildWithOperands(RexCall rexCall, List<RexNode> newOperands, RexBuilder rexBuilder) {
+        if (rexCall instanceof RexOver over) {
+            RexWindow window = over.getWindow();
+            return (RexCall) rexBuilder.makeOver(
+                over.getType(),
+                over.getAggOperator(),
+                newOperands,
+                window.partitionKeys,
+                window.orderKeys,
+                window.getLowerBound(),
+                window.getUpperBound(),
+                window.isRows(),
+                true,   // allowPartial: do not wrap in DISALLOW PARTIAL CASE
+                false,  // nullWhenCountZero: do not wrap in COUNT-guard CASE
+                over.isDistinct(),
+                over.ignoreNulls()
+            );
+        }
+        return rexCall.clone(rexCall.getType(), newOperands);
     }
 
     private List<String> resolveOpaqueViableBackends(String funcName, List<String> childViableBackends) {
@@ -163,11 +193,19 @@ public class OpenSearchProjectRule extends RelOptRule {
             scalarFunc = ScalarFunction.fromSqlFunction(sqlFunction);
         }
         if (scalarFunc == null) {
-            return List.of();
+            // Standard SQL operations not explicitly modeled in ScalarFunction (e.g. internal
+            // ops introduced by Calcite rewrite rules like AggregateReduceFunctionsRule when
+            // splitting AVG into SUM/COUNT) are assumed to be handled natively by any backend
+            // that supports Substrait. Pass the child's viable backends through.
+            return new ArrayList<>(childViableBackends);
         }
         FieldType fieldType = FieldType.fromSqlTypeName(rexCall.getType().getSqlTypeName());
         if (fieldType == null) {
-            return List.of();
+            // Collection / unmodeled return types (ARRAY, MAP, etc.) aren't represented in
+            // FieldType. Pass through child viable backends — same as the scalarFunc == null
+            // fallback above. The backend's substrait conversion is the real arbiter of
+            // whether the function actually executes.
+            return new ArrayList<>(childViableBackends);
         }
 
         CapabilityRegistry registry = context.getCapabilityRegistry();

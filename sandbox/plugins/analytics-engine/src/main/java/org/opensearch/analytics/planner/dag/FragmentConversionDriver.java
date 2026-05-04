@@ -132,16 +132,21 @@ public class FragmentConversionDriver {
             RelNode strippedNode = openSearchNode.stripAnnotations(strippedInputs);
 
             if (!finalAggConverted) {
-                // First OpenSearchRelNode above ExchangeReducer = final agg
-                // Check if child is ExchangeReducer — if so, this is the final agg node
-                boolean childIsExchangeReducer = !node.getInputs().isEmpty()
-                    && node.getInputs().getFirst() instanceof OpenSearchExchangeReducer;
-                if (childIsExchangeReducer) {
-                    // Strip ExchangeReducer, keep StageInputScan as leaf for schema
-                    RelNode stageInputScan = strip(node.getInputs().getFirst().getInputs().getFirst());
-                    List<RelNode> finalAggInputs = List.of(stageInputScan);
-                    RelNode finalAggFragment = openSearchNode.stripAnnotations(finalAggInputs);
-                    return convertor.convertFinalAggFragment(finalAggFragment);
+                boolean allChildrenAreExchangeReducer = !node.getInputs().isEmpty()
+                    && node.getInputs().stream().allMatch(in -> in instanceof OpenSearchExchangeReducer);
+                if (allChildrenAreExchangeReducer) {
+                    // Multi-input coord-side operator (join, future set op): strip every
+                    // ExchangeReducer to its underlying StageInputScan and hand the whole
+                    // operator to convertFinalAggFragment. The conversion path's
+                    // rewriteStageInputScans pass renames each StageInputScan to "input-i",
+                    // matching what the reduce sink registers against the local session.
+                    // For a single-input agg shape, this collapses to the existing path.
+                    List<RelNode> stageInputScans = new ArrayList<>(node.getInputs().size());
+                    for (RelNode reducer : node.getInputs()) {
+                        stageInputScans.add(strip(reducer.getInputs().getFirst()));
+                    }
+                    RelNode coordFragment = openSearchNode.stripAnnotations(stageInputScans);
+                    return convertor.convertFinalAggFragment(coordFragment);
                 }
             }
 

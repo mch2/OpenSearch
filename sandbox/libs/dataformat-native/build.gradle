@@ -55,7 +55,10 @@ def osName = System.getProperty('os.name').toLowerCase()
 def libPrefix = osName.contains('windows') ? '' : 'lib'
 def libExtension = osName.contains('windows') ? '.dll' : (osName.contains('mac') ? '.dylib' : '.so')
 def nativeLibName = "opensearch_native"
-def buildType = project.hasProperty('rustDebug') ? 'debug' : 'release'
+// Default to debug build for fast iteration. Release profile takes ~9 minutes
+// per recompile and we hit it on every Rust source change. Pass -Pcgrelease
+// (or set the system property) to opt into release for shipping.
+def buildType = project.hasProperty('rustRelease') ? 'release' : 'debug'
 def rustWorkspaceDir = file("${projectDir}/rust")
 def nativeLibFile = file("${rustWorkspaceDir}/target/${buildType}/${libPrefix}${nativeLibName}${libExtension}")
 

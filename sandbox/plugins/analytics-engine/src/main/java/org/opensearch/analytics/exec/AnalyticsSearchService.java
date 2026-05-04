@@ -110,6 +110,10 @@ public class AnalyticsSearchService {
             SearchShardTask searchShardTask = null; // TODO: real task for cancellation
             ExecutionContext ctx = new ExecutionContext(request.getShardId().getIndexName(), searchShardTask, gatedReader.get());
             ctx.setFragmentBytes(selectedPlan.getFragmentBytes());
+            // Single-shard indices skip the partial/final mode rewrite on the native side —
+            // the data node is the only contributor, so the aggregate runs end-to-end as
+            // Single rather than emitting state for a coordinator that will never merge it.
+            ctx.setSingleShard(shard.indexSettings().getNumberOfShards() == 1);
 
             AnalyticsSearchBackendPlugin backend = backends.get(selectedPlan.getBackendId());
 

@@ -115,11 +115,15 @@ impl AggregateUDFImpl for TakeUdaf {
             .map(|f| f.data_type().clone())
             .unwrap_or(DataType::Null);
         let list_type = DataType::List(Arc::new(Field::new("item", element, true)));
-        Ok(vec![Arc::new(Field::new(
-            format!("{}[buf]", args.name),
-            list_type,
-            true,
-        ))])
+        Ok(vec![
+            Arc::new(Field::new(format!("{}[buf]", args.name), list_type, true)),
+            // Carry the resolved limit through the partial→final boundary.
+            // Without this, a final accumulator constructed with None (because
+            // the Substrait call passes `n` as a column ref, not a literal)
+            // has no way to learn its cap during merge_batch — merge_batch only
+            // receives state columns, not the `n_col` from update_batch.
+            Arc::new(Field::new(format!("{}[n]", args.name), DataType::Int64, true)),
+        ])
     }
 }
 
@@ -249,10 +253,25 @@ impl Accumulator for TakeAccumulator {
     }
 
     fn state(&mut self) -> Result<Vec<ScalarValue>> {
-        Ok(vec![self.current_list()])
+        Ok(vec![self.current_list(), ScalarValue::Int64(self.limit)])
     }
 
     fn merge_batch(&mut self, states: &[ArrayRef]) -> Result<()> {
+        // The final accumulator may have been constructed with `limit = None`
+        // (column-ref `n` argument). Recover it from the state column before
+        // checking cap — otherwise merge_batch drops every partial.
+        if self.limit.is_none() {
+            if let Some(limits) = states.get(1) {
+                for i in 0..limits.len() {
+                    if limits.is_null(i) {
+                        continue;
+                    }
+                    let scalar = ScalarValue::try_from_array(limits, i)?;
+                    self.limit = Some(scalar_to_i64(&scalar)?);
+                    break;
+                }
+            }
+        }
         let cap = self.cap();
         if cap == 0 {
             return Ok(());
@@ -386,12 +405,43 @@ mod tests {
         // Build a ListArray containing both shard states as rows. ScalarValue
         // doesn't easily concatenate two single-element list scalars, so build
         // the ListArray manually via the same helper the partials use.
-        let s1 = shard1.evaluate().expect("shard1 eval");
-        let s2 = shard2.evaluate().expect("shard2 eval");
-        let combined = ScalarValue::iter_to_array(vec![s1, s2]).expect("iter_to_array");
+        let s1 = shard1.state().expect("shard1 state");
+        let s2 = shard2.state().expect("shard2 state");
+        let combined_lists = ScalarValue::iter_to_array(vec![s1[0].clone(), s2[0].clone()])
+            .expect("iter_to_array lists");
+        let combined_limits = ScalarValue::iter_to_array(vec![s1[1].clone(), s2[1].clone()])
+            .expect("iter_to_array limits");
 
-        acc.merge_batch(&[combined]).expect("merge_batch");
+        acc.merge_batch(&[combined_lists, combined_limits]).expect("merge_batch");
         let out = acc.evaluate().expect("evaluate");
         assert_eq!(list_strings(&out), vec!["a", "b", "c"]);
+    }
+
+    /// Regression test for the bug that caused testTake to return an empty list:
+    /// in the real Substrait-driven partial→final plan, the final accumulator is
+    /// constructed with `limit = None` (the `n` argument is a column ref, not a
+    /// literal). merge_batch is called only with state columns — there is no
+    /// n_col there. So the limit must ride along in state, otherwise the final
+    /// never knows its cap and merge_batch silently drops every partial.
+    #[test]
+    fn merge_batch_resolves_limit_from_state_when_final_has_none() {
+        // Partial accumulator: resolves limit from n_col on first update.
+        let mut partial = varchar_acc(None);
+        let col = strings(&["a", "b", "c", "d"]);
+        let n_col = const_int32(2, 4);
+        partial.update_batch(&[col, n_col]).expect("partial update");
+        let state = partial.state().expect("partial state");
+
+        // Final accumulator: constructed with `None` because substrait arg is a
+        // column ref. merge_batch must recover the limit from the state column,
+        // not from any n_col (which isn't passed here).
+        let mut final_acc = varchar_acc(None);
+        let lists_arr = ScalarValue::iter_to_array(vec![state[0].clone()])
+            .expect("iter_to_array lists");
+        let limits_arr = ScalarValue::iter_to_array(vec![state[1].clone()])
+            .expect("iter_to_array limits");
+        final_acc.merge_batch(&[lists_arr, limits_arr]).expect("merge_batch");
+        let out = final_acc.evaluate().expect("evaluate");
+        assert_eq!(list_strings(&out), vec!["a", "b"]);
     }
 }

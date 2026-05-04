@@ -14,6 +14,8 @@ import org.apache.calcite.plan.RelTraitSet;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.Aggregate;
 import org.apache.calcite.rel.core.AggregateCall;
+import org.apache.calcite.sql.SqlKind;
+import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.planner.CapabilityRegistry;
@@ -80,16 +82,24 @@ public class OpenSearchAggregateRule extends RelOptRule {
         // Build per-call annotations into a side map keyed by call index.
         Map<Integer, AggregateCallAnnotation> annotations = new LinkedHashMap<>();
         List<AggregateCall> aggCalls = aggregate.getAggCallList();
+        // Track replacements so the constructed OpenSearchAggregate uses the type-fixed calls.
+        List<AggregateCall> fixedCalls = new ArrayList<>(aggCalls.size());
         for (int i = 0; i < aggCalls.size(); i++) {
             AggregateCall aggCall = aggCalls.get(i);
-            List<String> callViable = resolveViableBackendsForCall(aggCall, childFieldStorage);
+            // Fix the return type to match Calcite's inference. The frontend may have
+            // created aggCalls with narrower types (e.g. SUM(INTEGER) → INTEGER instead
+            // of BIGINT). Mismatched types cause assertion failures in LogicalAggregate
+            // when stripAnnotations creates the stripped plan for Substrait conversion.
+            AggregateCall fixedCall = rewriteDistinctToApprox(aggCall);
+            fixedCall = fixAggCallType(fixedCall, aggregate);
+            fixedCalls.add(fixedCall);
+            List<String> callViable = resolveViableBackendsForCall(fixedCall, childFieldStorage);
             if (callViable.isEmpty()) {
-                throw new IllegalStateException(
-                    "No backend supports aggregate function [" + aggCall.getAggregation().getName() + "]"
-                );
+                throw new IllegalStateException("No backend supports aggregate function [" + fixedCall.getAggregation().getName() + "]");
             }
             annotations.put(i, new AggregateCallAnnotation(callViable, context.nextAnnotationId()));
         }
+        aggCalls = fixedCalls;
 
         // Compute operator-level viable backends: must be viable for child AND handle agg calls
         List<String> viableBackends = computeAggregateViableBackends(annotations, childViableBackends);
@@ -124,10 +134,7 @@ public class OpenSearchAggregateRule extends RelOptRule {
     }
 
     private List<String> resolveViableBackendsForCall(AggregateCall aggCall, List<FieldStorageInfo> childFieldStorageInfos) {
-        AggregateFunction func = AggregateFunction.fromSqlKind(aggCall.getAggregation().getKind());
-        if (func == null) {
-            func = AggregateFunction.fromNameOrError(aggCall.getAggregation().getName());
-        }
+        AggregateFunction func = AggregateFunction.resolve(aggCall);
 
         CapabilityRegistry registry = context.getCapabilityRegistry();
 
@@ -195,5 +202,58 @@ public class OpenSearchAggregateRule extends RelOptRule {
             }
         }
         return viable;
+    }
+
+    /**
+     * Rewrites {@code COUNT(DISTINCT x)} → {@code APPROX_COUNT_DISTINCT(x)} so the
+     * aggregate is splittable into PARTIAL + FINAL via HLL. PPL's dc/distinct_count
+     * semantics are approximate (HLL++), matching OpenSearch SQL's behavior.
+     */
+    private static AggregateCall rewriteDistinctToApprox(AggregateCall aggCall) {
+        if (aggCall.getAggregation().getKind() != SqlKind.COUNT || !aggCall.isDistinct()) {
+            return aggCall;
+        }
+        return AggregateCall.create(
+            SqlStdOperatorTable.APPROX_COUNT_DISTINCT,
+            false,
+            aggCall.isApproximate(),
+            aggCall.ignoreNulls(),
+            aggCall.rexList,
+            aggCall.getArgList(),
+            aggCall.filterArg,
+            aggCall.distinctKeys,
+            aggCall.collation,
+            aggCall.getType(),
+            aggCall.name
+        );
+    }
+
+    /**
+     * Ensures the aggCall's return type matches Calcite's inference for the function.
+     * Frontends may create aggCalls with narrower types (e.g. SUM(INTEGER) → INTEGER
+     * instead of BIGINT). Returns the original call if types already match.
+     *
+     * <p>Without this fix, {@code stripAnnotations} produces a {@code LogicalAggregate}
+     * with a row type that differs from what Calcite re-infers, triggering an assertion
+     * failure during Substrait conversion.
+     */
+    private static AggregateCall fixAggCallType(AggregateCall aggCall, Aggregate aggregate) {
+        org.apache.calcite.rel.type.RelDataType inferred = aggCall.getAggregation().inferReturnType(aggCall.createBinding(aggregate));
+        if (inferred.equals(aggCall.type)) {
+            return aggCall;
+        }
+        return AggregateCall.create(
+            aggCall.getAggregation(),
+            aggCall.isDistinct(),
+            aggCall.isApproximate(),
+            aggCall.ignoreNulls(),
+            aggCall.rexList,
+            aggCall.getArgList(),
+            aggCall.filterArg,
+            aggCall.distinctKeys,
+            aggCall.collation,
+            inferred,
+            aggCall.name
+        );
     }
 }

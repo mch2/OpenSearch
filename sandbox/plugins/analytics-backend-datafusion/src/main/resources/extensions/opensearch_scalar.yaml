@@ -48,7 +48,13 @@ calcite_aliases:
   character_length: char_length
   length: char_length
   len: char_length
-  ilike: like
+  # `ilike: like` intentionally omitted: ILIKE is case-insensitive, but substrait
+  # core `like` is case-sensitive. IlikeAdapter (registered in
+  # DataFusionAnalyticsBackendPlugin.SCALAR_FUNCTION_ADAPTERS) rewrites
+  # ILIKE(a, b[, escape]) → LIKE(LOWER(a), LOWER(b)) before isthmus runs; no alias
+  # needed. Route-through-regexp_like attempted in Stream 1 but Calcite emits 3-arg
+  # ILIKE (sql-plugin hardcodes `'\\'` escape); AliasSpec injection can't drop
+  # operands. Tracked for Stream 2 decomposition.
   log: logb
   sign: signum
   truncate: trunc
@@ -65,17 +71,53 @@ calcite_aliases:
   # Aggregate aliases — PPL operator name → DF built-in name
   first: first_value
   last: last_value
-  dc: count
-  distinct_count: count
+  # Distinct-count family — all HLL-approximate via DataFusion's approx_distinct
+  dc: approx_distinct
+  distinct_count: approx_distinct
+  distinct_count_approx: approx_distinct
   percentile: approx_percentile_cont
 
-  # Multi-value aliases — PPL operator name → DF array_* built-in
+  # Pairwise scalar min/max — PPL emits SCALAR_MAX / SCALAR_MIN UDFs.
+  # DataFusion has `greatest` / `least` as native scalar built-ins; we alias the
+  # PPL names to those, and declare their signatures below (substrait core does not
+  # ship declarations for these, so isthmus needs them to emit the call).
+  scalar_max: greatest
+  scalar_min: least
+
+  # PPL `array(...)` constructor UDF lowers to the lowercased call name `array`.
+  # DataFusion's native list constructor is `make_array`; alias and declare higher
+  # arities on `make_array` below.
+  array: make_array
+
+  # Regex predicates — PPL emits REGEXP / REGEXP_CONTAINS via Calcite library
+  # operators; DataFusion's substrait consumer recognises regexp_like for
+  # boolean substring/contains matching.
+  regexp: regexp_like
+  regexp_contains: regexp_like
+
+  # TRANSLATE3 is Calcite's name for the Oracle-style 3-arg translate
+  # (str, from, to) emitted by rex mode=sed y/../../. DataFusion calls it translate.
+  translate3: translate
+
+  # Multi-value aliases — PPL emits standard Calcite SqlLibraryOperators (BIG_QUERY)
+  # for these, not the PPL names. Keep the PPL→DF mappings for cases where PPL
+  # registers a UDF directly under the PPL name (mvappend, mvdedup, mvcount), and
+  # add Calcite-name → DF mappings (array_join, array_element) for the rest.
   mvcount: array_length
   mvjoin: array_to_string
+  array_join: array_to_string
   mvindex: array_element
   mvappend: array_concat
   mvdedup: array_distinct
+  mvfind: array_position
   split: string_to_array
+
+  # PPL emits the polymorphic SPAN UDF (PPLBuiltinOperators.SPAN); our backend
+  # implements it via the opensearch_span Rust UDF declared under scalar_functions
+  # below. The capability itself is declared at the framework SPI layer as
+  # ScalarFunction.SPAN — this alias is DataFusion's private resolution of that
+  # capability to its native registered impl. Other backends provide their own.
+  span: opensearch_span
 
   # Date/time aliases — PPL operator name → DF built-in name
   sysdate: now
@@ -87,10 +129,134 @@ calcite_aliases:
   date: to_date
   time: to_time
   datetime: to_timestamp
+  timestamp: to_timestamp
   makedate: make_date
   maketime: make_time
   unix_timestamp: to_unixtime
   extract: date_part
+  utc_date: current_date
+  utc_time: current_time
+  utc_timestamp: now
+
+  # date-part family — Calcite emits one-arg YEAR(ts), MONTH(ts), ...; DataFusion's
+  # date_part takes (unit, value). prepend_args injects the unit literal declaratively
+  # so no Java adapter is required for these calls. Pilot (YEAR) + Stream 1 migration.
+  year:
+    name: date_part
+    prepend_args:
+      - { string: "year" }
+  month:
+    name: date_part
+    prepend_args:
+      - { string: "month" }
+  month_of_year:
+    name: date_part
+    prepend_args:
+      - { string: "month" }
+  day:
+    name: date_part
+    prepend_args:
+      - { string: "day" }
+  dayofmonth:
+    name: date_part
+    prepend_args:
+      - { string: "day" }
+  day_of_month:
+    name: date_part
+    prepend_args:
+      - { string: "day" }
+  hour:
+    name: date_part
+    prepend_args:
+      - { string: "hour" }
+  hour_of_day:
+    name: date_part
+    prepend_args:
+      - { string: "hour" }
+  minute:
+    name: date_part
+    prepend_args:
+      - { string: "minute" }
+  minute_of_hour:
+    name: date_part
+    prepend_args:
+      - { string: "minute" }
+  second:
+    name: date_part
+    prepend_args:
+      - { string: "second" }
+  second_of_minute:
+    name: date_part
+    prepend_args:
+      - { string: "second" }
+  dayofweek:
+    name: date_part
+    prepend_args:
+      - { string: "dow" }
+  day_of_week:
+    name: date_part
+    prepend_args:
+      - { string: "dow" }
+  dayofyear:
+    name: date_part
+    prepend_args:
+      - { string: "doy" }
+  day_of_year:
+    name: date_part
+    prepend_args:
+      - { string: "doy" }
+  week:
+    name: date_part
+    prepend_args:
+      - { string: "week" }
+  weekofyear:
+    name: date_part
+    prepend_args:
+      - { string: "week" }
+  week_of_year:
+    name: date_part
+    prepend_args:
+      - { string: "week" }
+  quarter:
+    name: date_part
+    prepend_args:
+      - { string: "quarter" }
+  microsecond:
+    name: date_part
+    prepend_args:
+      - { string: "microsecond" }
+
+  # date-to-string — Calcite emits one-arg DAYNAME(ts), MONTHNAME(ts); DataFusion's
+  # to_char takes (value, format). append_args bakes the format literal after the
+  # operand so no Java adapter is required.
+  dayname:
+    name: to_char
+    append_args:
+      - { string: "Day" }
+  monthname:
+    name: to_char
+    append_args:
+      - { string: "Month" }
+
+  # PPL convert subfunctions — one-arg string transforms that lower to
+  # regexp_replace(s, pattern, '', flags). append_args injects the baked pattern,
+  # empty replacement, and the 'g' (global) flag after the operand, so every
+  # match in the input is replaced. Without 'g', DataFusion's regexp_replace
+  # only replaces the first match (e.g. rmcomma('1234,567.89') → '1234567,89').
+  # The 4-arg regexp_replace(string, string, string, string) variant is declared
+  # under scalar_functions: below.
+  rmcomma:
+    name: regexp_replace
+    append_args:
+      - { string: "," }
+      - { string: "" }
+      - { string: "g" }
+  rmunit:
+    name: regexp_replace
+    append_args:
+      - { string: "[A-Za-z]+$" }
+      - { string: "" }
+      - { string: "g" }
 
 scalar_functions:
   # ── Integer variants for substrait-core fp-only math functions ──
@@ -322,6 +488,140 @@ scalar_functions:
     impls:
       - args: [{ value: string, name: "part" }, { value: "any1", name: "value" }]
         return: fp64
+  # date_trunc(unit, ts) — truncate ts to the start of the enclosing unit
+  # (month, quarter, year, etc.). Used by PPL's visitor-level SPAN decomposition
+  # for calendar-unit spans: span(ts, 1, 'M') → date_trunc('month', ts).
+  # DataFusion's substrait consumer has this natively; we declare it here so
+  # isthmus resolves the Calcite DATE_TRUNC operator when emitting substrait.
+  -
+    name: "date_trunc"
+    impls:
+      - args: [{ value: string, name: "unit" }, { value: "timestamp", name: "value" }]
+        return: "timestamp"
+      - args: [{ value: string, name: "unit" }, { value: "date", name: "value" }]
+        return: "timestamp"
+
+  # convert_tz(ts, from_tz, to_tz) — DST-correct timezone conversion via chrono-tz.
+  # Rust UDF: rust/src/udf/convert_tz.rs. Replaces the Java ConvertTzAdapter which
+  # only handled ±HH:MM offsets; this variant also accepts IANA names like
+  # 'America/New_York' and correctly follows DST rules per instant.
+  -
+    name: "convert_tz"
+    description: "Shift a timestamp from one timezone to another. IANA names + ±HH:MM offsets."
+    impls:
+      - args: [{ value: "timestamp", name: "ts" }, { value: string, name: "from_tz" }, { value: string, name: "to_tz" }]
+        return: "timestamp"
+
+  # last_day(ts) — last day of ts's calendar month. Rust UDF: rust/src/udf/last_day.rs.
+  # Replaces the Java LastDayAdapter, which decomposed via make_date + to_unixtime
+  # round-trip; the Rust impl uses chrono directly and has one overload per input
+  # type (timestamp / date).
+  -
+    name: "last_day"
+    description: "Date of the last day of the argument's calendar month."
+    impls:
+      - args: [{ value: "timestamp", name: "ts" }]
+        return: "date"
+      - args: [{ value: "date",      name: "ts" }]
+        return: "date"
+
+  # timestampdiff_calendar(unit, a, b) — calendar-unit (MONTH/QUARTER/YEAR) diff.
+  # Rust UDF: rust/src/udf/timestampdiff_calendar.rs. The substrait-core fixed-unit
+  # path (SECOND..WEEK) is handled by the Stream 2 SPI adapter which decomposes to
+  # epoch arithmetic; this UDF is the target the adapter rewrites to for calendar
+  # units where such arithmetic is structurally wrong (variable-length months).
+  -
+    name: "timestampdiff_calendar"
+    description: "Calendar-unit diff (MONTH/QUARTER/YEAR)."
+    impls:
+      - args: [{ value: string, name: "unit" }, { value: "timestamp", name: "a" }, { value: "timestamp", name: "b" }]
+        return: i64
+
+  # timestampadd_calendar(unit, n, ts) — calendar-unit (MONTH/QUARTER/YEAR) add.
+  # Companion to timestampdiff_calendar above. Rust UDF: timestampadd_calendar.rs.
+  -
+    name: "timestampadd_calendar"
+    description: "Calendar-unit add (MONTH/QUARTER/YEAR)."
+    impls:
+      - args: [{ value: string, name: "unit" }, { value: i64, name: "n" }, { value: "timestamp", name: "ts" }]
+        return: "timestamp"
+
+  # span_bucket(field, span) — bucket a numeric value into a fixed-width range label.
+  # Rust UDF: rust/src/udf/span_bucket.rs. Returns 'start-end' string matching the
+  # sql-repo SpanBucketFunction's row-level output (integer/float formatting, null
+  # on non-positive span). Replaces SpanBucketAdapter which could only handle the
+  # integer-span integer-value case.
+  -
+    name: "span_bucket"
+    description: "Fixed-width bucket label 'start-end' for a numeric value."
+    impls:
+      - args: [{ value: i64,  name: "field" }, { value: i64,  name: "span" }]
+        return: string
+      - args: [{ value: fp64, name: "field" }, { value: fp64, name: "span" }]
+        return: string
+      - args: [{ value: i64,  name: "field" }, { value: fp64, name: "span" }]
+        return: string
+      - args: [{ value: fp64, name: "field" }, { value: i64,  name: "span" }]
+        return: string
+
+  # width_bucket(field, num_bins, data_range, max_value) — histogram bucket label.
+  # Rust UDF: rust/src/udf/width_bucket.rs. Bit-exact with sql-repo WidthBucketFunction
+  # (includes the maxValue % width == 0 and actualBins > requestedBins next-magnitude
+  # rescale the WidthBucketAdapter simplification dropped).
+  -
+    name: "width_bucket"
+    description: "Equal-width histogram bucket label via the power-of-10 optimal-width algorithm."
+    impls:
+      - args: [{ value: fp64, name: "field" }, { value: i64, name: "num_bins" }, { value: fp64, name: "data_range" }, { value: fp64, name: "max_value" }]
+        return: string
+      - args: [{ value: i64,  name: "field" }, { value: i64, name: "num_bins" }, { value: fp64, name: "data_range" }, { value: fp64, name: "max_value" }]
+        return: string
+      - args: [{ value: i64,  name: "field" }, { value: i64, name: "num_bins" }, { value: i64,  name: "data_range" }, { value: i64,  name: "max_value" }]
+        return: string
+
+  # rex_extract(field, pattern, group) — extract named/indexed capture group.
+  # Rust UDF: rust/src/udf/rex_extract.rs. Mirrors sql-repo RexExtractFunction;
+  # supports both string group-names and 1-based i64 group-indices. Replaces the
+  # RexExtractAdapter which only handled literal patterns; runtime pattern values
+  # compile per-row inside the Rust UDF.
+  -
+    name: "rex_extract"
+    description: "Extract a named or 1-based indexed regex capture group."
+    impls:
+      - args: [{ value: string, name: "field" }, { value: string, name: "pattern" }, { value: string, name: "group" }]
+        return: string
+      - args: [{ value: string, name: "field" }, { value: string, name: "pattern" }, { value: i64, name: "group" }]
+        return: string
+
+  # opensearch_span(field, n, unit) — polymorphic bucket/span UDF implemented
+  # in Rust (see analytics-backend-datafusion/rust/src/udf/opensearch_span.rs).
+  # Replaces the per-input-type Java SPAN decomposition. Return type matches
+  # the input field type so EXPR_DATE/EXPR_TIME/EXPR_TIMESTAMP propagate
+  # through the response schema unchanged; numeric overloads preserve i64/fp64.
+  # All bucket arithmetic (fixed s/m/h/d/w, calendar M/q/y, n>1) lives in the
+  # Rust kernel — isthmus just routes the substrait call to the registered UDF.
+  -
+    name: "opensearch_span"
+    description: "Bucket field into fixed-width or calendar-unit chunks. Polymorphic over timestamp/date/time/i64/fp64."
+    impls:
+      - args: [{ value: "timestamp", name: "field" }, { value: i64, name: "n" }, { value: string, name: "unit" }]
+        return: "timestamp"
+      - args: [{ value: "date",      name: "field" }, { value: i64, name: "n" }, { value: string, name: "unit" }]
+        return: "date"
+      - args: [{ value: "time",      name: "field" }, { value: i64, name: "n" }, { value: string, name: "unit" }]
+        return: "time"
+      - args: [{ value: i64,         name: "field" }, { value: i64, name: "n" }, { value: string, name: "unit" }]
+        return: i64
+      - args: [{ value: fp64,        name: "field" }, { value: i64, name: "n" }, { value: string, name: "unit" }]
+        return: fp64
+
+  # ── Date arithmetic ──
+  -
+    name: "date_diff"
+    description: "Difference between two dates/timestamps in given unit."
+    impls:
+      - args: [{ value: string, name: "part" }, { value: "any1", name: "start" }, { value: "any1", name: "end" }]
+        return: i64
 
   # ── Conditional ──
   -
@@ -333,6 +633,115 @@ scalar_functions:
         return: "any1"
       - args: [{ value: "any1", name: "a" }, { value: "any1", name: "b" }, { value: "any1", name: "c" }, { value: "any1", name: "d" }]
         return: "any1"
+
+  # ── Collection / multi-value functions ──
+  # PPL emits Calcite Big-Query-library operators (SPLIT, ARRAY_JOIN, ARRAY_ELEMENT,
+  # etc.) for many collection functions. The calcite_aliases block above maps those
+  # Calcite names to DataFusion's array_*/string_to_array names; isthmus needs the
+  # signatures here to convert the calls.
+  -
+    name: "string_to_array"
+    impls:
+      - args: [{ value: string, name: "str" }, { value: string, name: "delim" }]
+        return: "list<string>"
+  -
+    name: "array_to_string"
+    impls:
+      - args: [{ value: "list<string>", name: "arr" }, { value: string, name: "delim" }]
+        return: string
+  -
+    name: "array_length"
+    impls:
+      - args: [{ value: "list<any1>", name: "arr" }]
+        return: i32
+  -
+    name: "array_concat"
+    impls:
+      - args: [{ value: "list<any1>", name: "a" }, { value: "list<any1>", name: "b" }]
+        return: "list<any1>"
+  -
+    name: "array_distinct"
+    impls:
+      - args: [{ value: "list<any1>", name: "arr" }]
+        return: "list<any1>"
+  # array_element: DataFusion built-in for 1-based array indexing. PPL mvindex
+  # lowers to Calcite ITEM; ItemArrayElementAdapter rewrites ITEM(array, idx) into
+  # this signature when the container is ARRAY-typed.
+  -
+    name: "array_element"
+    impls:
+      - args: [{ value: "list<any1>", name: "arr" }, { value: i64, name: "idx" }]
+        return: "any1"
+  -
+    name: "array_position"
+    impls:
+      - args: [{ value: "list<any1>", name: "arr" }, { value: "any1", name: "element" }]
+        return: i64
+  # array_remove_all: DataFusion built-in — removes every occurrence of `element`
+  # from `arr`. ArrayCompactAdapter rewrites ARRAY_COMPACT(x) into
+  # array_remove_all(x, CAST(NULL AS T)) since DF 52.5.0 has no array_compact.
+  -
+    name: "array_remove_all"
+    impls:
+      - args: [{ value: "list<any1>", name: "arr" }, { value: "any1", name: "element" }]
+        return: "list<any1>"
+  -
+    name: "make_array"
+    # Arity set covers observed PPL usage (CalciteArrayFunctionIT survey): 0, 1, 2, 3,
+    # 4, 5. Extend only when a new failure signature with a higher arity is observed.
+    impls:
+      - args: []
+        return: "list<any1>"
+      - args: [{ value: "any1", name: "a" }]
+        return: "list<any1>"
+      - args: [{ value: "any1", name: "a" }, { value: "any1", name: "b" }]
+        return: "list<any1>"
+      - args: [{ value: "any1", name: "a" }, { value: "any1", name: "b" }, { value: "any1", name: "c" }]
+        return: "list<any1>"
+      - args: [{ value: "any1", name: "a" }, { value: "any1", name: "b" }, { value: "any1", name: "c" }, { value: "any1", name: "d" }]
+        return: "list<any1>"
+      - args: [{ value: "any1", name: "a" }, { value: "any1", name: "b" }, { value: "any1", name: "c" }, { value: "any1", name: "d" }, { value: "any1", name: "e" }]
+        return: "list<any1>"
+  # ── Pairwise min/max built-ins ──
+  # DataFusion has `least` / `greatest` as native scalar built-ins; substrait core
+  # does not ship declarations for them, so isthmus needs these entries to emit the
+  # call. PPL aliases `scalar_min → least` and `scalar_max → greatest` above.
+  #
+  # NOTE: these declarations fix the signature-lookup step ("Unable to convert call
+  # SCALAR_MIN"), but a second blocker remains on the output-type side: PPL's
+  # ScalarMinFunction/ScalarMaxFunction UDFs infer their return type as Calcite ANY,
+  # and isthmus's TypeConverter throws "Unable to convert the type ANY". That
+  # concrete-type inference lives in the sql repo's PPL function table and is
+  # tracked as a separate Phase-2 item — leaving these entries in place so the
+  # signature path is ready once PPL's type inference is tightened.
+  -
+    name: "least"
+    impls:
+      - args: [{ value: "any1", name: "a" }, { value: "any1", name: "b" }]
+        return: "any1"
+      - args: [{ value: "any1", name: "a" }, { value: "any1", name: "b" }, { value: "any1", name: "c" }]
+        return: "any1"
+      - args: [{ value: "any1", name: "a" }, { value: "any1", name: "b" }, { value: "any1", name: "c" }, { value: "any1", name: "d" }]
+        return: "any1"
+  -
+    name: "greatest"
+    impls:
+      - args: [{ value: "any1", name: "a" }, { value: "any1", name: "b" }]
+        return: "any1"
+      - args: [{ value: "any1", name: "a" }, { value: "any1", name: "b" }, { value: "any1", name: "c" }]
+        return: "any1"
+      - args: [{ value: "any1", name: "a" }, { value: "any1", name: "b" }, { value: "any1", name: "c" }, { value: "any1", name: "d" }]
+        return: "any1"
+  # mvzip: pairwise concat of two arrays → list<string>. Registered as a Rust
+  # UDF under the same name (see rust/src/udf/mvzip.rs). DataFusion's built-in
+  # arrays_zip returns list<struct>, which is the wrong shape for PPL.
+  -
+    name: "mvzip"
+    impls:
+      - args: [{ value: "list<any1>", name: "left" }, { value: "list<any2>", name: "right" }]
+        return: "list<string>"
+      - args: [{ value: "list<any1>", name: "left" }, { value: "list<any2>", name: "right" }, { value: "string", name: "delim" }]
+        return: "list<string>"
 
   # ── String functions (DF built-ins / DF-flavor) ──
   # concat — substrait spec declares concat as variadic, but isthmus's
@@ -360,6 +769,50 @@ scalar_functions:
     impls:
       - args: [{ value: string, name: "value" }]
         return: i64
+  # PPL regexp / regexp_match / regex_match all reduce to Calcite REGEXP /
+  # REGEXP_CONTAINS, both aliased to regexp_like above. DataFusion has a
+  # native regexp_like(string, string) → bool.
+  -
+    name: "regexp_like"
+    impls:
+      - args: [{ value: string, name: "value" }, { value: string, name: "pattern" }]
+        return: boolean
+
+  # regexp_replace 4-arg (str, pattern, replacement, flags) — substrait core
+  # declares regexp_replace(string, string, string) and (string, string, string, i64, i64),
+  # but not the Postgres-style 4-arg flag form PPL emits via REGEXP_REPLACE_PG_4
+  # (from `rex mode=sed "s/../../gi"`). DataFusion's native regexp_replace accepts
+  # the flag string, so declaring the variant here lets isthmus resolve the call.
+  -
+    name: "regexp_replace"
+    impls:
+      - args: [{ value: string, name: "input" }, { value: string, name: "pattern" }, { value: string, name: "replacement" }, { value: string, name: "flags" }]
+        return: string
+
+  # regexp_match(str, pattern) → list<string> of capture groups. DataFusion native.
+  # Emitted by RexExtractAdapter when lowering PPL's rex_extract UDF, together with
+  # array_element to pick the named group by its 1-based index.
+  -
+    name: "regexp_match"
+    impls:
+      - args: [{ value: string, name: "str" }, { value: string, name: "pattern" }]
+        return: "list<string>"
+
+  # array_element(array, index) — 1-based DataFusion built-in. Emitted by
+  # RexExtractAdapter (and, in the sibling team-i worktree, by ItemArrayElementAdapter).
+  -
+    name: "array_element"
+    impls:
+      - args: [{ value: "list<string>", name: "arr" }, { value: i32, name: "idx" }]
+        return: string
+
+  # translate(str, from, to) — PPL emits Calcite TRANSLATE3 from `rex mode=sed "y/../../";
+  # aliased above as translate3→translate. Not in substrait core, so declare here.
+  -
+    name: "translate"
+    impls:
+      - args: [{ value: string, name: "input" }, { value: string, name: "from" }, { value: string, name: "to" }]
+        return: string
   -
     name: "ltrim"
     impls:
@@ -401,6 +854,76 @@ scalar_functions:
     impls:
       - args: [{ value: string, name: "cidr" }, { value: string, name: "ip" }]
         return: boolean
+  # IP comparison UDFs — operands may be string (literal `'1.2.3.4'`) or binary
+  # (OpenSearch's parquet IP storage via IpParquetField, which encodes addresses
+  # as 16-byte InetAddressPoint). Each UDF enumerates all four combinations so
+  # substrait can resolve calls with any mix.
+  -
+    name: "equals_ip"
+    impls:
+      - args: [{ value: string, name: "a" }, { value: string, name: "b" }]
+        return: boolean
+      - args: [{ value: binary, name: "a" }, { value: string, name: "b" }]
+        return: boolean
+      - args: [{ value: string, name: "a" }, { value: binary, name: "b" }]
+        return: boolean
+      - args: [{ value: binary, name: "a" }, { value: binary, name: "b" }]
+        return: boolean
+  -
+    name: "not_equals_ip"
+    impls:
+      - args: [{ value: string, name: "a" }, { value: string, name: "b" }]
+        return: boolean
+      - args: [{ value: binary, name: "a" }, { value: string, name: "b" }]
+        return: boolean
+      - args: [{ value: string, name: "a" }, { value: binary, name: "b" }]
+        return: boolean
+      - args: [{ value: binary, name: "a" }, { value: binary, name: "b" }]
+        return: boolean
+  -
+    name: "less_ip"
+    impls:
+      - args: [{ value: string, name: "a" }, { value: string, name: "b" }]
+        return: boolean
+      - args: [{ value: binary, name: "a" }, { value: string, name: "b" }]
+        return: boolean
+      - args: [{ value: string, name: "a" }, { value: binary, name: "b" }]
+        return: boolean
+      - args: [{ value: binary, name: "a" }, { value: binary, name: "b" }]
+        return: boolean
+  -
+    name: "lte_ip"
+    impls:
+      - args: [{ value: string, name: "a" }, { value: string, name: "b" }]
+        return: boolean
+      - args: [{ value: binary, name: "a" }, { value: string, name: "b" }]
+        return: boolean
+      - args: [{ value: string, name: "a" }, { value: binary, name: "b" }]
+        return: boolean
+      - args: [{ value: binary, name: "a" }, { value: binary, name: "b" }]
+        return: boolean
+  -
+    name: "greater_ip"
+    impls:
+      - args: [{ value: string, name: "a" }, { value: string, name: "b" }]
+        return: boolean
+      - args: [{ value: binary, name: "a" }, { value: string, name: "b" }]
+        return: boolean
+      - args: [{ value: string, name: "a" }, { value: binary, name: "b" }]
+        return: boolean
+      - args: [{ value: binary, name: "a" }, { value: binary, name: "b" }]
+        return: boolean
+  -
+    name: "gte_ip"
+    impls:
+      - args: [{ value: string, name: "a" }, { value: string, name: "b" }]
+        return: boolean
+      - args: [{ value: binary, name: "a" }, { value: string, name: "b" }]
+        return: boolean
+      - args: [{ value: string, name: "a" }, { value: binary, name: "b" }]
+        return: boolean
+      - args: [{ value: binary, name: "a" }, { value: binary, name: "b" }]
+        return: boolean
 
   # ── JSON UDFs ──
   -
@@ -414,4 +937,80 @@ scalar_functions:
       - args: [{ value: string, name: "k1" }, { value: string, name: "v1" }]
         return: string
       - args: [{ value: string, name: "k1" }, { value: string, name: "v1" }, { value: string, name: "k2" }, { value: string, name: "v2" }]
+        return: string
+  -
+    name: "json"
+    impls:
+      - args: [{ value: string, name: "value" }]
+        return: string
+  -
+    name: "json_array_length"
+    impls:
+      - args: [{ value: string, name: "value" }]
+        return: i32
+  -
+    name: "json_keys"
+    impls:
+      - args: [{ value: string, name: "value" }]
+        return: string
+  -
+    name: "json_array"
+    impls:
+      - args: [{ value: string, name: "v1" }]
+        return: string
+      - args: [{ value: string, name: "v1" }, { value: string, name: "v2" }]
+        return: string
+      - args: [{ value: string, name: "v1" }, { value: string, name: "v2" }, { value: string, name: "v3" }]
+        return: string
+      - args: [{ value: string, name: "v1" }, { value: string, name: "v2" }, { value: string, name: "v3" }, { value: string, name: "v4" }]
+        return: string
+      - args: [{ value: string, name: "v1" }, { value: string, name: "v2" }, { value: string, name: "v3" }, { value: string, name: "v4" }, { value: string, name: "v5" }]
+        return: string
+      - args: [{ value: string, name: "v1" }, { value: string, name: "v2" }, { value: string, name: "v3" }, { value: string, name: "v4" }, { value: string, name: "v5" }, { value: string, name: "v6" }]
+        return: string
+  -
+    name: "json_extract"
+    impls:
+      - args: [{ value: string, name: "value" }, { value: string, name: "path" }]
+        return: string
+      - args: [{ value: string, name: "value" }, { value: string, name: "p1" }, { value: string, name: "p2" }]
+        return: string
+      - args: [{ value: string, name: "value" }, { value: string, name: "p1" }, { value: string, name: "p2" }, { value: string, name: "p3" }]
+        return: string
+      - args: [{ value: string, name: "value" }, { value: string, name: "p1" }, { value: string, name: "p2" }, { value: string, name: "p3" }, { value: string, name: "p4" }]
+        return: string
+  -
+    name: "json_extract_all"
+    impls:
+      - args: [{ value: string, name: "value" }, { value: string, name: "path" }]
+        return: string
+  -
+    name: "json_set"
+    impls:
+      - args: [{ value: string, name: "value" }, { value: string, name: "path" }, { value: string, name: "v" }]
+        return: string
+      - args: [{ value: string, name: "value" }, { value: string, name: "path1" }, { value: string, name: "v1" }, { value: string, name: "path2" }, { value: string, name: "v2" }]
+        return: string
+  -
+    name: "json_delete"
+    impls:
+      - args: [{ value: string, name: "value" }, { value: string, name: "path" }]
+        return: string
+      - args: [{ value: string, name: "value" }, { value: string, name: "p1" }, { value: string, name: "p2" }]
+        return: string
+      - args: [{ value: string, name: "value" }, { value: string, name: "p1" }, { value: string, name: "p2" }, { value: string, name: "p3" }]
+        return: string
+  -
+    name: "json_append"
+    impls:
+      - args: [{ value: string, name: "value" }, { value: string, name: "path" }, { value: string, name: "v" }]
+        return: string
+      - args: [{ value: string, name: "value" }, { value: string, name: "p1" }, { value: string, name: "v1" }, { value: string, name: "p2" }, { value: string, name: "v2" }]
+        return: string
+  -
+    name: "json_extend"
+    impls:
+      - args: [{ value: string, name: "value" }, { value: string, name: "path" }, { value: string, name: "v" }]
+        return: string
+      - args: [{ value: string, name: "value" }, { value: string, name: "p1" }, { value: string, name: "v1" }, { value: string, name: "p2" }, { value: string, name: "v2" }]
         return: string

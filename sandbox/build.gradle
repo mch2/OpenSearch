@@ -35,6 +35,21 @@ def sandboxEnabled = System.getProperty("sandbox.enabled", "false") == "true"
 subprojects {
   group = 'org.opensearch.sandbox'
 
+  // Pin every sandbox subproject to JDK 25 source/target. OpenSearch's
+  // StandaloneRestTestPlugin resets these to minimumRuntimeVersion (21) in an
+  // afterEvaluate hook, which confuses IntelliJ's Gradle import and causes
+  // "target release 21 is too old for source release 25" when a module uses
+  // JDK 25 language features. afterEvaluate here runs after the plugin's hook
+  // and wins.
+  afterEvaluate {
+    if (plugins.hasPlugin('java')) {
+      java {
+        sourceCompatibility = JavaVersion.toVersion(25)
+        targetCompatibility = JavaVersion.toVersion(25)
+      }
+    }
+  }
+
   if (sandboxEnabled == false) {
     afterEvaluate {
       tasks.configureEach { task ->

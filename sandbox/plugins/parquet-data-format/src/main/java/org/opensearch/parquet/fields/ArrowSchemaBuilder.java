@@ -9,9 +9,11 @@
 package org.opensearch.parquet.fields;
 
 import org.apache.arrow.vector.types.pojo.Field;
+import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.opensearch.index.mapper.FieldMapper;
 import org.opensearch.index.mapper.FieldNamesFieldMapper;
 import org.opensearch.index.mapper.IndexFieldMapper;
 import org.opensearch.index.mapper.Mapper;
@@ -50,7 +52,14 @@ public final class ArrowSchemaBuilder {
             }
             ParquetField parquetField = ArrowFieldRegistry.getParquetField(mapper.typeName());
             if (parquetField != null) {
-                fields.add(new Field(mapper.name(), parquetField.getFieldType(), null));
+                // Pass the MappedFieldType so format-aware ParquetField impls (e.g.
+                // DateParquetField) can pick a narrowed Arrow type (Date32 / Time) for
+                // date-only / time-only format mappings. Non-format-aware impls fall
+                // through to the no-arg getFieldType() default.
+                FieldType arrowFieldType = (mapper instanceof FieldMapper fm)
+                    ? parquetField.getFieldType(fm.fieldType())
+                    : parquetField.getFieldType();
+                fields.add(new Field(mapper.name(), arrowFieldType, null));
             } else {
                 logger.debug("No ParquetField registered for field: [{}] of type [{}]", mapper.name(), mapper.typeName());
             }

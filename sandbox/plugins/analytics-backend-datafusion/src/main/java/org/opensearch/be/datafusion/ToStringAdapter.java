@@ -8,13 +8,10 @@
 
 package org.opensearch.be.datafusion;
 
+import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.rel.type.RelDataType;
-import org.apache.calcite.rel.type.RelDataTypeFactory;
-import org.apache.calcite.rel.type.RelDataTypeSystem;
-import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.rex.RexCall;
 import org.apache.calcite.rex.RexNode;
-import org.apache.calcite.sql.type.SqlTypeFactoryImpl;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.opensearch.analytics.spi.FieldStorageInfo;
 import org.opensearch.analytics.spi.ScalarFunctionAdapter;
@@ -31,16 +28,16 @@ import java.util.List;
  */
 class ToStringAdapter implements ScalarFunctionAdapter {
 
-    private static final RelDataTypeFactory TYPE_FACTORY = new SqlTypeFactoryImpl(RelDataTypeSystem.DEFAULT);
-    private static final RexBuilder REX_BUILDER = new RexBuilder(TYPE_FACTORY);
-    private static final RelDataType VARCHAR_TYPE = TYPE_FACTORY.createSqlType(SqlTypeName.VARCHAR);
-    private static final RelDataType NULLABLE_VARCHAR_TYPE = TYPE_FACTORY.createTypeWithNullability(VARCHAR_TYPE, true);
-
     @Override
-    public RexNode adapt(RexCall original, List<FieldStorageInfo> fieldStorage) {
-        if (original.getOperands().size() != 1) return original;
+    public RexNode adapt(RexCall original, List<FieldStorageInfo> fieldStorage, RelOptCluster cluster) {
+        if (original.getOperands().size() != 1) {
+            throw new IllegalArgumentException("TOSTRING expects 1 operand, got " + original.getOperands().size());
+        }
         RexNode operand = original.getOperands().get(0);
-        RelDataType target = operand.getType().isNullable() ? NULLABLE_VARCHAR_TYPE : VARCHAR_TYPE;
-        return REX_BUILDER.makeCast(target, operand);
+        RelDataType varcharType = cluster.getTypeFactory().createSqlType(SqlTypeName.VARCHAR);
+        RelDataType target = operand.getType().isNullable()
+            ? cluster.getTypeFactory().createTypeWithNullability(varcharType, true)
+            : varcharType;
+        return cluster.getRexBuilder().makeCast(target, operand);
     }
 }

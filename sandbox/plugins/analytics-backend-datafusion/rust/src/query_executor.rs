@@ -20,18 +20,34 @@ use datafusion::{
 use datafusion::datasource::file_format::parquet::ParquetFormat;
 use datafusion::execution::cache::cache_manager::CacheManagerConfig;
 use datafusion::execution::cache::{CacheAccessor, DefaultListFilesCache};
+use datafusion_physical_optimizer::combine_partial_final_agg::CombinePartialFinalAggregate;
+use datafusion_physical_optimizer::optimizer::PhysicalOptimizer;
+use datafusion_physical_optimizer::PhysicalOptimizerRule;
 use datafusion_substrait::logical_plan::consumer::from_substrait_plan;
 use log::error;
 use object_store::ObjectMeta;
 use prost::Message;
 use substrait::proto::Plan;
 
+use crate::agg_phase::strip_final_aggregate;
 use crate::cross_rt_stream::CrossRtStream;
 use crate::executor::DedicatedExecutor;
 use crate::api::DataFusionRuntime;
 
 /// Execute a vanilla parquet query: substrait plan → DataFusion → CrossRtStream.
 /// File access goes through DataFusion's registered object store.
+///
+/// When `single_shard` is false, every [`AggregateExec`][1] in the produced
+/// physical plan is rewritten to [`AggregateMode::Partial`] — the data node's
+/// role in a multi-shard query is to emit partial state that the coordinator
+/// then merges via [`AggregateMode::Final`][1]. When `single_shard` is true,
+/// the rewrite is skipped: the data node is the only contributor and runs the
+/// aggregate end-to-end as `Single` (DataFusion's default after substrait
+/// parsing). DataFusion's substrait consumer ignores the substrait
+/// `AggregationPhase`, so this rewrite is what actually drives the partial/final
+/// behavior at the executor level.
+///
+/// [1]: datafusion::physical_plan::aggregates::AggregateExec
 pub async fn execute_query(
     table_path: ListingTableUrl,
     object_metas: Arc<Vec<ObjectMeta>>,
@@ -44,6 +60,9 @@ pub async fn execute_query(
     // to execute using the global pool. Can be made required once all flows
     // wire up context_id correctly.
     query_memory_pool: Option<Arc<dyn datafusion::execution::memory_pool::MemoryPool>>,
+    // True when the query covers a single shard end-to-end (no coordinator
+    // reduce stage will follow). The aggregate-mode rewrite is then a no-op.
+    single_shard: bool,
 ) -> Result<i64, DataFusionError> {
     // Pre-populate the list-files cache so DataFusion doesn't re-list the directory
     let list_file_cache = Arc::new(DefaultListFilesCache::default());
@@ -90,14 +109,20 @@ pub async fn execute_query(
         .with_config(config)
         .with_runtime_env(Arc::from(runtime_env))
         .with_default_features()
+        .with_physical_optimizer_rules(physical_optimizer_rules_without_combine())
         .build();
 
     let ctx = SessionContext::new_with_state(state);
     crate::udaf::register_all(&ctx);
     crate::udf::register_all(&ctx);
 
-    // Register table via ListingTable — all IO goes through object store
-    let file_format = ParquetFormat::new();
+    // Register table via ListingTable — all IO goes through object store.
+    // Disable `force_view_types` so Binary columns (e.g. OpenSearch `ip` fields
+    // stored as 16-byte InetAddressPoint binaries) surface as `Binary`, not
+    // `BinaryView`. The Calcite-emitted substrait schema uses plain Binary for
+    // VARBINARY, and DataFusion's substrait consumer rejects a Binary vs
+    // BinaryView mismatch at plan-validation time.
+    let file_format = ParquetFormat::new().with_force_view_types(false);
     let listing_options = ListingOptions::new(Arc::new(file_format))
         .with_file_extension(".parquet")
         .with_collect_stat(true);
@@ -132,6 +157,11 @@ pub async fn execute_query(
     let logical_plan = from_substrait_plan(&ctx.state(), &substrait_plan).await?;
     let dataframe = ctx.execute_logical_plan(logical_plan).await?;
     let physical_plan = dataframe.create_physical_plan().await?;
+    let physical_plan = if single_shard {
+        physical_plan
+    } else {
+        strip_final_aggregate(physical_plan)?
+    };
 
     let df_stream = execute_stream(physical_plan, ctx.task_ctx()).map_err(|e| {
         error!("Failed to create execution stream: {}", e);
@@ -147,4 +177,15 @@ pub async fn execute_query(
     );
 
     Ok(Box::into_raw(Box::new(wrapped)) as i64)
+}
+
+/// Returns the default physical optimizer rules with [`CombinePartialFinalAggregate`] removed.
+/// See [`crate::local_executor::physical_optimizer_rules_without_combine`] for rationale.
+fn physical_optimizer_rules_without_combine() -> Vec<Arc<dyn PhysicalOptimizerRule + Send + Sync>> {
+    let combine_name = CombinePartialFinalAggregate::new().name().to_string();
+    PhysicalOptimizer::default()
+        .rules
+        .into_iter()
+        .filter(|rule| rule.name() != combine_name)
+        .collect()
 }

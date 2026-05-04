@@ -199,16 +199,8 @@ public class AggregateRuleTests extends BasePlannerRulesTests {
         );
         assertCallAnnotation(agg, 0, MockDataFusionBackend.NAME, MockLuceneBackend.NAME);
         assertCallAnnotation(agg, 1, MockDataFusionBackend.NAME);
-        assertEquals(
-            "SUM viable for both backends",
-            2,
-            agg.getCallAnnotations().get(0).getViableBackends().size()
-        );
-        assertEquals(
-            "COUNT viable for DF only (Lucene not declared)",
-            1,
-            agg.getCallAnnotations().get(1).getViableBackends().size()
-        );
+        assertEquals("SUM viable for both backends", 2, agg.getCallAnnotations().get(0).getViableBackends().size());
+        assertEquals("COUNT viable for DF only (Lucene not declared)", 1, agg.getCallAnnotations().get(1).getViableBackends().size());
     }
 
     // ---- Delegation ----
@@ -308,12 +300,7 @@ public class AggregateRuleTests extends BasePlannerRulesTests {
      * silent-corruption pattern as PERCENTILE_DISC.
      */
     public void testListaggSilentlyMisaggregatesOnMultiShard() {
-        PlannerContext context = buildContext(
-            "parquet",
-            5,
-            keywordFields(),
-            List.of(stateExpandingDataFusion(AggregateFunction.LISTAGG))
-        );
+        PlannerContext context = buildContext("parquet", 5, keywordFields(), List.of(stateExpandingDataFusion(AggregateFunction.LISTAGG)));
         RelOptTable table = mockTable(
             "test_index",
             new String[] { "status", "name" },
@@ -322,11 +309,7 @@ public class AggregateRuleTests extends BasePlannerRulesTests {
         RelNode result = runPlanner(makeAggregate(stubScan(table), listaggCall()), context);
         logger.info("Plan:\n{}", RelOptUtil.toString(result));
         OpenSearchAggregate finalAgg = (OpenSearchAggregate) unwrapExchange(result);
-        assertEquals(
-            "LISTAGG slips through as FINAL — split fired but type validation missed it",
-            AggregateMode.FINAL,
-            finalAgg.getMode()
-        );
+        assertEquals("LISTAGG slips through as FINAL — split fired but type validation missed it", AggregateMode.FINAL, finalAgg.getMode());
     }
 
     public void testAggregateErrorsWithoutDelegation() {

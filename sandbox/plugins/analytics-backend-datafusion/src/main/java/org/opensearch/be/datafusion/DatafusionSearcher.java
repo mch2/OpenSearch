@@ -65,6 +65,7 @@ public class DatafusionSearcher implements EngineSearcher<DatafusionContext> {
             query.getSubstraitBytes(),
             runtimeHandle.get(),
             query.getContextId(),
+            query.isSingleShard(),
             new ActionListener<>() {
                 @Override
                 public void onResponse(Long streamPtr) {

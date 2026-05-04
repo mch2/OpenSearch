@@ -18,16 +18,23 @@ use std::sync::Arc;
 use datafusion::execution::context::SessionContext;
 use datafusion::logical_expr::AggregateUDF;
 
+pub mod min_max_by;
 pub mod take;
 
 /// Register every OpenSearch UDAF on `ctx`. Call once at session construction.
 pub fn register_all(ctx: &SessionContext) {
     ctx.register_udaf(AggregateUDF::from(take::TakeUdaf::new()));
-    log::info!("OpenSearch UDAF register_all: take registered");
+    ctx.register_udaf(AggregateUDF::from(min_max_by::MinByUdaf::new()));
+    ctx.register_udaf(AggregateUDF::from(min_max_by::MaxByUdaf::new()));
+    log::info!("OpenSearch UDAF register_all: take, min_by, max_by registered");
 }
 
 /// Same as [`register_all`] but builds an `Arc<AggregateUDF>` for callers that
 /// only have a `SessionStateBuilder`.
 pub fn all_udafs() -> Vec<Arc<AggregateUDF>> {
-    vec![Arc::new(AggregateUDF::from(take::TakeUdaf::new()))]
+    vec![
+        Arc::new(AggregateUDF::from(take::TakeUdaf::new())),
+        Arc::new(AggregateUDF::from(min_max_by::MinByUdaf::new())),
+        Arc::new(AggregateUDF::from(min_max_by::MaxByUdaf::new())),
+    ]
 }

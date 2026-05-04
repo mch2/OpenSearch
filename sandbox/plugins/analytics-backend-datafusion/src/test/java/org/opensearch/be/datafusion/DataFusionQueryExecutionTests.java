@@ -103,6 +103,7 @@ public class DataFusionQueryExecutionTests extends OpenSearchTestCase {
                 substraitBytes,
                 runtimeHandle.get(),
                 0L,
+                false,
                 listener
             )
         );

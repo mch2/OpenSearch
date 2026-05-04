@@ -47,10 +47,6 @@ import io.substrait.extension.SimpleExtension;
  */
 public class DatafusionMemtableReduceSinkTests extends OpenSearchTestCase {
 
-    public void testInputIdConstantMatchesDesign() {
-        assertEquals("Single-input reduce uses the synthetic id 'input-0'", "input-0", DatafusionMemtableReduceSink.INPUT_ID);
-    }
-
     public void testFeedDrainsSumToDownstream() throws Exception {
         NativeBridge.initTokioRuntimeManager(2);
         Path spillDir = createTempDir("datafusion-spill");
@@ -60,16 +56,16 @@ public class DatafusionMemtableReduceSinkTests extends OpenSearchTestCase {
 
         try (RootAllocator alloc = new RootAllocator(Long.MAX_VALUE)) {
             Schema inputSchema = new Schema(List.of(new Field("x", FieldType.nullable(new ArrowType.Int(64, true)), null)));
-            byte[] substrait = buildSumSubstraitBytes(DatafusionMemtableReduceSink.INPUT_ID);
+            byte[] substrait = buildSumSubstraitBytes(DatafusionReduceSink.INPUT_ID);
 
             CapturingSink downstream = new CapturingSink();
-            ExchangeSinkContext ctx = new ExchangeSinkContext("q-1", 0, substrait, alloc, inputSchema, downstream);
+            ExchangeSinkContext ctx = ExchangeSinkContext.singleInput("q-1", 0, substrait, alloc, inputSchema, 0, downstream);
 
             DatafusionMemtableReduceSink sink = new DatafusionMemtableReduceSink(ctx, runtimeHandle);
             try {
-                sink.feed(makeBatch(alloc, inputSchema, new long[] { 1L, 2L, 3L }));
-                sink.feed(makeBatch(alloc, inputSchema, new long[] { 4L, 5L, 6L }));
-                sink.feed(makeBatch(alloc, inputSchema, new long[] { 7L, 8L, 9L }));
+                sink.feed(0, makeBatch(alloc, inputSchema, new long[] { 1L, 2L, 3L }));
+                sink.feed(0, makeBatch(alloc, inputSchema, new long[] { 4L, 5L, 6L }));
+                sink.feed(0, makeBatch(alloc, inputSchema, new long[] { 7L, 8L, 9L }));
             } finally {
                 sink.close();
             }

@@ -12,6 +12,7 @@ import org.apache.calcite.rel.RelNode;
 import org.opensearch.analytics.planner.CapabilityRegistry;
 import org.opensearch.analytics.planner.CapabilityResolutionUtils;
 import org.opensearch.analytics.planner.rel.OpenSearchExchangeReducer;
+import org.opensearch.analytics.planner.rel.OpenSearchJoin;
 import org.opensearch.analytics.planner.rel.OpenSearchRelNode;
 import org.opensearch.analytics.planner.rel.OpenSearchStageInputScan;
 import org.opensearch.analytics.spi.ExchangeSinkProvider;
@@ -47,6 +48,19 @@ public class DAGBuilder {
         int[] counter = { 0 };
         List<Stage> childStages = new ArrayList<>();
 
+        // Volcano can wrap a coord-side compute (e.g. Project on top of an OpenSearchJoin
+        // whose own inputs are SINGLETON-producing reducers) in a redundant top-level
+        // OpenSearchExchangeReducer when satisfying the root's required SINGLETON trait —
+        // its trait set propagation doesn't pick up the SINGLETON declared by deeper ops.
+        // The wrapper reducer is a no-op for the data path; the DAG builder treats it as
+        // transparent when its subtree already contains gather reducers (i.e. coord-side
+        // compute). Without this, the cutSingleton path would treat the entire coord-side
+        // computation as a single shard-fragment child stage, dispatching the join's
+        // substrait to a data node that lacks the join's other input.
+        if (cboOutput instanceof OpenSearchExchangeReducer outerReducer && hasNestedExchangeReducer(outerReducer.getInput())) {
+            cboOutput = outerReducer.getInput();
+        }
+
         RelNode rootFragment;
         if (cboOutput instanceof OpenSearchExchangeReducer reducer) {
             // Root IS an ExchangeReducer — pure gather (no compute above the exchange).
@@ -70,6 +84,20 @@ public class DAGBuilder {
 
         Stage rootStage = new Stage(counter[0]++, rootFragment, childStages, null, sinkProvider, rootTargetResolver);
         return new QueryDAG(UUID.randomUUID().toString(), rootStage);
+    }
+
+    /** Returns true if {@code node}'s subtree contains an {@link OpenSearchExchangeReducer}.
+     *  Used to detect coord-side compute wrapped in a redundant top-level reducer. */
+    private static boolean hasNestedExchangeReducer(RelNode node) {
+        if (node instanceof OpenSearchExchangeReducer) {
+            return true;
+        }
+        for (RelNode input : node.getInputs()) {
+            if (hasNestedExchangeReducer(input)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static RelNode sever(

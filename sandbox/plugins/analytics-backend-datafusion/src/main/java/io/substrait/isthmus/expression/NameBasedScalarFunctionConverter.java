@@ -19,6 +19,7 @@ import org.apache.calcite.sql.SqlOperator;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -55,6 +56,22 @@ import io.substrait.type.Type;
  *       the {@code calcite_aliases} block in {@code opensearch_scalar.yaml}.</li>
  * </ol>
  *
+ * <p>Aliases come in two shapes in the YAML:
+ * <ol>
+ *   <li>Scalar string value — pure rename: {@code sign: signum}.</li>
+ *   <li>Object value — rename + literal-arg injection. Example:
+ *       <pre>
+ *       year:
+ *         name: date_part
+ *         prepend_args:
+ *           - { string: "year" }
+ *       </pre>
+ *       The converter prepends the declared literal(s) to the call's operand list before
+ *       emitting the Substrait invocation, so a Calcite {@code YEAR(ts)} call becomes a
+ *       {@code date_part('year', ts)} Substrait invocation with no Java adapter required.
+ *   </li>
+ * </ol>
+ *
  * <p>Operand-type coverage (e.g. {@code sin(i64)}) is handled by declaring additional
  * variants in {@code opensearch_scalar.yaml}. Structural rewrites (e.g. dropping
  * LIKE's 3rd escape arg) are handled by
@@ -67,19 +84,53 @@ public class NameBasedScalarFunctionConverter extends ScalarFunctionConverter {
     private static final String ALIAS_RESOURCE = "/extensions/opensearch_scalar.yaml";
 
     /**
-     * Calcite operator name (lowercased) → name DataFusion's substrait consumer accepts.
-     * Loaded once from {@code opensearch_scalar.yaml}. An entry is only needed when
-     * Calcite's operator name doesn't already match what DF recognises.
+     * Parsed spec for one alias entry: target name plus literal args to prepend/append
+     * before emitting the Substrait call. Simple string-value aliases load as {@code AliasSpec(name, [], [])}.
      */
-    static final Map<String, String> ALIAS = loadAliasesFromYaml(ALIAS_RESOURCE);
+    static final class AliasSpec {
+        final String name;
+        final List<Expression.Literal> prependArgs;
+        final List<Expression.Literal> appendArgs;
+
+        AliasSpec(String name, List<Expression.Literal> prependArgs, List<Expression.Literal> appendArgs) {
+            this.name = name;
+            this.prependArgs = prependArgs;
+            this.appendArgs = appendArgs;
+        }
+
+        boolean injectsArgs() {
+            return !prependArgs.isEmpty() || !appendArgs.isEmpty();
+        }
+    }
+
+    /**
+     * Calcite operator name (lowercased) → parsed alias spec. Loaded once from
+     * {@code opensearch_scalar.yaml}.
+     */
+    static final Map<String, AliasSpec> ALIAS_SPECS = loadAliasSpecsFromYaml(ALIAS_RESOURCE);
+
+    /**
+     * Back-compat view over {@link #ALIAS_SPECS} exposing just the name mapping. Kept for
+     * non-extended callers that only care whether a Calcite name has a target name.
+     */
+    static final Map<String, String> ALIAS = namesOnlyView(ALIAS_SPECS);
 
     /** Resolve the Substrait function name for a Calcite operator name. */
     static String aliasFor(String calciteName) {
         String lower = calciteName.toLowerCase(Locale.ROOT);
-        return ALIAS.getOrDefault(lower, lower);
+        AliasSpec spec = ALIAS_SPECS.get(lower);
+        return spec != null ? spec.name : lower;
     }
 
-    private static Map<String, String> loadAliasesFromYaml(String resource) {
+    private static Map<String, String> namesOnlyView(Map<String, AliasSpec> specs) {
+        Map<String, String> out = new HashMap<>();
+        for (Map.Entry<String, AliasSpec> e : specs.entrySet()) {
+            out.put(e.getKey(), e.getValue().name);
+        }
+        return Map.copyOf(out);
+    }
+
+    private static Map<String, AliasSpec> loadAliasSpecsFromYaml(String resource) {
         try (InputStream in = NameBasedScalarFunctionConverter.class.getResourceAsStream(resource)) {
             if (in == null) {
                 throw new IllegalStateException("missing classpath resource " + resource);
@@ -87,15 +138,72 @@ public class NameBasedScalarFunctionConverter extends ScalarFunctionConverter {
             JsonNode root = new ObjectMapper(new YAMLFactory()).readTree(in);
             JsonNode aliases = root.path("calcite_aliases");
             if (!aliases.isObject()) return Map.of();
-            Map<String, String> out = new HashMap<>();
+            Map<String, AliasSpec> out = new HashMap<>();
             for (Iterator<Map.Entry<String, JsonNode>> it = aliases.fields(); it.hasNext(); ) {
                 Map.Entry<String, JsonNode> e = it.next();
-                out.put(e.getKey().toLowerCase(Locale.ROOT), e.getValue().asText());
+                String key = e.getKey().toLowerCase(Locale.ROOT);
+                JsonNode val = e.getValue();
+                AliasSpec spec;
+                if (val.isTextual()) {
+                    spec = new AliasSpec(val.asText(), List.of(), List.of());
+                } else if (val.isObject()) {
+                    JsonNode nameNode = val.get("name");
+                    if (nameNode == null || !nameNode.isTextual()) {
+                        throw new IllegalStateException(
+                            "calcite_aliases[" + key + "]: object form must have a textual 'name' field"
+                        );
+                    }
+                    List<Expression.Literal> prepend = parseLiteralList(key, val.get("prepend_args"));
+                    List<Expression.Literal> append = parseLiteralList(key, val.get("append_args"));
+                    spec = new AliasSpec(nameNode.asText(), prepend, append);
+                } else {
+                    throw new IllegalStateException(
+                        "calcite_aliases[" + key + "]: value must be a string or an object with 'name'"
+                    );
+                }
+                out.put(key, spec);
             }
             return Map.copyOf(out);
         } catch (IOException e) {
             throw new RuntimeException("Failed to load calcite_aliases from " + resource, e);
         }
+    }
+
+    /**
+     * Parse a list of literal-arg descriptors. Pilot supports {@code { string: "..." }}
+     * only. TODO: extend with {int, bool, fp64} as future alias migrations need them.
+     */
+    private static List<Expression.Literal> parseLiteralList(String aliasKey, JsonNode node) {
+        if (node == null || node.isNull()) return List.of();
+        if (!node.isArray()) {
+            throw new IllegalStateException(
+                "calcite_aliases[" + aliasKey + "]: *_args must be a list"
+            );
+        }
+        List<Expression.Literal> out = new ArrayList<>(node.size());
+        for (JsonNode entry : node) {
+            if (!entry.isObject() || entry.size() != 1) {
+                throw new IllegalStateException(
+                    "calcite_aliases[" + aliasKey + "]: each *_args entry must be a single-key object, e.g. { string: \"...\" }"
+                );
+            }
+            Map.Entry<String, JsonNode> field = entry.fields().next();
+            String litType = field.getKey();
+            JsonNode litVal = field.getValue();
+            if ("string".equals(litType)) {
+                if (!litVal.isTextual()) {
+                    throw new IllegalStateException(
+                        "calcite_aliases[" + aliasKey + "]: string literal value must be textual"
+                    );
+                }
+                out.add(ExpressionCreator.string(false, litVal.asText()));
+            } else {
+                throw new IllegalStateException(
+                    "calcite_aliases[" + aliasKey + "]: literal type '" + litType + "' not yet supported (pilot covers string only)"
+                );
+            }
+        }
+        return List.copyOf(out);
     }
 
     private final List<SimpleExtension.ScalarFunctionVariant> allVariants;
@@ -118,7 +226,7 @@ public class NameBasedScalarFunctionConverter extends ScalarFunctionConverter {
         // For aliased operators, force-route through convertByName *before* super.convert —
         // super's directMap would otherwise resolve to the substrait-core variant under the
         // original name (e.g. SIGN → "sign") and ship a plan DataFusion can't resolve.
-        if (ALIAS.containsKey(lower)) {
+        if (ALIAS_SPECS.containsKey(lower)) {
             Optional<Expression> aliased = convertByName(call, topLevelConverter);
             if (aliased.isPresent()) {
                 return aliased;
@@ -139,8 +247,13 @@ public class NameBasedScalarFunctionConverter extends ScalarFunctionConverter {
     private Optional<Expression> convertByName(RexCall call, Function<RexNode, Expression> topLevelConverter) {
         String callName = call.getOperator().getName();
         if (callName == null) return Optional.empty();
-        String lookup = aliasFor(callName);
-        int argCount = call.getOperands().size();
+        String lower = callName.toLowerCase(Locale.ROOT);
+        AliasSpec spec = ALIAS_SPECS.get(lower);
+        String lookup = spec != null ? spec.name : lower;
+        List<Expression.Literal> prepend = spec != null ? spec.prependArgs : List.of();
+        List<Expression.Literal> append = spec != null ? spec.appendArgs : List.of();
+
+        int totalArgCount = call.getOperands().size() + prepend.size() + append.size();
 
         // Cheap pre-check: do *any* variants match name+arity? If not, return empty before
         // eagerly evaluating operands. This matters because the converter chain runs us before
@@ -148,22 +261,29 @@ public class NameBasedScalarFunctionConverter extends ScalarFunctionConverter {
         // can't handle — we must not visit them when we have nothing to convert.
         boolean nameAndArityMatches = false;
         for (SimpleExtension.ScalarFunctionVariant v : allVariants) {
-            if (v.name().equalsIgnoreCase(lookup) && arityFits(v, argCount)) {
+            if (v.name().equalsIgnoreCase(lookup) && arityFits(v, totalArgCount)) {
                 nameAndArityMatches = true;
                 break;
             }
         }
         if (!nameAndArityMatches) return Optional.empty();
 
-        List<Expression> operands = call.getOperands().stream().map(topLevelConverter).filter(Objects::nonNull).toList();
-        if (operands.size() != argCount) return Optional.empty();
+        List<Expression> callOperands = call.getOperands().stream().map(topLevelConverter).filter(Objects::nonNull).toList();
+        if (callOperands.size() != call.getOperands().size()) return Optional.empty();
+
+        // Build the final operand list: prepended literals, original operands, appended literals.
+        List<Expression> operands = new ArrayList<>(totalArgCount);
+        operands.addAll(prepend);
+        operands.addAll(callOperands);
+        operands.addAll(append);
+
         List<String> operandTypeStrs = operands.stream().map(e -> e.getType().accept(ToTypeString.INSTANCE)).toList();
 
         SimpleExtension.ScalarFunctionVariant exact = null;
         SimpleExtension.ScalarFunctionVariant arityMatch = null;
         for (SimpleExtension.ScalarFunctionVariant variant : allVariants) {
             if (!variant.name().equalsIgnoreCase(lookup)) continue;
-            if (!arityFits(variant, argCount)) continue;
+            if (!arityFits(variant, totalArgCount)) continue;
             if (arityMatch == null) arityMatch = variant;
             if (argTypesMatchExactly(variant, operandTypeStrs)) {
                 exact = variant;

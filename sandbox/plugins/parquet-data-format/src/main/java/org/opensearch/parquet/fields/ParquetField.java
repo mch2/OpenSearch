@@ -53,4 +53,31 @@ public abstract class ParquetField {
 
     /** Returns the Arrow field type with nullability metadata. */
     public abstract FieldType getFieldType();
+
+    /**
+     * Format-aware variant of {@link #getArrowType()}. The default implementation
+     * delegates to {@link #getArrowType()} so existing ParquetField impls that don't
+     * care about per-instance mapping metadata are unaffected.
+     *
+     * <p>Subclasses that need to branch on the {@link MappedFieldType} (e.g.
+     * {@link org.opensearch.parquet.fields.core.data.date.DateParquetField}, which
+     * picks Date32 / Time / Timestamp based on the format pattern) override this
+     * method and use {@code null} to mean "no context; fall back to the broadest
+     * Arrow type."
+     *
+     * @param mappedFieldType the field's mapping, or {@code null} if the caller has
+     *                        no handle on it (e.g. legacy paths that predate format
+     *                        awareness); overrides treat null as the default.
+     */
+    public ArrowType getArrowType(MappedFieldType mappedFieldType) {
+        return getArrowType();
+    }
+
+    /**
+     * Format-aware variant of {@link #getFieldType()}. See
+     * {@link #getArrowType(MappedFieldType)} for semantics.
+     */
+    public FieldType getFieldType(MappedFieldType mappedFieldType) {
+        return getFieldType();
+    }
 }

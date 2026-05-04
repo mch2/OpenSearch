@@ -41,7 +41,7 @@ final class LocalStageScheduler implements StageScheduler {
             stage.getStageId(),
             chosenBytes(stage),
             config.bufferAllocator(),
-            deriveInputSchema(stage),
+            buildInputDescriptors(stage),
             sink
         );
         ExchangeSink backendSink;
@@ -50,7 +50,7 @@ final class LocalStageScheduler implements StageScheduler {
         } catch (Exception e) {
             throw new RuntimeException("Failed to create exchange sink for stageId=" + stage.getStageId(), e);
         }
-        return new LocalStageExecution(stage, backendSink, sink);
+        return new LocalStageExecution(stage, backendSink, context, sink);
     }
 
     /** Picks the plan-alternative bytes bound to the stage's exchange sink provider. */
@@ -63,16 +63,21 @@ final class LocalStageScheduler implements StageScheduler {
     }
 
     /**
-     * Derives the backend's input Arrow schema from the single child stage's
-     * fragment rowtype. Multi-child support (joins, set ops with heterogeneous
-     * inputs) is deferred.
+     * Builds one {@link ExchangeSinkContext.InputDescriptor} per child stage. The
+     * {@code inputId} convention is {@code "input-" + i} where {@code i} is the
+     * child's index in {@link Stage#getChildStages()} — the same convention the
+     * substrait fragment's {@code NamedScan} table names use, so registration
+     * lines up by string equality.
      */
-    private static Schema deriveInputSchema(Stage stage) {
+    private static List<ExchangeSinkContext.InputDescriptor> buildInputDescriptors(Stage stage) {
         List<Stage> children = stage.getChildStages();
-        assert children.size() == 1 : "COORDINATOR_REDUCE stage "
-            + stage.getStageId()
-            + " expected exactly one child stage, got "
-            + children.size();
-        return ArrowSchemaFromCalcite.arrowSchemaFromRowType(children.getFirst().getFragment().getRowType());
+        assert !children.isEmpty() : "COORDINATOR_REDUCE stage " + stage.getStageId() + " has no child stages";
+        List<ExchangeSinkContext.InputDescriptor> result = new java.util.ArrayList<>(children.size());
+        for (int i = 0; i < children.size(); i++) {
+            Stage child = children.get(i);
+            Schema schema = ArrowSchemaFromCalcite.arrowSchemaFromRowType(child.getFragment().getRowType());
+            result.add(new ExchangeSinkContext.InputDescriptor(child.getStageId(), "input-" + i, schema));
+        }
+        return result;
     }
 }

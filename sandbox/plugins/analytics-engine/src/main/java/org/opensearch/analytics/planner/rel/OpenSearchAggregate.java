@@ -15,9 +15,11 @@ import org.apache.calcite.rel.RelWriter;
 import org.apache.calcite.rel.core.Aggregate;
 import org.apache.calcite.rel.core.AggregateCall;
 import org.apache.calcite.rel.logical.LogicalAggregate;
+import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.util.ImmutableBitSet;
 import org.opensearch.analytics.planner.RelNodeUtils;
 import org.opensearch.analytics.spi.FieldStorageInfo;
+import org.opensearch.common.Nullable;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -38,6 +40,15 @@ public class OpenSearchAggregate extends Aggregate implements OpenSearchRelNode 
     private final List<String> viableBackends;
     private final AggregateMode mode;
     private final Map<Integer, AggregateCallAnnotation> callAnnotations;
+    /** Optional row-type override. Used by the split rule's PARTIAL aggregate to
+     *  declare the partial-state row type computed from each measure's
+     *  {@link org.opensearch.analytics.spi.AggregateDecomposition} — Calcite's
+     *  default Aggregate.deriveRowType derives the row type from aggCalls' result
+     *  types, which is wrong for partial state (e.g. AVG's partial output is
+     *  {@code [sum, count]}, not {@code [avg]}). When non-null, {@link #deriveRowType()}
+     *  returns this instead. */
+    @Nullable
+    private final RelDataType rowTypeOverride;
 
     public OpenSearchAggregate(
         RelOptCluster cluster,
@@ -50,14 +61,35 @@ public class OpenSearchAggregate extends Aggregate implements OpenSearchRelNode 
         List<String> viableBackends,
         Map<Integer, AggregateCallAnnotation> callAnnotations
     ) {
+        this(cluster, traitSet, input, groupSet, groupSets, aggCalls, mode, viableBackends, callAnnotations, null);
+    }
+
+    public OpenSearchAggregate(
+        RelOptCluster cluster,
+        RelTraitSet traitSet,
+        RelNode input,
+        ImmutableBitSet groupSet,
+        List<ImmutableBitSet> groupSets,
+        List<AggregateCall> aggCalls,
+        AggregateMode mode,
+        List<String> viableBackends,
+        Map<Integer, AggregateCallAnnotation> callAnnotations,
+        @Nullable RelDataType rowTypeOverride
+    ) {
         super(cluster, traitSet, List.of(), input, groupSet, groupSets, aggCalls);
         this.mode = mode;
         this.viableBackends = viableBackends;
         this.callAnnotations = Map.copyOf(callAnnotations);
+        this.rowTypeOverride = rowTypeOverride;
     }
 
     public AggregateMode getMode() {
         return mode;
+    }
+
+    @Override
+    protected RelDataType deriveRowType() {
+        return rowTypeOverride != null ? rowTypeOverride : super.deriveRowType();
     }
 
     @Override
@@ -115,7 +147,8 @@ public class OpenSearchAggregate extends Aggregate implements OpenSearchRelNode 
             aggCalls,
             mode,
             viableBackends,
-            callAnnotations
+            callAnnotations,
+            rowTypeOverride
         );
     }
 
@@ -124,12 +157,24 @@ public class OpenSearchAggregate extends Aggregate implements OpenSearchRelNode 
         org.apache.calcite.plan.RelOptPlanner planner,
         org.apache.calcite.rel.metadata.RelMetadataQuery mq
     ) {
-        // SINGLE mode aggregate over partitioned input can't execute without splitting.
-        // Return infinite cost to force Volcano to explore the split rule.
-        // SINGLE over SINGLETON input is fine (single-shard case).
+        // SINGLE mode is only valid when no exchange happened beneath us — i.e.
+        // a real single-shard query. Penalize:
+        // * SINGLE over input whose distribution is RANDOM/HASH/etc. — Volcano
+        // would otherwise be able to satisfy a downstream SINGLETON requirement
+        // by inserting a gather between scan and aggregate, producing
+        // "ExchangeReducer → SINGLE Aggregate". That plan ships every row to
+        // the coordinator and runs the aggregate there as a single-stage. It's
+        // correct but defeats distributed aggregation; the split rule's
+        // PARTIAL → Exchange → FINAL is cheaper end-to-end.
+        // * SINGLE over an exchange-reducer input — same pattern after the
+        // converter has been inserted by Volcano's trait enforcement.
         if (mode == AggregateMode.SINGLE) {
-            for (int index = 0; index < getInput().getTraitSet().size(); index++) {
-                org.apache.calcite.plan.RelTrait trait = getInput().getTraitSet().getTrait(index);
+            RelNode input = getInput();
+            if (input instanceof OpenSearchExchangeReducer) {
+                return planner.getCostFactory().makeInfiniteCost();
+            }
+            for (int index = 0; index < input.getTraitSet().size(); index++) {
+                org.apache.calcite.plan.RelTrait trait = input.getTraitSet().getTrait(index);
                 if (trait instanceof OpenSearchDistribution distribution
                     && distribution.getType() != org.apache.calcite.rel.RelDistribution.Type.SINGLETON
                     && distribution.getType() != org.apache.calcite.rel.RelDistribution.Type.ANY) {
@@ -168,7 +213,8 @@ public class OpenSearchAggregate extends Aggregate implements OpenSearchRelNode 
             getAggCallList(),
             mode,
             List.of(backend),
-            resolvedMap
+            resolvedMap,
+            rowTypeOverride
         );
     }
 

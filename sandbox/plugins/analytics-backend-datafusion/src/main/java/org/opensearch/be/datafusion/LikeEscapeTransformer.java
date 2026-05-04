@@ -8,6 +8,7 @@
 
 package org.opensearch.be.datafusion;
 
+import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.rex.RexCall;
 import org.apache.calcite.rex.RexNode;
 import org.opensearch.analytics.spi.FieldStorageInfo;
@@ -25,7 +26,7 @@ import java.util.List;
 class LikeEscapeTransformer implements ScalarFunctionAdapter {
 
     @Override
-    public RexNode adapt(RexCall original, List<FieldStorageInfo> fieldStorage) {
+    public RexNode adapt(RexCall original, List<FieldStorageInfo> fieldStorage, RelOptCluster cluster) {
         if (original.getOperands().size() != 3) return original;
         return original.clone(original.getType(), original.getOperands().subList(0, 2));
     }

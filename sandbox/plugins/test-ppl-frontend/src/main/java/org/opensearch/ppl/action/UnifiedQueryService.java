@@ -80,6 +80,14 @@ public class UnifiedQueryService {
                 .language(QueryType.PPL)
                 .catalog(DEFAULT_CATALOG, flatSchema)
                 .defaultNamespace(DEFAULT_CATALOG)
+                // PPL commands like `table`, enhanced `fields` variants, and expression-level
+                // features gate themselves on the Calcite engine flag. This frontend always
+                // runs the Calcite-based pipeline, so flip it on here.
+                .setting("plugins.calcite.enabled", true)
+                // AstBuilder.visitRexCommand unboxes this setting unconditionally; without a
+                // value the sandbox frontend NPEs on any `rex` usage. MySQL's regexp_count
+                // convention is 10 matches; sufficient for end-to-end verification.
+                .setting("plugins.ppl.rex.max_match.limit", 10)
                 .build()
         ) {
 

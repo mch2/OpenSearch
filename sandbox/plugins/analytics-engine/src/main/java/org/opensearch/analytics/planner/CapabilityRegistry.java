@@ -9,6 +9,7 @@
 package org.opensearch.analytics.planner;
 
 import org.opensearch.analytics.spi.AggregateCapability;
+import org.opensearch.analytics.spi.AggregateDecomposition;
 import org.opensearch.analytics.spi.AggregateFunction;
 import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
 import org.opensearch.analytics.spi.BackendCapabilityProvider;
@@ -50,6 +51,10 @@ public class CapabilityRegistry {
     private final Map<ScanKey, Map<String, List<String>>> scanIndex = new HashMap<>();
     private final Map<ScalarKey, Map<String, List<String>>> filterIndex = new HashMap<>();
     private final Map<AggregateKey, Map<String, List<String>>> aggregateIndex = new HashMap<>();
+    // (backend, function) → optional decomposition declared by that backend's
+    // AggregateCapability. The split rule consults this to set the FINAL fragment's
+    // input row type; null means "use the default partial-state schema = result type".
+    private final Map<DecompositionKey, AggregateDecomposition> aggregateDecompositionIndex = new HashMap<>();
     private final Map<ScalarKey, Map<String, List<String>>> scalarIndex = new HashMap<>();
     // Backends that declared supportsLiteralEvaluation=true for a (function, fieldType)
     private final Map<ScalarKey, List<String>> literalScalarIndex = new HashMap<>();
@@ -118,6 +123,9 @@ public class CapabilityRegistry {
                     addToFormatMap(aggregateIndex, new AggregateKey(cap.function(), fieldType), cap.formats(), name);
                 }
                 aggregateCapableBackends.add(name);
+                if (cap.decomposition() != null) {
+                    aggregateDecompositionIndex.put(new DecompositionKey(name, cap.function()), cap.decomposition());
+                }
             }
             for (ProjectCapability cap : caps.projectCapabilities()) {
                 switch (cap) {
@@ -190,6 +198,13 @@ public class CapabilityRegistry {
         return aggregateIndex.getOrDefault(new AggregateKey(function, fieldType), Map.of()).getOrDefault(format, List.of());
     }
 
+    /** The {@link AggregateDecomposition} declared by {@code backendName} for {@code function},
+     *  or null if the backend didn't declare one. The split rule falls back to
+     *  {@code StandardAggregateDecompositions.DEFAULT} when this returns null. */
+    public AggregateDecomposition aggregateDecomposition(String backendName, AggregateFunction function) {
+        return aggregateDecompositionIndex.get(new DecompositionKey(backendName, function));
+    }
+
     public boolean isOpaqueOperation(String name) {
         return opaqueIndex.containsKey(name);
     }
@@ -233,6 +248,14 @@ public class CapabilityRegistry {
 
     public List<String> aggregateBackendsAnyFormat(AggregateFunction function, FieldType fieldType) {
         return allBackends(aggregateIndex.getOrDefault(new AggregateKey(function, fieldType), Map.of()));
+    }
+
+    /** Backends that declared this filter function on this fieldType in any format.
+     *  Used for derived columns (expression outputs, aggregate results) that have no
+     *  physical storage — the filter executes against an Arrow batch inside a fragment,
+     *  not against a doc-values file, so format-aware lookup isn't meaningful. */
+    public List<String> filterBackendsAnyFormat(ScalarFunction function, FieldType fieldType) {
+        return allBackends(filterIndex.getOrDefault(new ScalarKey(function, fieldType), Map.of()));
     }
 
     public List<String> scalarBackendsAnyFormat(ScalarFunction function, FieldType fieldType) {
@@ -302,6 +325,9 @@ public class CapabilityRegistry {
     }
 
     private record AggregateKey(AggregateFunction function, FieldType fieldType) {
+    }
+
+    private record DecompositionKey(String backendName, AggregateFunction function) {
     }
 
     private record ScalarKey(ScalarFunction function, FieldType fieldType) {

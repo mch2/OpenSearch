@@ -22,6 +22,8 @@ import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.Filter;
 import org.apache.calcite.rel.core.Project;
 import org.apache.calcite.rel.metadata.RelMetadataQuery;
+import org.apache.calcite.rel.rules.CoreRules;
+import org.apache.calcite.rel.rules.PruneEmptyRules;
 import org.apache.calcite.rel.rules.ReduceExpressionsRule;
 import org.apache.calcite.tools.RelBuilder;
 import org.apache.logging.log4j.LogManager;
@@ -30,9 +32,13 @@ import org.opensearch.analytics.planner.rel.OpenSearchDistributionTraitDef;
 import org.opensearch.analytics.planner.rules.OpenSearchAggregateRule;
 import org.opensearch.analytics.planner.rules.OpenSearchAggregateSplitRule;
 import org.opensearch.analytics.planner.rules.OpenSearchFilterRule;
+import org.opensearch.analytics.planner.rules.OpenSearchJoinRule;
 import org.opensearch.analytics.planner.rules.OpenSearchProjectRule;
 import org.opensearch.analytics.planner.rules.OpenSearchSortRule;
 import org.opensearch.analytics.planner.rules.OpenSearchTableScanRule;
+import org.opensearch.analytics.planner.rules.OpenSearchUnionRule;
+import org.opensearch.analytics.planner.rules.OpenSearchValuesRule;
+
 import java.util.List;
 
 /**
@@ -81,7 +87,24 @@ public class PlannerImpl {
         hepBuilder.addRuleCollection(
             List.of(
                 new ReduceExpressionsRule.FilterReduceExpressionsRule(Filter.class, RelBuilder.proto(Contexts.empty())),
-                new ReduceExpressionsRule.ProjectReduceExpressionsRule(Project.class, RelBuilder.proto(Contexts.empty()))
+                new ReduceExpressionsRule.ProjectReduceExpressionsRule(Project.class, RelBuilder.proto(Contexts.empty())),
+                // Empty-relation collapse. Folds Aggregate/Project/Filter/Sort over an empty
+                // Values into a single-row Values with aggregate identities (SUM→NULL,
+                // COUNT→0). The resulting Values-rooted plan is evaluated in-process by
+                // CoordinatorLocalFragmentEvaluator's short-circuit in DefaultPlanExecutor —
+                // no shard dispatch needed.
+                CoreRules.AGGREGATE_VALUES,
+                PruneEmptyRules.PROJECT_INSTANCE,
+                PruneEmptyRules.FILTER_INSTANCE,
+                PruneEmptyRules.SORT_INSTANCE
+                // No AggregateReduceFunctionsRule: aggregates flow through unchanged. The native
+                // backend's physical-plan walker rewrites AggregateExec.mode (Partial on data
+                // node, Final on coordinator) — DataFusion's state_fields machinery then handles
+                // every aggregate it knows how to split (AVG, STDDEV, HLL approx_distinct,
+                // TDigest percentile, custom UDAFs that implement state_fields). Decomposing
+                // here would force AVG → SUM/COUNT in every plan, hiding the function from
+                // DataFusion and adding per-function knowledge in Java that doesn't scale to
+                // sketches and UDAFs.
             )
         );
 
@@ -96,10 +119,13 @@ public class PlannerImpl {
         hepBuilder.addRuleCollection(
             List.of(
                 new OpenSearchTableScanRule(context),
+                new OpenSearchValuesRule(context),
                 new OpenSearchFilterRule(context),
                 new OpenSearchProjectRule(context),
                 new OpenSearchAggregateRule(context),
-                new OpenSearchSortRule(context)
+                new OpenSearchSortRule(context),
+                new OpenSearchJoinRule(context),
+                new OpenSearchUnionRule(context)
             )
         );
 

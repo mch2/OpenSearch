@@ -14,11 +14,19 @@ import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.apache.calcite.rel.core.JoinRelType;
+import org.apache.calcite.rex.RexNode;
 import org.opensearch.analytics.planner.BasePlannerRulesTests;
+import org.opensearch.analytics.planner.MockDataFusionBackend;
+import org.opensearch.analytics.planner.PlannerContext;
 import org.opensearch.analytics.planner.rel.OpenSearchExchangeReducer;
+import org.opensearch.analytics.planner.rel.OpenSearchJoin;
 import org.opensearch.analytics.planner.rel.OpenSearchSort;
 import org.opensearch.analytics.planner.rel.OpenSearchStageInputScan;
 import org.opensearch.analytics.planner.rel.OpenSearchTableScan;
+import org.opensearch.analytics.spi.FieldStorageInfo;
+
+import java.util.List;
 
 /**
  * Tests for {@link DAGBuilder} — verifies correct stage structure for single-stage
@@ -100,5 +108,101 @@ public class DAGBuilderTests extends BasePlannerRulesTests {
         assertNull(aggChild.getExchangeSinkProvider());
         assertNotNull(aggChild.getExchangeInfo());
         assertEquals(RelDistribution.Type.SINGLETON, aggChild.getExchangeInfo().distributionType());
+    }
+
+    /**
+     * Verifies DAGBuilder handles a parent with two ExchangeReducer inputs (the join shape).
+     * Synthesizes the post-CBO marked plan directly — no planner rule yet.
+     *
+     * <p>Expected DAG: child stage 0 (t1 scan), child stage 1 (t2 scan), root stage 2 (join).
+     * Root fragment must be an OpenSearchJoin whose left and right inputs are both
+     * OpenSearchExchangeReducer wrapping an OpenSearchStageInputScan referencing the
+     * correct child stage id.
+     */
+    public void testJoinUnderRootProducesThreeStages() {
+        PlannerContext context = buildContext("parquet", 2, intFields());
+        List<String> viable = List.of(MockDataFusionBackend.NAME);
+        List<FieldStorageInfo> emptyStorage = List.of();
+
+        OpenSearchTableScan leftScan = new OpenSearchTableScan(
+            cluster,
+            cluster.traitSet(),
+            mockTable("t1", "k", "v"),
+            viable,
+            emptyStorage
+        );
+        OpenSearchTableScan rightScan = new OpenSearchTableScan(
+            cluster,
+            cluster.traitSet(),
+            mockTable("t2", "k", "w"),
+            viable,
+            emptyStorage
+        );
+        OpenSearchExchangeReducer leftReducer = new OpenSearchExchangeReducer(cluster, cluster.traitSet(), leftScan, viable);
+        OpenSearchExchangeReducer rightReducer = new OpenSearchExchangeReducer(cluster, cluster.traitSet(), rightScan, viable);
+
+        // Inner equi-join on t1.k = t2.k. Field 0 of left = field 0 of right (offset by left fieldCount=2).
+        RexNode joinCondition = rexBuilder.makeCall(
+            org.apache.calcite.sql.fun.SqlStdOperatorTable.EQUALS,
+            rexBuilder.makeInputRef(typeFactory.createSqlType(SqlTypeName.INTEGER), 0),
+            rexBuilder.makeInputRef(typeFactory.createSqlType(SqlTypeName.INTEGER), 2)
+        );
+        OpenSearchJoin join = new OpenSearchJoin(
+            cluster,
+            cluster.traitSet(),
+            leftReducer,
+            rightReducer,
+            joinCondition,
+            JoinRelType.INNER,
+            viable
+        );
+
+        QueryDAG dag = DAGBuilder.build(join, context.getCapabilityRegistry(), mockClusterService());
+        LOGGER.info("Join QueryDAG:\n{}", dag);
+
+        Stage root = dag.rootStage();
+        assertBottomUpIds(root);
+        assertEquals("root has two child stages", 2, root.getChildStages().size());
+        assertNull("root has no shard target resolver", root.getTargetResolver());
+        assertNotNull("root has an exchange sink provider", root.getExchangeSinkProvider());
+        assertTrue("root fragment is OpenSearchJoin", root.getFragment() instanceof OpenSearchJoin);
+
+        OpenSearchJoin rootJoin = (OpenSearchJoin) root.getFragment();
+        assertTrue(
+            "left input rewritten to ExchangeReducer→StageInputScan",
+            rootJoin.getLeft() instanceof OpenSearchExchangeReducer
+        );
+        assertTrue(
+            "right input rewritten to ExchangeReducer→StageInputScan",
+            rootJoin.getRight() instanceof OpenSearchExchangeReducer
+        );
+        OpenSearchExchangeReducer leftRoot = (OpenSearchExchangeReducer) rootJoin.getLeft();
+        OpenSearchExchangeReducer rightRoot = (OpenSearchExchangeReducer) rootJoin.getRight();
+        assertTrue(leftRoot.getInput() instanceof OpenSearchStageInputScan);
+        assertTrue(rightRoot.getInput() instanceof OpenSearchStageInputScan);
+        OpenSearchStageInputScan leftStageInput = (OpenSearchStageInputScan) leftRoot.getInput();
+        OpenSearchStageInputScan rightStageInput = (OpenSearchStageInputScan) rightRoot.getInput();
+
+        Stage leftChild = root.getChildStages().get(0);
+        Stage rightChild = root.getChildStages().get(1);
+        assertNotEquals("child stage ids are distinct", leftChild.getStageId(), rightChild.getStageId());
+        assertEquals(
+            "left StageInputScan references the left child stage",
+            leftChild.getStageId(),
+            leftStageInput.getChildStageId()
+        );
+        assertEquals(
+            "right StageInputScan references the right child stage",
+            rightChild.getStageId(),
+            rightStageInput.getChildStageId()
+        );
+
+        // Each child stage is a SHARD_FRAGMENT with its own target resolver and the original table scan.
+        assertNotNull("left child has shard target resolver", leftChild.getTargetResolver());
+        assertNotNull("right child has shard target resolver", rightChild.getTargetResolver());
+        assertTrue(leftChild.getFragment() instanceof OpenSearchTableScan);
+        assertTrue(rightChild.getFragment() instanceof OpenSearchTableScan);
+        assertEquals(RelDistribution.Type.SINGLETON, leftChild.getExchangeInfo().distributionType());
+        assertEquals(RelDistribution.Type.SINGLETON, rightChild.getExchangeInfo().distributionType());
     }
 }

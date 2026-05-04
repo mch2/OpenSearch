@@ -113,9 +113,24 @@ public class NumberParquetFieldTests extends OpenSearchTestCase {
     }
 
     public void testHalfFloatFieldArrowType() {
+        // HalfFloatParquetField is widened to Float32 (SINGLE precision) on disk so
+        // Calcite's schema can declare REAL without a substrait/parquet type mismatch.
+        // See HalfFloatParquetField javadoc for the full rationale.
         HalfFloatParquetField field = new HalfFloatParquetField();
         ArrowType.FloatingPoint type = (ArrowType.FloatingPoint) field.getArrowType();
-        assertEquals(FloatingPointPrecision.HALF, type.getPrecision());
+        assertEquals(FloatingPointPrecision.SINGLE, type.getPrecision());
+    }
+
+    public void testHalfFloatFieldAddToGroup() {
+        HalfFloatParquetField field = new HalfFloatParquetField();
+        MappedFieldType ft = new NumberFieldMapper.NumberFieldType("val", NumberFieldMapper.NumberType.HALF_FLOAT);
+        ManagedVSR vsr = createVSR("half-float-test", field, "val");
+        // NumberFieldMapper.HALF_FLOAT.parse returns a Float (within the half_float
+        // representable range). The widened writer stores it as Arrow Float32.
+        field.createField(ft, vsr, 7.25f);
+        vsr.setRowCount(1);
+        assertEquals(7.25f, ((Float4Vector) vsr.getVector("val")).get(0), 0.001f);
+        cleanupVSR(vsr);
     }
 
     public void testShortFieldArrowType() {

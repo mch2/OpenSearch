@@ -15,6 +15,7 @@ import org.opensearch.nativebridge.spi.NativeLibraryLoader;
 
 import java.lang.foreign.FunctionDescriptor;
 import java.lang.foreign.Linker;
+import java.lang.foreign.MemorySegment;
 import java.lang.foreign.SymbolLookup;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
@@ -58,6 +59,8 @@ public final class NativeBridge {
     private static final MethodHandle SENDER_SEND;
     private static final MethodHandle SENDER_CLOSE;
     private static final MethodHandle REGISTER_MEMTABLE;
+    private static final MethodHandle RESOLVE_AGG_STATE_SCHEMA;
+    private static final MethodHandle FREE_BYTES;
 
     static {
         SymbolLookup lib = NativeLibraryLoader.symbolLookup();
@@ -113,7 +116,8 @@ public final class NativeBridge {
                 ValueLayout.ADDRESS,
                 ValueLayout.JAVA_LONG,
                 ValueLayout.JAVA_LONG,
-                ValueLayout.JAVA_LONG
+                ValueLayout.JAVA_LONG,
+                ValueLayout.JAVA_INT
             )
         );
 
@@ -160,6 +164,9 @@ public final class NativeBridge {
         );
 
         // i64 df_register_partition_stream(session_ptr, input_id_ptr, input_id_len, schema_ipc_ptr, schema_ipc_len)
+        // The schema is the partial-state schema declared by the backend's
+        // AggregateCapability for the FINAL fragment's input — Java knows it because
+        // the planner sets the StageInputScan row type from that capability.
         REGISTER_PARTITION_STREAM = linker.downcallHandle(
             lib.find("df_register_partition_stream").orElseThrow(),
             FunctionDescriptor.of(
@@ -202,6 +209,33 @@ public final class NativeBridge {
                 ValueLayout.ADDRESS,
                 ValueLayout.JAVA_LONG
             )
+        );
+
+        // i64 df_resolve_agg_state_schema(session_ptr, group_ipc_ptr, group_ipc_len,
+        //   func_names_ptr, func_name_lens_ptr, agg_input_ipcs_ptr, agg_input_ipc_lens_ptr,
+        //   n_aggs, out_ptr_ptr, out_len_ptr, out_cap_ptr)
+        RESOLVE_AGG_STATE_SCHEMA = linker.downcallHandle(
+            lib.find("df_resolve_agg_state_schema").orElseThrow(),
+            FunctionDescriptor.of(
+                ValueLayout.JAVA_LONG,
+                ValueLayout.JAVA_LONG,
+                ValueLayout.ADDRESS,
+                ValueLayout.JAVA_LONG,
+                ValueLayout.ADDRESS,
+                ValueLayout.ADDRESS,
+                ValueLayout.ADDRESS,
+                ValueLayout.ADDRESS,
+                ValueLayout.JAVA_LONG,
+                ValueLayout.ADDRESS,
+                ValueLayout.ADDRESS,
+                ValueLayout.ADDRESS
+            )
+        );
+
+        // void df_free_bytes(ptr, len, cap)
+        FREE_BYTES = linker.downcallHandle(
+            lib.find("df_free_bytes").orElseThrow(),
+            FunctionDescriptor.ofVoid(ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG)
         );
     }
 
@@ -262,6 +296,7 @@ public final class NativeBridge {
         byte[] substraitPlan,
         long runtimePtr,
         long contextId,
+        boolean singleShard,
         ActionListener<Long> listener
     ) {
         try {
@@ -281,7 +316,8 @@ public final class NativeBridge {
                 call.bytes(substraitPlan),
                 (long) substraitPlan.length,
                 runtimePtr,
-                contextId
+                contextId,
+                singleShard ? 1 : 0
             );
             listener.onResponse(result);
         } catch (Throwable t) {
@@ -360,7 +396,15 @@ public final class NativeBridge {
 
     /**
      * Registers an input partition stream on the session under {@code inputId}, with the given
-     * Arrow IPC-encoded schema. Returns an opaque sender pointer freed by {@link #senderClose}.
+     * Arrow IPC-encoded schema.
+     *
+     * <p>The schema is the partial-state shape declared by the backend's
+     * {@code AggregateCapability} (e.g. AVG → {@code [sum F64, count U64]},
+     * HLL → {@code [sketch Binary]}). Java sets the {@code OpenSearchStageInputScan}
+     * row type from that capability, so the same schema flows here and into the substrait
+     * {@code NamedScan.base_schema}.
+     *
+     * <p>Returns an opaque sender pointer freed by {@link #senderClose}.
      */
     public static long registerPartitionStream(long sessionPtr, String inputId, byte[] schemaIpc) {
         NativeHandle.validatePointer(sessionPtr, "session");
@@ -445,4 +489,73 @@ public final class NativeBridge {
     public static void cacheManagerRemoveFiles(long runtimePtr, String[] filePaths) {}
 
     public static void initLogger() {}
+
+    /**
+     * Resolves the partial-state schema for a list of aggregate functions by looking each up in the
+     * session's UDAF registry and invoking {@code state_fields}. Returns the result as an Arrow IPC
+     * stream-writer encoded schema (decodable via {@code ArrowStreamReader}).
+     *
+     * <p>The returned schema has, in order: the {@code groupFieldsIpc} schema fields verbatim,
+     * followed by each aggregate's {@code state_fields} output in parallel-array order.
+     *
+     * @param sessionPtr        live {@code LocalSession} pointer
+     * @param groupFieldsIpc    Arrow IPC-encoded schema of the grouping columns (empty-schema IPC is OK)
+     * @param funcNames         aggregate function names registered on the session (parallel with {@code aggInputFieldsIpcs})
+     * @param aggInputFieldsIpcs Arrow IPC-encoded input-field schemas, one per aggregate
+     * @return the IPC bytes of the resolved partial-state schema
+     */
+    public static byte[] resolveAggStateSchema(long sessionPtr, byte[] groupFieldsIpc, String[] funcNames, byte[][] aggInputFieldsIpcs) {
+        NativeHandle.validatePointer(sessionPtr, "session");
+        if (funcNames.length != aggInputFieldsIpcs.length) {
+            throw new IllegalArgumentException(
+                "funcNames.length (" + funcNames.length + ") != aggInputFieldsIpcs.length (" + aggInputFieldsIpcs.length + ")"
+            );
+        }
+        long outPtr;
+        long outLen;
+        long outCap;
+        try (var call = new NativeCall()) {
+            var groupIpc = call.bytes(groupFieldsIpc);
+            var names = call.strArray(funcNames);
+            var inputIpcs = call.bytesArray(aggInputFieldsIpcs);
+            MemorySegment outPtrOut = call.longOut();
+            MemorySegment outLenOut = call.longOut();
+            MemorySegment outCapOut = call.longOut();
+            call.invoke(
+                RESOLVE_AGG_STATE_SCHEMA,
+                sessionPtr,
+                groupIpc,
+                (long) groupFieldsIpc.length,
+                names.ptrs(),
+                names.lens(),
+                inputIpcs.ptrs(),
+                inputIpcs.lens(),
+                (long) funcNames.length,
+                outPtrOut,
+                outLenOut,
+                outCapOut
+            );
+            outPtr = outPtrOut.get(ValueLayout.JAVA_LONG, 0);
+            outLen = outLenOut.get(ValueLayout.JAVA_LONG, 0);
+            outCap = outCapOut.get(ValueLayout.JAVA_LONG, 0);
+        }
+        if (outPtr == 0 || outLen < 0) {
+            throw new IllegalStateException("resolveAggStateSchema: native returned null or negative length (" + outLen + ")");
+        }
+        byte[] ipc = new byte[(int) outLen];
+        MemorySegment.ofAddress(outPtr).reinterpret(outLen).asByteBuffer().get(ipc);
+        freeBytes(outPtr, outLen, outCap);
+        return ipc;
+    }
+
+    /**
+     * Frees a heap-allocated byte buffer returned by a native call (e.g.
+     * {@link #resolveAggStateSchema}). Safe to call with a zero pointer.
+     */
+    public static void freeBytes(long ptr, long len, long cap) {
+        if (ptr == 0) {
+            return;
+        }
+        NativeCall.invokeVoid(FREE_BYTES, ptr, len, cap);
+    }
 }

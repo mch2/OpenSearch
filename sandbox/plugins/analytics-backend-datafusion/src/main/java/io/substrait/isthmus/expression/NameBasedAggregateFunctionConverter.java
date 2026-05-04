@@ -60,9 +60,19 @@ public class NameBasedAggregateFunctionConverter extends AggregateFunctionConver
      * different conventional name than the DataFusion built-in it maps to. Lookups
      * are case-insensitive (keys lowercase).
      */
-    private static final Map<String, String> NAME_ALIASES = Map.of(
-        "first", "first_value",
-        "last", "last_value"
+    private static final Map<String, String> NAME_ALIASES = Map.ofEntries(
+        Map.entry("first", "first_value"),
+        Map.entry("last", "last_value"),
+        Map.entry("percentile_approx", "approx_percentile_cont"),
+        // PPL `stats earliest(field, ts)` / `latest(field, ts)` decompose to Calcite
+        // ARG_MIN/ARG_MAX; DataFusion's substrait consumer recognizes these as min_by/max_by.
+        Map.entry("arg_min", "min_by"),
+        Map.entry("arg_max", "max_by"),
+        // PPL `stats list(field)` / `values(field)` aggregate to a list. DataFusion's
+        // built-in `array_agg(any1)` covers both — VALUES uses DISTINCT to dedup,
+        // which Calcite already encodes as AggregateCall.isDistinct().
+        Map.entry("list", "array_agg"),
+        Map.entry("values", "array_agg")
     );
 
     private final List<SimpleExtension.AggregateFunctionVariant> allVariants;

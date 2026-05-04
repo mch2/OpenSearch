@@ -11,9 +11,11 @@ package org.opensearch.analytics.exec.stage;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.opensearch.analytics.exec.RowProducingSink;
 import org.opensearch.analytics.planner.dag.Stage;
 import org.opensearch.analytics.spi.ExchangeSink;
+import org.opensearch.analytics.spi.ExchangeSinkContext;
 import org.opensearch.test.OpenSearchTestCase;
 
 import java.util.ArrayList;
@@ -46,7 +48,7 @@ public class LocalStageExecutionTests extends OpenSearchTestCase {
     public void testStartClosesBackendSinkAndTransitionsToSucceeded() {
         CapturingSink backend = new CapturingSink();
         CapturingSink downstream = new CapturingSink();
-        LocalStageExecution exec = new LocalStageExecution(stageWithId(0), backend, downstream);
+        LocalStageExecution exec = newExecution(0, backend, downstream, List.of(7));
 
         exec.start();
 
@@ -57,23 +59,48 @@ public class LocalStageExecutionTests extends OpenSearchTestCase {
         assertEquals(StageExecution.State.SUCCEEDED, exec.getState());
     }
 
-    public void testInputSinkReturnsBackendSinkForAnyChildId() {
-        CapturingSink backend = new CapturingSink();
-        LocalStageExecution exec = new LocalStageExecution(stageWithId(0), backend, new CapturingSink());
+    public void testInputSinkRoutesToCorrectInputIndex() {
+        IndexedCapturingSink backend = new IndexedCapturingSink();
+        // Two children at stageIds 7 and 9; the wrappers should pin inputIndex 0 and 1 respectively.
+        LocalStageExecution exec = newExecution(2, backend, new CapturingSink(), List.of(7, 9));
 
-        assertSame(backend, exec.inputSink(0));
-        assertSame(backend, exec.inputSink(7));
-        assertSame(backend, exec.inputSink(42));
+        ExchangeSink wrapper7 = exec.inputSink(7);
+        ExchangeSink wrapper9 = exec.inputSink(9);
+        assertNotSame("wrappers are distinct", wrapper7, wrapper9);
+
+        try (VectorSchemaRoot empty7 = VectorSchemaRoot.create(new Schema(List.of()), allocator)) {
+            wrapper7.feed(empty7);
+        }
+        try (VectorSchemaRoot empty9 = VectorSchemaRoot.create(new Schema(List.of()), allocator)) {
+            wrapper9.feed(empty9);
+        }
+
+        assertEquals(2, backend.calls.size());
+        assertEquals("first call routed to inputIndex 0", Integer.valueOf(0), backend.calls.get(0));
+        assertEquals("second call routed to inputIndex 1", Integer.valueOf(1), backend.calls.get(1));
+    }
+
+    public void testInputSinkRejectsUnknownChildStageId() {
+        IndexedCapturingSink backend = new IndexedCapturingSink();
+        LocalStageExecution exec = newExecution(0, backend, new CapturingSink(), List.of(7));
+        expectThrows(IllegalArgumentException.class, () -> exec.inputSink(42));
+    }
+
+    public void testInputSinkWrapperCloseDoesNotCloseBackendSink() {
+        CapturingSink backend = new CapturingSink();
+        LocalStageExecution exec = newExecution(0, backend, new CapturingSink(), List.of(7));
+        exec.inputSink(7).close();
+        assertFalse("wrapper close must not close shared backend sink", backend.closed);
     }
 
     public void testOutputSourceReturnsDownstreamWhenItImplementsExchangeSource() {
         RowProducingSink downstream = new RowProducingSink();
-        LocalStageExecution exec = new LocalStageExecution(stageWithId(0), new CapturingSink(), downstream);
+        LocalStageExecution exec = newExecution(0, new CapturingSink(), downstream, List.of(7));
         assertSame(downstream, exec.outputSource());
     }
 
     public void testOutputSourceThrowsWhenDownstreamDoesNotImplementExchangeSource() {
-        LocalStageExecution exec = new LocalStageExecution(stageWithId(0), new CapturingSink(), new CapturingSink());
+        LocalStageExecution exec = newExecution(0, new CapturingSink(), new CapturingSink(), List.of(7));
         expectThrows(UnsupportedOperationException.class, exec::outputSource);
     }
 
@@ -88,7 +115,7 @@ public class LocalStageExecutionTests extends OpenSearchTestCase {
                 throw boom;
             }
         };
-        LocalStageExecution exec = new LocalStageExecution(stageWithId(0), backend, new CapturingSink());
+        LocalStageExecution exec = newExecution(0, backend, new CapturingSink(), List.of(7));
 
         exec.start();
 
@@ -98,7 +125,7 @@ public class LocalStageExecutionTests extends OpenSearchTestCase {
 
     public void testStartIsNoopAfterTerminalTransition() {
         CapturingSink backend = new CapturingSink();
-        LocalStageExecution exec = new LocalStageExecution(stageWithId(0), backend, new CapturingSink());
+        LocalStageExecution exec = newExecution(0, backend, new CapturingSink(), List.of(7));
 
         exec.cancel("test cancellation");
         assertEquals(StageExecution.State.CANCELLED, exec.getState());
@@ -112,7 +139,7 @@ public class LocalStageExecutionTests extends OpenSearchTestCase {
 
     public void testFailFromChildClosesBackendSinkAndTransitions() {
         CapturingSink backend = new CapturingSink();
-        LocalStageExecution exec = new LocalStageExecution(stageWithId(0), backend, new CapturingSink());
+        LocalStageExecution exec = newExecution(0, backend, new CapturingSink(), List.of(7));
 
         Exception cause = new RuntimeException("child failed");
         boolean transitioned = exec.failFromChild(cause);
@@ -125,7 +152,7 @@ public class LocalStageExecutionTests extends OpenSearchTestCase {
 
     public void testCancelClosesBackendSink() {
         CapturingSink backend = new CapturingSink();
-        LocalStageExecution exec = new LocalStageExecution(stageWithId(0), backend, new CapturingSink());
+        LocalStageExecution exec = newExecution(0, backend, new CapturingSink(), List.of(7));
 
         exec.cancel("user requested");
 
@@ -134,6 +161,16 @@ public class LocalStageExecutionTests extends OpenSearchTestCase {
     }
 
     // ── helpers ──────────────────────────────────────────────────────────
+
+    private LocalStageExecution newExecution(int stageId, ExchangeSink backend, ExchangeSink downstream, List<Integer> childStageIds) {
+        Schema emptySchema = new Schema(List.of());
+        List<ExchangeSinkContext.InputDescriptor> inputs = new ArrayList<>(childStageIds.size());
+        for (int i = 0; i < childStageIds.size(); i++) {
+            inputs.add(new ExchangeSinkContext.InputDescriptor(childStageIds.get(i), "input-" + i, emptySchema));
+        }
+        ExchangeSinkContext ctx = new ExchangeSinkContext("q-test", stageId, new byte[0], allocator, inputs, downstream);
+        return new LocalStageExecution(stageWithId(stageId), backend, ctx, downstream);
+    }
 
     private Stage stageWithId(int id) {
         Stage stage = mock(Stage.class);
@@ -158,6 +195,29 @@ public class LocalStageExecutionTests extends OpenSearchTestCase {
             for (VectorSchemaRoot batch : fed) {
                 batch.close();
             }
+        }
+    }
+
+    /** ExchangeSink that records the inputIndex of each multi-input feed call. */
+    private static final class IndexedCapturingSink implements ExchangeSink {
+        final List<Integer> calls = new ArrayList<>();
+        boolean closed = false;
+
+        @Override
+        public void feed(VectorSchemaRoot batch) {
+            // Single-input path — rejected because LocalStageExecution wrappers always call feed(int, batch).
+            throw new UnsupportedOperationException("IndexedCapturingSink expects feed(int, batch)");
+        }
+
+        @Override
+        public void feed(int inputIndex, VectorSchemaRoot batch) {
+            calls.add(inputIndex);
+            batch.close();
+        }
+
+        @Override
+        public void close() {
+            closed = true;
         }
     }
 }

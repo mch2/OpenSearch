@@ -10,16 +10,19 @@ package org.opensearch.analytics.exec;
 
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
+import org.apache.arrow.vector.DateDayVector;
 import org.apache.arrow.vector.IntVector;
+import org.apache.arrow.vector.TimeMilliVector;
 import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.complex.ListVector;
 import org.apache.arrow.vector.complex.impl.UnionListWriter;
 import org.apache.arrow.vector.types.pojo.ArrowType;
-import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
 import org.opensearch.test.OpenSearchTestCase;
 
 import java.nio.charset.StandardCharsets;
+import java.time.LocalDate;
+import java.time.LocalTime;
 import java.util.List;
 
 /**
@@ -110,6 +113,52 @@ public class ArrowValuesTests extends OpenSearchTestCase {
             Object result = ArrowValues.toJavaValue(listVector, 0);
             assertTrue(result instanceof List);
             assertEquals(0, ((List<?>) result).size());
+        }
+    }
+
+    /**
+     * Arrow's {@link DateDayVector#getObject} returns an {@link Integer} epoch-day count,
+     * which leaks to {@link org.opensearch.analytics.exec.action.FragmentExecutionResponse}
+     * and serializes as a raw integer ({@code 5215}) instead of an ISO date
+     * ({@code "1984-04-12"}). Coerce to {@link LocalDate} so the response's existing
+     * {@code LocalDate → "yyyy-MM-dd"} branch fires.
+     *
+     * <p>Day 5215 = 1984-04-12 (reference date for the {@code date-formats} test index).
+     * Regression for {@code testCountByDateTypeSpanWithDifferentUnits} and siblings.
+     */
+    public void testDateDayVectorReturnsLocalDate() {
+        try (DateDayVector v = new DateDayVector("d", allocator)) {
+            v.allocateNew(1);
+            v.set(0, 5215);
+            v.setValueCount(1);
+            Object result = ArrowValues.toJavaValue(v, 0);
+            assertEquals("DateDayVector must coerce to LocalDate, not raw Integer epoch-day", LocalDate.class, result.getClass());
+            assertEquals(LocalDate.of(1984, 4, 12), result);
+        }
+    }
+
+    /**
+     * Arrow's {@link TimeMilliVector#getObject} has a known bug: it treats the int32
+     * millis-of-day as if it were epoch millis, producing a {@link java.time.LocalDateTime}
+     * pinned to 1970-01-01 (e.g. {@code "1970-01-01 09:07:00"}). The downstream response
+     * formatter can't distinguish this from a legitimate {@code LocalDateTime} timestamp.
+     *
+     * <p>Coerce to {@link LocalTime} here (where we still have the Arrow vector type) so
+     * the response's existing {@code LocalTime → "HH:mm:ss"} branch fires and the user
+     * sees {@code "09:07:00"}.
+     *
+     * <p>Millis-of-day {@code 9*3600_000 + 7*60_000 + 42_000 = 32_862_000} = 09:07:42.
+     * Regression for {@code testCountByTimeTypeSpanWithDifferentUnits} and
+     * {@code testCountByNullableTimeSpan}.
+     */
+    public void testTimeMilliVectorReturnsLocalTime() {
+        try (TimeMilliVector v = new TimeMilliVector("t", allocator)) {
+            v.allocateNew(1);
+            v.set(0, (9 * 3600 + 7 * 60 + 42) * 1000);
+            v.setValueCount(1);
+            Object result = ArrowValues.toJavaValue(v, 0);
+            assertEquals("TimeMilliVector must coerce to LocalTime, not Arrow's buggy LocalDateTime", LocalTime.class, result.getClass());
+            assertEquals(LocalTime.of(9, 7, 42), result);
         }
     }
 

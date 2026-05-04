@@ -12,15 +12,20 @@ import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelTraitSet;
 import org.apache.calcite.plan.hep.HepRelVertex;
 import org.apache.calcite.rel.RelNode;
+import org.apache.calcite.rel.logical.LogicalJoin;
 import org.opensearch.analytics.planner.rel.OpenSearchAggregate;
 import org.opensearch.analytics.planner.rel.OpenSearchConvention;
 import org.opensearch.analytics.planner.rel.OpenSearchDistribution;
 import org.opensearch.analytics.planner.rel.OpenSearchDistributionTraitDef;
+import org.opensearch.analytics.planner.rel.OpenSearchExchangeReducer;
 import org.opensearch.analytics.planner.rel.OpenSearchFilter;
+import org.opensearch.analytics.planner.rel.OpenSearchJoin;
+import org.opensearch.analytics.planner.rel.OpenSearchUnion;
 import org.opensearch.analytics.planner.rel.OpenSearchProject;
 import org.opensearch.analytics.planner.rel.OpenSearchRelNode;
 import org.opensearch.analytics.planner.rel.OpenSearchSort;
 import org.opensearch.analytics.planner.rel.OpenSearchTableScan;
+import org.opensearch.analytics.planner.rel.OpenSearchValues;
 
 import java.util.List;
 
@@ -55,6 +60,8 @@ public class RelNodeUtils {
 
         if (node instanceof OpenSearchTableScan scan) {
             return new OpenSearchTableScan(newCluster, newTraits, scan.getTable(), scan.getViableBackends(), scan.getOutputFieldStorage());
+        } else if (node instanceof OpenSearchValues values) {
+            return new OpenSearchValues(newCluster, newTraits, values.getRowType(), values.getTuples(), values.getViableBackends());
         } else if (node instanceof OpenSearchFilter filter) {
             return new OpenSearchFilter(newCluster, newTraits, newInputs.getFirst(), filter.getCondition(), filter.getViableBackends());
         } else if (node instanceof OpenSearchAggregate aggregate) {
@@ -87,6 +94,33 @@ public class RelNodeUtils {
                 project.getProjects(),
                 project.getRowType(),
                 project.getViableBackends()
+            );
+        } else if (node instanceof OpenSearchJoin join) {
+            return new OpenSearchJoin(
+                newCluster,
+                newTraits,
+                newInputs.get(0),
+                newInputs.get(1),
+                join.getCondition(),
+                join.getJoinType(),
+                join.getViableBackends()
+            );
+        } else if (node instanceof OpenSearchUnion union) {
+            return new OpenSearchUnion(newCluster, newTraits, newInputs, union.all, union.getViableBackends());
+        } else if (node instanceof OpenSearchExchangeReducer reducer) {
+            return new OpenSearchExchangeReducer(newCluster, newTraits, newInputs.getFirst(), reducer.getViableBackends());
+        } else if (node instanceof LogicalJoin join) {
+            // Non-inner / non-equi joins fall through HEP marking unchanged. They are not
+            // supported by this spec but may flow into Volcano regardless — copying them
+            // here keeps the rest of the planner pipeline well-typed; downstream stages
+            // throw a clearer error if such a plan is actually executed.
+            return LogicalJoin.create(
+                newInputs.get(0),
+                newInputs.get(1),
+                join.getHints(),
+                join.getCondition(),
+                join.getVariablesSet(),
+                join.getJoinType()
             );
         }
 

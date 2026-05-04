@@ -150,10 +150,7 @@ public class DefaultPlanExecutorTests extends OpenSearchTestCase {
      * JSON-encoded string instead of an array).
      */
     public void testBatchesToRowsListOfStringsDecodedAsListOfStrings() {
-        org.apache.arrow.vector.complex.ListVector listVector = org.apache.arrow.vector.complex.ListVector.empty(
-            "take",
-            allocator
-        );
+        org.apache.arrow.vector.complex.ListVector listVector = org.apache.arrow.vector.complex.ListVector.empty("take", allocator);
         listVector.addOrGetVector(FieldType.nullable(ArrowType.Utf8.INSTANCE));
         org.apache.arrow.vector.complex.impl.UnionListWriter writer = listVector.getWriter();
         writer.startList();

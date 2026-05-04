@@ -112,11 +112,18 @@ public enum FieldType {
             case BIGINT -> LONG;
             case FLOAT, REAL -> FieldType.FLOAT;
             case DOUBLE, DECIMAL -> FieldType.DOUBLE;
-            case CHAR, VARCHAR -> KEYWORD;
+            case CHAR, VARCHAR, SYMBOL -> KEYWORD;
             case DATE -> FieldType.DATE;
             case TIME, TIMESTAMP, TIMESTAMP_WITH_LOCAL_TIME_ZONE -> FieldType.DATE;
             case BOOLEAN -> FieldType.BOOLEAN;
-            case BINARY, VARBINARY -> FieldType.BINARY;
+            // IP fields are declared VARBINARY in the Calcite schema so the runtime
+            // Arrow schema (16-byte InetAddressPoint in IpParquetField) matches
+            // what DataFusion's substrait consumer sees. VARBINARY -> IP keeps
+            // the IP signal on the round trip through capability matching.
+            // Generic BINARY columns are rare in this codebase; when they appear
+            // they'll go through the IP path and be harmless for downstream
+            // scalars that don't care.
+            case BINARY, VARBINARY -> IP;
             default -> null;
         };
     }

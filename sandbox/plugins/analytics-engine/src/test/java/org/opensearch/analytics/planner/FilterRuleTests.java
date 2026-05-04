@@ -214,15 +214,17 @@ public class FilterRuleTests extends BasePlannerRulesTests {
     // ---- Derived columns ----
 
     /**
-     * HAVING on derived column must throw — marking on derived/expression columns
-     * is not yet implemented. Verifies the planner fails fast with a clear message
-     * rather than silently producing incorrect viableBackends.
+     * HAVING on a derived column (aggregate output) must be supported by falling back
+     * to format-agnostic capability lookup. A derived column has no physical storage;
+     * the planner can't ask "which backend can read this field's doc values" — only
+     * "which backend declared this filter function on this field type". Marked and
+     * executed by whichever backend owns the upstream fragment.
      *
-     * TODO: add testFilterOnAggregateOutput — Filter(Aggregate(Scan)) where the filter
-     * is on a non-derived column (e.g. group-by key) should succeed and propagate
-     * viableBackends correctly through the composed pipeline.
+     * Regression target: {@code CalcitePPLAggregationIT.testStatsGroupByDate}, where
+     * {@code stats count() by span(t, 1d)} (with {@code t} derived via eval) produced a
+     * {@code Filter(IS NOT NULL(t))} the old rule could not mark.
      */
-    public void testFilterOnDerivedColumnsAfterAggregateThrows() {
+    public void testFilterOnDerivedColumnAfterAggregateMarksViaAnyFormat() {
         PlannerContext context = buildContext("parquet", 1, Map.of("status", Map.of("type", "integer"), "size", Map.of("type", "integer")));
 
         RelOptTable table = mockTable("test_index", "status", "size");
@@ -251,8 +253,14 @@ public class FilterRuleTests extends BasePlannerRulesTests {
         );
         LogicalFilter having = LogicalFilter.create(aggregate, havingCondition);
 
-        UnsupportedOperationException ex = expectThrows(UnsupportedOperationException.class, () -> runPlanner(having, context));
-        assertTrue("Expected message about derived column, got: " + ex.getMessage(), ex.getMessage().contains("derived column"));
+        RelNode result = runPlanner(having, context);
+        RelNode unwrapped = unwrapExchange(result);
+        assertTrue("Expected OpenSearchFilter, got " + unwrapped.getClass().getSimpleName(), unwrapped instanceof OpenSearchFilter);
+        OpenSearchFilter filter = (OpenSearchFilter) unwrapped;
+        assertTrue(
+            "datafusion must be a viable backend for a filter on a derived aggregate output",
+            filter.getViableBackends().contains(MockDataFusionBackend.NAME)
+        );
     }
 
     // ---- Helpers ----

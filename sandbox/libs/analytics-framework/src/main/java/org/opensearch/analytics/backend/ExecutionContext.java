@@ -25,6 +25,7 @@ public class ExecutionContext {
     private final SearchShardTask task;
     private byte[] fragmentBytes;
     private BufferAllocator allocator;
+    private boolean singleShard;
 
     /**
      * Constructs an execution context.
@@ -61,5 +62,17 @@ public class ExecutionContext {
     /** Sets the backend-specific serialized plan fragment bytes. */
     public void setFragmentBytes(byte[] fragmentBytes) {
         this.fragmentBytes = fragmentBytes;
+    }
+
+    /** True when the index has a single shard — the data node runs the query end-to-end and
+     *  there's no coordinator merge stage. Backends use this to skip partial/final mode rewrites
+     *  whose only purpose is to feed a downstream merge. */
+    public boolean isSingleShard() {
+        return singleShard;
+    }
+
+    /** Sets the single-shard flag. */
+    public void setSingleShard(boolean singleShard) {
+        this.singleShard = singleShard;
     }
 }

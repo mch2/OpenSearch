@@ -8,11 +8,18 @@
 
 package org.opensearch.analytics.exec;
 
+import org.apache.arrow.vector.DateDayVector;
 import org.apache.arrow.vector.FieldVector;
+import org.apache.arrow.vector.TimeMicroVector;
+import org.apache.arrow.vector.TimeMilliVector;
+import org.apache.arrow.vector.TimeNanoVector;
+import org.apache.arrow.vector.TimeSecVector;
 import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.complex.ListVector;
 
 import java.nio.charset.StandardCharsets;
+import java.time.LocalDate;
+import java.time.LocalTime;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -44,6 +51,42 @@ public final class ArrowValues {
         }
         if (vector instanceof ListVector listVector) {
             return listToJavaValue(listVector, index);
+        }
+        // Date32 (day-precision) vectors: Arrow returns the raw Integer epoch-day count
+        // from getObject(). FragmentExecutionResponse's coerce() doesn't know that
+        // integer represents a date, so it serializes as a raw int (e.g. "5215" instead
+        // of "1984-04-12"). Convert to LocalDate here — the response's LocalDate branch
+        // formats it as "yyyy-MM-dd".
+        if (vector instanceof DateDayVector dateVector) {
+            return LocalDate.ofEpochDay(dateVector.get(index));
+        }
+        // Time32(MILLI) vectors: Arrow's TimeMilliVector.getObject has a longstanding bug
+        // where it treats the int32 millis-of-day as if it were epoch millis, producing a
+        // LocalDateTime pinned to 1970-01-01 (e.g. "1970-01-01 09:07:00"). Downstream
+        // serializers can't distinguish that from a legitimate LocalDateTime timestamp.
+        // Read the raw int millis-of-day and construct a LocalTime so the response's
+        // LocalTime branch formats it as "HH:mm:ss".
+        if (vector instanceof TimeMilliVector timeVector) {
+            int millisOfDay = timeVector.get(index);
+            return LocalTime.ofNanoOfDay((long) millisOfDay * 1_000_000L);
+        }
+        // Time32(SECOND) vectors: TimeSecVector.getObject returns a raw Integer seconds-of-day.
+        // DataFusion's make_time(i32, i32, i32) (used by the PPL SPAN-on-TIME decomposition)
+        // returns Time32(SECOND), so we see this vector type on the response path.
+        // Coerce to LocalTime for canonical "HH:mm:ss" formatting.
+        if (vector instanceof TimeSecVector timeSecVector) {
+            int secondsOfDay = timeSecVector.get(index);
+            return LocalTime.ofSecondOfDay(secondsOfDay);
+        }
+        // Time64(MICRO/NANO) vectors: returned by DF for higher-precision time operations.
+        // Arrow's getObject returns Long microseconds/nanoseconds of day. Coerce to LocalTime.
+        if (vector instanceof TimeMicroVector timeMicroVector) {
+            long microsOfDay = timeMicroVector.get(index);
+            return LocalTime.ofNanoOfDay(microsOfDay * 1_000L);
+        }
+        if (vector instanceof TimeNanoVector timeNanoVector) {
+            long nanosOfDay = timeNanoVector.get(index);
+            return LocalTime.ofNanoOfDay(nanosOfDay);
         }
         Object obj = vector.getObject(index);
         // Catch-all for any Arrow vector whose getObject() returns Arrow's Text wrapper

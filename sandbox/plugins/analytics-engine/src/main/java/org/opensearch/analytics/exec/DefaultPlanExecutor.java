@@ -25,6 +25,7 @@ import org.opensearch.analytics.planner.CapabilityRegistry;
 import org.opensearch.analytics.planner.PlannerContext;
 import org.opensearch.analytics.planner.PlannerImpl;
 import org.opensearch.analytics.planner.dag.BackendPlanAdapter;
+import org.opensearch.analytics.planner.dag.CoordinatorLocalFragmentEvaluator;
 import org.opensearch.analytics.planner.dag.DAGBuilder;
 import org.opensearch.analytics.planner.dag.FragmentConversionDriver;
 import org.opensearch.analytics.planner.dag.PlanForker;
@@ -129,6 +130,16 @@ public class DefaultPlanExecutor extends HandledTransportAction<ActionRequest, A
         logicalFragment.getCluster().invalidateMetadataQuery();
 
         RelNode plan = PlannerImpl.createPlan(logicalFragment, new PlannerContext(capabilityRegistry, clusterService.state()));
+
+        // Scan-less shortcut: fully constant-folded plans (e.g. the post-AGGREGATE_VALUES
+        // collapse of `where 1=2 | stats sum(...)`) have no OpenSearchTableScan, so the
+        // shard-dispatch pipeline can't run them. The plan is already a literal projection
+        // over a single-row Values; evaluate it in-process and short-circuit.
+        if (CoordinatorLocalFragmentEvaluator.isScanLessCoordinatorFragment(plan)) {
+            listener.onResponse(CoordinatorLocalFragmentEvaluator.evaluate(plan));
+            return;
+        }
+
         QueryDAG dag = DAGBuilder.build(plan, capabilityRegistry, clusterService);
         PlanForker.forkAll(dag, capabilityRegistry);
         BackendPlanAdapter.adaptAll(dag, capabilityRegistry);

@@ -9,29 +9,29 @@
 package org.opensearch.analytics.spi;
 
 import org.apache.calcite.rel.core.AggregateCall;
-import org.apache.calcite.rex.RexBuilder;
-import org.apache.calcite.rex.RexNode;
-
-import java.util.List;
+import org.apache.calcite.rel.type.RelDataType;
+import org.apache.calcite.rel.type.RelDataTypeFactory;
 
 /**
- * Describes how a backend decomposes an aggregate function into partial and final phases
- * for distributed execution across shards.
+ * Declares the partial-state row type a backend's aggregate function emits
+ * when run as a per-shard partial aggregate.
  *
- * <p>When {@link AggregateCapability#decomposition()} is null, the planner applies
- * Calcite's standard decomposition (e.g. AVG → SUM/COUNT, STDDEV_POP → SUM(x²)+SUM(x)+COUNT).
+ * <p>The split rule uses this to set the FINAL fragment's input row type
+ * (and therefore the substrait {@code NamedScan.base_schema} that flows to
+ * the coordinator). The same aggregate function name appears in both the
+ * PARTIAL and FINAL fragments — DataFusion's {@code AggregateExec(Final)}
+ * handles state merging internally via the function's accumulator
+ * (forced via the native physical-plan mode rewriter on the coord side).
  *
- * <p>When non-null, the planner uses this decomposition during plan forking resolution,
- * after a single backend has been chosen for the aggregate operator. The decomposition
- * rewrites the PARTIAL aggregate's output schema and the FINAL aggregate's input schema
- * as a paired operation — they must be consistent within the same plan alternative.
- *
- * <p>Examples:
+ * <p>Defaults (no decomposition supplied) treat the state as identical to
+ * the function's result type — correct for SUM/MIN/MAX/COUNT where the
+ * single result column happens to also be a valid state column. Backends
+ * override for functions whose state shape differs from their result:
  * <ul>
- *   <li>COVAR_POP(x, y): partial emits SUM(x*y), SUM(x), SUM(y), COUNT;
- *       final expression: (SUM(x*y) - SUM(x)*SUM(y)/COUNT) / COUNT</li>
- *   <li>HLL distinct count: partial emits a single HLL sketch accumulator;
- *       final expression: HLL_MERGE(sketches) → cardinality estimate</li>
+ *   <li>AVG → {@code [sum FLOAT8, count INT8]}</li>
+ *   <li>STDDEV/VAR → {@code [count INT8, mean FLOAT8, m2 FLOAT8]} (Welford)</li>
+ *   <li>HLL approx_distinct → {@code [sketch BINARY]}</li>
+ *   <li>TDigest approx_percentile_cont → {@code [digest BINARY]}</li>
  * </ul>
  *
  * @opensearch.internal
@@ -39,22 +39,11 @@ import java.util.List;
 public interface AggregateDecomposition {
 
     /**
-     * The aggregate calls emitted by the PARTIAL phase.
-     * These replace the original aggregate call in the PARTIAL operator and define
-     * the columns flowing through the exchange to the FINAL operator.
-     *
-     * <p>The returned calls must use types compatible with
-     * Calcite's type system so the exchange row type is well-defined.
+     * The Calcite row type produced by this aggregate's partial stage. The
+     * type is a struct whose fields become the partial output's columns
+     * (after the optional groupBy fields). For a single-column state, return
+     * a struct with one field; for multi-column state (e.g. AVG's sum/count),
+     * return a struct with multiple fields.
      */
-    List<AggregateCall> partialCalls();
-
-    /**
-     * Expression over the partial results that produces the final aggregated value.
-     * {@code partialRefs} are {@link org.apache.calcite.rex.RexInputRef} nodes
-     * referencing the columns emitted by {@link #partialCalls()} in order.
-     *
-     * <p>For AVG: {@code partialRefs.get(0) / partialRefs.get(1)} (SUM / COUNT).
-     * For HLL: a call to the backend's HLL_MERGE function over {@code partialRefs.get(0)}.
-     */
-    RexNode finalExpression(RexBuilder rexBuilder, List<RexNode> partialRefs);
+    RelDataType partialStateSchema(AggregateCall original, RelDataTypeFactory typeFactory);
 }

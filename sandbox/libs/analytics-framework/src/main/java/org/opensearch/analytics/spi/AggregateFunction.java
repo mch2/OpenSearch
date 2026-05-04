@@ -13,8 +13,9 @@ import org.apache.calcite.sql.SqlKind;
 /**
  * Aggregate functions that a backend may support, categorized by {@link Type}.
  *
- * <p>Note: {@code COUNT} covers both {@code COUNT(*)} and {@code COUNT(DISTINCT x)}.
- * The distinction is on {@code AggregateCall.isDistinct()}, not on SqlKind.
+ * <p>Note: {@code COUNT(DISTINCT x)} is rewritten to {@code APPROX_COUNT_DISTINCT(x)}
+ * by {@code OpenSearchAggregateRule} — PPL's dc/distinct_count semantics are HLL++
+ * approximate. Plain {@code COUNT} covers {@code COUNT(*)} and {@code COUNT(x)}.
  *
  * @opensearch.internal
  */
@@ -39,6 +40,12 @@ public enum AggregateFunction {
     FIRST_VALUE(Type.SIMPLE, SqlKind.FIRST_VALUE),
     LAST_VALUE(Type.SIMPLE, SqlKind.LAST_VALUE),
 
+    // Time-ordered (PPL `stats earliest(field, ts)` / `latest(field, ts)`).
+    // Calcite emits these as ARG_MIN/ARG_MAX; DataFusion's name is min_by/max_by
+    // (handled by NAME_ALIASES in NameBasedAggregateFunctionConverter).
+    ARG_MIN(Type.SIMPLE, SqlKind.ARG_MIN),
+    ARG_MAX(Type.SIMPLE, SqlKind.ARG_MAX),
+
     // State-expanding — state grows with input rows per key
     PERCENTILE_CONT(Type.STATE_EXPANDING, SqlKind.PERCENTILE_CONT),
     PERCENTILE_DISC(Type.STATE_EXPANDING, SqlKind.PERCENTILE_DISC),
@@ -53,7 +60,9 @@ public enum AggregateFunction {
     // Approximate — probabilistic, fixed-size state
     APPROX_COUNT_DISTINCT(Type.APPROXIMATE, SqlKind.OTHER),
     DISTINCT_COUNT(Type.APPROXIMATE, SqlKind.OTHER),
-    DC(Type.APPROXIMATE, SqlKind.OTHER);
+    DC(Type.APPROXIMATE, SqlKind.OTHER),
+    PERCENTILE_APPROX(Type.STATE_EXPANDING, SqlKind.OTHER),
+    APPROX_MEDIAN(Type.APPROXIMATE, SqlKind.OTHER);
 
     /** Category of aggregate function. Affects execution strategy (shuffle vs map-reduce). */
     public enum Type {
@@ -79,6 +88,22 @@ public enum AggregateFunction {
         return sqlKind;
     }
 
+    /** Resolves the {@code AggregateFunction} for a Calcite {@code AggregateCall}.
+     *  Tries name-based lookup first (handles cases like APPROX_COUNT_DISTINCT where
+     *  the Calcite function name is more specific than SqlKind.COUNT), then falls
+     *  back to SqlKind-based lookup. */
+    public static AggregateFunction resolve(org.apache.calcite.rel.core.AggregateCall call) {
+        AggregateFunction byName = fromName(call.getAggregation().getName());
+        if (byName != null) {
+            return byName;
+        }
+        AggregateFunction byKind = fromSqlKind(call.getAggregation().getKind());
+        if (byKind != null) {
+            return byKind;
+        }
+        throw new IllegalStateException("Unrecognized aggregate function [" + call.getAggregation().getName() + "]");
+    }
+
     /** Maps a Calcite SqlKind to an AggregateFunction, or null if not recognized. Skips OTHER. */
     public static AggregateFunction fromSqlKind(SqlKind kind) {
         for (AggregateFunction func : values()) {
@@ -87,6 +112,16 @@ public enum AggregateFunction {
             }
         }
         return null;
+    }
+
+    /** Maps an aggregate function name to an AggregateFunction, or null if not recognized.
+     *  Case-insensitive. */
+    public static AggregateFunction fromName(String name) {
+        try {
+            return valueOf(name.toUpperCase(java.util.Locale.ROOT));
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
     }
 
     /** Maps an aggregate function name to an AggregateFunction. Throws if not recognized.

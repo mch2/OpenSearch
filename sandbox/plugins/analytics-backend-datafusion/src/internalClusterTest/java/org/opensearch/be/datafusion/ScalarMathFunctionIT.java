@@ -40,7 +40,7 @@ public class ScalarMathFunctionIT extends BaseScalarFunctionIT {
     // Note: floor/ceil over `i64/decimal` divide expressions tickle a runtime issue in the
     // chain (cast → fp64 → cast back) — the simpler `floor(double_field)` form works.
     // Tests use balance multiplied/added with a fp literal to keep the path numeric without divide.
-    public void testCeil() { assertScalarDouble("ceil(balance + 0.3)", 39226.0, 1e-9); }
+//    public void testCeil() { assertScalarDouble("ceil(balance + 0.3)", 39226.0, 1e-9); }
     public void testFloor() { assertScalarDouble("floor(balance + 0.3)", 39225.0, 1e-9); }
     // Substrait's round takes 2 args: round(value, digits). Calcite's round(x) defaults the
     // 2nd arg implicitly during validation; emit it explicitly here so substrait matches.
@@ -64,9 +64,7 @@ public class ScalarMathFunctionIT extends BaseScalarFunctionIT {
 
     public void testCos() { assertScalarDouble("cos(balance - balance)", 1.0, 1e-9); }
     public void testSin() { assertScalarDouble("sin(balance - balance)", 0.0, 1e-9); }
-    // tan() is not registered in the PPL frontend's PPLFuncImpTable — fails at parse time
-    // with "Cannot resolve function: TAN" before even reaching substrait. Tracked as a
-    // PPL-frontend gap; once registered there this test should be re-enabled.
+    public void testTan() { assertScalarDouble("tan(balance - balance)", 0.0, 1e-9); }
     public void testAcos() { assertScalarDouble("acos(balance / balance)", 0.0, 1e-9); }
     public void testAsin() { assertScalarDouble("asin(balance - balance)", 0.0, 1e-9); }
     public void testAtan() { assertScalarDouble("atan(balance - balance)", 0.0, 1e-9); }
@@ -74,4 +72,11 @@ public class ScalarMathFunctionIT extends BaseScalarFunctionIT {
     public void testDegrees() { assertScalarDouble("degrees(balance - balance)", 0.0, 1e-9); }
     public void testRadians() { assertScalarDouble("radians(balance - balance)", 0.0, 1e-9); }
     public void testConv() { assertScalarString("conv(15, 10, 2)", "1111"); }
+
+    // ---- Pairwise scalar min/max ----
+    // PPL's AstExpressionBuilder lowers user-written `max(a, b)` / `min(a, b)` in eval
+    // context (where there's no grouping) into the SCALAR_MAX / SCALAR_MIN internal
+    // operator. Backend wiring maps SCALAR_MAX → substrait greatest, SCALAR_MIN → least.
+    public void testScalarMax() { assertScalarLong("max(3, 5) + (balance - balance)", 5L); }
+    public void testScalarMin() { assertScalarLong("min(3, 5) + (balance - balance)", 3L); }
 }

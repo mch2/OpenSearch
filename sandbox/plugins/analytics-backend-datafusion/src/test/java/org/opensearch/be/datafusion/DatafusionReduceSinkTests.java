@@ -89,13 +89,13 @@ public class DatafusionReduceSinkTests extends OpenSearchTestCase {
             byte[] substrait = buildSumSubstraitBytes(DatafusionReduceSink.INPUT_ID);
 
             CapturingSink downstream = new CapturingSink();
-            ExchangeSinkContext ctx = new ExchangeSinkContext("q-1", 0, substrait, alloc, inputSchema, downstream);
+            ExchangeSinkContext ctx = ExchangeSinkContext.singleInput("q-1", 0, substrait, alloc, inputSchema, 0, downstream);
 
             DatafusionReduceSink sink = new DatafusionReduceSink(ctx, runtimeHandle);
             try {
-                sink.feed(makeBatch(alloc, inputSchema, new long[] { 1L, 2L, 3L }));
-                sink.feed(makeBatch(alloc, inputSchema, new long[] { 4L, 5L, 6L }));
-                sink.feed(makeBatch(alloc, inputSchema, new long[] { 7L, 8L, 9L }));
+                sink.feed(0, makeBatch(alloc, inputSchema, new long[] { 1L, 2L, 3L }));
+                sink.feed(0, makeBatch(alloc, inputSchema, new long[] { 4L, 5L, 6L }));
+                sink.feed(0, makeBatch(alloc, inputSchema, new long[] { 7L, 8L, 9L }));
             } finally {
                 sink.close();
             }
@@ -148,7 +148,7 @@ public class DatafusionReduceSinkTests extends OpenSearchTestCase {
             byte[] substrait = buildSumSubstraitBytes(DatafusionReduceSink.INPUT_ID);
 
             CapturingSink downstream = new CapturingSink();
-            ExchangeSinkContext ctx = new ExchangeSinkContext("q-wedge", 0, substrait, alloc, inputSchema, downstream);
+            ExchangeSinkContext ctx = ExchangeSinkContext.singleInput("q-wedge", 0, substrait, alloc, inputSchema, 0, downstream);
 
             DatafusionReduceSink sink = new DatafusionReduceSink(ctx, runtimeHandle);
 
@@ -157,7 +157,7 @@ public class DatafusionReduceSinkTests extends OpenSearchTestCase {
             Thread producer = new Thread(() -> {
                 for (int i = 0; i < totalBatches; i++) {
                     attempts.incrementAndGet();
-                    sink.feed(makeBatch(alloc, inputSchema, new long[] { (long) i }));
+                    sink.feed(0, makeBatch(alloc, inputSchema, new long[] { (long) i }));
                 }
             }, "test-producer-wedge");
             producer.setDaemon(true);

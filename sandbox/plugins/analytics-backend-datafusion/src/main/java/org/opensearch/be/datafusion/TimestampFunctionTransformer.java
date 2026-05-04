@@ -8,14 +8,11 @@
 
 package org.opensearch.be.datafusion;
 
-import org.apache.calcite.rel.type.RelDataTypeFactory;
-import org.apache.calcite.rel.type.RelDataTypeSystem;
-import org.apache.calcite.rex.RexBuilder;
+import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.rex.RexCall;
 import org.apache.calcite.rex.RexInputRef;
 import org.apache.calcite.rex.RexLiteral;
 import org.apache.calcite.rex.RexNode;
-import org.apache.calcite.sql.type.SqlTypeFactoryImpl;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.calcite.util.TimestampString;
 import org.opensearch.analytics.spi.FieldStorageInfo;
@@ -43,11 +40,8 @@ import java.util.Set;
  */
 class TimestampFunctionTransformer implements ScalarFunctionAdapter {
 
-    private static final RelDataTypeFactory TYPE_FACTORY = new SqlTypeFactoryImpl(RelDataTypeSystem.DEFAULT);
-    private static final RexBuilder REX_BUILDER = new RexBuilder(TYPE_FACTORY);
-
     @Override
-    public RexNode adapt(RexCall original, List<FieldStorageInfo> fieldStorage) {
+    public RexNode adapt(RexCall original, List<FieldStorageInfo> fieldStorage, RelOptCluster cluster) {
         if (original.getOperands().size() != 1) return original;
         if (!(original.getOperands().get(0) instanceof RexLiteral literal)) return original;
         if (literal.getType().getSqlTypeName() != SqlTypeName.VARCHAR) return original;
@@ -57,7 +51,7 @@ class TimestampFunctionTransformer implements ScalarFunctionAdapter {
         int precision = resolveTimestampPrecision(original, fieldStorage);
         if (precision < 0) return original;
 
-        return REX_BUILDER.makeTimestampLiteral(parseTimestamp(value), precision);
+        return cluster.getRexBuilder().makeTimestampLiteral(parseTimestamp(value), precision);
     }
 
     private int resolveTimestampPrecision(RexNode node, List<FieldStorageInfo> fieldStorage) {

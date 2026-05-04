@@ -105,12 +105,14 @@ pub unsafe extern "C" fn df_execute_query(
     plan_len: i64,
     runtime_ptr: i64,
     context_id: i64,
+    single_shard: i32,
 ) -> i64 {
     let mgr = get_rt_manager()?;
     let table_name = str_from_raw(table_name_ptr, table_name_len).map_err(|e| format!("df_execute_query: {}", e))?;
     let plan_bytes = slice::from_raw_parts(plan_ptr, plan_len as usize);
+    let single_shard = single_shard != 0;
     mgr.io_runtime
-        .block_on(api::execute_query(shard_view_ptr, table_name, plan_bytes, runtime_ptr, &mgr, context_id))
+        .block_on(api::execute_query(shard_view_ptr, table_name, plan_bytes, runtime_ptr, &mgr, context_id, single_shard))
         .map_err(|e| e.to_string())
 }
 
@@ -212,18 +214,9 @@ pub unsafe extern "C" fn df_execute_local_plan(
     substrait_len: i64,
 ) -> i64 {
     let mgr = get_rt_manager()?;
-    // Copy substrait bytes into an owned Vec so the spawned future can move them
-    // (cpu_executor.spawn requires 'static). Clone the manager Arc twice — once for
-    // the inner future to access the runtime env / etc., once for the outer block_on
-    // closure to call `cpu_executor().spawn`.
     let bytes_vec = slice::from_raw_parts(substrait_ptr, substrait_len as usize).to_vec();
     let mgr_for_inner = Arc::clone(&mgr);
     let mgr_for_spawn = Arc::clone(&mgr);
-    // Wrap plan setup in cpu_executor.spawn so internal DataFusion spawns
-    // (RepartitionExec drain, CoalescePartitionsExec, etc.) inherit the CPU executor
-    // instead of the IO runtime. Without this, operator hash work runs on IO workers.
-    // The IO runtime still drives the outer block_on (bridging the synchronous FFI
-    // call to the async spawn handle).
     mgr.io_runtime
         .block_on(async move {
             let inner_fut = async move {
@@ -291,4 +284,69 @@ pub unsafe extern "C" fn df_register_memtable(
     api::register_memtable(session_ptr, input_id, schema_ipc, array_slice, schema_slice)
         .map(|_| 0)
         .map_err(|e| e.to_string())
+}
+
+/// Resolves the partial-state schema for a list of aggregate functions against
+/// the session's UDAF registry. Returns the resulting Arrow IPC bytes via
+/// three out parameters (`out_ptr`, `out_len`, `out_cap`) — the caller owns
+/// the buffer and must call [`df_free_bytes`] exactly once.
+///
+/// Inputs:
+/// - `group_ipc_ptr/len` — Arrow IPC-encoded schema of the group fields
+///   (empty schema IPC is allowed for no grouping).
+/// - `func_names_ptr/func_name_lens_ptr/n_aggs` — parallel pointer array of
+///   UTF-8 aggregate function names.
+/// - `agg_input_ipcs_ptr/agg_input_ipc_lens_ptr` — parallel pointer array of
+///   IPC-encoded input-field schemas (one per aggregate).
+///
+/// Out parameters (each pointer must be non-null):
+/// - `out_ptr_ptr` — receives a `*mut u8` to the allocated IPC bytes.
+/// - `out_len_ptr` — receives the byte length.
+/// - `out_cap_ptr` — receives the backing capacity (used by `df_free_bytes`).
+#[ffm_safe]
+#[no_mangle]
+pub unsafe extern "C" fn df_resolve_agg_state_schema(
+    session_ptr: i64,
+    group_ipc_ptr: *const u8,
+    group_ipc_len: i64,
+    func_names_ptr: *const *const u8,
+    func_name_lens_ptr: *const i64,
+    agg_input_ipcs_ptr: *const *const u8,
+    agg_input_ipc_lens_ptr: *const i64,
+    n_aggs: i64,
+    out_ptr_ptr: *mut i64,
+    out_len_ptr: *mut i64,
+    out_cap_ptr: *mut i64,
+) -> i64 {
+    if out_ptr_ptr.is_null() || out_len_ptr.is_null() || out_cap_ptr.is_null() {
+        return Err("df_resolve_agg_state_schema: null out parameter".to_string());
+    }
+    let group_ipc = slice::from_raw_parts(group_ipc_ptr, group_ipc_len as usize);
+    let n = n_aggs as usize;
+    let mut func_names: Vec<String> = Vec::with_capacity(n);
+    let mut input_ipcs: Vec<Vec<u8>> = Vec::with_capacity(n);
+    for i in 0..n {
+        let name_ptr = *func_names_ptr.add(i);
+        let name_len = *func_name_lens_ptr.add(i);
+        let name = str_from_raw(name_ptr, name_len)
+            .map_err(|e| format!("df_resolve_agg_state_schema: func_name[{}]: {}", i, e))?;
+        func_names.push(name.to_string());
+
+        let ipc_ptr = *agg_input_ipcs_ptr.add(i);
+        let ipc_len = *agg_input_ipc_lens_ptr.add(i);
+        input_ipcs.push(slice::from_raw_parts(ipc_ptr, ipc_len as usize).to_vec());
+    }
+    let bytes = api::resolve_agg_state_schema(session_ptr, group_ipc, &func_names, &input_ipcs)
+        .map_err(|e| e.to_string())?;
+    *out_ptr_ptr = bytes.ptr as i64;
+    *out_len_ptr = bytes.len as i64;
+    *out_cap_ptr = bytes.cap as i64;
+    Ok(0)
+}
+
+/// Frees a byte buffer returned by [`df_resolve_agg_state_schema`]. Safe to
+/// call with a null `ptr`.
+#[no_mangle]
+pub unsafe extern "C" fn df_free_bytes(ptr: i64, len: i64, cap: i64) {
+    api::free_bytes(ptr as *mut u8, len, cap);
 }

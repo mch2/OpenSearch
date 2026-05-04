@@ -108,6 +108,42 @@ public class AggregationUDFIT extends OpenSearchIntegTestCase {
         assertEquals("take(firstname, 2) over the bank fixture", List.of("Amber JOHnny", "Hattie"), taken);
     }
 
+    /**
+     * PPL {@code stats earliest(firstname, balance)} decomposes to Calcite {@code ARG_MIN(firstname, balance)},
+     * which {@code NAME_ALIASES} remaps to {@code min_by} on the substrait wire. DataFusion's built-in
+     * {@code min_by} rejects the wildcard {@code any1, any2} signature in our YAML extension — the Rust
+     * {@code MinByUdaf} (registered in {@code udaf::register_all}) takes priority over the built-in and
+     * accepts the call.
+     *
+     * <p>Against the fixture: min balance is 4180 (Dale) → {@code earliest(firstname, balance) = "Dale"}.
+     */
+    public void testEarliest() throws Exception {
+        PPLRequest request = new PPLRequest("source=" + BANK_INDEX + " | stats earliest(firstname, balance) as e");
+        PPLResponse response = client().execute(UnifiedPPLExecuteAction.INSTANCE, request).actionGet();
+
+        assertNotNull("PPLResponse must not be null", response);
+        assertEquals("schema columns", List.of("e"), response.getColumns());
+        assertEquals("scalar agg → exactly 1 result row", 1, response.getRows().size());
+
+        Object cell = response.getRows().get(0)[0];
+        assertEquals("earliest(firstname, balance) picks firstname at min balance", "Dale", cell);
+    }
+
+    /**
+     * Mirror of {@link #testEarliest()} for {@code max_by}. Max balance in the fixture is 39225 (Amber JOHnny).
+     */
+    public void testLatest() throws Exception {
+        PPLRequest request = new PPLRequest("source=" + BANK_INDEX + " | stats latest(firstname, balance) as l");
+        PPLResponse response = client().execute(UnifiedPPLExecuteAction.INSTANCE, request).actionGet();
+
+        assertNotNull("PPLResponse must not be null", response);
+        assertEquals("schema columns", List.of("l"), response.getColumns());
+        assertEquals("scalar agg → exactly 1 result row", 1, response.getRows().size());
+
+        Object cell = response.getRows().get(0)[0];
+        assertEquals("latest(firstname, balance) picks firstname at max balance", "Amber JOHnny", cell);
+    }
+
     private void createBankIndex() throws Exception {
         XContentBuilder mapping = XContentFactory.jsonBuilder()
             .startObject()

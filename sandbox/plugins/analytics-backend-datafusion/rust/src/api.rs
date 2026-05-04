@@ -152,10 +152,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use arrow::ipc::reader::StreamReader;
+use arrow::ipc::writer::StreamWriter;
 use arrow_array::{Array, StructArray};
 use arrow_array::ffi::FFI_ArrowArray;
 use arrow_array::RecordBatch;
 use arrow_schema::ffi::FFI_ArrowSchema;
+use arrow_schema::FieldRef;
 use datafusion::common::DataFusionError;
 use datafusion::datasource::listing::ListingTableUrl;
 use datafusion::execution::disk_manager::{DiskManagerBuilder, DiskManagerMode};
@@ -304,6 +306,11 @@ pub unsafe fn close_reader(ptr: i64) {
 /// This is an async function — the bridge layer decides how to run it
 /// (`block_on` for synchronous JNI, `spawn` for async delivery).
 ///
+/// `single_shard` controls whether the data node's aggregates are rewritten to
+/// `Partial` mode. False (the default for multi-shard queries) means rewrite;
+/// true means leave at `Single` (the data node is the only contributor and
+/// runs the aggregate end-to-end).
+///
 /// # Safety
 /// `shard_view_ptr` and `runtime_ptr` must be valid, non-zero pointers.
 pub async unsafe fn execute_query(
@@ -313,6 +320,7 @@ pub async unsafe fn execute_query(
     runtime_ptr: i64,
     manager: &RuntimeManager,
     context_id: i64,
+    single_shard: bool,
 ) -> Result<i64, DataFusionError> {
     let shard_view = &*(shard_view_ptr as *const ShardView);
     let runtime = &*(runtime_ptr as *const DataFusionRuntime);
@@ -335,6 +343,7 @@ pub async unsafe fn execute_query(
         runtime,
         cpu_executor,
         query_memory_pool,
+        single_shard,
     )
     .await?;
 
@@ -559,8 +568,6 @@ pub async unsafe fn execute_local_plan(
 ) -> Result<i64, DataFusionError> {
     let session = &*(session_ptr as *const LocalSession);
 
-    // Per-query memory tracking — wraps the session's global pool. A
-    // `context_id` of 0 disables tracking (pool is not consulted).
     let query_context = QueryTrackingContext::new(context_id, session.memory_pool());
 
     let df_stream = session.execute_substrait(substrait_bytes).await?;
@@ -701,4 +708,109 @@ pub unsafe fn register_memtable(
     }
 
     session.register_memtable(input_id, table_schema, batches)
+}
+
+/// Resolves the partial-state schema for a list of aggregate functions against
+/// the `LocalSession`'s UDAF registry and returns it as a heap-allocated Arrow
+/// IPC stream-writer blob. The caller must invoke [`free_bytes`] exactly once
+/// to free it.
+///
+/// `group_ipc` encodes the group-column fields (can be empty-schema IPC). Each
+/// entry in `agg_input_ipcs` is an IPC-encoded schema of the input fields for
+/// one aggregate (one entry per element of `func_names`). `func_names` is the
+/// parallel list of aggregate names.
+///
+/// Returned layout: a Rust-allocated `Vec<u8>` leaked via `Box::into_raw` of a
+/// `(ptr, len, cap)` tuple stored as `Box<BytesOut>`; the returned `i64` is a
+/// pointer to that struct. `free_bytes` reconstructs and drops it.
+///
+/// # Safety
+/// `session_ptr` must be valid. The IPC slices must be valid reads for their
+/// lengths.
+pub unsafe fn resolve_agg_state_schema(
+    session_ptr: i64,
+    group_ipc: &[u8],
+    func_names: &[String],
+    agg_input_ipcs: &[Vec<u8>],
+) -> Result<BytesOut, DataFusionError> {
+    let session = &*(session_ptr as *const LocalSession);
+
+    let group_fields = decode_fields_ipc(group_ipc, "group")?;
+    if func_names.len() != agg_input_ipcs.len() {
+        return Err(DataFusionError::Execution(format!(
+            "resolve_agg_state_schema: func_names.len()={} != agg_input_ipcs.len()={}",
+            func_names.len(),
+            agg_input_ipcs.len()
+        )));
+    }
+    let mut aggregates: Vec<(String, Vec<FieldRef>)> = Vec::with_capacity(func_names.len());
+    for (idx, (name, ipc)) in func_names.iter().zip(agg_input_ipcs.iter()).enumerate() {
+        let fields = decode_fields_ipc(ipc, &format!("agg-input-{}", idx))?;
+        aggregates.push((name.clone(), fields));
+    }
+
+    let state_schema = session.resolve_aggregate_state_schema(&group_fields, &aggregates)?;
+    encode_schema_ipc(&state_schema)
+}
+
+fn decode_fields_ipc(ipc: &[u8], label: &str) -> Result<Vec<FieldRef>, DataFusionError> {
+    let mut cursor = Cursor::new(ipc);
+    let reader = StreamReader::try_new(&mut cursor, None).map_err(|e| {
+        DataFusionError::Execution(format!(
+            "resolve_agg_state_schema: failed to decode IPC schema for '{}': {}",
+            label, e
+        ))
+    })?;
+    Ok(reader.schema().fields().iter().cloned().collect())
+}
+
+fn encode_schema_ipc(
+    schema: &arrow_schema::SchemaRef,
+) -> Result<BytesOut, DataFusionError> {
+    let mut buf: Vec<u8> = Vec::new();
+    {
+        let mut writer = StreamWriter::try_new(&mut buf, schema.as_ref()).map_err(|e| {
+            DataFusionError::Execution(format!(
+                "encode_schema_ipc: failed to start stream writer: {}",
+                e
+            ))
+        })?;
+        writer.finish().map_err(|e| {
+            DataFusionError::Execution(format!(
+                "encode_schema_ipc: failed to finish stream writer: {}",
+                e
+            ))
+        })?;
+    }
+    Ok(BytesOut::from_vec(buf))
+}
+
+/// Heap-allocated byte buffer returned across the FFM boundary. Ownership of
+/// the `Vec<u8>` is held by the `Box<BytesOut>` heap allocation; the caller
+/// reads `(ptr, len)` and calls [`free_bytes`] exactly once to free.
+pub struct BytesOut {
+    pub ptr: *mut u8,
+    pub len: usize,
+    pub cap: usize,
+}
+
+impl BytesOut {
+    fn from_vec(mut v: Vec<u8>) -> BytesOut {
+        let ptr = v.as_mut_ptr();
+        let len = v.len();
+        let cap = v.capacity();
+        std::mem::forget(v);
+        BytesOut { ptr, len, cap }
+    }
+}
+
+/// Frees a `Vec<u8>` previously returned by [`resolve_agg_state_schema`].
+///
+/// # Safety
+/// `ptr` must be the pointer returned in `BytesOut::ptr`; `len` and `cap` must
+/// match the values originally returned. Safe to call with a null `ptr`.
+pub unsafe fn free_bytes(ptr: *mut u8, len: i64, cap: i64) {
+    if !ptr.is_null() && cap > 0 {
+        drop(Vec::from_raw_parts(ptr, len as usize, cap as usize));
+    }
 }
