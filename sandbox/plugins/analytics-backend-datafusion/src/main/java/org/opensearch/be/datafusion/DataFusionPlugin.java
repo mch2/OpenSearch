@@ -158,9 +158,30 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
         ClassLoader previous = t.getContextClassLoader();
         try {
             t.setContextClassLoader(DataFusionPlugin.class.getClassLoader());
+            SimpleExtension.ExtensionCollection collection = DefaultExtensionCatalog.DEFAULT_COLLECTION;
+
+            // Layer in the upstream delegation-function extensions (DelegatedPredicateFunction
+            // signature used by the Lucene predicate-pushdown path).
             SimpleExtension.ExtensionCollection delegationExtensions = SimpleExtension.load(List.of("/delegation_functions.yaml"));
+            collection = collection.merge(delegationExtensions);
+
+            // Layer in scalar function signatures (e.g. ilike) that aren't in substrait's default catalog.
             SimpleExtension.ExtensionCollection scalarExtensions = SimpleExtension.load(List.of("/opensearch_scalar_functions.yaml"));
-            return DefaultExtensionCatalog.DEFAULT_COLLECTION.merge(delegationExtensions).merge(scalarExtensions);
+            collection = collection.merge(scalarExtensions);
+
+            // Layer in OpenSearch-specific aggregate signatures (first_value / last_value)
+            // consumed by the ARG_MIN/ARG_MAX → FIRST_VALUE/LAST_VALUE rewrite.
+            try (java.io.InputStream stream = DataFusionPlugin.class.getResourceAsStream("/extensions/opensearch_aggregate.yaml")) {
+                if (stream != null) {
+                    SimpleExtension.ExtensionCollection custom = SimpleExtension.load(stream);
+                    collection = collection.merge(custom);
+                } else {
+                    logger.warn("opensearch_aggregate.yaml not found on plugin classpath");
+                }
+            } catch (java.io.IOException e) {
+                throw new RuntimeException("Failed to load opensearch_aggregate.yaml", e);
+            }
+            return collection;
         } finally {
             t.setContextClassLoader(previous);
         }

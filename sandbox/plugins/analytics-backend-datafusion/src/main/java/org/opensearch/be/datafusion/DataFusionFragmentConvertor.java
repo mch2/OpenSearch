@@ -44,6 +44,7 @@ import io.substrait.isthmus.SubstraitRelVisitor;
 import io.substrait.isthmus.TypeConverter;
 import io.substrait.isthmus.expression.AggregateFunctionConverter;
 import io.substrait.isthmus.expression.FunctionMappings;
+import io.substrait.isthmus.expression.NameBasedAggregateFunctionConverter;
 import io.substrait.isthmus.expression.ScalarFunctionConverter;
 import io.substrait.isthmus.expression.WindowFunctionConverter;
 import io.substrait.plan.Plan;
@@ -273,7 +274,17 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
             typeFactory,
             typeConverter
         );
-        AggregateFunctionConverter aggConverter = new AggregateFunctionConverter(extensions.aggregateFunctions(), typeFactory);
+        // NameBasedAggregateFunctionConverter adds an ARG_MIN / ARG_MAX → first_value /
+        // last_value rewrite on top of the stock matcher so PPL `earliest(field, ts)` and
+        // `latest(field, ts)` resolve to DataFusion's native UDAFs (DF 52.x has no
+        // min_by / max_by). The rewrite runs BEFORE super.convert, so no additional Sigs
+        // are required for earliest/latest themselves.
+        AggregateFunctionConverter aggConverter = new NameBasedAggregateFunctionConverter(
+            extensions.aggregateFunctions(),
+            List.of(),
+            typeFactory,
+            typeConverter
+        );
         WindowFunctionConverter windowConverter = new WindowFunctionConverter(extensions.windowFunctions(), typeFactory);
         ConverterProvider converterProvider = new ConverterProvider(
             typeFactory,

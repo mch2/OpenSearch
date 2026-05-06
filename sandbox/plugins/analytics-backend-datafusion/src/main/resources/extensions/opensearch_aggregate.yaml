@@ -1,0 +1,33 @@
+%YAML 1.2
+---
+urn: extension:org.opensearch:opensearch_aggregate
+aggregate_functions:
+  # Target of NameBasedAggregateFunctionConverter.rewriteArgMinMax to implement
+  # PPL `earliest(field, ts)`: Calcite emits ARG_MIN(field, ts), the rewrite
+  # transforms it to first_value(field) with sort `ts ASC NULLS LAST` so
+  # DataFusion's first_value UDAF picks the row with the smallest timestamp.
+  # DataFusion 52.x has no native min_by/arg_min UDAF.
+  - name: "first_value"
+    description: "Returns the first value in the input (used with ORDER BY for earliest-style selection)."
+    impls:
+      - args:
+          - name: x
+            value: any1
+        nullability: DECLARED_OUTPUT
+        decomposable: NONE
+        return: any1?
+
+  # Target of rewriteArgMinMax for PPL `latest(field, ts)`: Calcite
+  # ARG_MAX(field, ts) rewrites to last_value(field) with sort `ts ASC NULLS LAST`,
+  # so DataFusion's last_value returns the row with the largest timestamp (the
+  # last row of the ascending sort). Equivalent to first_value with DESC but
+  # chosen for symmetry with DF's semantics.
+  - name: "last_value"
+    description: "Returns the last value in the input (used with ORDER BY for latest-style selection)."
+    impls:
+      - args:
+          - name: x
+            value: any1
+        nullability: DECLARED_OUTPUT
+        decomposable: NONE
+        return: any1?

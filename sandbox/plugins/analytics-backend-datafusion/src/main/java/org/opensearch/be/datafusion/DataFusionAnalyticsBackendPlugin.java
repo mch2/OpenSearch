@@ -109,7 +109,15 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
         AggregateFunction.MIN,
         AggregateFunction.MAX,
         AggregateFunction.COUNT,
-        AggregateFunction.AVG
+        AggregateFunction.AVG,
+        // PPL `earliest(field, ts)` → Calcite ARG_MIN(field, ts) →
+        // NameBasedAggregateFunctionConverter.rewriteArgMinMax transforms to substrait
+        // first_value(field) with an ORDER BY ts ASC sort field. DataFusion's native
+        // first_value UDAF resolves by name at the substrait consumer.
+        AggregateFunction.EARLIEST,
+        // PPL `latest(field, ts)` → Calcite ARG_MAX(field, ts) → substrait
+        // last_value(field) with the same ASC sort field (last row wins).
+        AggregateFunction.LATEST
     );
 
     private final DataFusionPlugin plugin;

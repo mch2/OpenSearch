@@ -33,6 +33,19 @@ public enum AggregateFunction {
     VAR_POP(Type.STATISTICAL, SqlKind.VAR_POP),
     VAR_SAMP(Type.STATISTICAL, SqlKind.VAR_SAMP),
 
+    // Simple — PPL `earliest(field, ts)` lowers to SqlStdOperatorTable.ARG_MIN(field, ts)
+    // at the Calcite layer (via PPLFuncImpTable.resolveTimeField). DataFusion 52.x has
+    // no native min_by/arg_min UDAF, so NameBasedAggregateFunctionConverter.rewriteArgMinMax
+    // transforms the substrait emission to first_value(field) with an ORDER BY ts ASC
+    // sort field. Planner-side lookup uses SqlKind.ARG_MIN → AggregateFunction.EARLIEST
+    // via fromSqlKind.
+    EARLIEST(Type.SIMPLE, SqlKind.ARG_MIN),
+
+    // Symmetric to EARLIEST — PPL `latest(field, ts)` lowers to
+    // SqlStdOperatorTable.ARG_MAX(field, ts); the rewrite emits substrait
+    // last_value(field) with ORDER BY ts ASC (last row of the ascending sort wins).
+    LATEST(Type.SIMPLE, SqlKind.ARG_MAX),
+
     // State-expanding — state grows with input rows per key
     PERCENTILE_CONT(Type.STATE_EXPANDING, SqlKind.PERCENTILE_CONT),
     PERCENTILE_DISC(Type.STATE_EXPANDING, SqlKind.PERCENTILE_DISC),
@@ -79,7 +92,7 @@ public enum AggregateFunction {
     /** Maps an aggregate function name to an AggregateFunction. Throws if not recognized. */
     public static AggregateFunction fromNameOrError(String name) {
         try {
-            return valueOf(name);
+            return valueOf(name.toUpperCase(java.util.Locale.ROOT));
         } catch (IllegalArgumentException e) {
             throw new IllegalStateException("Unrecognized aggregate function [" + name + "]", e);
         }
