@@ -8,6 +8,7 @@
 
 package org.opensearch.be.datafusion;
 
+import org.apache.calcite.rel.core.AggregateCall;
 import org.opensearch.analytics.spi.AggregateCapability;
 import org.opensearch.analytics.spi.AggregateFunction;
 import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
@@ -28,6 +29,7 @@ import org.opensearch.index.engine.dataformat.DataFormatRegistry;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.UnaryOperator;
 
 /**
  * SPI extension discovered by analytics-engine via {@code META-INF/services}.
@@ -83,7 +85,18 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
         AggregateFunction.MIN,
         AggregateFunction.MAX,
         AggregateFunction.COUNT,
-        AggregateFunction.AVG
+        AggregateFunction.AVG,
+        // PPL `first(field)` / `last(field)` — renamed to DataFusion's native first_value /
+        // last_value on the wire via ADDITIONAL_AGG_SIGS in DataFusionFragmentConvertor.
+        // Without ORDER BY, DataFusion returns an arbitrary element; the PPL "first/last in
+        // document order" guarantee is a documented tradeoff.
+        AggregateFunction.FIRST,
+        AggregateFunction.LAST,
+        // PPL `earliest(field, ts)` / `latest(field, ts)` lower to Calcite ARG_MIN / ARG_MAX
+        // and are rewritten by ArgMin/ArgMaxAggCallAdapter to first_value/last_value with an
+        // ORDER BY on the key.
+        AggregateFunction.ARG_MIN,
+        AggregateFunction.ARG_MAX
     );
 
     private final DataFusionPlugin plugin;
@@ -142,12 +155,31 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
                         caps.add(AggregateCapability.simple(func, Set.of(type), formats));
                     }
                 }
+                // PPL TAKE — collect first N values into a list. State-expanding (state grows with N).
+                caps.add(AggregateCapability.stateExpanding(AggregateFunction.TAKE, Set.copyOf(SUPPORTED_FIELD_TYPES), formats));
+                // PPL LIST — collect all values into an array (renamed to DataFusion's
+                // native array_agg on the wire). State-expanding (state grows with input size).
+                caps.add(AggregateCapability.stateExpanding(AggregateFunction.LIST, Set.copyOf(SUPPORTED_FIELD_TYPES), formats));
+                // PPL VALUES — DISTINCT + sorted-ascending variant of LIST. Also routes to
+                // array_agg but with AliasConfig-forced DISTINCT + sort-by-self.
+                caps.add(AggregateCapability.stateExpanding(AggregateFunction.VALUES, Set.copyOf(SUPPORTED_FIELD_TYPES), formats));
                 return Set.copyOf(caps);
             }
 
             @Override
             public Map<ScalarFunction, ScalarFunctionAdapter> scalarFunctionAdapters() {
                 return Map.of(ScalarFunction.TIMESTAMP, new TimestampFunctionAdapter(), ScalarFunction.SARG_PREDICATE, new SargAdapter());
+            }
+
+            @Override
+            public Map<AggregateFunction, UnaryOperator<AggregateCall>> aggregateCallAdapters() {
+                // VALUES is NOT here — PPL's values() coerces the operand to VARCHAR at the
+                // frontend layer (the AggregateCall's return type is VARCHAR ARRAY even for
+                // non-string operands), but substrait ARRAY_AGG preserves operand type. The
+                // two cannot be reconciled by Calcite operator substitution (which asserts
+                // typeMatchesInferred). VALUES reshape therefore lives in the aggregate
+                // function converter where the substrait invocation is assembled directly.
+                return Map.of(AggregateFunction.ARG_MIN, new ArgMinAggCallAdapter(), AggregateFunction.ARG_MAX, new ArgMaxAggCallAdapter());
             }
         };
     }

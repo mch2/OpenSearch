@@ -1,0 +1,110 @@
+%YAML 1.2
+---
+urn: extension:org.opensearch:opensearch_aggregate
+aggregate_functions:
+  # PPL `take(x, n)` — collect up to N values into a list. Backed by a custom
+  # Rust UDAF in datafusion. Concrete variants per operand type so the stock
+  # isthmus matcher's strict directMap lookup finds an exact key match.
+  - name: "take"
+    description: "Collect first N values into a list."
+    impls:
+      - args:
+          - name: x
+            value: i32
+          - name: n
+            value: i32
+        nullability: DECLARED_OUTPUT
+        decomposable: NONE
+        return: LIST?<i32>
+      - args:
+          - name: x
+            value: i64
+          - name: n
+            value: i32
+        nullability: DECLARED_OUTPUT
+        decomposable: NONE
+        return: LIST?<i64>
+      - args:
+          - name: x
+            value: fp32
+          - name: n
+            value: i32
+        nullability: DECLARED_OUTPUT
+        decomposable: NONE
+        return: LIST?<fp32>
+      - args:
+          - name: x
+            value: fp64
+          - name: n
+            value: i32
+        nullability: DECLARED_OUTPUT
+        decomposable: NONE
+        return: LIST?<fp64>
+      - args:
+          - name: x
+            value: string
+          - name: n
+            value: i32
+        nullability: DECLARED_OUTPUT
+        decomposable: NONE
+        return: LIST?<string>
+      - args:
+          - name: x
+            value: boolean
+          - name: n
+            value: i32
+        nullability: DECLARED_OUTPUT
+        decomposable: NONE
+        return: LIST?<boolean>
+      - args:
+          - name: x
+            value: timestamp
+          - name: n
+            value: i32
+        nullability: DECLARED_OUTPUT
+        decomposable: NONE
+        return: LIST?<timestamp>
+
+  # PPL `first(field)` — ADDITIONAL_AGG_SIGS maps PPL's "first" stub to substrait
+  # "first_value", which DataFusion's native first_value UDAF resolves. Without an
+  # explicit ORDER BY it returns an arbitrary element from the group (documented
+  # tradeoff vs PPL's "first in document order" semantics).
+  #
+  # Also targeted by ArgMinAggCallAdapter for PPL `earliest(field, ts)`:
+  # ARG_MIN(field, ts) is rewritten to first_value(field) ORDER BY ts ASC so
+  # DataFusion's first_value picks the row with the smallest timestamp.
+  - name: "first_value"
+    description: "Returns the first value in the input (optionally ORDER BY)."
+    impls:
+      - args:
+          - name: x
+            value: any1
+        nullability: DECLARED_OUTPUT
+        decomposable: NONE
+        return: any1?
+
+  # PPL `last(field)` — symmetric to first(field). Also targeted by
+  # ArgMaxAggCallAdapter for PPL `latest(field, ts)`: ARG_MAX(field, ts) rewrites
+  # to last_value(field) ORDER BY ts ASC.
+  - name: "last_value"
+    description: "Returns the last value in the input (optionally ORDER BY)."
+    impls:
+      - args:
+          - name: x
+            value: any1
+        nullability: DECLARED_OUTPUT
+        decomposable: NONE
+        return: any1?
+
+  # PPL `list(field)` (pure rename) and `values(field)` (DISTINCT + ORDER BY self,
+  # synthesized by ValuesAggCallAdapter) both route to DataFusion's native
+  # array_agg UDAF.
+  - name: "array_agg"
+    description: "Aggregate values into an array."
+    impls:
+      - args:
+          - name: x
+            value: any1
+        nullability: DECLARED_OUTPUT
+        decomposable: NONE
+        return: LIST?<any1>

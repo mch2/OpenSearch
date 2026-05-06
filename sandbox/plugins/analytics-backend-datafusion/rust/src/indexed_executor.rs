@@ -133,6 +133,11 @@ pub async fn execute_indexed_query(
         .build();
     let ctx = SessionContext::new_with_state(state);
     ctx.register_udf(create_index_filter_udf());
+    // Register OpenSearch-specific UDAFs (take, approx_count_distinct alias) —
+    // the indexed-executor session is separate from the coordinator session
+    // created by create_session_context, so it needs its own registration or
+    // substrait plan decode fails resolving plugin aggregate names.
+    crate::udaf::register_all(&ctx);
 
     // Resolve the object store for this shard's table URL (file://, s3://,
     // gs://, ... whatever the global runtime has registered). We pass this
