@@ -101,6 +101,13 @@ pub async unsafe fn create_session_context(
     let ctx = SessionContext::new_with_state(state);
     crate::udf::register_all(&ctx);
 
+    // Register OpenSearch scalar UDFs (convert_tz, span_bucket, width_bucket,
+    // minspan_bucket, span, range_bucket) on the shared SessionContext so PPL
+    // queries routed via searchWithSessionContext resolve them during substrait
+    // planning. Parallel to the calls in local_executor.rs / query_executor.rs /
+    // indexed_executor.rs.
+    crate::udf::register_all(&ctx);
+
     // Register default ListingTable for parquet scans
     let listing_options = ListingOptions::new(Arc::new(ParquetFormat::new()))
         .with_file_extension(".parquet")

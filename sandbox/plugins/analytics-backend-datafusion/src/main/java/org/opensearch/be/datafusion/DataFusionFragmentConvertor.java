@@ -90,10 +90,14 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
     private static final List<FunctionMappings.Sig> ADDITIONAL_SCALAR_SIGS = List.of(
         FunctionMappings.s(DelegatedPredicateFunction.FUNCTION, DelegatedPredicateFunction.NAME),
         FunctionMappings.s(SqlLibraryOperators.ILIKE, "ilike"),
-        FunctionMappings.s(DelegatedPredicateFunction.FUNCTION, DelegatedPredicateFunction.NAME),
         FunctionMappings.s(SqlLibraryOperators.DATE_PART, "date_part"),
         FunctionMappings.s(ConvertTzAdapter.LOCAL_CONVERT_TZ_OP, "convert_tz"),
-        FunctionMappings.s(UnixTimestampAdapter.LOCAL_TO_UNIXTIME_OP, "to_unixtime")
+        FunctionMappings.s(UnixTimestampAdapter.LOCAL_TO_UNIXTIME_OP, "to_unixtime"),
+        FunctionMappings.s(SpanBucketAdapter.LOCAL_SPAN_BUCKET_OP, "span_bucket"),
+        FunctionMappings.s(WidthBucketAdapter.LOCAL_WIDTH_BUCKET_OP, "width_bucket"),
+        FunctionMappings.s(MinspanBucketAdapter.LOCAL_MINSPAN_BUCKET_OP, "minspan_bucket"),
+        FunctionMappings.s(SpanAdapter.LOCAL_SPAN_OP, "span"),
+        FunctionMappings.s(RangeBucketAdapter.LOCAL_RANGE_BUCKET_OP, "range_bucket")
     );
 
     private final SimpleExtension.ExtensionCollection extensions;
@@ -139,8 +143,6 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
         Rel wrapper = convertStandalone(rewritten);
         return serializePlan(rewire(inner, wrapper));
     }
-
-    // ── Core conversion helpers ─────────────────────────────────────────────────
 
     private byte[] convertToSubstrait(RelNode fragment) {
         RelRoot root = RelRoot.of(fragment, SqlKind.SELECT);

@@ -133,6 +133,10 @@ pub async fn execute_indexed_query(
         .build();
     let ctx = SessionContext::new_with_state(state);
     ctx.register_udf(create_index_filter_udf());
+    // Register OpenSearch scalar UDFs (convert_tz, span_bucket, width_bucket,
+    // minspan_bucket, span, range_bucket) so PPL queries that route through the
+    // indexed execution path (searchWithSessionContext) can resolve them.
+    // Parallel to the call in local_executor.rs and query_executor.rs.
     crate::udf::register_all(&ctx);
 
     // Resolve the object store for this shard's table URL (file://, s3://,

@@ -12,6 +12,11 @@
 //!
 //! Functions registered here:
 //! - `convert_tz(ts, from_tz, to_tz)` — DST-aware timezone shift (chrono-tz)
+//! - `span_bucket(value, span)` — fixed-width numeric bucket label (PPL)
+//! - `width_bucket(value, num_bins, data_range, max_value)` — histogram bucket label (PPL)
+//! - `minspan_bucket(value, min_span, data_range, max_value)` — minimum-span bucket label (PPL)
+//! - `span(value, interval, unit)` — numeric-span kernel (PPL; date/time span bridged on coord)
+//! - `range_bucket(value, data_min, data_max, start_param, end_param)` — expansion-range bucket label (PPL)
 
 use datafusion::arrow::datatypes::{DataType, TimeUnit};
 use datafusion::common::plan_err;
@@ -67,17 +72,15 @@ pub(crate) fn coerce_slot(
             ),
         },
         CoerceMode::Int64 => match observed {
-            Int8 | Int16 | Int32 | Int64 | UInt8 | UInt16 | UInt32 | UInt64 | Float32 | Float64 => {
-                Ok(Int64)
-            }
+            Int8 | Int16 | Int32 | Int64 | UInt8 | UInt16 | UInt32 | UInt64 | Float32 | Float64
+            | Decimal128(_, _) | Decimal256(_, _) => Ok(Int64),
             other => plan_err!(
                 "{udf_name}: arg {slot_index} expected integer or float, got {other:?}"
             ),
         },
         CoerceMode::Float64 => match observed {
-            Int8 | Int16 | Int32 | Int64 | UInt8 | UInt16 | UInt32 | UInt64 | Float32 | Float64 => {
-                Ok(Float64)
-            }
+            Int8 | Int16 | Int32 | Int64 | UInt8 | UInt16 | UInt32 | UInt64 | Float32 | Float64
+            | Decimal128(_, _) | Decimal256(_, _) => Ok(Float64),
             other => plan_err!(
                 "{udf_name}: arg {slot_index} expected integer or float, got {other:?}"
             ),
@@ -113,10 +116,22 @@ pub(crate) fn coerce_args(
 }
 
 pub mod convert_tz;
+pub mod minspan_bucket;
+pub mod range_bucket;
+pub mod span;
+pub mod span_bucket;
+pub mod width_bucket;
 
 pub fn register_all(ctx: &SessionContext) {
     convert_tz::register_all(ctx);
-    log::info!("OpenSearch UDF register_all: convert_tz registered");
+    span_bucket::register_all(ctx);
+    width_bucket::register_all(ctx);
+    minspan_bucket::register_all(ctx);
+    span::register_all(ctx);
+    range_bucket::register_all(ctx);
+    log::info!(
+        "OpenSearch UDF register_all: convert_tz, span_bucket, width_bucket, minspan_bucket, span, range_bucket registered"
+    );
 }
 
 #[cfg(test)]
@@ -204,6 +219,17 @@ mod tests {
         assert!(err.to_string().contains("expected integer or float"));
     }
 
+    #[test]
+    fn int64_accepts_decimal_types() {
+        // PPL emits Decimal128(p,s) literals (e.g. `span=2.5` becomes
+        // Decimal128(2, 1)). The Int64 coerce-mode must accept and canonicalize.
+        for observed in [DataType::Decimal128(2, 1), DataType::Decimal256(10, 3)] {
+            let result = coerce_slot("i", 0, &observed, CoerceMode::Int64).unwrap();
+            assert_eq!(result, DataType::Int64);
+        }
+    }
+
+
     // ── Float64 ────────────────────────────────────────────────────────────
     #[test]
     fn float64_accepts_every_number() {
@@ -224,6 +250,16 @@ mod tests {
         let err = coerce_slot("f", 0, &DataType::Utf8, CoerceMode::Float64).unwrap_err();
         assert!(err.to_string().contains("expected integer or float"));
     }
+
+    #[test]
+    fn float64_accepts_decimal_types() {
+        // Decimal128 flows in for fractional literals like `span=2.5`.
+        for observed in [DataType::Decimal128(2, 1), DataType::Decimal256(10, 3)] {
+            let result = coerce_slot("f", 0, &observed, CoerceMode::Float64).unwrap();
+            assert_eq!(result, DataType::Float64);
+        }
+    }
+
 
     // ── Utf8 ───────────────────────────────────────────────────────────────
     #[test]

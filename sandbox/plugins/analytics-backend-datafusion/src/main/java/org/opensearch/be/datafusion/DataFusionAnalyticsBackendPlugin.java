@@ -92,6 +92,7 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
         ScalarFunction.CEIL,
         ScalarFunction.CAST,
         ScalarFunction.SARG_PREDICATE,
+        // comparison / arithmetic / logical operators in eval-style projections (from operators PR)
         ScalarFunction.EQUALS,
         ScalarFunction.NOT_EQUALS,
         ScalarFunction.GREATER_THAN,
@@ -105,9 +106,14 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
         ScalarFunction.TIMES,
         ScalarFunction.DIVIDE,
         ScalarFunction.MOD,
-        ScalarFunction.YEAR,
-        ScalarFunction.CONVERT_TZ,
-        ScalarFunction.UNIX_TIMESTAMP
+        ScalarFunction.YEAR,            // rewritten to date_part('year', ts) by YearAdapter
+        ScalarFunction.CONVERT_TZ,      // resolved to the convert_tz Rust UDF
+        ScalarFunction.UNIX_TIMESTAMP,  // wraps convert_tz in the IT assertion
+        ScalarFunction.SPAN_BUCKET,     // resolved to the span_bucket Rust UDF via SpanBucketAdapter
+        ScalarFunction.WIDTH_BUCKET,    // resolved to the width_bucket Rust UDF via WidthBucketAdapter
+        ScalarFunction.MINSPAN_BUCKET,  // resolved to the minspan_bucket Rust UDF via MinspanBucketAdapter
+        ScalarFunction.SPAN,            // resolved to the span Rust UDF via SpanAdapter (numeric branch only)
+        ScalarFunction.RANGE_BUCKET     // resolved to the range_bucket Rust UDF via RangeBucketAdapter
     );
 
     private static final Set<AggregateFunction> AGG_FUNCTIONS = Set.of(
@@ -188,7 +194,25 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
                     Map.entry(ScalarFunction.LIKE, new LikeAdapter()),
                     Map.entry(ScalarFunction.YEAR, new YearAdapter()),
                     Map.entry(ScalarFunction.CONVERT_TZ, new ConvertTzAdapter()),
-                    Map.entry(ScalarFunction.UNIX_TIMESTAMP, new UnixTimestampAdapter())
+                    Map.entry(ScalarFunction.UNIX_TIMESTAMP, new UnixTimestampAdapter()),
+                    // SpanBucketAdapter rewrites PPL's SPAN_BUCKET to a locally-declared
+                    // span_bucket SqlFunction whose Sig resolves to the span_bucket Rust UDF.
+                    Map.entry(ScalarFunction.SPAN_BUCKET, new SpanBucketAdapter()),
+                    // WidthBucketAdapter rewrites PPL's WIDTH_BUCKET to a locally-declared
+                    // width_bucket SqlFunction whose Sig resolves to the width_bucket Rust UDF.
+                    Map.entry(ScalarFunction.WIDTH_BUCKET, new WidthBucketAdapter()),
+                    // MinspanBucketAdapter rewrites PPL's MINSPAN_BUCKET to a locally-declared
+                    // minspan_bucket SqlFunction whose Sig resolves to the minspan_bucket Rust UDF.
+                    Map.entry(ScalarFunction.MINSPAN_BUCKET, new MinspanBucketAdapter()),
+                    // SpanAdapter rewrites PPL's polymorphic SPAN (numeric branch) to a
+                    // locally-declared span SqlFunction whose Sig resolves to the span Rust UDF.
+                    // Date/time SPAN is bridged on the coordinator — see SpanAdapter Javadoc.
+                    Map.entry(ScalarFunction.SPAN, new SpanAdapter()),
+                    // RangeBucketAdapter rewrites PPL's RANGE_BUCKET to a locally-declared
+                    // range_bucket SqlFunction whose Sig resolves to the range_bucket Rust UDF.
+                    // End-to-end via PPL's `bin start=... end=...` command additionally
+                    // requires the backend to support empty-partition window aggregates.
+                    Map.entry(ScalarFunction.RANGE_BUCKET, new RangeBucketAdapter())
                 );
             }
         };
