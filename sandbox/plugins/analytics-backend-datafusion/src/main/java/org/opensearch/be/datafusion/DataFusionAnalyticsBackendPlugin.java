@@ -112,6 +112,26 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
         AggregateFunction.AVG
     );
 
+    // Statistical aggregates (Group D) — DataFusion evaluates these natively via its built-in
+    // stddev/var UDAFs. PPL emits these as Calcite NullableSqlAvgAggFunction(SqlKind.STDDEV_POP)
+    // etc. Isthmus's default FunctionMappings.AGGREGATE_SIGS does not map these SqlKinds, so
+    // resolution relies on the isthmus converter falling back to operator-name matching against
+    // the Substrait core extensions (functions_arithmetic.yaml exposes `std_dev` and `variance`
+    // with a SAMPLE/POPULATION option). Declared on numeric field types only; returns fp64.
+    private static final Set<AggregateFunction> STATISTICAL_AGG_FUNCTIONS = Set.of(
+        AggregateFunction.STDDEV_POP,
+        AggregateFunction.STDDEV_SAMP,
+        AggregateFunction.VAR_POP,
+        AggregateFunction.VAR_SAMP
+    );
+
+    // Approximate aggregates (Group D) — APPROX_COUNT_DISTINCT covers PPL `distinct_count_approx`,
+    // `dc`, and `distinct_count`. Isthmus' AGGREGATE_SIGS maps SqlStdOperatorTable.APPROX_COUNT_DISTINCT
+    // to the Substrait core name `approx_count_distinct` (functions_aggregate_approx.yaml); the
+    // DataFusion substrait consumer maps that to its HyperLogLog built-in. Declared on every
+    // supported field type (HLL is type-agnostic).
+    private static final Set<AggregateFunction> APPROXIMATE_AGG_FUNCTIONS = Set.of(AggregateFunction.APPROX_COUNT_DISTINCT);
+
     private final DataFusionPlugin plugin;
 
     public DataFusionAnalyticsBackendPlugin(DataFusionPlugin plugin) {
@@ -166,6 +186,18 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
                 for (AggregateFunction func : AGG_FUNCTIONS) {
                     for (FieldType type : SUPPORTED_FIELD_TYPES) {
                         caps.add(AggregateCapability.simple(func, Set.of(type), formats));
+                    }
+                }
+                // Statistical aggregates — numeric inputs only.
+                for (AggregateFunction func : STATISTICAL_AGG_FUNCTIONS) {
+                    for (FieldType type : FieldType.numeric()) {
+                        caps.add(AggregateCapability.statistical(func, Set.of(type), formats));
+                    }
+                }
+                // Approximate aggregates — HyperLogLog is type-agnostic.
+                for (AggregateFunction func : APPROXIMATE_AGG_FUNCTIONS) {
+                    for (FieldType type : SUPPORTED_FIELD_TYPES) {
+                        caps.add(AggregateCapability.approximate(func, Set.of(type), formats));
                     }
                 }
                 return Set.copyOf(caps);
