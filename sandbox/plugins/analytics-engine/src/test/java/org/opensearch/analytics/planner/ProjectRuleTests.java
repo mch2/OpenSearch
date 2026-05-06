@@ -8,12 +8,15 @@
 
 package org.opensearch.analytics.planner;
 
+import com.google.common.collect.ImmutableList;
 import org.apache.calcite.plan.RelOptTable;
 import org.apache.calcite.plan.RelOptUtil;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.logical.LogicalProject;
 import org.apache.calcite.rex.RexCall;
+import org.apache.calcite.rex.RexFieldCollation;
 import org.apache.calcite.rex.RexNode;
+import org.apache.calcite.rex.RexWindowBounds;
 import org.apache.calcite.sql.SqlFunction;
 import org.apache.calcite.sql.SqlFunctionCategory;
 import org.apache.calcite.sql.SqlKind;
@@ -32,6 +35,8 @@ import org.opensearch.analytics.spi.DelegationType;
 import org.opensearch.analytics.spi.FieldType;
 import org.opensearch.analytics.spi.ProjectCapability;
 import org.opensearch.analytics.spi.ScalarFunction;
+import org.opensearch.analytics.spi.WindowFunction;
+import org.opensearch.analytics.spi.WindowFunctionCapability;
 
 import java.util.ArrayList;
 import java.util.EnumSet;
@@ -637,5 +642,85 @@ public class ProjectRuleTests extends BasePlannerRulesTests {
         for (String name : names)
             caps.add(new ProjectCapability.Opaque(name, formats));
         return caps;
+    }
+
+    // ---- Window functions (RexOver in a Project) ----
+
+    /** Running-sum shape: {@code SUM(value) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)}. */
+    private RexNode makeRunningSumOver() {
+        return rexBuilder.makeOver(
+            typeFactory.createSqlType(SqlTypeName.INTEGER),
+            SqlStdOperatorTable.SUM,
+            List.of(rexBuilder.makeInputRef(typeFactory.createSqlType(SqlTypeName.INTEGER), 1)),
+            List.of(),
+            ImmutableList.<RexFieldCollation>of(),
+            RexWindowBounds.UNBOUNDED_PRECEDING,
+            RexWindowBounds.CURRENT_ROW,
+            true,  // rows (vs range)
+            true,  // allowPartial
+            false, // nullWhenCountZero
+            false, // distinct
+            false  // ignoreNulls
+        );
+    }
+
+    public void testWindowFunctionNativelySupported() {
+        MockDataFusionBackend dfWithSumWindow = new MockDataFusionBackend() {
+            @Override
+            protected Set<WindowFunctionCapability> windowFunctionCapabilities() {
+                return Set.of(
+                    new WindowFunctionCapability(
+                        WindowFunction.SUM,
+                        Set.of(FieldType.INTEGER),
+                        Set.of(MockDataFusionBackend.PARQUET_DATA_FORMAT)
+                    )
+                );
+            }
+        };
+        OpenSearchProject result = runProject("parquet", List.of(dfWithSumWindow, LUCENE), makeRunningSumOver());
+        assertTrue(result.getViableBackends().contains(MockDataFusionBackend.NAME));
+        assertAnnotation(result.getProjects().get(0), MockDataFusionBackend.NAME);
+    }
+
+    public void testWindowFunctionUnsupportedErrors() {
+        // Backend declares no windowFunctionCapabilities → the rule must reject a RexOver.
+        RelOptTable table = mockTable(
+            "test_index",
+            new String[] { "name", "value" },
+            new SqlTypeName[] { SqlTypeName.VARCHAR, SqlTypeName.INTEGER }
+        );
+        LogicalProject project = LogicalProject.create(stubScan(table), List.of(), List.of(makeRunningSumOver()), List.of("running_sum"));
+        PlannerContext context = buildContext("parquet", nameValueFields());
+
+        IllegalStateException exception = expectThrows(IllegalStateException.class, () -> runPlanner(project, context));
+        assertTrue(
+            "Expected message about no backend supporting window function, got: " + exception.getMessage(),
+            exception.getMessage().contains("window function")
+        );
+    }
+
+    public void testWindowFunctionStripReturnsOriginalRexOver() {
+        // strip path must unwrap AnnotatedProjectExpression back to the original RexOver so
+        // isthmus's RexExpressionConverter can dispatch to visitOver(RexOver).
+        MockDataFusionBackend dfWithSumWindow = new MockDataFusionBackend() {
+            @Override
+            protected Set<WindowFunctionCapability> windowFunctionCapabilities() {
+                return Set.of(
+                    new WindowFunctionCapability(
+                        WindowFunction.SUM,
+                        Set.of(FieldType.INTEGER),
+                        Set.of(MockDataFusionBackend.PARQUET_DATA_FORMAT)
+                    )
+                );
+            }
+        };
+        OpenSearchProject annotated = runProject("parquet", List.of(dfWithSumWindow, LUCENE), makeRunningSumOver());
+        RelNode stripped = annotated.stripAnnotations(annotated.getInputs());
+        assertTrue("Stripped plan should be a plain LogicalProject", stripped instanceof LogicalProject);
+        RexNode strippedExpr = ((LogicalProject) stripped).getProjects().get(0);
+        assertTrue(
+            "Stripped RexNode must be the original RexOver, got " + strippedExpr.getClass().getSimpleName(),
+            strippedExpr instanceof org.apache.calcite.rex.RexOver
+        );
     }
 }

@@ -48,6 +48,16 @@ public interface BackendCapabilityProvider {
     }
 
     /**
+     * Window functions this backend can evaluate inside a {@code RexOver} projection
+     * expression, scoped to function, field type, and data format.
+     * <p>Used by {@link org.opensearch.analytics.spi} planner rules to decide whether a
+     * backend can execute a {@code RexOver} call embedded in a Project node.
+     */
+    default Set<WindowFunctionCapability> windowFunctionCapabilities() {
+        return Set.of();
+    }
+
+    /**
      * Delegation types this backend can initiate — it has a custom physical operator
      * that calls Analytics Core's delegation API to offload work to another backend.
      */

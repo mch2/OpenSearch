@@ -25,6 +25,8 @@ import org.opensearch.analytics.spi.ScalarFunctionAdapter;
 import org.opensearch.analytics.spi.ScanCapability;
 import org.opensearch.analytics.spi.SearchExecEngineProvider;
 import org.opensearch.analytics.spi.StdOperatorRewriteAdapter;
+import org.opensearch.analytics.spi.WindowFunction;
+import org.opensearch.analytics.spi.WindowFunctionCapability;
 import org.opensearch.index.engine.dataformat.DataFormatRegistry;
 
 import java.util.HashSet;
@@ -119,6 +121,13 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
         AggregateFunction.AVG
     );
 
+    // Window functions declared for the minimum-viable track: SUM as a windowed aggregate. Other
+    // window-shape PPL commands (trendline, eventstats, appendcol-via-ROW_NUMBER, bin) will add
+    // entries here as they land. Each function/type combination listed here goes through isthmus's
+    // WindowFunctionConverter (already wired in DataFusionFragmentConvertor) and DataFusion's
+    // native substrait consumer — no new conversion path.
+    private static final Set<WindowFunction> WINDOW_FUNCTIONS = Set.of(WindowFunction.SUM);
+
     private final DataFusionPlugin plugin;
 
     public DataFusionAnalyticsBackendPlugin(DataFusionPlugin plugin) {
@@ -173,6 +182,18 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
                 for (AggregateFunction func : AGG_FUNCTIONS) {
                     for (FieldType type : SUPPORTED_FIELD_TYPES) {
                         caps.add(AggregateCapability.simple(func, Set.of(type), formats));
+                    }
+                }
+                return Set.copyOf(caps);
+            }
+
+            @Override
+            public Set<WindowFunctionCapability> windowFunctionCapabilities() {
+                Set<String> formats = Set.copyOf(plugin.getSupportedFormats());
+                Set<WindowFunctionCapability> caps = new HashSet<>();
+                for (WindowFunction func : WINDOW_FUNCTIONS) {
+                    for (FieldType type : SUPPORTED_FIELD_TYPES) {
+                        caps.add(new WindowFunctionCapability(func, Set.of(type), formats));
                     }
                 }
                 return Set.copyOf(caps);

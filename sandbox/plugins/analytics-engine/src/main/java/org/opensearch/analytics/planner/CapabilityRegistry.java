@@ -20,6 +20,8 @@ import org.opensearch.analytics.spi.FilterCapability;
 import org.opensearch.analytics.spi.ProjectCapability;
 import org.opensearch.analytics.spi.ScalarFunction;
 import org.opensearch.analytics.spi.ScanCapability;
+import org.opensearch.analytics.spi.WindowFunction;
+import org.opensearch.analytics.spi.WindowFunctionCapability;
 import org.opensearch.cluster.metadata.IndexMetadata;
 
 import java.util.ArrayList;
@@ -66,6 +68,8 @@ public class CapabilityRegistry {
     private final Map<ScalarKey, List<String>> literalScalarIndex = new HashMap<>();
     // Opaque operations keyed by name (e.g. "painless") rather than a typed key
     private final Map<String, Map<String, List<String>>> opaqueIndex = new HashMap<>();
+    // Window functions index: (WindowFunction, FieldType) → format → backends
+    private final Map<WindowKey, Map<String, List<String>>> windowIndex = new HashMap<>();
 
     // Non-format-scoped indexes
     private final Map<EngineCapability, List<String>> operatorIndex = new HashMap<>();
@@ -80,6 +84,9 @@ public class CapabilityRegistry {
     private final Set<String> filterCapableBackends = new HashSet<>();
     private final Set<String> aggregateCapableBackends = new HashSet<>();
     private final Set<String> projectCapableBackends = new HashSet<>();
+    // Backends declaring any WindowFunctionCapability. A RexOver-carrying projection requires
+    // the backend to appear in this set on top of being projectCapable.
+    private final Set<String> windowCapableBackends = new HashSet<>();
 
     public CapabilityRegistry(
         List<AnalyticsSearchBackendPlugin> backends,
@@ -169,6 +176,17 @@ public class CapabilityRegistry {
                 }
                 projectCapableBackends.add(name);
             }
+            for (WindowFunctionCapability cap : caps.windowFunctionCapabilities()) {
+                for (FieldType fieldType : cap.fieldTypes()) {
+                    addToFormatMap(windowIndex, new WindowKey(cap.function(), fieldType), cap.formats(), name);
+                }
+                windowCapableBackends.add(name);
+                // A RexOver is expressed inside a Project operator, so backends declaring
+                // window capabilities implicitly carry Project capability. Add them here so
+                // OpenSearchProjectRule's projectCapableBackends gate doesn't reject them when
+                // the only projection expression is a window call.
+                projectCapableBackends.add(name);
+            }
         }
     }
 
@@ -202,6 +220,10 @@ public class CapabilityRegistry {
 
     public Set<String> projectCapableBackends() {
         return projectCapableBackends;
+    }
+
+    public Set<String> windowCapableBackends() {
+        return windowCapableBackends;
     }
 
     // ---- Scan lookups ----
@@ -288,6 +310,15 @@ public class CapabilityRegistry {
         return allBackends(opaqueIndex.getOrDefault(name, Map.of()));
     }
 
+    /**
+     * Backends declaring window support for ({@code function}, {@code fieldType}) across any
+     * format. Window calls project derived columns with no specific storage format, so format
+     * scoping is not applied at match time — the gate is function + field type.
+     */
+    public List<String> windowBackendsAnyFormat(WindowFunction function, FieldType fieldType) {
+        return allBackends(windowIndex.getOrDefault(new WindowKey(function, fieldType), Map.of()));
+    }
+
     // ---- Annotation handling ----
 
     /**
@@ -348,5 +379,8 @@ public class CapabilityRegistry {
     }
 
     private record FullTextParamKey(ScalarFunction function, FieldType fieldType, String backendName) {
+    }
+
+    private record WindowKey(WindowFunction function, FieldType fieldType) {
     }
 }
