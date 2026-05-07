@@ -12,8 +12,10 @@ import org.opensearch.client.Request;
 import org.opensearch.client.Response;
 
 import java.io.IOException;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * End-to-end integration test for PPL {@code streamstats sum(...)} on the analytics-engine route.
@@ -36,13 +38,18 @@ import java.util.Map;
 public class StreamstatsCommandIT extends AnalyticsRestTestCase {
 
     private static final Dataset DATASET = new Dataset("calcs", "calcs");
+    private static final Dataset DATASET_MULTI_SHARD = new Dataset("calcs", "calcs_multi_shard");
+    private static final int MULTI_SHARD_COUNT = 3;
 
-    private static boolean dataProvisioned = false;
+    private static final Set<String> PROVISIONED = new HashSet<>();
 
     private void ensureDataProvisioned() throws IOException {
-        if (dataProvisioned == false) {
-            DatasetProvisioner.provision(client(), DATASET);
-            dataProvisioned = true;
+        ensureProvisioned(DATASET, 0);
+    }
+
+    private void ensureProvisioned(Dataset dataset, int numberOfShards) throws IOException {
+        if (PROVISIONED.add(dataset.indexName)) {
+            DatasetProvisioner.provision(client(), dataset, numberOfShards);
         }
     }
 
@@ -82,8 +89,54 @@ public class StreamstatsCommandIT extends AnalyticsRestTestCase {
         }
     }
 
+    /**
+     * Multi-shard correctness check for the same running-sum query as
+     * {@link #testStreamstatsRunningSumOverInteger()}. The dataset is provisioned into a
+     * {@value #MULTI_SHARD_COUNT}-shard index using the same documents.
+     *
+     * <p>Diagnostic: a global running window must execute over a totally-ordered stream.
+     * If {@code RexOver(SUM ... OVER (ROWS UNBOUNDED PRECEDING))} were pushed to data nodes
+     * and computed per-shard, each shard would emit its own independent running sum and the
+     * coordinator would concatenate them — producing a result that is not a valid global
+     * running sum. This test catches that latent bug; the single-shard test cannot.
+     *
+     * <p>Pinned values are identical to the single-shard test because the global running sum
+     * over the same documents in the same key order is the same number, regardless of how
+     * many shards the data is spread across. A failure here means the planner is not
+     * coercing the windowed Project to a SINGLETON-distributed input.
+     */
+    public void testStreamstatsRunningSumOverInteger_multiShard() throws IOException {
+        ensureProvisioned(DATASET_MULTI_SHARD, MULTI_SHARD_COUNT);
+        Map<String, Object> response = executePplOnIndex(
+            DATASET_MULTI_SHARD.indexName,
+            "source=" + DATASET_MULTI_SHARD.indexName
+                + " | sort key | streamstats sum(int0) as running_sum | fields key, int0, running_sum | head 5"
+        );
+
+        @SuppressWarnings("unchecked")
+        List<List<Object>> rows = (List<List<Object>>) response.get("rows");
+        assertNotNull("Response missing 'rows'", rows);
+        assertEquals("Expected 5 rows from head 5", 5, rows.size());
+
+        Integer[] expectedInt0 = { 1, null, null, null, 7 };
+        long[] expectedRunningSum = { 1, 1, 1, 1, 8 };
+        for (int i = 0; i < rows.size(); i++) {
+            List<Object> row = rows.get(i);
+            if (expectedInt0[i] == null) {
+                assertNull("int0 at row " + i + " should be null", row.get(1));
+            } else {
+                assertEquals("int0 at row " + i, expectedInt0[i].intValue(), ((Number) row.get(1)).intValue());
+            }
+            assertEquals("running_sum at row " + i, expectedRunningSum[i], ((Number) row.get(2)).longValue());
+        }
+    }
+
     private Map<String, Object> executePpl(String ppl) throws IOException {
         ensureDataProvisioned();
+        return executePplOnIndex(DATASET.indexName, ppl);
+    }
+
+    private Map<String, Object> executePplOnIndex(String indexName, String ppl) throws IOException {
         Request request = new Request("POST", "/_analytics/ppl");
         request.setJsonEntity("{\"query\": \"" + escapeJson(ppl) + "\"}");
         Response response = client().performRequest(request);

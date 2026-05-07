@@ -677,7 +677,7 @@ public class ProjectRuleTests extends BasePlannerRulesTests {
                 );
             }
         };
-        OpenSearchProject result = runProject("parquet", List.of(dfWithSumWindow, LUCENE), makeRunningSumOver());
+        OpenSearchProject result = runWindowedProject("parquet", List.of(dfWithSumWindow, LUCENE), makeRunningSumOver());
         assertTrue(result.getViableBackends().contains(MockDataFusionBackend.NAME));
         assertAnnotation(result.getProjects().get(0), MockDataFusionBackend.NAME);
     }
@@ -699,6 +699,37 @@ public class ProjectRuleTests extends BasePlannerRulesTests {
         );
     }
 
+    /**
+     * Variant of {@link #runProject(String, List, RexNode...)} for projections whose first
+     * expression is a {@link org.apache.calcite.rex.RexOver}. Asserts the post-CBO pipeline is
+     * {@code [OpenSearchProject, OpenSearchExchangeReducer, OpenSearchTableScan]} — i.e. that
+     * {@link OpenSearchProject#computeSelfCost} forced its input to SINGLETON, causing Volcano
+     * to insert a reducer below the windowed Project so the windowed compute runs after gather.
+     * Without that requirement the running window would execute per-shard and produce
+     * incorrect global results on a multi-shard index.
+     */
+    private OpenSearchProject runWindowedProject(String format, List<AnalyticsSearchBackendPlugin> backends, RexNode... exprs) {
+        RelOptTable table = mockTable(
+            "test_index",
+            new String[] { "name", "value" },
+            new SqlTypeName[] { SqlTypeName.VARCHAR, SqlTypeName.INTEGER }
+        );
+        List<String> fieldNames = new ArrayList<>();
+        for (int i = 0; i < exprs.length; i++)
+            fieldNames.add("col_" + i);
+        LogicalProject project = LogicalProject.create(stubScan(table), List.of(), List.of(exprs), fieldNames);
+        PlannerContext context = buildContext(format, nameValueFields(), backends);
+        RelNode result = unwrapExchange(runPlanner(project, context));
+        logger.info("Plan:\n{}", RelOptUtil.toString(result));
+        assertTrue("Expected OpenSearchProject", result instanceof OpenSearchProject);
+        assertPipelineViableBackends(
+            result,
+            List.of(OpenSearchProject.class, OpenSearchExchangeReducer.class, OpenSearchTableScan.class),
+            Set.of(MockDataFusionBackend.NAME)
+        );
+        return (OpenSearchProject) result;
+    }
+
     public void testWindowFunctionStripReturnsOriginalRexOver() {
         // strip path must unwrap AnnotatedProjectExpression back to the original RexOver so
         // isthmus's RexExpressionConverter can dispatch to visitOver(RexOver).
@@ -714,7 +745,7 @@ public class ProjectRuleTests extends BasePlannerRulesTests {
                 );
             }
         };
-        OpenSearchProject annotated = runProject("parquet", List.of(dfWithSumWindow, LUCENE), makeRunningSumOver());
+        OpenSearchProject annotated = runWindowedProject("parquet", List.of(dfWithSumWindow, LUCENE), makeRunningSumOver());
         RelNode stripped = annotated.stripAnnotations(annotated.getInputs());
         assertTrue("Stripped plan should be a plain LogicalProject", stripped instanceof LogicalProject);
         RexNode strippedExpr = ((LogicalProject) stripped).getProjects().get(0);
