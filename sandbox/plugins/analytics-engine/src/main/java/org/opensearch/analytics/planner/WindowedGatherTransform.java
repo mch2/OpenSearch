@@ -120,9 +120,10 @@ final class WindowedGatherTransform {
 
         if (anyChildAffected) {
             // A windowed Project is somewhere below. If this node is distribution-preserving,
-            // propagate the SINGLETON traits up. Otherwise terminate propagation here — the
-            // child's SINGLETON output is already correct, this node is just a normal boundary.
-            if (isDistributionPreserving(node)) {
+            // propagate the SINGLETON traits up — operators above the windowed Project always
+            // need to run on coordinator because they consume already-windowed output that
+            // only exists post-gather. Otherwise terminate propagation here.
+            if (propagatesSingletonUpward(node)) {
                 RelNode rewritten = node.copy(node.getTraitSet().replace(distTraitDef.singleton()), rewrittenInputs);
                 return new Result(rewritten, true);
             }
@@ -135,13 +136,21 @@ final class WindowedGatherTransform {
     }
 
     /**
-     * Walk down through distribution-preserving operators inserting the gather at the deepest
-     * possible position. Each preserving operator on the way down is rebuilt with SINGLETON
-     * traits over its rewritten input. The first non-preserving node we hit (Scan, Aggregate,
-     * Union, etc.) becomes the gather's input.
+     * Walk down through operators that <em>must</em> execute over a SINGLETON-gathered stream
+     * (i.e. the gather must be inserted below them). The first operator that <em>doesn't</em>
+     * require a gathered input becomes the gather's location: the gather is inserted above it
+     * so the operator stays on the data node and runs per-shard.
+     *
+     * <p>Today only {@link OpenSearchSort} requires gathered input — global ordering and
+     * top-K need a SINGLETON stream, otherwise per-shard sort + concat ≠ global sort. Filters
+     * and column-projections are row-local; running them per-shard before the gather is both
+     * correct and cheaper (the filter drops rows that would otherwise be shipped, and a
+     * narrowing project shrinks the per-row payload through the exchange). Treating them as
+     * boundaries here is the difference between &quot;ship everything to coordinator and
+     * filter/project there&quot; and &quot;filter/project per-shard then ship the survivors.&quot;
      */
     private static RelNode lowerGatherInChain(RelNode node, OpenSearchDistributionTraitDef distTraitDef) {
-        if (isDistributionPreserving(node)) {
+        if (requiresGatheredInput(node)) {
             RelNode innerRewritten = lowerGatherInChain(node.getInputs().getFirst(), distTraitDef);
             return node.copy(node.getTraitSet().replace(distTraitDef.singleton()), List.of(innerRewritten));
         }
@@ -183,18 +192,31 @@ final class WindowedGatherTransform {
     }
 
     /**
-     * Operators whose output distribution is the same as their (single) input's distribution.
-     * For these, propagating a SINGLETON requirement up through the operator simply means
-     * rebuilding the operator with SINGLETON traits — no operator-specific logic needed.
+     * Used by the upward walk: when a child below is windowed-affected, this operator must
+     * also run on the coordinator (its input is now a gathered stream). Operators above the
+     * windowed Project always need SINGLETON traits because they consume already-windowed
+     * output that only exists post-gather.
+     *
+     * <p>The windowed Project itself returns false here because the {@link #walk} method has
+     * a dedicated branch for it that flips the SINGLETON requirement on. A non-windowed
+     * Project, Filter, or Sort sitting above the windowed Project does propagate.
      */
-    private static boolean isDistributionPreserving(RelNode node) {
-        // Skip the windowed Project itself — it's handled in {@link #walk} as the boundary
-        // that flips the SINGLETON requirement on. A non-windowed OpenSearchProject IS
-        // distribution-preserving and should propagate.
+    private static boolean propagatesSingletonUpward(RelNode node) {
         if (node instanceof OpenSearchProject && isWindowedProject(node)) {
             return false;
         }
         return node instanceof OpenSearchSort || node instanceof OpenSearchProject || node instanceof OpenSearchFilter;
+    }
+
+    /**
+     * Used by the downward walk: should the gather be inserted <em>below</em> this operator?
+     * True only for operators whose semantics genuinely require a SINGLETON input — Sort
+     * (global ordering / top-K) needs the entire stream on one node. Filter and column-
+     * projection are row-local: running them per-shard before the gather is correct and
+     * cheaper. Returning false here makes them boundaries, so the gather goes above them.
+     */
+    private static boolean requiresGatheredInput(RelNode node) {
+        return node instanceof OpenSearchSort;
     }
 
     private static boolean inputsChanged(RelNode node, List<RelNode> rewrittenInputs) {

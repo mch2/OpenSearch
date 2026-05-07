@@ -12,7 +12,6 @@ import org.apache.calcite.plan.RelOptPlanner;
 import org.apache.calcite.plan.RelTrait;
 import org.apache.calcite.plan.RelTraitDef;
 import org.apache.calcite.rel.RelDistribution;
-import org.apache.calcite.util.mapping.Mapping;
 import org.apache.calcite.util.mapping.Mappings;
 
 import java.util.List;
@@ -74,7 +73,18 @@ public class OpenSearchDistribution implements RelDistribution {
         if (type != Type.HASH_DISTRIBUTED || keys.isEmpty()) {
             return this;
         }
-        List<Integer> newKeys = Mappings.apply2((Mapping) mapping, keys);
+        // Calcite's contract on RelDistribution.apply (RelDistribution.java:53-67) is to
+        // silently degrade to ANY if any HASH key cannot be mapped through the projection.
+        // Mappings.apply2 throws on an unmapped key, which is the wrong behavior here — fall
+        // back to ANY when the mapping drops a key we depend on.
+        List<Integer> newKeys = new java.util.ArrayList<>(keys.size());
+        for (int key : keys) {
+            int target = mapping.getTargetOpt(key);
+            if (target < 0) {
+                return new OpenSearchDistribution(traitDef, Type.ANY, List.of());
+            }
+            newKeys.add(target);
+        }
         return new OpenSearchDistribution(traitDef, Type.HASH_DISTRIBUTED, newKeys);
     }
 
