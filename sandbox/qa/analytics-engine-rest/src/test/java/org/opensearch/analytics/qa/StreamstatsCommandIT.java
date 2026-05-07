@@ -131,6 +131,85 @@ public class StreamstatsCommandIT extends AnalyticsRestTestCase {
         }
     }
 
+    /**
+     * Running count of rows. {@code count()} (no field arg) counts every row regardless of null
+     * values, so the cumulative count is the row sequence number 1, 2, 3, ….
+     */
+    public void testStreamstatsRunningCountOverRows() throws IOException {
+        Map<String, Object> response = executePpl(
+            "source=" + DATASET.indexName + " | sort key | streamstats count() as running_count | fields key, running_count | head 5"
+        );
+        @SuppressWarnings("unchecked")
+        List<List<Object>> rows = (List<List<Object>>) response.get("rows");
+        assertNotNull("Response missing 'rows'", rows);
+        assertEquals("Expected 5 rows from head 5", 5, rows.size());
+        for (int i = 0; i < 5; i++) {
+            assertEquals("running_count at row " + i, (long) (i + 1), ((Number) rows.get(i).get(1)).longValue());
+        }
+    }
+
+    /**
+     * Running min over int0. MIN ignores nulls. calcs sorted by key starts with
+     * int0=[1, null, null, null, 7], so the cumulative min is [1, 1, 1, 1, 1].
+     */
+    public void testStreamstatsRunningMinOverInteger() throws IOException {
+        Map<String, Object> response = executePpl(
+            "source=" + DATASET.indexName + " | sort key | streamstats min(int0) as running_min | fields key, int0, running_min | head 5"
+        );
+        @SuppressWarnings("unchecked")
+        List<List<Object>> rows = (List<List<Object>>) response.get("rows");
+        assertNotNull(rows);
+        assertEquals(5, rows.size());
+        for (int i = 0; i < 5; i++) {
+            assertEquals("running_min at row " + i, 1, ((Number) rows.get(i).get(2)).intValue());
+        }
+    }
+
+    /**
+     * Running max over int0. int0=[1, null, null, null, 7], so the cumulative max is
+     * [1, 1, 1, 1, 7]. First-row-with-non-null-int0 then the new max once 7 arrives at row 4.
+     */
+    public void testStreamstatsRunningMaxOverInteger() throws IOException {
+        Map<String, Object> response = executePpl(
+            "source=" + DATASET.indexName + " | sort key | streamstats max(int0) as running_max | fields key, int0, running_max | head 5"
+        );
+        @SuppressWarnings("unchecked")
+        List<List<Object>> rows = (List<List<Object>>) response.get("rows");
+        assertNotNull(rows);
+        assertEquals(5, rows.size());
+        int[] expectedMax = { 1, 1, 1, 1, 7 };
+        for (int i = 0; i < 5; i++) {
+            assertEquals("running_max at row " + i, expectedMax[i], ((Number) rows.get(i).get(2)).intValue());
+        }
+    }
+
+    /**
+     * Documents two upstream limitations exposed during the windowed-track expansion.
+     *
+     * <p><b>1. PPL's streamstats does not expose ranking / navigation window functions.</b>
+     * The grammar (OpenSearchPPLParser.g4) lists ROW_NUMBER, RANK, DENSE_RANK, NTH, NTILE,
+     * etc. under {@code scalarWindowFunctionName}, but {@code BuiltinFunctionName.WINDOW_FUNC_MAPPING}
+     * (in core/.../BuiltinFunctionName.java) only maps aggregate-style names: {@code sum,
+     * count, avg, min, max, var_pop, var_samp, std/stddev*, earliest, latest, distinct_count*,
+     * pattern}. {@code CalciteRexNodeVisitor.visitWindowFunction} then throws
+     * {@code UnsupportedOperationException("Unexpected window function: row_number")} for any
+     * scalar window function. This blocks streamstats row_number / rank / dense_rank / nth at
+     * the SQL-plugin layer; nothing in our analytics-engine can fix it.
+     *
+     * <p><b>2. DataFusion's substrait consumer rejects AVG OVER (ROWS UNBOUNDED PRECEDING).</b>
+     * {@code streamstats avg(int0)} fails with {@code Physical plan does not support logical
+     * expression WindowFunction(... fun: AggregateUDF(AggregateUDF { inner: Sum ... })}.
+     * Calcite/isthmus appears to wrap the aggregator in a doubled {@code AggregateUDF} that
+     * DataFusion doesn't recognize as a planner-compatible window aggregate. Direct
+     * {@code SUM} / {@code MIN} / {@code MAX} / {@code COUNT} all work; only {@code AVG} hits
+     * this. Likely needs a fix on the DataFusion substrait-consumer side.
+     */
+    @SuppressWarnings("unused")
+    public void testUpstreamLimitations_documentation_only() {
+        // Intentionally empty. The javadoc documents what was tested and where it fails so the
+        // next person doesn't go through the same investigation.
+    }
+
     private Map<String, Object> executePpl(String ppl) throws IOException {
         ensureDataProvisioned();
         return executePplOnIndex(DATASET.indexName, ppl);

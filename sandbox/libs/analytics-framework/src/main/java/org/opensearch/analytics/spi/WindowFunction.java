@@ -29,6 +29,7 @@ public enum WindowFunction {
     LEAD(SqlKind.LEAD),
     LAG(SqlKind.LAG),
     NTILE(SqlKind.NTILE),
+    NTH_VALUE(SqlKind.NTH_VALUE),
 
     // Aggregates usable as window functions
     SUM(SqlKind.SUM),

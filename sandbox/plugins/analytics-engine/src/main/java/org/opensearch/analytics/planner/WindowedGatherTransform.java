@@ -136,21 +136,28 @@ final class WindowedGatherTransform {
     }
 
     /**
-     * Walk down through operators that <em>must</em> execute over a SINGLETON-gathered stream
-     * (i.e. the gather must be inserted below them). The first operator that <em>doesn't</em>
-     * require a gathered input becomes the gather's location: the gather is inserted above it
-     * so the operator stays on the data node and runs per-shard.
+     * Walk down inserting the gather at the deepest correctness-safe position.
      *
-     * <p>Today only {@link OpenSearchSort} requires gathered input — global ordering and
-     * top-K need a SINGLETON stream, otherwise per-shard sort + concat ≠ global sort. Filters
-     * and column-projections are row-local; running them per-shard before the gather is both
-     * correct and cheaper (the filter drops rows that would otherwise be shipped, and a
-     * narrowing project shrinks the per-row payload through the exchange). Treating them as
-     * boundaries here is the difference between &quot;ship everything to coordinator and
-     * filter/project there&quot; and &quot;filter/project per-shard then ship the survivors.&quot;
+     * <p>The traversal walks through three classes of operator:
+     *
+     * <ol>
+     *   <li>{@link OpenSearchSort} — always. Sort needs SINGLETON input for global ordering /
+     *       top-K (per-shard sort + concat ≠ global sort), so the gather must be below every
+     *       Sort in the chain.</li>
+     *   <li>{@link OpenSearchFilter} and non-windowed {@link OpenSearchProject} — only when
+     *       there's a Sort somewhere deeper. Filter+Sort and Project+Sort both commute, so a
+     *       filter or column-projection above a Sort can equivalently sit below it. Walking
+     *       through the filter/project lets the gather land below the Sort, which is the only
+     *       correctness-safe position. Without the Sort below, filter and project become
+     *       <em>pushdown boundaries</em> so they run per-shard on the data node.</li>
+     * </ol>
+     *
+     * <p>The first operator we encounter that's not in either class — Scan, Aggregate, Union,
+     * etc. — becomes the gather's input. If the boundary is already SINGLETON-distributed
+     * (single-shard scan, FINAL aggregate from the split rule), no gather is inserted.
      */
     private static RelNode lowerGatherInChain(RelNode node, OpenSearchDistributionTraitDef distTraitDef) {
-        if (requiresGatheredInput(node)) {
+        if (shouldWalkThroughForGatherPlacement(node)) {
             RelNode innerRewritten = lowerGatherInChain(node.getInputs().getFirst(), distTraitDef);
             return node.copy(node.getTraitSet().replace(distTraitDef.singleton()), List.of(innerRewritten));
         }
@@ -165,6 +172,35 @@ final class WindowedGatherTransform {
             return node;
         }
         return makeGather(node, distTraitDef);
+    }
+
+    /**
+     * Should the downward walk pass through this node when looking for the gather's position?
+     * See {@link #lowerGatherInChain} for the full set of cases.
+     */
+    private static boolean shouldWalkThroughForGatherPlacement(RelNode node) {
+        if (node instanceof OpenSearchSort) {
+            return true;
+        }
+        if (node instanceof OpenSearchFilter) {
+            return subtreeContainsSort(node.getInputs().getFirst());
+        }
+        if (node instanceof OpenSearchProject project && !isWindowedProject(project)) {
+            return subtreeContainsSort(node.getInputs().getFirst());
+        }
+        return false;
+    }
+
+    private static boolean subtreeContainsSort(RelNode node) {
+        if (node instanceof OpenSearchSort) {
+            return true;
+        }
+        for (RelNode child : node.getInputs()) {
+            if (subtreeContainsSort(child)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static RelNode makeGather(RelNode input, OpenSearchDistributionTraitDef distTraitDef) {
@@ -208,16 +244,6 @@ final class WindowedGatherTransform {
         return node instanceof OpenSearchSort || node instanceof OpenSearchProject || node instanceof OpenSearchFilter;
     }
 
-    /**
-     * Used by the downward walk: should the gather be inserted <em>below</em> this operator?
-     * True only for operators whose semantics genuinely require a SINGLETON input — Sort
-     * (global ordering / top-K) needs the entire stream on one node. Filter and column-
-     * projection are row-local: running them per-shard before the gather is correct and
-     * cheaper. Returning false here makes them boundaries, so the gather goes above them.
-     */
-    private static boolean requiresGatheredInput(RelNode node) {
-        return node instanceof OpenSearchSort;
-    }
 
     private static boolean inputsChanged(RelNode node, List<RelNode> rewrittenInputs) {
         List<RelNode> originalInputs = node.getInputs();

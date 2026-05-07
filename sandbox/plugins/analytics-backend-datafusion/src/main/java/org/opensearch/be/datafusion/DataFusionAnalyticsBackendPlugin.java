@@ -90,6 +90,7 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
     // the projection `fields str0` is rewritten to `CAST('FURNITURE' AS VARCHAR)`. The remaining
     // comparison / arithmetic / logical operators are project-capable for eval-style projections.
     private static final Set<ScalarFunction> STANDARD_PROJECT_OPS = Set.of(
+        ScalarFunction.CASE,
         ScalarFunction.COALESCE,
         ScalarFunction.CEIL,
         ScalarFunction.CAST,
@@ -121,12 +122,31 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
         AggregateFunction.AVG
     );
 
-    // Window functions declared for the minimum-viable track: SUM as a windowed aggregate. Other
-    // window-shape PPL commands (trendline, eventstats, appendcol-via-ROW_NUMBER, bin) will add
-    // entries here as they land. Each function/type combination listed here goes through isthmus's
-    // WindowFunctionConverter (already wired in DataFusionFragmentConvertor) and DataFusion's
-    // native substrait consumer — no new conversion path.
-    private static final Set<WindowFunction> WINDOW_FUNCTIONS = Set.of(WindowFunction.SUM);
+    // Window functions declared for streamstats / eventstats / trendline coverage. Each entry
+    // goes through isthmus's WindowFunctionConverter (already wired in DataFusionFragmentConvertor)
+    // and DataFusion's native substrait consumer — no new conversion path needed per function.
+    //
+    // Aggregate-style window functions (SUM/COUNT/MIN/MAX/AVG) are used by streamstats with the
+    // matching aggregator, and by trendline sma which lowers to AVG OVER ROWS N-1 PRECEDING +
+    // COUNT OVER for the warm-up CASE. Ranking / navigation functions (ROW_NUMBER/RANK/
+    // DENSE_RANK/NTH_VALUE) cover streamstats's ranking forms and trendline wma's NTH_VALUE
+    // expansion. LEAD/LAG/NTILE are declared even without a current PPL command using them —
+    // their substrait conversion is identical and declaring them here keeps the capability
+    // surface aligned with the WindowFunction enum.
+    private static final Set<WindowFunction> WINDOW_FUNCTIONS = Set.of(
+        WindowFunction.SUM,
+        WindowFunction.COUNT,
+        WindowFunction.MIN,
+        WindowFunction.MAX,
+        WindowFunction.AVG,
+        WindowFunction.ROW_NUMBER,
+        WindowFunction.RANK,
+        WindowFunction.DENSE_RANK,
+        WindowFunction.NTH_VALUE,
+        WindowFunction.LEAD,
+        WindowFunction.LAG,
+        WindowFunction.NTILE
+    );
 
     private final DataFusionPlugin plugin;
 
