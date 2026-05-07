@@ -29,7 +29,6 @@ import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.planner.rel.OpenSearchDistributionTraitDef;
 import org.opensearch.analytics.planner.rules.OpenSearchAggregateRule;
 import org.opensearch.analytics.planner.rules.OpenSearchAggregateSplitRule;
-import org.opensearch.analytics.planner.rules.OpenSearchProjectGatherRule;
 import org.opensearch.analytics.planner.rules.OpenSearchFilterRule;
 import org.opensearch.analytics.planner.rules.OpenSearchProjectRule;
 import org.opensearch.analytics.planner.rules.OpenSearchSortRule;
@@ -113,13 +112,19 @@ public class PlannerImpl {
 
         LOGGER.info("After marking:\n{}", RelOptUtil.toString(marked));
 
+        // Phase 1.5 (windowed-only): lower the SINGLETON exchange position for windowed-Project
+        // subtrees. See WindowedGatherTransform's class javadoc for why this is a deterministic
+        // pre-CBO AST rewrite rather than a Calcite rule. No-op for plans without RexOver.
+        marked = WindowedGatherTransform.apply(marked, context.getDistributionTraitDef());
+
+        LOGGER.info("After windowed-gather lowering:\n{}", RelOptUtil.toString(marked));
+
         // Phase 2: CBO — VolcanoPlanner for trait propagation + exchange insertion
         VolcanoPlanner volcanoPlanner = new VolcanoPlanner();
         volcanoPlanner.addRelTraitDef(ConventionTraitDef.INSTANCE);
         OpenSearchDistributionTraitDef distTraitDef = context.getDistributionTraitDef();
         volcanoPlanner.addRelTraitDef(distTraitDef);
         volcanoPlanner.addRule(new OpenSearchAggregateSplitRule(context));
-        volcanoPlanner.addRule(new OpenSearchProjectGatherRule(context));
         volcanoPlanner.addRule(AbstractConverter.ExpandConversionRule.INSTANCE);
 
         RelOptCluster volcanoCluster = RelOptCluster.create(volcanoPlanner, rawRelNode.getCluster().getRexBuilder());
