@@ -124,14 +124,6 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
             TestPPLPlugin.class,
             FlightStreamPlugin.class,
             CompositeDataFormatPlugin.class,
-            // Supplies the committer factory required at cluster bootstrap —
-            // DataFusionAnalyticsBackendPlugin's SPI constructor signature is
-            // (LucenePlugin), so the Lucene plugin instance must exist in the
-            // plugin registry even though resilience tests never issue
-            // Lucene-backed queries.
-            LucenePlugin.class,
-            // Replaces default TransportService with MockTransportService so
-            // NetworkDisruption + addRequestHandlingBehavior can intercept.
             MockTransportService.TestPlugin.class
         );
     }
@@ -141,7 +133,16 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
         return List.of(
             classpathPlugin(AnalyticsPlugin.class, Collections.emptyList()),
             classpathPlugin(ParquetDataFormatPlugin.class, Collections.emptyList()),
-            classpathPlugin(DataFusionPlugin.class, List.of(AnalyticsPlugin.class.getName()))
+            classpathPlugin(DataFusionPlugin.class, List.of(AnalyticsPlugin.class.getName())),
+            // LucenePlugin is loaded purely for the EnginePlugin committer factory.
+            // We deliberately do NOT declare extendedPlugins=[AnalyticsPlugin] —
+            // that would make AnalyticsPlugin.loadExtensions iterate SPI extensions
+            // from LucenePlugin's classloader, finding DataFusionAnalyticsBackendPlugin
+            // (whose ctor is (DataFusionPlugin)) and throwing on the ctor signature
+            // mismatch. The Lucene-side SPI registration is itself stripped from the
+            // analytics-backend-lucene jar at the internalClusterTest classpath
+            // layer (see analytics-engine/build.gradle stripLuceneAnalyticsSpi).
+            classpathPlugin(LucenePlugin.class, Collections.emptyList())
         );
     }
 

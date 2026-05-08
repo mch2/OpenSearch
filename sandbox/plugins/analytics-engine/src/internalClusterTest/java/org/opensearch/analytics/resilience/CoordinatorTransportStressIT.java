@@ -150,8 +150,6 @@ public class CoordinatorTransportStressIT extends OpenSearchIntegTestCase {
             TestPPLPlugin.class,
             FlightStreamPlugin.class,
             CompositeDataFormatPlugin.class,
-            // Same Lucene committer-factory rationale as CoordinatorResilienceIT.
-            LucenePlugin.class,
             MockTransportService.TestPlugin.class
         );
     }
@@ -161,7 +159,15 @@ public class CoordinatorTransportStressIT extends OpenSearchIntegTestCase {
         return List.of(
             classpathPlugin(AnalyticsPlugin.class, Collections.emptyList()),
             classpathPlugin(ParquetDataFormatPlugin.class, Collections.emptyList()),
-            classpathPlugin(DataFusionPlugin.class, List.of(AnalyticsPlugin.class.getName()))
+            classpathPlugin(DataFusionPlugin.class, List.of(AnalyticsPlugin.class.getName())),
+            // LucenePlugin loaded for the EnginePlugin committer factory only.
+            // extendedPlugins=[] (not [AnalyticsPlugin]) so AnalyticsPlugin.loadExtensions
+            // doesn't iterate it for SPI extensions — that iteration would find the
+            // DataFusion-side service file via LucenePlugin's classloader and throw on
+            // ctor signature mismatch. See CoordinatorResilienceIT for the full rationale
+            // (and analytics-engine/build.gradle stripLuceneAnalyticsSpi for the
+            // companion test classpath strip).
+            classpathPlugin(LucenePlugin.class, Collections.emptyList())
         );
     }
 

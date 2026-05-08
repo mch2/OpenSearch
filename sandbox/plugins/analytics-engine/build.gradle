@@ -15,7 +15,7 @@
 apply plugin: 'opensearch.internal-cluster-test'
 
 // SQL Unified Query API version (aligned with OpenSearch build version)
-def sqlUnifiedQueryVersion = '3.6.0.0-SNAPSHOT'
+def sqlUnifiedQueryVersion = '3.7.0.0-SNAPSHOT'
 
 opensearchplugin {
   description = 'Analytics engine hub: discovers and wires query extensions via ExtensiblePlugin SPI.'
@@ -27,6 +27,23 @@ opensearchplugin {
 }
 
 java { sourceCompatibility = JavaVersion.toVersion(25); targetCompatibility = JavaVersion.toVersion(25) }
+
+// Stripped variant of analytics-backend-lucene.jar with the
+// AnalyticsSearchBackendPlugin SPI service file removed. The flat
+// internalClusterTest classloader exposes both lucene-side and DF-side SPI
+// service files; SPIClassIterator (= ServiceLoader) then iterates both for
+// every extending plugin and PluginsService.createExtension throws on the
+// (LucenePlugin)-vs-(DataFusionPlugin) ctor mismatch. Production runs each
+// plugin in its own URLClassLoader so the conflict is test-only.
+tasks.register('stripLuceneAnalyticsSpi', Jar) {
+  def luceneJarTask = project(':sandbox:plugins:analytics-backend-lucene').tasks.named('jar')
+  dependsOn luceneJarTask
+  archiveBaseName = 'analytics-backend-lucene-test-spi-stripped'
+  destinationDirectory = layout.buildDirectory.dir('repackaged')
+  from(zipTree(luceneJarTask.flatMap { it.archiveFile }))
+  exclude 'META-INF/services/org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin'
+  duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}
 
 // Guava comes transitively from calcite-core and unified-query — forbidden on
 // compile classpaths by OpenSearch. Main sources don't need it; test sources do
@@ -160,7 +177,17 @@ dependencies {
   // boot. Resilience tests never issue Lucene-backed queries, but a committer
   // factory must be registered or cluster bootstrap fails with
   // "multiple committer factories found: []".
-  internalClusterTestImplementation project(':sandbox:plugins:analytics-backend-lucene')
+  //
+  // Compile uses the original jar (so LucenePlugin.class resolves). Runtime uses
+  // a stripped variant produced by stripLuceneAnalyticsSpi (below) that removes
+  // META-INF/services/AnalyticsSearchBackendPlugin. Without that strip, the flat
+  // internalClusterTest classloader exposes both the lucene-side and DF-side SPI
+  // service files; SPIClassIterator (= ServiceLoader) iterates both for every
+  // extending plugin and PluginsService.createExtension throws on the
+  // (LucenePlugin)-vs-(DataFusionPlugin) ctor mismatch. Production runs each
+  // plugin in its own URLClassLoader so the conflict is test-only.
+  internalClusterTestCompileOnly project(':sandbox:plugins:analytics-backend-lucene')
+  internalClusterTestRuntimeOnly files(tasks.named('stripLuceneAnalyticsSpi'))
   // TestPPLPlugin + UnifiedPPL action for driving queries from ITs.
   internalClusterTestImplementation project(':sandbox:plugins:test-ppl-frontend')
 
