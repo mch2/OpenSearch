@@ -8,6 +8,7 @@
 
 package org.opensearch.analytics.qa;
 
+import org.apache.lucene.tests.util.LuceneTestCase.AwaitsFix;
 import org.opensearch.client.Request;
 import org.opensearch.client.Response;
 
@@ -184,7 +185,44 @@ public class StreamstatsCommandIT extends AnalyticsRestTestCase {
     }
 
     /**
-     * Documents two upstream limitations exposed during the windowed-track expansion.
+     * Running avg over int0. AVG ignores nulls. calcs sorted by key starts with
+     * int0=[1, null, null, null, 7] so the cumulative averages are [1, 1, 1, 1, (1+7)/2=4].
+     *
+     * <p>Currently blocked by the SQL plugin's AVG-OVER decomposition in
+     * {@code PlanUtils.makeOver:178} which emits {@code Divide(Sum-OVER, Cast(Count-OVER))}.
+     * The two nested Sum/Count window functions are buried inside arithmetic in the Project's
+     * expression list — DataFusion's substrait consumer
+     * ({@code datafusion-substrait/src/logical_plan/consumer/rel/project_rel.rs}) only
+     * detects {@code Expr::WindowFunction} at the TOP LEVEL of each project expression and
+     * silently leaves nested ones in place, so physical planning hits the catch-all in
+     * {@code physical-expr/src/planner.rs::create_physical_expr}: "Physical plan does not
+     * support logical expression WindowFunction".
+     *
+     * <p>SUM, MIN, MAX, COUNT pass through as a single top-level RexOver and work end-to-end.
+     * AVG, STDDEV_POP, STDDEV_SAMP, VAR_POP, VAR_SAMP all hit the same nested-window bug due
+     * to the same decomposition.
+     *
+     * <p>Fix is upstream in the SQL plugin — drop the AVG/STDDEV/VAR cases from
+     * {@code PlanUtils.makeOver}, emit a single {@code RexOver} per function. Once landed and
+     * the SNAPSHOT artifact picked up by our build, this test passes.
+     */
+    @AwaitsFix(bugUrl = "SQL plugin PlanUtils.makeOver decomposes AVG-OVER into nested Sum/Count which DataFusion's substrait consumer can't lift")
+    public void testStreamstatsRunningAvgOverInteger() throws IOException {
+        Map<String, Object> response = executePpl(
+            "source=" + DATASET.indexName + " | sort key | streamstats avg(int0) as running_avg | fields key, int0, running_avg | head 5"
+        );
+        @SuppressWarnings("unchecked")
+        List<List<Object>> rows = (List<List<Object>>) response.get("rows");
+        assertNotNull(rows);
+        assertEquals(5, rows.size());
+        double[] expectedAvg = { 1.0, 1.0, 1.0, 1.0, 4.0 };
+        for (int i = 0; i < 5; i++) {
+            assertEquals("running_avg at row " + i, expectedAvg[i], ((Number) rows.get(i).get(2)).doubleValue(), 0.0001);
+        }
+    }
+
+    /**
+     * Documents one upstream limitation exposed during the windowed-track expansion.
      *
      * <p><b>1. PPL's streamstats does not expose ranking / navigation window functions.</b>
      * The grammar (OpenSearchPPLParser.g4) lists ROW_NUMBER, RANK, DENSE_RANK, NTH, NTILE,
@@ -196,13 +234,6 @@ public class StreamstatsCommandIT extends AnalyticsRestTestCase {
      * scalar window function. This blocks streamstats row_number / rank / dense_rank / nth at
      * the SQL-plugin layer; nothing in our analytics-engine can fix it.
      *
-     * <p><b>2. DataFusion's substrait consumer rejects AVG OVER (ROWS UNBOUNDED PRECEDING).</b>
-     * {@code streamstats avg(int0)} fails with {@code Physical plan does not support logical
-     * expression WindowFunction(... fun: AggregateUDF(AggregateUDF { inner: Sum ... })}.
-     * Calcite/isthmus appears to wrap the aggregator in a doubled {@code AggregateUDF} that
-     * DataFusion doesn't recognize as a planner-compatible window aggregate. Direct
-     * {@code SUM} / {@code MIN} / {@code MAX} / {@code COUNT} all work; only {@code AVG} hits
-     * this. Likely needs a fix on the DataFusion substrait-consumer side.
      */
     @SuppressWarnings("unused")
     public void testUpstreamLimitations_documentation_only() {
