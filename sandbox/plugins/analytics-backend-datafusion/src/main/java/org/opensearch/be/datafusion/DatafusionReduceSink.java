@@ -188,8 +188,36 @@ public final class DatafusionReduceSink extends AbstractDatafusionReduceSink imp
         } finally {
             batch.close();
         }
+        // After this point ownership of the underlying buffers transfers to the FFI
+        // structs' release callbacks. On the success path (and on any path where the
+        // senderSend FFM downcall was actually invoked) Rust takes ownership via
+        // FFI_ArrowArray::from_raw and is responsible for invoking release when the
+        // imported batch is dropped — including on the send-after-close error path.
+        //
+        // The race we must defend against here is the *pre-handoff* one: between
+        // exporting the batch and calling senderSend, sink.close() can run
+        // concurrently and close `sender` (the per-input NativeHandle). Resolving
+        // sender.getPointer() then throws IllegalStateException before the FFM
+        // downcall, leaving the release callback never invoked and the source
+        // buffers' refcounts leaked. Snapshot the pointer up front so we can
+        // distinguish "Rust got the pointers (their problem)" from "Rust never
+        // saw the pointers (our problem to release)".
+        long senderPtr;
         try {
-            NativeBridge.senderSend(sender.getPointer(), array.memoryAddress(), arrowSchema.memoryAddress());
+            senderPtr = sender.getPointer();
+        } catch (RuntimeException e) {
+            // Sender closed concurrently — release the exported buffers ourselves.
+            releaseExportedFfiStructs(array, arrowSchema);
+            array.close();
+            arrowSchema.close();
+            if (closed) {
+                logger.debug("[ReduceSink] send-after-close race caught (sender closed), discarding batch");
+                return;
+            }
+            throw e;
+        }
+        try {
+            NativeBridge.senderSend(senderPtr, array.memoryAddress(), arrowSchema.memoryAddress());
             feedCount.incrementAndGet();
         } catch (RuntimeException e) {
             if (closed) {
@@ -198,8 +226,30 @@ public final class DatafusionReduceSink extends AbstractDatafusionReduceSink imp
             }
             throw e;
         } finally {
+            // After senderSend returned (Ok or Err), Rust has invoked from_raw on the
+            // FFI structs and is responsible for the release callback — Java only
+            // frees the 80/72-byte struct memory.
             array.close();
             arrowSchema.close();
+        }
+    }
+
+    /**
+     * Invokes the C release callback installed by {@code Data.exportVectorSchemaRoot}
+     * so the export's refcounts on the source Arrow buffers are dropped. Used only
+     * when Rust never received the pointers (e.g. the sender was concurrently
+     * closed) — once the FFM downcall has fired, release is Rust's responsibility.
+     */
+    private static void releaseExportedFfiStructs(ArrowArray array, ArrowSchema arrowSchema) {
+        try {
+            array.release();
+        } catch (Throwable t) {
+            logger.warn("[ReduceSink] error releasing exported ArrowArray on failure path", t);
+        }
+        try {
+            arrowSchema.release();
+        } catch (Throwable t) {
+            logger.warn("[ReduceSink] error releasing exported ArrowSchema on failure path", t);
         }
     }
 
