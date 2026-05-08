@@ -11,7 +11,9 @@ package org.opensearch.analytics.planner.rel;
 import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelOptCost;
 import org.apache.calcite.plan.RelOptPlanner;
+import org.apache.calcite.plan.RelTrait;
 import org.apache.calcite.plan.RelTraitSet;
+import org.apache.calcite.rel.RelDistribution;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.RelWriter;
 import org.apache.calcite.rel.core.Project;
@@ -21,7 +23,9 @@ import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rex.RexCall;
 import org.apache.calcite.rex.RexInputRef;
 import org.apache.calcite.rex.RexNode;
+import org.apache.calcite.rex.RexOver;
 import org.apache.calcite.rex.RexShuttle;
+import org.apache.calcite.rex.RexVisitorImpl;
 import org.opensearch.analytics.planner.RelNodeUtils;
 import org.opensearch.analytics.spi.FieldStorageInfo;
 
@@ -83,7 +87,59 @@ public class OpenSearchProject extends Project implements OpenSearchRelNode {
 
     @Override
     public RelOptCost computeSelfCost(RelOptPlanner planner, RelMetadataQuery mq) {
+        // A windowed Project (any expression containing a RexOver) computes a window aggregate
+        // that depends on a totally-ordered global stream — running sums, ranks, frame-bounded
+        // aggregates, etc. Executing it over partitioned input is incorrect: each shard would
+        // produce its own per-shard window state and the coordinator gather would concatenate
+        // mismatched results. Mirror the OpenSearchAggregate.computeSelfCost pattern: return
+        // infinite cost when the input distribution is non-SINGLETON-and-non-ANY so Volcano
+        // explores inserting an OpenSearchExchangeReducer below this Project, forcing the
+        // windowed compute to run on the coordinator over the gathered stream.
+        //
+        // TODO (FB-3 hash shuffle): once HASH_DISTRIBUTED exchanges are implemented, refine this
+        // to allow HASH_DISTRIBUTED input when the RexOver carries a PARTITION BY clause whose
+        // keys match the input's hash keys. SINGLETON remains required for unpartitioned RexOver.
+        if (containsWindowFunction()) {
+            for (int i = 0; i < getInput().getTraitSet().size(); i++) {
+                RelTrait trait = getInput().getTraitSet().getTrait(i);
+                if (trait instanceof OpenSearchDistribution distribution
+                    && distribution.getType() != RelDistribution.Type.SINGLETON
+                    && distribution.getType() != RelDistribution.Type.ANY) {
+                    return planner.getCostFactory().makeInfiniteCost();
+                }
+            }
+        }
         return planner.getCostFactory().makeTinyCost();
+    }
+
+    private boolean containsWindowFunction() {
+        WindowFunctionDetector detector = new WindowFunctionDetector();
+        for (RexNode expr : getProjects()) {
+            expr.accept(detector);
+            if (detector.found) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Recursively scans a RexNode tree for a {@link RexOver}. The project rule wraps top-level
+     * window expressions in {@link AnnotatedProjectExpression}, so the search must descend into
+     * operand trees rather than only checking top-level project expressions.
+     */
+    private static final class WindowFunctionDetector extends RexVisitorImpl<Void> {
+        boolean found = false;
+
+        WindowFunctionDetector() {
+            super(true);
+        }
+
+        @Override
+        public Void visitOver(RexOver over) {
+            found = true;
+            return null;
+        }
     }
 
     @Override

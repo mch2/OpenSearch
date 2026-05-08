@@ -114,6 +114,13 @@ public class PlannerImpl {
 
         LOGGER.info("After marking:\n{}", RelOptUtil.toString(marked));
 
+        // Phase 1.5 (windowed-only): lower the SINGLETON exchange position for windowed-Project
+        // subtrees. See WindowedGatherTransform's class javadoc for why this is a deterministic
+        // pre-CBO AST rewrite rather than a Calcite rule. No-op for plans without RexOver.
+        marked = WindowedGatherTransform.apply(marked, context.getDistributionTraitDef());
+
+        LOGGER.info("After windowed-gather lowering:\n{}", RelOptUtil.toString(marked));
+
         // Phase 2: CBO — VolcanoPlanner for trait propagation + exchange insertion
         VolcanoPlanner volcanoPlanner = new VolcanoPlanner();
         volcanoPlanner.addRelTraitDef(ConventionTraitDef.INSTANCE);

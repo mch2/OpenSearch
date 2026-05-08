@@ -15,6 +15,7 @@ import org.apache.calcite.rel.core.Project;
 import org.apache.calcite.rex.RexCall;
 import org.apache.calcite.rex.RexInputRef;
 import org.apache.calcite.rex.RexNode;
+import org.apache.calcite.rex.RexOver;
 import org.apache.calcite.sql.SqlFunction;
 import org.opensearch.analytics.planner.CapabilityRegistry;
 import org.opensearch.analytics.planner.PlannerContext;
@@ -25,6 +26,7 @@ import org.opensearch.analytics.planner.rel.OpenSearchRelNode;
 import org.opensearch.analytics.spi.DelegationType;
 import org.opensearch.analytics.spi.FieldType;
 import org.opensearch.analytics.spi.ScalarFunction;
+import org.opensearch.analytics.spi.WindowFunction;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -104,6 +106,22 @@ public class OpenSearchProjectRule extends RelOptRule {
             return expr;
         }
 
+        // Window functions (RexOver) — aggregate or ranking function invoked with an OVER clause.
+        // Streamstats/trendline/eventstats/appendcol/bin all lower their window machinery into
+        // RexOver nodes embedded directly in a Project (the SQL plugin does not install
+        // ProjectToWindowRule, so no LogicalWindow rel appears). The RexOver wrapper is stripped
+        // later by OpenSearchProject.stripAnnotations, restoring the original RexOver for
+        // isthmus's RexExpressionConverter.visitOver → WindowFunctionConverter path.
+        if (rexCall instanceof RexOver rexOver) {
+            List<String> exprViable = resolveWindowViableBackends(rexOver, childViableBackends);
+            if (exprViable.isEmpty()) {
+                throw new IllegalStateException(
+                    "No backend supports window function [" + rexOver.getAggOperator().getName() + "] among " + childViableBackends
+                );
+            }
+            return new AnnotatedProjectExpression(rexOver.getType(), rexOver, exprViable, context.nextAnnotationId());
+        }
+
         // Opaque operations — no recursion into operands
         if (rexCall.getOperator() instanceof SqlFunction sqlFunction) {
             String funcName = sqlFunction.getName();
@@ -137,6 +155,37 @@ public class OpenSearchProjectRule extends RelOptRule {
 
         RexCall target = changed ? rexCall.clone(rexCall.getType(), newOperands) : rexCall;
         return new AnnotatedProjectExpression(target.getType(), target, scalarViable, context.nextAnnotationId());
+    }
+
+    /**
+     * Resolves viable backends for a {@link RexOver} by looking up the {@link WindowFunction}
+     * enum entry matching the aggregate's {@link org.apache.calcite.sql.SqlKind} and intersecting
+     * with the child's viable backends. Result field type (the RexOver's type) drives the
+     * capability match — consistent with scalar/aggregate capability shape.
+     *
+     * <p>Delegation is not considered here — PROJECT delegation is for expression-level, not
+     * window-level, offload. Windows require the backend to own the whole Project operator.
+     */
+    private List<String> resolveWindowViableBackends(RexOver rexOver, List<String> childViableBackends) {
+        WindowFunction windowFunc = WindowFunction.fromSqlKind(rexOver.getAggOperator().getKind());
+        if (windowFunc == null) {
+            return List.of();
+        }
+        FieldType fieldType = FieldType.fromSqlTypeName(rexOver.getType().getSqlTypeName());
+        if (fieldType == null) {
+            return List.of();
+        }
+
+        CapabilityRegistry registry = context.getCapabilityRegistry();
+        List<String> capable = registry.windowBackendsAnyFormat(windowFunc, fieldType);
+
+        List<String> viable = new ArrayList<>();
+        for (String candidateName : childViableBackends) {
+            if (capable.contains(candidateName)) {
+                viable.add(candidateName);
+            }
+        }
+        return viable;
     }
 
     private List<String> resolveOpaqueViableBackends(String funcName, List<String> childViableBackends) {

@@ -25,6 +25,8 @@ import org.opensearch.analytics.spi.ScalarFunctionAdapter;
 import org.opensearch.analytics.spi.ScanCapability;
 import org.opensearch.analytics.spi.SearchExecEngineProvider;
 import org.opensearch.analytics.spi.StdOperatorRewriteAdapter;
+import org.opensearch.analytics.spi.WindowFunction;
+import org.opensearch.analytics.spi.WindowFunctionCapability;
 import org.opensearch.index.engine.dataformat.DataFormatRegistry;
 
 import java.util.HashSet;
@@ -91,6 +93,7 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
     // expressions. The remaining comparison / arithmetic / logical operators are project-capable
     // for eval-style projections.
     private static final Set<ScalarFunction> STANDARD_PROJECT_OPS = Set.of(
+        ScalarFunction.CASE,
         ScalarFunction.COALESCE,
         ScalarFunction.CEIL,
         ScalarFunction.CAST,
@@ -122,6 +125,32 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
         AggregateFunction.MAX,
         AggregateFunction.COUNT,
         AggregateFunction.AVG
+    );
+
+    // Window functions declared for streamstats / eventstats / trendline coverage. Each entry
+    // goes through isthmus's WindowFunctionConverter (already wired in DataFusionFragmentConvertor)
+    // and DataFusion's native substrait consumer — no new conversion path needed per function.
+    //
+    // Aggregate-style window functions (SUM/COUNT/MIN/MAX/AVG) are used by streamstats with the
+    // matching aggregator, and by trendline sma which lowers to AVG OVER ROWS N-1 PRECEDING +
+    // COUNT OVER for the warm-up CASE. Ranking / navigation functions (ROW_NUMBER/RANK/
+    // DENSE_RANK/NTH_VALUE) cover streamstats's ranking forms and trendline wma's NTH_VALUE
+    // expansion. LEAD/LAG/NTILE are declared even without a current PPL command using them —
+    // their substrait conversion is identical and declaring them here keeps the capability
+    // surface aligned with the WindowFunction enum.
+    private static final Set<WindowFunction> WINDOW_FUNCTIONS = Set.of(
+        WindowFunction.SUM,
+        WindowFunction.COUNT,
+        WindowFunction.MIN,
+        WindowFunction.MAX,
+        WindowFunction.AVG,
+        WindowFunction.ROW_NUMBER,
+        WindowFunction.RANK,
+        WindowFunction.DENSE_RANK,
+        WindowFunction.NTH_VALUE,
+        WindowFunction.LEAD,
+        WindowFunction.LAG,
+        WindowFunction.NTILE
     );
 
     private final DataFusionPlugin plugin;
@@ -180,6 +209,18 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
                 for (AggregateFunction func : AGG_FUNCTIONS) {
                     for (FieldType type : SUPPORTED_FIELD_TYPES) {
                         caps.add(AggregateCapability.simple(func, Set.of(type), formats));
+                    }
+                }
+                return Set.copyOf(caps);
+            }
+
+            @Override
+            public Set<WindowFunctionCapability> windowFunctionCapabilities() {
+                Set<String> formats = Set.copyOf(plugin.getSupportedFormats());
+                Set<WindowFunctionCapability> caps = new HashSet<>();
+                for (WindowFunction func : WINDOW_FUNCTIONS) {
+                    for (FieldType type : SUPPORTED_FIELD_TYPES) {
+                        caps.add(new WindowFunctionCapability(func, Set.of(type), formats));
                     }
                 }
                 return Set.copyOf(caps);

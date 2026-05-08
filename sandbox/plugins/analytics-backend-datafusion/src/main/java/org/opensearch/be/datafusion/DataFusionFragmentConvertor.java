@@ -186,7 +186,8 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
      * Substrait consumer walks the top plan's output schema once per leaf and
      * fails with "Names list must match exactly to nested schema" if the two
      * disagree (e.g. reusing the inner's pre-wrap names when the wrapper shrinks
-     * or widens the schema, as an Aggregate-over-Join does).
+     * or widens the schema — as an Aggregate-over-Join does, or as a windowed
+     * Project over an exchange-gathered Scan does).
      */
     static Plan rewire(Plan inner, Rel wrapper, List<String> wrapperNames) {
         if (inner.getRoots().isEmpty()) {
