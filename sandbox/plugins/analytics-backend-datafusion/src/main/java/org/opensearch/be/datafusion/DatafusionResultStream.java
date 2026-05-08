@@ -88,6 +88,8 @@ public class DatafusionResultStream implements EngineResultStream {
         private Schema schema;
         private VectorSchemaRoot nextBatch;
         private Boolean nextAvailable;
+        private boolean batchEmitted;
+        private boolean nativeStreamExhausted;
 
         BatchIterator(StreamHandle streamHandle, BufferAllocator allocator, CDataDictionaryProvider dictionaryProvider) {
             this.streamHandle = streamHandle;
@@ -109,10 +111,25 @@ public class DatafusionResultStream implements EngineResultStream {
 
         private boolean loadNextBatch() {
             ensureSchema();
+            // Once exhausted, never poll the native stream again — and never re-synthesize the empty
+            // batch (callers that poll hasNext() repeatedly post-completion must see false).
+            if (nativeStreamExhausted) return false;
             long arrayAddr = callNativeFn(
                 listener -> NativeBridge.streamNext(streamHandle.getRuntimeHandle().get(), streamHandle.getPointer(), listener)
             );
-            if (arrayAddr == 0) return false;
+            if (arrayAddr == 0) {
+                nativeStreamExhausted = true;
+                // Streaming Flight protocol requires ≥1 schema-bearing frame before completeStream;
+                // when the native source produced zero batches, synthesize a single zero-row batch
+                // so the schema rides on the first (and only) frame. See FlightServerChannel.completeStream:
+                // when root == null the server writes only a header and the client never sees the schema.
+                if (!batchEmitted) {
+                    nextBatch = VectorSchemaRoot.create(schema, allocator);
+                    nextBatch.setRowCount(0);
+                    return true;
+                }
+                return false;
+            }
             VectorSchemaRoot freshRoot = VectorSchemaRoot.create(schema, allocator);
             try (ArrowArray arrowArray = ArrowArray.wrap(arrayAddr)) {
                 Data.importIntoVectorSchemaRoot(allocator, arrowArray, freshRoot, dictionaryProvider);
@@ -137,6 +154,7 @@ public class DatafusionResultStream implements EngineResultStream {
             nextAvailable = null;
             VectorSchemaRoot batch = nextBatch;
             nextBatch = null;
+            batchEmitted = true;
             // Caller owns the returned VSR's lifecycle. Streaming handler transfers it to Flight
             // (Flight closes after wire write); row-path collector closes after reading.
             return new ArrowResultBatch(batch);

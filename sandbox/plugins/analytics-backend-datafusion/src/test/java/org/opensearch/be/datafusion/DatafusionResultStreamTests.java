@@ -123,10 +123,23 @@ public class DatafusionResultStreamTests extends OpenSearchTestCase {
         }
     }
 
-    public void testNextOnExhaustedStreamThrows() throws Exception {
+    public void testEmptyResultYieldsOneZeroRowBatchWithSchema() throws Exception {
+        // Streaming Flight protocol requires at least one schema-bearing frame before
+        // completeStream — see FlightServerChannel.completeStream(): when root == null
+        // the server writes only a header, no schema. The iterator must therefore yield
+        // a single zero-row batch (carrying the real schema) for empty native streams,
+        // so the data-node-side handler always sends ≥1 batch.
         try (DatafusionResultStream stream = createStream("SELECT message FROM test_table WHERE message > 999")) {
             Iterator<EngineResultBatch> it = stream.iterator();
-            assertFalse(it.hasNext());
+            assertTrue("empty stream must yield exactly one zero-row schema batch", it.hasNext());
+            EngineResultBatch batch = it.next();
+            try {
+                assertEquals(0, batch.getRowCount());
+                assertEquals(java.util.List.of("message"), batch.getFieldNames());
+            } finally {
+                batch.getArrowRoot().close();
+            }
+            assertFalse("after consuming the schema batch the stream is empty", it.hasNext());
             expectThrows(NoSuchElementException.class, it::next);
         }
     }
