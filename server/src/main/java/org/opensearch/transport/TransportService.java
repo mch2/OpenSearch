@@ -123,6 +123,17 @@ public class TransportService extends AbstractLifecycleComponent
     protected final TransportInterceptor interceptor;
     private final Transport streamTransport;
 
+    /**
+     * Access the underlying stream transport (test-framework hook). Returns
+     * {@code null} if streaming transport was not configured for this service.
+     * Streaming has no public accessor on the base class because production
+     * callers go through {@link StreamTransportService} directly. Tests use
+     * this to stub-wrap the stream transport's request-handler registry.
+     */
+    public Transport getStreamTransport() {
+        return streamTransport;
+    }
+
     // An LRU (don't really care about concurrency here) that holds the latest timed out requests so if they
     // do show up, we can print more descriptive information about them
     final Map<Long, TimeoutInfoHolder> timeoutInfoHandlers = Collections.synchronizedMap(
