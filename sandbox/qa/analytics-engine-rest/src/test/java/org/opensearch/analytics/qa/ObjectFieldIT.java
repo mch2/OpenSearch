@@ -65,7 +65,7 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
         );
     }
 
-    @AwaitsFix(bugUrl = "Requires sql repo fix to CalciteRelNodeVisitor.containsNestedAggregator (try/catch around relBuilder.field)")
+    @AwaitsFix(bugUrl = "Requires sql repo fix to CalciteRelNodeVisitor.containsNestedAggregator (RelDataType.getField null-check). Once SQL 3.7 is published with the fix and test-ppl-frontend's exclude group: 'org.opensearch' is narrowed (currently strips unified-query-common at runtime), un-pin and verify.")
     public void testMinOnObjectField() throws IOException {
         assertRowsEqual(
             "source=" + DATASET.indexName + " | stats min(account.balance)",
@@ -73,7 +73,7 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
         );
     }
 
-    @AwaitsFix(bugUrl = "Requires sql repo fix to CalciteRelNodeVisitor.containsNestedAggregator (try/catch around relBuilder.field)")
+    @AwaitsFix(bugUrl = "Requires sql repo fix to CalciteRelNodeVisitor.containsNestedAggregator (RelDataType.getField null-check). Once SQL 3.7 is published with the fix and test-ppl-frontend's exclude group: 'org.opensearch' is narrowed (currently strips unified-query-common at runtime), un-pin and verify.")
     public void testMaxOnDeeplyNestedObjectField() throws IOException {
         assertRowsEqual(
             "source=" + DATASET.indexName + " | stats max(city.location.latitude)",
@@ -81,7 +81,7 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
         );
     }
 
-    @AwaitsFix(bugUrl = "Requires sql repo fix to CalciteRelNodeVisitor.containsNestedAggregator (try/catch around relBuilder.field)")
+    @AwaitsFix(bugUrl = "Requires sql repo fix to CalciteRelNodeVisitor.containsNestedAggregator (RelDataType.getField null-check). Once SQL 3.7 is published with the fix and test-ppl-frontend's exclude group: 'org.opensearch' is narrowed (currently strips unified-query-common at runtime), un-pin and verify.")
     public void testSumOnObjectField() throws IOException {
         assertRowsEqual(
             "source=" + DATASET.indexName + " | stats sum(city.population)",
