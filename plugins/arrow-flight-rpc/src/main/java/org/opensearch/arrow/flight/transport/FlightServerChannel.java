@@ -37,7 +37,15 @@ import static org.opensearch.arrow.flight.transport.FlightErrorMapper.mapFromCal
 
 /**
  * TcpChannel implementation for Arrow Flight. It is created per call in ArrowFlightProducer.
- * This implementation is not thread safe; consumer must ensure to invoke sendBatch serially and call completeStream() at the end
+ * This implementation is not thread safe; consumer must ensure to invoke sendBatch serially and call completeStream() at the end.
+ *
+ * <p><b>Schema frame contract:</b> the Arrow Flight wire protocol delivers the schema as the first DATA frame on the stream
+ * (emitted by {@link org.apache.arrow.flight.FlightProducer.ServerStreamListener#start} via the first
+ * {@link #sendBatch}). Calling {@link #completeStream} without any prior {@link #sendBatch} writes only the response header
+ * and closes the stream — no schema frame is ever transmitted, and the client's {@code FlightStream.next()} will block
+ * until the call timeout. Callers MUST emit at least one batch (it may be a zero-row {@link VectorSchemaRoot} carrying
+ * just the schema) before completing the stream. Error completion via {@link #sendError} is exempt because the error
+ * itself terminates the client wait.
  */
 class FlightServerChannel implements TcpChannel, ArrowFlightChannel {
     private static final String PROFILE_NAME = "flight";
@@ -142,6 +150,13 @@ class FlightServerChannel implements TcpChannel, ArrowFlightChannel {
     /**
      * Completes the streaming response and closes all pending roots.
      *
+     * <p><b>MUST be preceded by at least one {@link #sendBatch} call.</b> The Arrow Flight schema frame is emitted by
+     * {@link org.apache.arrow.flight.FlightProducer.ServerStreamListener#start} on the first {@code sendBatch}; if no
+     * batch has been sent ({@link #root} is still {@code null}), only the response header is written here and the
+     * client's {@code FlightStream.next()} will block waiting for a schema frame that never arrives, ultimately
+     * timing out. If a producer can legitimately yield zero data batches (e.g. a filter excludes all rows), it must
+     * still emit a schema-bearing zero-row batch before calling this method. See
+     * {@code DatafusionResultStream.BatchIterator} for an example of this synthesis.
      */
     public void completeStream(ByteBuffer header) {
         try {
@@ -149,9 +164,17 @@ class FlightServerChannel implements TcpChannel, ArrowFlightChannel {
                 throw new IllegalStateException("FlightServerChannel already closed.");
             }
             if (root == null) {
-                // Set header if no batches were sent
+                // No batches sent — schema frame was never emitted. The response header is written but the client
+                // will block on FlightStream.next() until timeout. This branch exists for backward compatibility
+                // with callers that may complete without batches (notably error fallbacks after sendResponse(e)
+                // failure); new callers should always send at least one schema-bearing batch first.
                 middleware.setHeader(header);
-                logger.debug("Completing empty stream for correlation ID: {}", correlationId);
+                logger.warn(
+                    "Completing Flight stream for correlation ID: {} with no batches sent — schema frame was never "
+                        + "transmitted; client will block until timeout. Caller must emit at least one (possibly "
+                        + "zero-row) batch before completeStream.",
+                    correlationId
+                );
             } else {
                 logger.debug("Completing stream for correlation ID: {} after {} batches", correlationId, batchNumber);
             }

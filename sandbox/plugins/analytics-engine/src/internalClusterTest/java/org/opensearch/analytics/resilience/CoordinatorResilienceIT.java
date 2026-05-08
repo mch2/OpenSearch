@@ -215,6 +215,21 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
         }
         client().admin().indices().prepareRefresh(INDEX).get();
         client().admin().indices().prepareFlush(INDEX).get();
+        // pluggable_dataformat=composite + parquet primary: prepareFlush().get() returns
+        // before parquet commits are durable on every shard. Tests in this suite exercise
+        // search/coordinator resilience, not ingestion — they need a stable post-seed
+        // dataset. assertBusy until the analytics path sees the full sum, otherwise
+        // disruption-time queries race the in-flight commit and produce nondeterministic
+        // partial results that look like resilience bugs.
+        try {
+            assertBusy(() -> {
+                PPLResponse r = executePPL("source = " + INDEX + " | stats sum(value) as total");
+                long actual = ((Number) r.getRows().get(0)[r.getColumns().indexOf("total")]).longValue();
+                assertEquals("seed not yet visible to analytics path", EXPECTED_SUM, actual);
+            }, 30, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            throw new AssertionError("createAndSeedIndex: timed out waiting for seed durability", e);
+        }
     }
 
     private PPLResponse executePPL(String ppl) {
