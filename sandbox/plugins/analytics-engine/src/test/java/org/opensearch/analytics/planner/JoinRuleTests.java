@@ -10,6 +10,7 @@ package org.opensearch.analytics.planner;
 
 import org.apache.calcite.plan.RelOptTable;
 import org.apache.calcite.plan.RelOptUtil;
+import org.apache.calcite.rel.RelDistribution;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.JoinRelType;
 import org.apache.calcite.rel.logical.LogicalJoin;
@@ -18,6 +19,8 @@ import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.opensearch.analytics.planner.join.CoordinatorHashJoin;
+import org.opensearch.analytics.planner.join.JoinStrategy;
 import org.opensearch.analytics.planner.rel.OpenSearchExchangeReducer;
 import org.opensearch.analytics.planner.rel.OpenSearchJoin;
 
@@ -100,6 +103,43 @@ public class JoinRuleTests extends BasePlannerRulesTests {
         assertTrue(
             "right input wrapped in OpenSearchExchangeReducer, got " + right.getClass().getSimpleName(),
             right instanceof OpenSearchExchangeReducer
+        );
+    }
+
+    /**
+     * The rule must attach a {@link CoordinatorHashJoin} strategy to the produced
+     * {@link OpenSearchJoin} and propagate per-side {@link org.opensearch.analytics.planner.dag.ExchangeInfo}
+     * to each input's {@link OpenSearchExchangeReducer}. This is what lets new strategies
+     * (shuffle / broadcast) plug in additively without changing DAGBuilder or stage wiring.
+     */
+    public void testRuleAttachesCoordinatorHashJoinStrategyAndPerSideExchangeInfo() {
+        RelNode result = runJoin(JoinRelType.INNER, equiJoinCondition());
+
+        RelNode unwrapped = RelNodeUtils.unwrapHep(result);
+        if (unwrapped instanceof OpenSearchExchangeReducer wrapper) {
+            unwrapped = RelNodeUtils.unwrapHep(wrapper.getInput());
+        }
+        OpenSearchJoin osJoin = (OpenSearchJoin) unwrapped;
+
+        JoinStrategy strategy = osJoin.getStrategy();
+        assertNotNull("OpenSearchJoin must carry a JoinStrategy", strategy);
+        assertTrue(
+            "default strategy must be CoordinatorHashJoin, got " + strategy.getClass().getSimpleName(),
+            strategy instanceof CoordinatorHashJoin
+        );
+
+        OpenSearchExchangeReducer leftReducer = (OpenSearchExchangeReducer) RelNodeUtils.unwrapHep(osJoin.getLeft());
+        OpenSearchExchangeReducer rightReducer = (OpenSearchExchangeReducer) RelNodeUtils.unwrapHep(osJoin.getRight());
+
+        assertEquals(
+            "coord-side hash join: left side gathered SINGLETON",
+            RelDistribution.Type.SINGLETON,
+            leftReducer.getExchangeInfo().distributionType()
+        );
+        assertEquals(
+            "coord-side hash join: right side gathered SINGLETON",
+            RelDistribution.Type.SINGLETON,
+            rightReducer.getExchangeInfo().distributionType()
         );
     }
 

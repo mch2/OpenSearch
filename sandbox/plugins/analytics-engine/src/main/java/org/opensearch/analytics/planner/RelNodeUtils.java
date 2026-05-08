@@ -97,12 +97,19 @@ public class RelNodeUtils {
                 newInputs.get(1),
                 join.getCondition(),
                 join.getJoinType(),
-                join.getViableBackends()
+                join.getViableBackends(),
+                join.getStrategy()
             );
         } else if (node instanceof OpenSearchUnion union) {
             return new OpenSearchUnion(newCluster, newTraits, newInputs, union.all, union.getViableBackends());
         } else if (node instanceof OpenSearchExchangeReducer reducer) {
-            return new OpenSearchExchangeReducer(newCluster, newTraits, newInputs.getFirst(), reducer.getViableBackends());
+            return new OpenSearchExchangeReducer(
+                newCluster,
+                newTraits,
+                newInputs.getFirst(),
+                reducer.getViableBackends(),
+                reducer.getExchangeInfo()
+            );
         }
 
         throw new UnsupportedOperationException("Cannot copy node type: " + node.getClass().getSimpleName());

@@ -17,6 +17,10 @@ import org.apache.calcite.rel.core.JoinInfo;
 import org.apache.calcite.rel.core.JoinRelType;
 import org.apache.calcite.rel.logical.LogicalJoin;
 import org.opensearch.analytics.planner.PlannerContext;
+import org.opensearch.analytics.planner.dag.ExchangeInfo;
+import org.opensearch.analytics.planner.join.CoordinatorHashJoin;
+import org.opensearch.analytics.planner.join.JoinContext;
+import org.opensearch.analytics.planner.join.JoinStrategy;
 import org.opensearch.analytics.planner.rel.OpenSearchConvention;
 import org.opensearch.analytics.planner.rel.OpenSearchExchangeReducer;
 import org.opensearch.analytics.planner.rel.OpenSearchJoin;
@@ -32,9 +36,13 @@ import java.util.Set;
  * HEP-marker rule that converts a Calcite {@link LogicalJoin} into an
  * {@link OpenSearchJoin} in {@link OpenSearchConvention}.
  *
- * <p>The marked join wraps each input in an {@link OpenSearchExchangeReducer}
- * carrying SINGLETON distribution. The DAG builder cuts at every reducer, producing
- * one child stage per join input (a 3-stage DAG: 2 children + 1 coord parent).
+ * <p>Strategy selection: the rule picks a {@link JoinStrategy} for the join (today
+ * always {@link CoordinatorHashJoin} — stats / hint-driven selection is a future
+ * spec) and attaches it to the {@link OpenSearchJoin}. The strategy provides per-side
+ * {@link ExchangeInfo} which is placed on each input's {@link OpenSearchExchangeReducer};
+ * {@code DAGBuilder} reads it directly off the reducer when cutting child stages.
+ * Adding shuffle / broadcast strategies later requires implementing {@link JoinStrategy}
+ * and adjusting selection here — no DAGBuilder changes needed.
  *
  * <p><b>Match criteria</b> (Requirement 1):
  * <ul>
@@ -101,32 +109,44 @@ public class OpenSearchJoinRule extends RelOptRule {
         if (viableBackends.isEmpty()) {
             throw new IllegalStateException("No backend supports JOIN among viable backends after intersecting inputs");
         }
-        RelTraitSet singletonTraits = join.getTraitSet()
+
+        // Select a strategy for this join. Today always CoordinatorHashJoin —
+        // stats / hint-driven selection (shuffle / broadcast) is a future spec.
+        JoinStrategy strategy = new CoordinatorHashJoin();
+        JoinInfo info = join.analyzeCondition();
+        JoinContext joinCtx = new JoinContext(info.leftKeys, info.rightKeys, 1, join.getJoinType());
+        ExchangeInfo leftExchange = strategy.leftExchange(joinCtx);
+        ExchangeInfo rightExchange = strategy.rightExchange(joinCtx);
+
+        // Trait set for the marked join. CoordinatorHashJoin gathers SINGLETON; this is
+        // currently the only strategy and the trait set reflects that. When non-singleton
+        // strategies land, the join's own distribution trait will need to come from the
+        // strategy too (it's currently implicit in the call to distributionTraitDef.singleton()).
+        RelTraitSet joinTraits = join.getTraitSet()
             .replace(OpenSearchConvention.INSTANCE)
             .replace(context.getDistributionTraitDef().singleton());
 
-        // Wrap each input in an OpenSearchExchangeReducer to gather it to the coord.
-        // The DAG builder cuts at every reducer, producing one child stage per join input.
-        // The join itself is SINGLETON since both gathered inputs are SINGLETON — declaring
-        // this on the join's trait set lets any operator above it (e.g. Project) inherit
-        // SINGLETON without Volcano inserting a redundant top-level reducer.
-        RelNode left = wrapInExchange(join.getLeft(), singletonTraits, viableBackends);
-        RelNode right = wrapInExchange(join.getRight(), singletonTraits, viableBackends);
+        // Wrap each input in an OpenSearchExchangeReducer carrying the strategy's
+        // per-side ExchangeInfo. DAGBuilder reads ExchangeInfo straight off the
+        // reducer when cutting — it doesn't need to know about joins.
+        RelNode left = wrapInExchange(join.getLeft(), joinTraits, viableBackends, leftExchange);
+        RelNode right = wrapInExchange(join.getRight(), joinTraits, viableBackends, rightExchange);
 
         OpenSearchJoin osJoin = new OpenSearchJoin(
             join.getCluster(),
-            singletonTraits,
+            joinTraits,
             left,
             right,
             join.getCondition(),
             join.getJoinType(),
-            viableBackends
+            viableBackends,
+            strategy
         );
         call.transformTo(osJoin);
     }
 
-    private static RelNode wrapInExchange(RelNode input, RelTraitSet singletonTraits, List<String> viableBackends) {
-        return new OpenSearchExchangeReducer(input.getCluster(), singletonTraits, input, viableBackends);
+    private static RelNode wrapInExchange(RelNode input, RelTraitSet joinTraits, List<String> viableBackends, ExchangeInfo exchange) {
+        return new OpenSearchExchangeReducer(input.getCluster(), joinTraits, input, viableBackends, exchange);
     }
 
     /** Intersection of viable backends from left and right children. Children may be

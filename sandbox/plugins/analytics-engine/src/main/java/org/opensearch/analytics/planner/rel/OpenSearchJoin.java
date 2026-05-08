@@ -21,6 +21,8 @@ import org.apache.calcite.rel.logical.LogicalJoin;
 import org.apache.calcite.rel.metadata.RelMetadataQuery;
 import org.apache.calcite.rex.RexNode;
 import org.opensearch.analytics.planner.RelNodeUtils;
+import org.opensearch.analytics.planner.join.CoordinatorHashJoin;
+import org.opensearch.analytics.planner.join.JoinStrategy;
 import org.opensearch.analytics.spi.FieldStorageInfo;
 
 import java.util.ArrayList;
@@ -28,13 +30,13 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * OpenSearch custom Join carrying viable backend list.
+ * OpenSearch custom Join carrying viable backend list and a {@link JoinStrategy}.
  *
- * <p>This spec only emits a coord-side hash join: both inputs request SINGLETON
- * distribution so Volcano inserts an {@link OpenSearchExchangeReducer} above each.
- * The DAG builder cuts each reducer into its own child stage; the coordinator
- * stage's substrait fragment becomes a {@code JoinRel} with two {@code NamedScan}
- * inputs ({@code "input-0"}, {@code "input-1"}).
+ * <p>The strategy decides how each side is distributed and where the join executes —
+ * the rule attaches it; {@code DAGBuilder} doesn't need to know about join types.
+ * Today the only strategy is {@link CoordinatorHashJoin}, which gathers both inputs
+ * SINGLETON to the coordinator. Adding shuffle / broadcast strategies is purely
+ * additive: implement {@code JoinStrategy}, select it in the rule.
  *
  * <p>Build-side contract: {@code right} input is always the build side. Calcite's
  * {@code LogicalJoin.right} maps to substrait {@code JoinRel.right}; users can
@@ -46,6 +48,7 @@ import java.util.Set;
 public class OpenSearchJoin extends Join implements OpenSearchRelNode {
 
     private final List<String> viableBackends;
+    private final JoinStrategy strategy;
 
     public OpenSearchJoin(
         RelOptCluster cluster,
@@ -54,15 +57,22 @@ public class OpenSearchJoin extends Join implements OpenSearchRelNode {
         RelNode right,
         RexNode condition,
         JoinRelType joinType,
-        List<String> viableBackends
+        List<String> viableBackends,
+        JoinStrategy strategy
     ) {
         super(cluster, traitSet, List.of(), left, right, condition, Set.of(), joinType);
         this.viableBackends = viableBackends;
+        this.strategy = strategy;
     }
 
     @Override
     public List<String> getViableBackends() {
         return viableBackends;
+    }
+
+    /** Distribution strategy attached by the rule. Drives per-side ExchangeInfo and execution placement. */
+    public JoinStrategy getStrategy() {
+        return strategy;
     }
 
     /**
@@ -86,7 +96,7 @@ public class OpenSearchJoin extends Join implements OpenSearchRelNode {
 
     @Override
     public Join copy(RelTraitSet traitSet, RexNode conditionExpr, RelNode left, RelNode right, JoinRelType joinType, boolean semiJoinDone) {
-        return new OpenSearchJoin(getCluster(), traitSet, left, right, conditionExpr, joinType, viableBackends);
+        return new OpenSearchJoin(getCluster(), traitSet, left, right, conditionExpr, joinType, viableBackends, strategy);
     }
 
     @Override
@@ -98,7 +108,7 @@ public class OpenSearchJoin extends Join implements OpenSearchRelNode {
 
     @Override
     public RelWriter explainTerms(RelWriter pw) {
-        return super.explainTerms(pw).item("viableBackends", viableBackends);
+        return super.explainTerms(pw).item("viableBackends", viableBackends).item("strategy", strategy.getClass().getSimpleName());
     }
 
     @Override
@@ -110,7 +120,8 @@ public class OpenSearchJoin extends Join implements OpenSearchRelNode {
             children.get(1),
             getCondition(),
             getJoinType(),
-            List.of(backend)
+            List.of(backend),
+            strategy
         );
     }
 

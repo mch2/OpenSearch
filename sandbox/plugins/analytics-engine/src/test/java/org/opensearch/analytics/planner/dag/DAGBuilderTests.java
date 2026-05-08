@@ -20,6 +20,8 @@ import org.opensearch.analytics.planner.rel.OpenSearchSort;
 import org.opensearch.analytics.planner.rel.OpenSearchStageInputScan;
 import org.opensearch.analytics.planner.rel.OpenSearchTableScan;
 
+import java.util.List;
+
 /**
  * Tests for {@link DAGBuilder} — verifies correct stage structure for single-stage
  * and two-stage query shapes.
@@ -100,5 +102,32 @@ public class DAGBuilderTests extends BasePlannerRulesTests {
         assertNull(aggChild.getExchangeSinkProvider());
         assertNotNull(aggChild.getExchangeInfo());
         assertEquals(RelDistribution.Type.SINGLETON, aggChild.getExchangeInfo().distributionType());
+    }
+
+    /**
+     * The reducer's own {@link ExchangeInfo} must flow into the cut child stage —
+     * DAGBuilder must not hardcode SINGLETON. Asserts that a non-singleton ExchangeInfo
+     * placed on the reducer survives the cut, which is the contract that lets
+     * future shuffle/broadcast strategies work without DAGBuilder changes.
+     */
+    public void testReducerExchangeInfoFlowsToChildStage() {
+        var context = buildContext("parquet", 2, intFields());
+        RelNode logical = stubScan(mockTable("test_index", "status", "size"));
+        RelNode cbo = runPlanner(logical, context);
+        // For a multi-shard scan, the planner inserts an OpenSearchExchangeReducer at the root.
+        OpenSearchExchangeReducer originalReducer = (OpenSearchExchangeReducer) cbo;
+
+        ExchangeInfo customInfo = new ExchangeInfo(RelDistribution.Type.HASH_DISTRIBUTED, List.of(0));
+        OpenSearchExchangeReducer customReducer = new OpenSearchExchangeReducer(
+            originalReducer.getCluster(),
+            originalReducer.getTraitSet(),
+            originalReducer.getInput(),
+            originalReducer.getViableBackends(),
+            customInfo
+        );
+
+        QueryDAG dag = DAGBuilder.build(customReducer, context.getCapabilityRegistry(), mockClusterService());
+        Stage child = dag.rootStage().getChildStages().get(0);
+        assertEquals(customInfo, child.getExchangeInfo());
     }
 }

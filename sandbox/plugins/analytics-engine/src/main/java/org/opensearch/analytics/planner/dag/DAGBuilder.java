@@ -24,16 +24,21 @@ import java.util.UUID;
 /**
  * Builds a {@link QueryDAG} from the CBO output by cutting at exchange boundaries.
  *
- * <p>SINGLETON: {@link OpenSearchExchangeReducer} is the boundary. Everything above
- * the reducer becomes the root (coordinator gather/compute) stage. The reducer's input
- * subtree becomes the child (data node) stage with a {@link ShardTargetResolver}.
+ * <p>{@link OpenSearchExchangeReducer} is the boundary. Everything above the reducer
+ * becomes the root (coordinator gather/compute) stage. The reducer's input subtree
+ * becomes the child (data node) stage with a {@link ShardTargetResolver}. The
+ * resulting child stage's {@link ExchangeInfo} is read directly off the reducer —
+ * the reducer is the exchange and knows its own distribution. DAGBuilder is therefore
+ * agnostic to join-vs-aggregate-vs-union; whichever rule introduced the reducer
+ * decided its ExchangeInfo (via a {@code JoinStrategy} for joins, SINGLETON for the
+ * other shapes today).
  *
  * <p>Single-stage (no exchange): one stage with a {@link ShardTargetResolver}.
  * The Scheduler uses a simple {@code RowProducingSink} since {@code exchangeSinkProvider}
  * is null.
  *
- * <p>TODO: implement HASH/RANGE shuffle exchange cutting when joins and shuffle
- * aggregates are added.
+ * <p>TODO: implement HASH/RANGE shuffle exchange execution paths when shuffle joins
+ * and shuffle aggregates are added.
  *
  * <p>Stage IDs are assigned bottom-up (leaf stages get lower IDs).
  *
@@ -52,7 +57,7 @@ public class DAGBuilder {
             // Root IS an ExchangeReducer — pure gather (no compute above the exchange).
             // Cut directly: child stage is the subtree below, root fragment is
             // ExchangeReducer → StageInputScan.
-            rootFragment = cutSingleton(reducer, counter, childStages, registry, clusterService);
+            rootFragment = cutAtExchange(reducer, counter, childStages, registry, clusterService);
         } else {
             rootFragment = sever(cboOutput, counter, childStages, registry, clusterService);
         }
@@ -82,7 +87,7 @@ public class DAGBuilder {
         List<RelNode> newInputs = new ArrayList<>();
         for (RelNode input : node.getInputs()) {
             if (input instanceof OpenSearchExchangeReducer reducer) {
-                newInputs.add(cutSingleton(reducer, counter, childStages, registry, clusterService));
+                newInputs.add(cutAtExchange(reducer, counter, childStages, registry, clusterService));
             } else {
                 newInputs.add(sever(input, counter, childStages, registry, clusterService));
             }
@@ -98,7 +103,7 @@ public class DAGBuilder {
         return changed ? node.copy(node.getTraitSet(), newInputs) : node;
     }
 
-    private static RelNode cutSingleton(
+    private static RelNode cutAtExchange(
         OpenSearchExchangeReducer reducer,
         int[] counter,
         List<Stage> parentChildStages,
@@ -121,8 +126,11 @@ public class DAGBuilder {
             List<String> reduceViable = CapabilityResolutionUtils.filterByReduceCapability(registry, reducer.getViableBackends());
             childSinkProvider = registry.getBackend(reduceViable.getFirst()).getExchangeSinkProvider();
         }
+        // ExchangeInfo comes from the reducer — the reducer is the exchange and carries
+        // the distribution intent set by whichever rule introduced it (e.g. a JoinStrategy
+        // for joins, SINGLETON for aggregates / unions today).
         parentChildStages.add(
-            new Stage(childStageId, childFragment, grandchildren, ExchangeInfo.singleton(), childSinkProvider, targetResolver)
+            new Stage(childStageId, childFragment, grandchildren, reducer.getExchangeInfo(), childSinkProvider, targetResolver)
         );
 
         // Replace the reducer's input with a StageInputScan placeholder.
@@ -135,6 +143,12 @@ public class DAGBuilder {
             reducer.getInput().getRowType(),
             reducer.getViableBackends()
         );
-        return new OpenSearchExchangeReducer(reducer.getCluster(), reducer.getTraitSet(), stageInput, reducer.getViableBackends());
+        return new OpenSearchExchangeReducer(
+            reducer.getCluster(),
+            reducer.getTraitSet(),
+            stageInput,
+            reducer.getViableBackends(),
+            reducer.getExchangeInfo()
+        );
     }
 }
