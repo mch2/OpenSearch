@@ -115,6 +115,11 @@ public class MockDataFusionBackend extends MockBackend implements SearchBackEndP
     }
 
     @Override
+    protected Set<org.opensearch.analytics.spi.JoinAlgorithm> supportedJoinAlgorithms() {
+        return Set.of(org.opensearch.analytics.spi.JoinAlgorithm.COORDINATOR_HASH);
+    }
+
+    @Override
     protected Set<ScanCapability> scanCapabilities() {
         return SCAN_CAPS;
     }

@@ -10,6 +10,7 @@ package org.opensearch.analytics.planner.join;
 
 import org.opensearch.analytics.planner.dag.ExchangeInfo;
 import org.opensearch.analytics.planner.dag.StageExecutionType;
+import org.opensearch.analytics.spi.JoinAlgorithm;
 
 /**
  * Coordinator-side hash join: both inputs are gathered SINGLETON to the coordinator,
@@ -34,5 +35,10 @@ public final class CoordinatorHashJoin implements JoinStrategy {
     @Override
     public StageExecutionType executionType() {
         return StageExecutionType.COORDINATOR_REDUCE;
+    }
+
+    @Override
+    public JoinAlgorithm algorithm() {
+        return JoinAlgorithm.COORDINATOR_HASH;
     }
 }

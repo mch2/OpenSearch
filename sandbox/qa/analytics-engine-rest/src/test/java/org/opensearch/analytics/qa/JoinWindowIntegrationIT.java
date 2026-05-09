@@ -91,6 +91,23 @@ public class JoinWindowIntegrationIT extends AnalyticsRestTestCase {
     }
 
 
+    /** Diagnostic: composite-key stats alone (no join). Should yield 5 groups. */
+    public void testStatsCountByCompositeKey_diagnostic() throws IOException {
+        String ppl = "source=" + CALCS.indexName + " | stats count() as c by str0, bool2 | stats count() as cnt";
+        assertSingleCount(ppl, 5L);
+    }
+
+    /** Diagnostic: composite-key stats then join on single key — isolates whether the composite group-by or the AND-condition join is the issue. */
+    public void testStatsCompositeKeyJoinOnSingleKey_diagnostic() throws IOException {
+        String ppl = "source=" + CALCS.indexName
+            + " | stats count() as left_cnt by str0, bool2"
+            + " | inner join left=a, right=b ON a.str0 = b.str0"
+            + " [ source=" + CALCS_ALT.indexName + " | stats count() as right_cnt by str0 ]"
+            + " | stats count() as cnt";
+        // 5 left groups, each str0 matches once on right (3 right groups). FURNITURE on left has 1 group (only false bool2 occurs) → matches FURNITURE on right (1 row). OFFICE SUPPLIES has 2 left groups (true/false bool2) → matches OFFICE on right (2 rows). TECHNOLOGY 2 left groups → 2 rows. Total = 1 + 2 + 2 = 5.
+        assertSingleCount(ppl, 5L);
+    }
+
     /** Diagnostic: SUM by group — works for SUM regardless of phase since sum-of-partial-sums = total sum. */
     public void testStatsSumByStr0_multiShard_diagnostic() throws IOException {
         String ppl = "source=" + CALCS.indexName + " | stats sum(int0) as s by str0 | fields str0, s";
@@ -136,7 +153,7 @@ public class JoinWindowIntegrationIT extends AnalyticsRestTestCase {
     }
 
     /** Group by two keys (str0, bool2) on each side, inner-join on both. 5 groups. */
-    @AwaitsFix(bugUrl = "composite-key group-by feeding a join hangs in execution. Right-side stage with Sort(fetch=50000) over composite-key agg never completes — happens for both COUNT and SUM aggregates, so not COUNT-specific. Same shape with single-key works.")
+    @AwaitsFix(bugUrl = "DataFusion: composite-equi-key (AND) hash join over multi-shard composite-key Aggregate output hangs. Composite stats alone works (testStatsCountByCompositeKey_diagnostic), and composite stats + single-key join works (testStatsCompositeKeyJoinOnSingleKey_diagnostic). Issue is specifically the AND-condition join over composite-key inputs.")
     public void testJoinOnTwoGroupKeys_multiShard() throws IOException {
         String ppl = "source=" + CALCS.indexName
             + " | stats count() as left_cnt by str0, bool2"
@@ -226,7 +243,6 @@ public class JoinWindowIntegrationIT extends AnalyticsRestTestCase {
     }
 
     /** Full pipeline: stats → join → sort → streamstats. Running sum after sort: 2, 8, 17. */
-    @AwaitsFix(bugUrl = "streamstats over a join's output ignores the upstream sort — running sum follows arrival order")
     public void testStatsJoinStreamstats_multiShard() throws IOException {
         String ppl = "source=" + CALCS.indexName
             + " | stats count() as left_cnt by str0"

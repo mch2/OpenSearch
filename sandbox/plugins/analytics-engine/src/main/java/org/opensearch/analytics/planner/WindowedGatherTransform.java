@@ -8,22 +8,34 @@
 
 package org.opensearch.analytics.planner;
 
+import com.google.common.collect.ImmutableList;
 import org.apache.calcite.plan.RelTraitSet;
+import org.apache.calcite.rel.RelCollation;
 import org.apache.calcite.rel.RelDistribution;
+import org.apache.calcite.rel.RelFieldCollation;
 import org.apache.calcite.rel.RelNode;
+import org.apache.calcite.rex.RexBuilder;
+import org.apache.calcite.rex.RexFieldCollation;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.rex.RexOver;
 import org.apache.calcite.rex.RexVisitorImpl;
+import org.apache.calcite.sql.SqlKind;
+import org.opensearch.analytics.planner.rel.AnnotatedProjectExpression;
+import org.opensearch.analytics.planner.rel.OpenSearchAggregate;
 import org.opensearch.analytics.planner.rel.OpenSearchDistribution;
 import org.opensearch.analytics.planner.rel.OpenSearchDistributionTraitDef;
 import org.opensearch.analytics.planner.rel.OpenSearchExchangeReducer;
 import org.opensearch.analytics.planner.rel.OpenSearchFilter;
+import org.opensearch.analytics.planner.rel.OpenSearchJoin;
 import org.opensearch.analytics.planner.rel.OpenSearchProject;
 import org.opensearch.analytics.planner.rel.OpenSearchRelNode;
 import org.opensearch.analytics.planner.rel.OpenSearchSort;
+import org.opensearch.analytics.planner.rel.OpenSearchUnion;
 
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Pre-CBO AST transform that lowers the SINGLETON exchange position for windowed-Project
@@ -111,8 +123,12 @@ final class WindowedGatherTransform {
             // bring every operator above it up to SINGLETON traits.
             RelNode windowedInput = node.getInputs().getFirst();
             RelNode rewrittenInput = lowerGatherInChain(windowedInput, distTraitDef);
-            RelNode rewrittenNode = node.copy(
-                node.getTraitSet().replace(distTraitDef.singleton()),
+            // Propagate any upstream Sort's collation into the RexOver's ORDER BY. Without
+            // this, DataFusion's Window operator with an empty OVER's ORDER BY processes
+            // input in unspecified order, breaking running aggregates over a sorted stream.
+            RelNode rewrittenWithOrderedWindow = propagateSortIntoWindow((OpenSearchProject) node, rewrittenInput);
+            RelNode rewrittenNode = rewrittenWithOrderedWindow.copy(
+                rewrittenWithOrderedWindow.getTraitSet().replace(distTraitDef.singleton()),
                 List.of(rewrittenInput)
             );
             return new Result(rewrittenNode, true);
@@ -213,6 +229,104 @@ final class WindowedGatherTransform {
         return new OpenSearchExchangeReducer(input.getCluster(), singletonTraits, input, openSearchInput.getViableBackends());
     }
 
+    /**
+     * If the input chain has an immediate Sort whose collation we can attach to a RexOver
+     * with empty ORDER BY, rebuild the project's expressions with an OVER that explicitly
+     * orders by the sort's fields. Returns the original project unchanged when there's no
+     * sort to propagate, no RexOver with empty ORDER BY, or any other rewrite obstacle.
+     */
+    private static RelNode propagateSortIntoWindow(OpenSearchProject project, RelNode rewrittenInput) {
+        OpenSearchSort sort = findUpstreamSort(rewrittenInput);
+        if (sort == null) {
+            return project;
+        }
+        RexBuilder rexBuilder = project.getCluster().getRexBuilder();
+        ImmutableList<RexFieldCollation> orderKeys = sortCollationToOrderKeys(sort.getCollation(), rexBuilder, rewrittenInput);
+        if (orderKeys.isEmpty()) {
+            return project;
+        }
+        List<RexNode> rewritten = new ArrayList<>(project.getProjects().size());
+        boolean anyChanged = false;
+        for (RexNode expr : project.getProjects()) {
+            RexNode result = rewriteRexOverOrderKeys(expr, orderKeys, rexBuilder);
+            anyChanged |= result != expr;
+            rewritten.add(result);
+        }
+        if (!anyChanged) {
+            return project;
+        }
+        return project.copy(project.getTraitSet(), rewrittenInput, rewritten, project.getRowType());
+    }
+
+    /** Walks down through Sort/Filter/Project layers, returns the first OpenSearchSort or null. */
+    private static OpenSearchSort findUpstreamSort(RelNode node) {
+        if (node instanceof OpenSearchSort sort) {
+            return sort;
+        }
+        if (node instanceof OpenSearchFilter || node instanceof OpenSearchProject || node instanceof OpenSearchExchangeReducer) {
+            return findUpstreamSort(node.getInputs().getFirst());
+        }
+        return null;
+    }
+
+    private static ImmutableList<RexFieldCollation> sortCollationToOrderKeys(RelCollation collation, RexBuilder rexBuilder, RelNode input) {
+        ImmutableList.Builder<RexFieldCollation> builder = ImmutableList.builder();
+        for (RelFieldCollation fc : collation.getFieldCollations()) {
+            int idx = fc.getFieldIndex();
+            if (idx >= input.getRowType().getFieldCount()) {
+                return ImmutableList.of();
+            }
+            RexNode ref = rexBuilder.makeInputRef(input.getRowType().getFieldList().get(idx).getType(), idx);
+            Set<SqlKind> direction = EnumSet.noneOf(SqlKind.class);
+            if (fc.direction == RelFieldCollation.Direction.DESCENDING) {
+                direction.add(SqlKind.DESCENDING);
+            }
+            if (fc.nullDirection == RelFieldCollation.NullDirection.FIRST) {
+                direction.add(SqlKind.NULLS_FIRST);
+            } else if (fc.nullDirection == RelFieldCollation.NullDirection.LAST) {
+                direction.add(SqlKind.NULLS_LAST);
+            }
+            builder.add(new RexFieldCollation(ref, direction));
+        }
+        return builder.build();
+    }
+
+    /**
+     * If the expression is (or wraps) a RexOver with empty orderKeys, rebuild it with the
+     * provided orderKeys. Annotated wrappers are unwrapped, rewritten, and re-wrapped.
+     */
+    private static RexNode rewriteRexOverOrderKeys(RexNode expr, ImmutableList<RexFieldCollation> orderKeys, RexBuilder rexBuilder) {
+        if (expr instanceof AnnotatedProjectExpression annotated && annotated.getOriginal() instanceof RexOver over) {
+            RexNode rebuilt = rebuildRexOverWithOrderKeys(over, orderKeys, rexBuilder);
+            return rebuilt == over ? expr : annotated.withAdaptedOriginal(rebuilt);
+        }
+        if (expr instanceof RexOver over) {
+            return rebuildRexOverWithOrderKeys(over, orderKeys, rexBuilder);
+        }
+        return expr;
+    }
+
+    private static RexNode rebuildRexOverWithOrderKeys(RexOver over, ImmutableList<RexFieldCollation> orderKeys, RexBuilder rexBuilder) {
+        if (!over.getWindow().orderKeys.isEmpty()) {
+            return over;
+        }
+        return rexBuilder.makeOver(
+            over.getType(),
+            over.getAggOperator(),
+            over.getOperands(),
+            over.getWindow().partitionKeys,
+            orderKeys,
+            over.getWindow().getLowerBound(),
+            over.getWindow().getUpperBound(),
+            over.getWindow().getExclude(),
+            over.getWindow().isRows(),
+            true,
+            false,
+            over.isDistinct(),
+            over.ignoreNulls()
+        );
+    }
+
     private static boolean isWindowedProject(RelNode node) {
         if (!(node instanceof OpenSearchProject project)) {
             return false;
@@ -256,9 +370,17 @@ final class WindowedGatherTransform {
     }
 
     /**
-     * Returns true if the node already declares SINGLETON {@link OpenSearchDistribution}.
-     * Used by {@link #lowerGatherInChain} to skip the gather insertion when the boundary is
-     * already on a single node — single-shard scans are SINGLETON by construction.
+     * Returns true if the boundary node will produce SINGLETON-distributed output, so a
+     * separate gather above it would be redundant. Two cases:
+     *
+     * <ol>
+     *   <li>The trait set already declares SINGLETON (single-shard scan, FINAL aggregate
+     *       from the split rule, OpenSearchJoin/OpenSearchUnion which mark themselves
+     *       SINGLETON during HEP).</li>
+     *   <li>Structurally a SINGLETON-producing operator that hasn't been marked yet pre-CBO
+     *       (multi-shard SINGLE OpenSearchAggregate — CBO splits it into PARTIAL+gather+FINAL
+     *       so its eventual output is SINGLETON).</li>
+     * </ol>
      */
     private static boolean alreadySingleton(RelNode node) {
         for (int i = 0; i < node.getTraitSet().size(); i++) {
@@ -267,7 +389,7 @@ final class WindowedGatherTransform {
                 return true;
             }
         }
-        return false;
+        return node instanceof OpenSearchAggregate || node instanceof OpenSearchJoin || node instanceof OpenSearchUnion;
     }
 
     private static final class WindowFunctionDetector extends RexVisitorImpl<Void> {

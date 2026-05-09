@@ -19,6 +19,7 @@ import org.opensearch.analytics.spi.BackendCapabilityProvider;
 import org.opensearch.analytics.spi.BackendExecutionContext;
 import org.opensearch.analytics.spi.DelegationType;
 import org.opensearch.analytics.spi.EngineCapability;
+import org.opensearch.analytics.spi.JoinAlgorithm;
 import org.opensearch.analytics.spi.ExchangeSinkProvider;
 import org.opensearch.analytics.spi.FieldType;
 import org.opensearch.analytics.spi.FilterCapability;
@@ -100,6 +101,10 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
     // ScalarFunction); SAFE_CAST covers PPL `eval`'s explicit nullable `CAST(... AS ...)`
     // expressions. The remaining comparison / arithmetic / logical operators are project-capable
     // for eval-style projections.
+    // CASE — Calcite emits CASE WHEN ... THEN ... END for conditional expressions, including
+    // PPL `count(eval(predicate))` (lowered to COUNT(CASE WHEN predicate THEN ... ELSE NULL END))
+    // and explicit `eval x = case(cond, val, ...)`. Isthmus translates SqlKind.CASE structurally
+    // to a Substrait IfThen rel — no extension lookup needed, no adapter required.
     private static final Set<ScalarFunction> STANDARD_PROJECT_OPS = Set.of(
         ScalarFunction.CASE,
         ScalarFunction.COALESCE,
@@ -107,14 +112,6 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
         ScalarFunction.CAST,
         ScalarFunction.CONCAT,
         ScalarFunction.SAFE_CAST,
-        // CASE — Calcite emits CASE WHEN ... THEN ... END for conditional expressions, including
-        // PPL `count(eval(predicate))` (lowered to COUNT(CASE WHEN predicate THEN ... ELSE NULL END))
-        // and explicit `eval x = case(cond, val, ...)`. Isthmus translates SqlKind.CASE structurally
-        // to a Substrait IfThen rel — no extension lookup needed, no adapter required. DataFusion's
-        // substrait consumer handles IfThen natively. Without this entry, the analytics planner
-        // rejects the operator with "No backend supports scalar function [CASE] among [datafusion]"
-        // before substrait emission.
-        ScalarFunction.CASE,
         // ABS / SUBSTRING — `eval x = abs(...)` and `eval s = substring(...)` projections that PPL
         // sort-pushdown moves into the project tree (see CalciteSortCommandIT
         // testPushdownSortExpressionContainsNull and CalcitePPLSortIT
@@ -225,6 +222,11 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
             @Override
             public Set<EngineCapability> supportedEngineCapabilities() {
                 return ENGINE_CAPS;
+            }
+
+            @Override
+            public Set<JoinAlgorithm> supportedJoinAlgorithms() {
+                return Set.of(JoinAlgorithm.COORDINATOR_HASH);
             }
 
             @Override

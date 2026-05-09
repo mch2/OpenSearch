@@ -26,6 +26,7 @@ import org.opensearch.analytics.planner.rel.OpenSearchExchangeReducer;
 import org.opensearch.analytics.planner.rel.OpenSearchJoin;
 import org.opensearch.analytics.planner.rel.OpenSearchRelNode;
 import org.opensearch.analytics.spi.EngineCapability;
+import org.opensearch.analytics.spi.JoinAlgorithm;
 
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -110,9 +111,20 @@ public class OpenSearchJoinRule extends RelOptRule {
             throw new IllegalStateException("No backend supports JOIN among viable backends after intersecting inputs");
         }
 
-        // Select a strategy for this join. Today always CoordinatorHashJoin —
-        // stats / hint-driven selection (shuffle / broadcast) is a future spec.
+        // Pick a strategy. Today only CoordinatorHashJoin exists; future work picks based on
+        // stats/hints. Narrow viable backends to those declaring the chosen algorithm so a
+        // backend with EngineCapability.JOIN but no support for this specific algorithm
+        // is dropped.
         JoinStrategy strategy = new CoordinatorHashJoin();
+        viableBackends.removeIf(backend -> {
+            var caps = context.getCapabilityRegistry().getBackend(backend).getCapabilityProvider();
+            return !caps.supportedJoinAlgorithms().contains(strategy.algorithm());
+        });
+        if (viableBackends.isEmpty()) {
+            throw new IllegalStateException(
+                "No backend supports join algorithm [" + strategy.algorithm() + "] among viable backends"
+            );
+        }
         JoinInfo info = join.analyzeCondition();
         JoinContext joinCtx = new JoinContext(info.leftKeys, info.rightKeys, 1, join.getJoinType());
         ExchangeInfo leftExchange = strategy.leftExchange(joinCtx);

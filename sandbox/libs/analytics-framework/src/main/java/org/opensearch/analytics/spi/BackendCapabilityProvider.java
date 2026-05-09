@@ -58,6 +58,16 @@ public interface BackendCapabilityProvider {
     }
 
     /**
+     * Join algorithms this backend can execute. The planner selects a strategy per join
+     * and narrows viable backends to those that declare matching algorithm support. An
+     * empty set means the backend cannot execute joins (independent of
+     * {@link EngineCapability#JOIN}, which remains as a coarser presence check).
+     */
+    default Set<JoinAlgorithm> supportedJoinAlgorithms() {
+        return Set.of();
+    }
+
+    /**
      * Delegation types this backend can initiate — it has a custom physical operator
      * that calls Analytics Core's delegation API to offload work to another backend.
      */

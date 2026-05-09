@@ -10,6 +10,7 @@ package org.opensearch.analytics.planner.join;
 
 import org.opensearch.analytics.planner.dag.ExchangeInfo;
 import org.opensearch.analytics.planner.dag.StageExecutionType;
+import org.opensearch.analytics.spi.JoinAlgorithm;
 
 /**
  * Distribution policy for a join. Decides how each side of the join is delivered
@@ -37,4 +38,7 @@ public interface JoinStrategy {
 
     /** Where the join itself executes — coordinator, partition-local, or shard-local. */
     StageExecutionType executionType();
+
+    /** The execution algorithm. Used to pick a backend that declares matching support. */
+    JoinAlgorithm algorithm();
 }

@@ -80,6 +80,11 @@ abstract class MockBackend implements AnalyticsSearchBackendPlugin {
             }
 
             @Override
+            public Set<org.opensearch.analytics.spi.JoinAlgorithm> supportedJoinAlgorithms() {
+                return self.supportedJoinAlgorithms();
+            }
+
+            @Override
             public Set<DelegationType> supportedDelegations() {
                 return self.supportedDelegations();
             }
@@ -123,6 +128,10 @@ abstract class MockBackend implements AnalyticsSearchBackendPlugin {
     }
 
     protected Set<WindowFunctionCapability> windowFunctionCapabilities() {
+        return Set.of();
+    }
+
+    protected Set<org.opensearch.analytics.spi.JoinAlgorithm> supportedJoinAlgorithms() {
         return Set.of();
     }
 

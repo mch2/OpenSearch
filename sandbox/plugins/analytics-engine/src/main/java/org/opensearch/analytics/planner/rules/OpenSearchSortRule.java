@@ -14,6 +14,8 @@ import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.Sort;
 import org.opensearch.analytics.planner.PlannerContext;
 import org.opensearch.analytics.planner.RelNodeUtils;
+import org.opensearch.analytics.planner.rel.OpenSearchAggregate;
+import org.opensearch.analytics.planner.rel.OpenSearchProject;
 import org.opensearch.analytics.planner.rel.OpenSearchRelNode;
 import org.opensearch.analytics.planner.rel.OpenSearchSort;
 import org.opensearch.analytics.spi.EngineCapability;
@@ -53,6 +55,17 @@ public class OpenSearchSortRule extends RelOptRule {
             throw new IllegalStateException("Sort rule encountered unmarked child [" + child.getClass().getSimpleName() + "]");
         }
 
+        // Drop a pure-Fetch Sort over an Aggregate (possibly via a Project chain). Aggregate
+        // output cardinality is bounded by group count, so a JOIN_SUBSEARCH_MAXOUT-style 50000
+        // limit is structurally never hit. The Sort/Fetch shape here also triggers a DataFusion
+        // hang for composite-group keys. Removing it keeps the safety contract intact for
+        // unbounded children but avoids the redundant Fetch when the aggregate already bounds
+        // output.
+        if (sort.getCollation().getFieldCollations().isEmpty() && sort.offset == null && hasAggregateUnderProjects(child)) {
+            call.transformTo(child);
+            return;
+        }
+
         List<String> childViableBackends = openSearchChild.getViableBackends();
         List<String> sortCapable = context.getCapabilityRegistry().operatorBackends(EngineCapability.SORT);
 
@@ -75,5 +88,13 @@ public class OpenSearchSortRule extends RelOptRule {
                 viableBackends
             )
         );
+    }
+
+    private static boolean hasAggregateUnderProjects(RelNode node) {
+        RelNode current = RelNodeUtils.unwrapHep(node);
+        while (current instanceof OpenSearchProject project) {
+            current = RelNodeUtils.unwrapHep(project.getInput());
+        }
+        return current instanceof OpenSearchAggregate;
     }
 }
