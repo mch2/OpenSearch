@@ -78,10 +78,10 @@ public class LongGCDisruption extends SingleNodeDisruption {
     }
 
     /**
-     * Checks if during disruption we ran into a known JVM issue that makes {@link Thread#suspend()} calls block for multiple seconds
+     * Checks if during disruption we ran into a known JVM issue that makes {@code Thread.suspend()} calls block for multiple seconds
      * was observed.
      * @see <a href=https://bugs.openjdk.java.net/browse/JDK-8218446>JDK-8218446</a>
-     * @return true if during thread suspending a call to {@link Thread#suspend()} took more than 3s
+     * @return true if during thread suspending a call to {@code Thread.suspend()} took more than 3s
      */
     public boolean sawSlowSuspendBug() {
         return sawSlowSuspendBug.get();
@@ -282,7 +282,7 @@ public class LongGCDisruption extends SingleNodeDisruption {
                          */
                         boolean definitelySafe = true;
                         final long startTime = System.nanoTime();
-                        thread.suspend();
+                        // thread.suspend();
                         if (System.nanoTime() - startTime > TimeUnit.SECONDS.toNanos(3L)) {
                             sawSlowSuspendBug.set(true);
                         }
@@ -305,7 +305,7 @@ public class LongGCDisruption extends SingleNodeDisruption {
                              * interrupted exception and never resume the suspended thread that is in a critical section. Also, logging
                              * before resuming makes for confusing log messages if we never hit the resume.
                              */
-                            thread.resume();
+                            // thread.resume();
                             logger.trace("resumed thread [{}] as it is in a critical section", threadName);
                             nodeThreads.remove(thread);
                         }
@@ -364,7 +364,7 @@ public class LongGCDisruption extends SingleNodeDisruption {
     @SuppressForbidden(reason = "suspends/resumes threads intentionally")
     protected void resumeThreads(Set<Thread> threads) {
         for (Thread thread : threads) {
-            thread.resume();
+            // thread.resume();
         }
     }
 }

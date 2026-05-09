@@ -55,6 +55,7 @@ public final class NativeBridge {
     private static final MethodHandle EXECUTE_QUERY;
     private static final MethodHandle STREAM_GET_SCHEMA;
     private static final MethodHandle STREAM_NEXT;
+    private static final MethodHandle STREAM_TRY_NEXT;
     private static final MethodHandle STREAM_CLOSE;
     private static final MethodHandle SQL_TO_SUBSTRAIT;
     private static final MethodHandle REGISTER_FILTER_TREE_CALLBACKS;
@@ -164,6 +165,11 @@ public final class NativeBridge {
 
         STREAM_NEXT = linker.downcallHandle(
             lib.find("df_stream_next").orElseThrow(),
+            FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG)
+        );
+
+        STREAM_TRY_NEXT = linker.downcallHandle(
+            lib.find("df_stream_try_next").orElseThrow(),
             FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG)
         );
 
@@ -608,6 +614,39 @@ public final class NativeBridge {
             listener.onResponse(result);
         } catch (Throwable t) {
             listener.onFailure(t instanceof Exception ? (Exception) t : new RuntimeException(t));
+        }
+    }
+
+    /**
+     * Sentinel returned by {@link #streamTryNext} when no batch is currently ready
+     * without blocking. Mirrors {@code api::STREAM_PENDING} on the Rust side —
+     * {@code 1} can never be a valid {@code FFI_ArrowArray*} (those are
+     * 8-byte-aligned), and negatives are reserved for the FFM error encoding.
+     */
+    public static final long STREAM_PENDING = 1L;
+
+    /**
+     * Non-blocking variant of {@link #streamNext}. Returns:
+     * <ul>
+     *   <li>positive even pointer ({@code >= 8}): heap-allocated {@code FFI_ArrowArray*}
+     *       — caller must release once the import is done</li>
+     *   <li>{@code 0}: end-of-stream</li>
+     *   <li>{@link #STREAM_PENDING} ({@code 1}): no batch ready right now</li>
+     * </ul>
+     * Errors surface as a thrown exception via {@link NativeLibraryLoader#checkResult}.
+     *
+     * <p>Used by callers that want to drain a result stream opportunistically from
+     * the producer's own thread — e.g. the reduce-sink drain path interleaves
+     * {@code senderSend} (push to input mpsc) with {@code streamTryNext} (pull
+     * from output) so DataFusion's plan-level backpressure flows without a
+     * dedicated puller thread.
+     */
+    public static long streamTryNext(long streamPtr) {
+        try {
+            NativeHandle.validatePointer(streamPtr, "stream");
+            return NativeLibraryLoader.checkResult((long) STREAM_TRY_NEXT.invokeExact(streamPtr));
+        } catch (Throwable t) {
+            throw t instanceof RuntimeException re ? re : new RuntimeException(t);
         }
     }
 

@@ -9,6 +9,8 @@
 package org.opensearch.analytics.exec.stage;
 
 import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.backend.ExchangeSource;
 import org.opensearch.analytics.exec.AnalyticsSearchTransportService;
 import org.opensearch.analytics.exec.PendingExecutions;
@@ -43,6 +45,8 @@ import java.util.function.Function;
  * @opensearch.internal
  */
 final class ShardFragmentStageExecution extends AbstractStageExecution implements DataProducer {
+
+    private static final Logger logger = LogManager.getLogger(ShardFragmentStageExecution.class);
 
     private final AtomicInteger inFlight = new AtomicInteger(0);
 
@@ -118,12 +122,47 @@ final class ShardFragmentStageExecution extends AbstractStageExecution implement
             public void onStreamResponse(T response, boolean isLast) {
                 config.searchExecutor().execute(() -> {
                     if (isDone()) {
+                        logger.debug(
+                            "[stage={}] onStreamResponse short-circuited (state={}); isLast={} response={}",
+                            stage.getStageId(),
+                            getState(),
+                            isLast,
+                            response.getClass().getSimpleName()
+                        );
                         releaseResponseResources(response);
                         return;
                     }
 
                     VectorSchemaRoot vsr = toVsr.apply(response);
-                    outputSink.feed(vsr);
+                    int rows = vsr.getRowCount();
+                    logger.debug(
+                        "[stage={}] onStreamResponse: feeding batch rows={} isLast={} inFlight={} sinkClass={}",
+                        stage.getStageId(),
+                        rows,
+                        isLast,
+                        inFlight.get(),
+                        outputSink.getClass().getSimpleName()
+                    );
+                    try {
+                        outputSink.feed(vsr);
+                    } catch (Exception e) {
+                        // Without this guard, an outputSink.feed(...) exception surfaces only on
+                        // the search-executor thread — the stage stays RUNNING, inFlight never
+                        // decrements, parentExec.start() never fires, and the query hangs to
+                        // QUERY_TIMEOUT instead of propagating the real cause. Exception covers
+                        // every FFM/FFI failure mode the native sink can produce
+                        // (IllegalStateException on closed arena/handle, WrongThreadException on
+                        // cross-thread access, IndexOutOfBoundsException on memory bounds, plus
+                        // any RuntimeException the sink raises for stream-merge errors). Errors
+                        // (OOM, StackOverflow, AssertionError) propagate to the JVM uncaught
+                        // handler — those indicate JVM-level state we can't safely recover from
+                        // by re-driving the stage's failure path.
+                        vsr.close();
+                        captureFailure(new RuntimeException("Stage " + stage.getStageId() + " sink feed failed", e));
+                        metrics.incrementTasksFailed();
+                        onShardTerminated();
+                        return;
+                    }
                     metrics.addRowsProcessed(vsr.getRowCount());
 
                     if (isLast) {
@@ -149,7 +188,9 @@ final class ShardFragmentStageExecution extends AbstractStageExecution implement
     }
 
     private void onShardTerminated() {
-        if (inFlight.decrementAndGet() == 0) {
+        int after = inFlight.decrementAndGet();
+        logger.debug("[stage={}] shard terminated; inFlight={}", stage.getStageId(), after);
+        if (after == 0) {
             Exception captured = getFailure();
             transitionTo(captured != null ? StageExecution.State.FAILED : StageExecution.State.SUCCEEDED);
         }

@@ -91,7 +91,7 @@ public class QueryScheduler implements Scheduler {
         try {
             graph = walker.build();
         } catch (Exception e) {
-            logger.debug("[QueryScheduler] walker.build() failed for queryId={}; listener already fired", queryId, e);
+            logger.debug(() -> "[QueryScheduler] walker.build() failed for queryId=" + queryId + "; listener already fired", e);
             return;
         }
 

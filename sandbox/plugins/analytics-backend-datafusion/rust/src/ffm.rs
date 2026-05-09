@@ -192,6 +192,17 @@ pub unsafe extern "C" fn df_stream_next(stream_ptr: i64) -> i64 {
         .map_err(|e| e.to_string())
 }
 
+#[ffm_safe]
+#[no_mangle]
+pub unsafe extern "C" fn df_stream_try_next(stream_ptr: i64) -> i64 {
+    // Polling a DataFusion stream requires being inside a Tokio runtime context
+    // (sources may schedule on the runtime). `Handle::enter` is enough — we don't
+    // block_on, since stream_try_next polls only and returns immediately.
+    let mgr = get_rt_manager()?;
+    let _guard = mgr.io_runtime.enter();
+    api::stream_try_next(stream_ptr).map_err(|e| e.to_string())
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn df_stream_close(stream_ptr: i64) {
     api::stream_close(stream_ptr);

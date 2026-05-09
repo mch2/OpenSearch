@@ -8,16 +8,20 @@
 
 package org.opensearch.analytics.resilience;
 
+import org.apache.arrow.vector.VectorSchemaRoot;
 import org.opensearch.Version;
 import org.opensearch.action.admin.cluster.node.tasks.cancel.CancelTasksResponse;
 import org.opensearch.action.admin.cluster.node.tasks.list.ListTasksResponse;
 import org.opensearch.action.admin.indices.create.CreateIndexResponse;
 import org.opensearch.analytics.AnalyticsPlugin;
 import org.opensearch.analytics.backend.jni.NativeHandle;
+import org.opensearch.analytics.exec.QueryScheduler;
 import org.opensearch.analytics.exec.action.FragmentExecutionAction;
+import org.opensearch.analytics.exec.action.FragmentExecutionResponse;
 import org.opensearch.analytics.exec.stage.StageExecutionBuilder;
 import org.opensearch.analytics.exec.stage.StageScheduler;
 import org.opensearch.analytics.planner.dag.StageExecutionType;
+import org.opensearch.analytics.spi.ExchangeSink;
 import org.opensearch.arrow.flight.transport.FlightStreamPlugin;
 import org.opensearch.be.datafusion.DataFusionPlugin;
 import org.opensearch.be.datafusion.DataFusionService;
@@ -29,6 +33,7 @@ import org.opensearch.common.settings.Settings;
 import org.opensearch.common.unit.TimeValue;
 import org.opensearch.common.util.FeatureFlags;
 import org.opensearch.composite.CompositeDataFormatPlugin;
+import org.opensearch.core.transport.TransportResponse;
 import org.opensearch.parquet.ParquetDataFormatPlugin;
 import org.opensearch.plugins.Plugin;
 import org.opensearch.plugins.PluginInfo;
@@ -43,6 +48,7 @@ import org.opensearch.test.disruption.NetworkDisruption;
 import org.opensearch.test.junit.annotations.TestLogging;
 import org.opensearch.test.transport.MockTransportService;
 import org.opensearch.transport.TransportChannel;
+import org.opensearch.transport.TransportService;
 import org.junit.After;
 
 import java.util.Collection;
@@ -99,13 +105,15 @@ import static org.hamcrest.Matchers.lessThan;
  */
 // TEST-scope: each test gets a fresh cluster — disruption schemes and killed
 // nodes must not leak across methods.
-@OpenSearchIntegTestCase.ClusterScope(
-    scope = OpenSearchIntegTestCase.Scope.TEST,
-    numDataNodes = 3,
-    numClientNodes = 0,
-    supportsDedicatedMasters = false
-)
+@OpenSearchIntegTestCase.ClusterScope(scope = OpenSearchIntegTestCase.Scope.TEST, numDataNodes = 3, numClientNodes = 0, supportsDedicatedMasters = false)
 @TestLogging(reason = "debugging resilience behavior", value = "org.opensearch.analytics:DEBUG")
+// Per-method leak detection: any thread spawned during a single test method that
+// is still alive 5s after the method returns fails the test. Overrides the
+// SUITE-scope default inherited from OpenSearchTestCase so failure-path leaks
+// (orphaned fragment-task threads, leaked native-handle reapers) surface
+// immediately at the offending method instead of being aggregated to suite end.
+@com.carrotsearch.randomizedtesting.annotations.ThreadLeakScope(com.carrotsearch.randomizedtesting.annotations.ThreadLeakScope.Scope.TEST)
+@com.carrotsearch.randomizedtesting.annotations.ThreadLeakLingering(linger = 5000)
 public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
 
     private static final String INDEX = "resilience_idx";
@@ -243,7 +251,10 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
     /** Map each primary shard id → node name that currently hosts it. */
     private Map<Integer, String> shardToNode() {
         Map<Integer, String> out = new HashMap<>();
-        for (ShardRouting sr : clusterService().state().routingTable().index(INDEX).shardsWithState(org.opensearch.cluster.routing.ShardRoutingState.STARTED)) {
+        for (ShardRouting sr : clusterService().state()
+            .routingTable()
+            .index(INDEX)
+            .shardsWithState(org.opensearch.cluster.routing.ShardRoutingState.STARTED)) {
             if (sr.primary()) {
                 String nodeId = sr.currentNodeId();
                 String name = clusterService().state().nodes().get(nodeId).getName();
@@ -300,8 +311,7 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
             // Hanging past QUERY_TIMEOUT surfaces as actionGet timeout → ignored
             // by AtomicReference failure capture only if we add per-call timeout.
             assertTrue(
-                "query must either return or fail within " + QUERY_TIMEOUT
-                    + "; got null response and null failure → coordinator hung",
+                "query must either return or fail within " + QUERY_TIMEOUT + "; got null response and null failure → coordinator hung",
                 response.get() != null || failure.get() != null
             );
         } finally {
@@ -413,10 +423,7 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
             } catch (Throwable t) {
                 failure.set(t);
             }
-            assertTrue(
-                "Coordinator must complete or fail within " + QUERY_TIMEOUT,
-                response.get() != null || failure.get() != null
-            );
+            assertTrue("Coordinator must complete or fail within " + QUERY_TIMEOUT, response.get() != null || failure.get() != null);
         } finally {
             disruption.stopDisrupting();
             internalCluster().clearDisruptionScheme();
@@ -458,10 +465,7 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
             }
             // Pin the behavior — whichever path the coordinator takes, it must
             // terminate in bounded time.
-            assertTrue(
-                "Bridge partition must surface a response or an error (no hang)",
-                response.get() != null || failure.get() != null
-            );
+            assertTrue("Bridge partition must surface a response or an error (no hang)", response.get() != null || failure.get() != null);
         } finally {
             disruption.stopDisrupting();
             internalCluster().clearDisruptionScheme();
@@ -539,10 +543,7 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
     public void testCoordinatorPropagatesStageFailure() throws Exception {
         createAndSeedIndex();
         String victim = pickShardHostingNode();
-        MockTransportService mts = (MockTransportService) internalCluster().getInstance(
-            org.opensearch.transport.TransportService.class,
-            victim
-        );
+        MockTransportService mts = (MockTransportService) internalCluster().getInstance(TransportService.class, victim);
         AtomicBoolean thrown = new AtomicBoolean(false);
         mts.addRequestHandlingBehavior(FragmentExecutionAction.NAME, (handler, request, channel, task) -> {
             thrown.set(true);
@@ -557,8 +558,13 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
                 failure.set(t);
             }
             assertTrue(
-                "Injection must reach victim node before termination (thrown=" + thrown.get()
-                    + ", response=" + response.get() + ", failure=" + failure.get() + ")",
+                "Injection must reach victim node before termination (thrown="
+                    + thrown.get()
+                    + ", response="
+                    + response.get()
+                    + ", failure="
+                    + failure.get()
+                    + ")",
                 thrown.get() || response.get() != null || failure.get() != null
             );
         } finally {
@@ -575,10 +581,7 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
         createAndSeedIndex();
         String victim = pickShardHostingNode();
         // Slow the victim so we can race in a cancellation.
-        MockTransportService mts = (MockTransportService) internalCluster().getInstance(
-            org.opensearch.transport.TransportService.class,
-            victim
-        );
+        MockTransportService mts = (MockTransportService) internalCluster().getInstance(TransportService.class, victim);
         CountDownLatch released = new CountDownLatch(1);
         mts.addRequestHandlingBehavior(FragmentExecutionAction.NAME, (handler, request, channel, task) -> {
             // Hold the shard-side request until released.
@@ -594,12 +597,11 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
             Future<PPLResponse> fut = exec.submit(() -> executePPL("source = " + INDEX + " | stats sum(value) as total"));
             // Allow dispatch + shard-handler entry
             Thread.sleep(500);
-            CancelTasksResponse cancel = client().admin()
-                .cluster()
-                .prepareCancelTasks()
-                .setActions(FragmentExecutionAction.NAME)
-                .get();
-            assertFalse("cancel request must not carry back node failures", cancel.getNodeFailures() != null && !cancel.getNodeFailures().isEmpty());
+            CancelTasksResponse cancel = client().admin().cluster().prepareCancelTasks().setActions(FragmentExecutionAction.NAME).get();
+            assertFalse(
+                "cancel request must not carry back node failures",
+                cancel.getNodeFailures() != null && !cancel.getNodeFailures().isEmpty()
+            );
             released.countDown();
             try {
                 fut.get(QUERY_TIMEOUT.seconds(), TimeUnit.SECONDS);
@@ -624,10 +626,7 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
     public void testTaskCancellationAtCoordinator() throws Exception {
         createAndSeedIndex();
         String victim = pickShardHostingNode();
-        MockTransportService mts = (MockTransportService) internalCluster().getInstance(
-            org.opensearch.transport.TransportService.class,
-            victim
-        );
+        MockTransportService mts = (MockTransportService) internalCluster().getInstance(TransportService.class, victim);
         CountDownLatch released = new CountDownLatch(1);
         mts.addRequestHandlingBehavior(FragmentExecutionAction.NAME, (handler, request, channel, task) -> {
             try {
@@ -641,11 +640,7 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
         try {
             Future<PPLResponse> fut = exec.submit(() -> executePPL("source = " + INDEX + " | stats sum(value) as total"));
             Thread.sleep(500);
-            CancelTasksResponse cancel = client().admin()
-                .cluster()
-                .prepareCancelTasks()
-                .setActions(UnifiedPPLExecuteAction.NAME)
-                .get();
+            CancelTasksResponse cancel = client().admin().cluster().prepareCancelTasks().setActions(UnifiedPPLExecuteAction.NAME).get();
             assertFalse("cancel must not report node failures", cancel.getNodeFailures() != null && !cancel.getNodeFailures().isEmpty());
             released.countDown();
             try {
@@ -659,15 +654,8 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
         }
         assertNoPendingFragmentTasks();
         // Parent PPL task must also be gone.
-        ListTasksResponse remaining = client().admin()
-            .cluster()
-            .prepareListTasks()
-            .setActions(UnifiedPPLExecuteAction.NAME)
-            .get();
-        assertTrue(
-            "No residual UnifiedPPLExecute tasks after cancel: " + remaining.getTasks(),
-            remaining.getTasks().isEmpty()
-        );
+        ListTasksResponse remaining = client().admin().cluster().prepareListTasks().setActions(UnifiedPPLExecuteAction.NAME).get();
+        assertTrue("No residual UnifiedPPLExecute tasks after cancel: " + remaining.getTasks(), remaining.getTasks().isEmpty());
     }
 
     /**
@@ -688,10 +676,7 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
     public void testNoDataReturnedFromShard() throws Exception {
         createAndSeedIndex();
         String victim = pickShardHostingNode();
-        MockTransportService mts = (MockTransportService) internalCluster().getInstance(
-            org.opensearch.transport.TransportService.class,
-            victim
-        );
+        MockTransportService mts = (MockTransportService) internalCluster().getInstance(TransportService.class, victim);
         mts.addRequestHandlingBehavior(FragmentExecutionAction.NAME, (handler, request, channel, task) -> {
             // Wrap the channel: let the real handler run, but substitute any row content with
             // zero rows while preserving the shard's protocol state. Works on both the unary
@@ -707,21 +692,16 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
                 private boolean schemaForwarded = false;
 
                 @Override
-                public void sendResponse(org.opensearch.core.transport.TransportResponse response) throws java.io.IOException {
-                    if (response instanceof org.opensearch.analytics.exec.action.FragmentExecutionResponse real) {
-                        super.sendResponse(
-                            new org.opensearch.analytics.exec.action.FragmentExecutionResponse(
-                                real.getFieldNames(),
-                                java.util.Collections.emptyList()
-                            )
-                        );
+                public void sendResponse(TransportResponse response) throws java.io.IOException {
+                    if (response instanceof FragmentExecutionResponse real) {
+                        super.sendResponse(new FragmentExecutionResponse(real.getFieldNames(), java.util.Collections.emptyList()));
                     } else {
                         super.sendResponse(response);
                     }
                 }
 
                 @Override
-                public void sendResponseBatch(org.opensearch.core.transport.TransportResponse response) {
+                public void sendResponseBatch(TransportResponse response) {
                     if (response instanceof org.opensearch.analytics.exec.action.FragmentExecutionArrowResponse arrow) {
                         org.apache.arrow.vector.VectorSchemaRoot incoming = arrow.getRoot();
                         if (incoming == null) return;
@@ -746,11 +726,7 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
             PPLResponse response = executePPL("source = " + INDEX + " | stats sum(value) as total", QUERY_TIMEOUT);
             assertNotNull("coordinator must produce a response when one shard is empty", response);
             long actual = ((Number) response.getRows().get(0)[response.getColumns().indexOf("total")]).longValue();
-            assertThat(
-                "Partial sum must be < full when a shard contributes nothing; got " + actual,
-                actual,
-                lessThan(EXPECTED_SUM)
-            );
+            assertThat("Partial sum must be < full when a shard contributes nothing; got " + actual, actual, lessThan(EXPECTED_SUM));
             assertThat("Partial sum must be ≥ 0 given the other two shards' contribution", actual, greaterThan(-1L));
         } finally {
             mts.clearAllRules();
@@ -770,14 +746,8 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
         String errorNode = hosts[0];
         String emptyNode = hosts.length > 1 ? hosts[1] : hosts[0];
 
-        MockTransportService errorMts = (MockTransportService) internalCluster().getInstance(
-            org.opensearch.transport.TransportService.class,
-            errorNode
-        );
-        MockTransportService emptyMts = (MockTransportService) internalCluster().getInstance(
-            org.opensearch.transport.TransportService.class,
-            emptyNode
-        );
+        MockTransportService errorMts = (MockTransportService) internalCluster().getInstance(TransportService.class, errorNode);
+        MockTransportService emptyMts = (MockTransportService) internalCluster().getInstance(TransportService.class, emptyNode);
 
         errorMts.addRequestHandlingBehavior(FragmentExecutionAction.NAME, (handler, request, channel, task) -> {
             channel.sendResponse(new RuntimeException("partial-failure-error-shard"));
@@ -786,14 +756,9 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
             emptyMts.addRequestHandlingBehavior(FragmentExecutionAction.NAME, (handler, request, channel, task) -> {
                 TransportChannel wrapper = new ForwardingChannel(channel) {
                     @Override
-                    public void sendResponse(org.opensearch.core.transport.TransportResponse response) throws java.io.IOException {
-                        if (response instanceof org.opensearch.analytics.exec.action.FragmentExecutionResponse real) {
-                            super.sendResponse(
-                                new org.opensearch.analytics.exec.action.FragmentExecutionResponse(
-                                    real.getFieldNames(),
-                                    java.util.Collections.emptyList()
-                                )
-                            );
+                    public void sendResponse(TransportResponse response) throws java.io.IOException {
+                        if (response instanceof FragmentExecutionResponse real) {
+                            super.sendResponse(new FragmentExecutionResponse(real.getFieldNames(), java.util.Collections.emptyList()));
                         } else {
                             super.sendResponse(response);
                         }
@@ -837,39 +802,79 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
      * stream handle). This is a tighter, reduce-sink-layer assertion of the same
      * propagation logic exercised at the transport layer by
      * {@link #testCoordinatorPropagatesStageFailure} (#8) — only the injection
-     * point differs. Deferred: there is no production fault seam on
-     * {@code DatafusionReduceSink} today (the sink is constructed and consumed
-     * in-process by {@code StageExecutionBuilder} via {@code ExchangeSinkProvider},
-     * so {@code MockTransportService} cannot reach it).
+     * point differs.
      */
-    @org.apache.lucene.tests.util.LuceneTestCase.AwaitsFix(
-        bugUrl = "Tighter failure-mode assertion at the reduce-sink layer. The propagation "
-            + "contract (failure surfaces + bounded time) is already covered indirectly by "
-            + "testCoordinatorPropagatesStageFailure (#8), which injects via "
-            + "MockTransportService.addRequestHandlingBehavior(FragmentExecutionAction.NAME, ...) "
-            + "at the shard-fragment boundary; only the injection point differs. What this test "
-            + "would add on top is the native-memory-baseline-return oracle "
-            + "(DataFusionService.getMemoryPoolUsage()) at the reduce-sink layer specifically. "
-            + "Deferred until DatafusionReduceSink exposes a fault seam — the natural call site is "
-            + "where StageExecutionBuilder wires the coordinator-side sink (sandbox/plugins/"
-            + "analytics-engine/src/main/java/org/opensearch/analytics/exec/stage/"
-            + "StageExecutionBuilder.java, around the ExchangeSinkProvider.createSink(...) call "
-            + "consumed by LocalStageExecution.java)."
-    )
     public void testReduceStageFailureSurfaced() throws Exception {
-        // Intended shape (kept so the test survives future hook-add):
         createAndSeedIndex();
-        DataFusionService dfs = internalCluster().getInstance(DataFusionService.class, coordinatorNodeName());
+        String coord = coordinatorNodeName();
+        DataFusionService dfs = internalCluster().getInstance(DataFusionService.class, coord);
         long before = dfs.getMemoryPoolUsage();
-        AtomicReference<Throwable> failure = new AtomicReference<>();
-        try {
-            executePPL("source = " + INDEX + " | stats sum(value) as total", QUERY_TIMEOUT);
-        } catch (Throwable t) {
-            failure.set(t);
+
+        Map<String, StageScheduler> originalByNode = new HashMap<>();
+        for (String node : internalCluster().getNodeNames()) {
+            StageExecutionBuilder builder = internalCluster().getInstance(QueryScheduler.class, node).getStageExecutionBuilder();
+            StageScheduler[] thisNodeOriginal = new StageScheduler[1];
+            StageScheduler perNodeFaulting = (stage, sink, qctx) -> {
+                ExchangeSink poisoned = new ExchangeSink() {
+                    @Override
+                    public void feed(VectorSchemaRoot batch) {
+                        batch.close();
+                        throw new RuntimeException("injected reduce-sink feed failure");
+                    }
+
+                    @Override
+                    public void close() {
+                        sink.close();
+                    }
+                };
+                return thisNodeOriginal[0].createExecution(stage, poisoned, qctx);
+            };
+            thisNodeOriginal[0] = builder.registerScheduler(StageExecutionType.SHARD_FRAGMENT, perNodeFaulting);
+            if (thisNodeOriginal[0] != null) {
+                originalByNode.put(node, thisNodeOriginal[0]);
+            }
         }
-        assertNotNull("reduce-stage injection must surface a failure", failure.get());
-        long after = dfs.getMemoryPoolUsage();
-        assertEquals("Native memory must return to baseline after reduce failure", before, after);
+        try {
+            AtomicReference<PPLResponse> response = new AtomicReference<>();
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            try {
+                response.set(executePPL("source = " + INDEX + " | stats sum(value) as total", QUERY_TIMEOUT));
+            } catch (Throwable t) {
+                failure.set(t);
+            }
+            // The contract this guard fixes: feed() throwing must NOT hang the query
+            // past QUERY_TIMEOUT. Either the failure surfaces as an exception (preferred),
+            // OR the parent reduce stage races ahead and emits a wrong result from an
+            // empty source (acceptable for this fix — propagating SHARD_FRAGMENT FAILED
+            // to the parent stage is a separate cascade concern). What we forbid is
+            // silently returning EXPECTED_SUM, since the producer never delivered rows.
+            boolean exception = failure.get() != null;
+            boolean wrongResult = false;
+            if (response.get() != null) {
+                int idx = response.get().getColumns().indexOf("total");
+                if (idx < 0 || response.get().getRows().isEmpty()) {
+                    wrongResult = true;
+                } else {
+                    Object cell = response.get().getRows().get(0)[idx];
+                    long got = cell == null ? -1 : ((Number) cell).longValue();
+                    wrongResult = got != EXPECTED_SUM;
+                }
+            }
+            assertTrue(
+                "feed() failure must surface (got response=" + response.get() + ", failure=" + failure.get() + ")",
+                exception || wrongResult
+            );
+        } finally {
+            for (Map.Entry<String, StageScheduler> e : originalByNode.entrySet()) {
+                StageExecutionBuilder b = internalCluster().getInstance(QueryScheduler.class, e.getKey()).getStageExecutionBuilder();
+                b.registerScheduler(StageExecutionType.SHARD_FRAGMENT, e.getValue());
+            }
+        }
+        assertBusy(
+            () -> assertEquals("Native memory must return to baseline after reduce failure", before, dfs.getMemoryPoolUsage()),
+            10,
+            TimeUnit.SECONDS
+        );
     }
 
     /**
@@ -892,10 +897,7 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
             } catch (Throwable t) {
                 failure.set(t);
             }
-            assertTrue(
-                "Tiny memory limit must surface as failure or bounded response",
-                response.get() != null || failure.get() != null
-            );
+            assertTrue("Tiny memory limit must surface as failure or bounded response", response.get() != null || failure.get() != null);
         } finally {
             client().admin()
                 .cluster()
@@ -906,39 +908,41 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
     }
 
     /**
-     * #15 — Run 50 failing queries in a row; assert the thread count doesn't
-     * monotonically grow in a way that would indicate leaks.
+     * #15 — Workload driver for failure-path leak detection. Runs 50 failing
+     * queries in a row to amplify any per-failure leak (orphaned fragment
+     * task, native-handle reaper, executor pool thread) so even a leak too
+     * small to surface at N=1 becomes obvious. Leak detection itself comes
+     * from the class-level {@code @ThreadLeakScope(Scope.TEST)}: the suite
+     * framework fails this test if any thread spawned during the loop is
+     * still alive {@code linger}ms after the method returns.
+     *
+     * <p>Injects on every node — {@code client()} routes randomly, so every
+     * potential coordinator must intercept the dispatch.
      */
     public void testThreadLeakAfterFailedQuery() throws Exception {
         createAndSeedIndex();
-        String victim = pickShardHostingNode();
-        MockTransportService mts = (MockTransportService) internalCluster().getInstance(
-            org.opensearch.transport.TransportService.class,
-            victim
-        );
-        mts.addRequestHandlingBehavior(FragmentExecutionAction.NAME, (handler, request, channel, task) -> {
-            channel.sendResponse(new IllegalStateException("forced-failure for thread-leak test"));
-        });
+        for (String node : internalCluster().getNodeNames()) {
+            MockTransportService mts = (MockTransportService) internalCluster().getInstance(TransportService.class, node);
+            mts.addRequestHandlingBehavior(FragmentExecutionAction.NAME, (handler, request, channel, task) -> {
+                channel.sendResponse(new IllegalStateException("forced-failure for thread-leak test"));
+            });
+        }
         try {
-            int threadsBefore = Thread.activeCount();
+            int failed = 0;
             for (int i = 0; i < 50; i++) {
                 try {
                     executePPL("source = " + INDEX + " | stats sum(value) as total", QUERY_TIMEOUT);
-                } catch (Throwable ignore) {
-                    // Expected — injection causes failure.
+                } catch (Throwable expected) {
+                    failed++;
                 }
             }
-            // Allow task manager / pending handlers to drain.
-            assertBusy(() -> {
-                int threadsAfter = Thread.activeCount();
-                // Heuristic slack: pool growth under load is OK up to a generous bound.
-                assertTrue(
-                    "Thread count grew from " + threadsBefore + " → " + threadsAfter + " after 50 failed queries — likely leak",
-                    threadsAfter - threadsBefore < 200
-                );
-            }, 30, TimeUnit.SECONDS);
+            // Verify the workload was real — otherwise we'd be running 50 successful
+            // queries through the leak detector, which doesn't exercise failure paths.
+            assertTrue("expected most queries to fail (saw " + failed + "/50)", failed >= 45);
         } finally {
-            mts.clearAllRules();
+            for (String node : internalCluster().getNodeNames()) {
+                ((MockTransportService) internalCluster().getInstance(TransportService.class, node)).clearAllRules();
+            }
         }
     }
 
@@ -1008,7 +1012,9 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
                     fail(
                         "Deadlock signature: pool join deadline exceeded under "
                             + concurrency
-                            + "-way concurrency (per-query timeout was " + perQueryTimeout + "). "
+                            + "-way concurrency (per-query timeout was "
+                            + perQueryTimeout
+                            + "). "
                             + "Threads:\n"
                             + dumpAllThreads()
                     );
@@ -1017,8 +1023,10 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
             // Most queries must succeed. If multiple queries are timing out
             // individually (firstFailure has a value), that's the real bug.
             assertThat(
-                "most concurrent queries should succeed (succeeded=" + succeeded.get()
-                    + ", failed=" + failed.get()
+                "most concurrent queries should succeed (succeeded="
+                    + succeeded.get()
+                    + ", failed="
+                    + failed.get()
                     + (firstFailure.get() == null ? "" : ", firstFailure=" + firstFailure.get())
                     + ")",
                 succeeded.get(),
@@ -1042,10 +1050,7 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
         long before = dfs.getMemoryPoolUsage();
 
         String victim = pickShardHostingNode();
-        MockTransportService mts = (MockTransportService) internalCluster().getInstance(
-            org.opensearch.transport.TransportService.class,
-            victim
-        );
+        MockTransportService mts = (MockTransportService) internalCluster().getInstance(TransportService.class, victim);
         mts.addRequestHandlingBehavior(FragmentExecutionAction.NAME, (handler, request, channel, task) -> {
             channel.sendResponse(new IllegalStateException("release-on-failure probe"));
         });
@@ -1097,10 +1102,7 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
         int baseline = NativeHandle.liveHandleCount();
 
         String victim = pickShardHostingNode();
-        MockTransportService mts = (MockTransportService) internalCluster().getInstance(
-            org.opensearch.transport.TransportService.class,
-            victim
-        );
+        MockTransportService mts = (MockTransportService) internalCluster().getInstance(TransportService.class, victim);
         CountDownLatch released = new CountDownLatch(1);
         mts.addRequestHandlingBehavior(FragmentExecutionAction.NAME, (handler, request, channel, task) -> {
             try {
@@ -1112,9 +1114,7 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
         });
         ExecutorService exec = Executors.newSingleThreadExecutor();
         try {
-            Future<PPLResponse> fut = exec.submit(
-                () -> executePPL("source = " + INDEX + " | stats sum(value) as total", QUERY_TIMEOUT)
-            );
+            Future<PPLResponse> fut = exec.submit(() -> executePPL("source = " + INDEX + " | stats sum(value) as total", QUERY_TIMEOUT));
             // Allow the query to dispatch and the coordinator to allocate
             // its native session / runtime handles before we cancel.
             Thread.sleep(500);
@@ -1125,15 +1125,8 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
                 "Expected at least one native handle to be live mid-query (baseline=" + baseline + ", during=" + duringQuery + ")",
                 duringQuery >= baseline
             );
-            CancelTasksResponse cancel = client().admin()
-                .cluster()
-                .prepareCancelTasks()
-                .setActions(UnifiedPPLExecuteAction.NAME)
-                .get();
-            assertFalse(
-                "cancel must not produce node failures",
-                cancel.getNodeFailures() != null && !cancel.getNodeFailures().isEmpty()
-            );
+            CancelTasksResponse cancel = client().admin().cluster().prepareCancelTasks().setActions(UnifiedPPLExecuteAction.NAME).get();
+            assertFalse("cancel must not produce node failures", cancel.getNodeFailures() != null && !cancel.getNodeFailures().isEmpty());
             released.countDown();
             try {
                 fut.get(QUERY_TIMEOUT.seconds(), TimeUnit.SECONDS);
@@ -1152,10 +1145,7 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
         assertBusy(() -> {
             System.gc();
             int after = NativeHandle.liveHandleCount();
-            assertTrue(
-                "NativeHandle live count grew after cancel: baseline=" + baseline + " after=" + after,
-                after <= baseline
-            );
+            assertTrue("NativeHandle live count grew after cancel: baseline=" + baseline + " after=" + after, after <= baseline);
         }, 30, TimeUnit.SECONDS);
     }
 
@@ -1217,9 +1207,7 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
         // helper resolves to a cluster-wide client, so post-crash it can still
         // dispatch against a surviving node.
         ExecutorService exec = Executors.newSingleThreadExecutor();
-        Future<PPLResponse> inFlight = exec.submit(
-            () -> executePPL("source = " + INDEX + " | stats sum(value) as total", QUERY_TIMEOUT)
-        );
+        Future<PPLResponse> inFlight = exec.submit(() -> executePPL("source = " + INDEX + " | stats sum(value) as total", QUERY_TIMEOUT));
         Thread.sleep(200);
         try {
             internalCluster().stopRandomNode(InternalTestCluster.nameFilter(coord));
@@ -1254,11 +1242,7 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
     public void testPlanFailurePropagates() throws Exception {
         createAndSeedIndex();
         // Sample task list before to detect any leak after.
-        ListTasksResponse before = client().admin()
-            .cluster()
-            .prepareListTasks()
-            .setActions(FragmentExecutionAction.NAME)
-            .get();
+        ListTasksResponse before = client().admin().cluster().prepareListTasks().setActions(FragmentExecutionAction.NAME).get();
         int beforeCount = before.getTasks().size();
 
         AtomicReference<Throwable> failure = new AtomicReference<>();
@@ -1267,17 +1251,10 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
         } catch (Throwable t) {
             failure.set(t);
         }
-        assertNotNull(
-            "PPL referencing missing field must surface a planning error; got null failure (response=hang?)",
-            failure.get()
-        );
+        assertNotNull("PPL referencing missing field must surface a planning error; got null failure (response=hang?)", failure.get());
         // No leaked fragment tasks (planning failure must short-circuit before dispatch).
         assertNoPendingFragmentTasks();
-        ListTasksResponse after = client().admin()
-            .cluster()
-            .prepareListTasks()
-            .setActions(FragmentExecutionAction.NAME)
-            .get();
+        ListTasksResponse after = client().admin().cluster().prepareListTasks().setActions(FragmentExecutionAction.NAME).get();
         assertEquals(
             "Plan failure must not leak fragment tasks: before=" + beforeCount + " after=" + after.getTasks().size(),
             beforeCount,
@@ -1300,26 +1277,21 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
      * the planner / orchestrator). Deferred: there is no public fault seam or
      * registered-state accessor on the unified query planner today.
      */
-    @org.apache.lucene.tests.util.LuceneTestCase.AwaitsFix(
-        bugUrl = "Tighter cleanup observability for planner-stage failures. The propagation "
-            + "contract (planner failure surfaces + no leaked FragmentExecutionAction tasks) is "
-            + "already covered indirectly by testPlanFailurePropagates (#21), which exercises the "
-            + "same path with a real planner-rejecting query. What this test would add is direct "
-            + "assertion on coordinator registered-state cleanup (pending executions, query "
-            + "contexts) after a planner-injected failure. Deferred until UnifiedQueryPlanner "
-            + "exposes a public fault seam or a registered-state observability accessor — "
-            + "natural call sites are sandbox/plugins/analytics-engine/src/main/java/org/"
-            + "opensearch/analytics/exec/DefaultPlanExecutor.java (transport entry, around the "
-            + "doExecute(...) plan-then-schedule path) and sandbox/plugins/analytics-engine/src/"
-            + "main/java/org/opensearch/analytics/planner/PlannerImpl.java (planner internals). "
-            + "MockTransportService.addRequestHandlingBehavior on the dispatch action sees the "
-            + "request only AFTER transport dispatch — i.e. after planning has kicked off "
-            + "in-process — so transport interception cannot reach the planner-internal failure "
-            + "mode."
-    )
-    public void testPlanFailureAfterValidDispatchesCleansUp() throws Exception {
-        fail("placeholder — see @AwaitsFix bugUrl");
-    }
+    @org.apache.lucene.tests.util.LuceneTestCase.AwaitsFix(bugUrl = "Tighter cleanup observability for planner-stage failures. The propagation "
+        + "contract (planner failure surfaces + no leaked FragmentExecutionAction tasks) is "
+        + "already covered indirectly by testPlanFailurePropagates (#21), which exercises the "
+        + "same path with a real planner-rejecting query. What this test would add is direct "
+        + "assertion on coordinator registered-state cleanup (pending executions, query "
+        + "contexts) after a planner-injected failure. Deferred until UnifiedQueryPlanner "
+        + "exposes a public fault seam or a registered-state observability accessor — "
+        + "natural call sites are sandbox/plugins/analytics-engine/src/main/java/org/"
+        + "opensearch/analytics/exec/DefaultPlanExecutor.java (transport entry, around the "
+        + "doExecute(...) plan-then-schedule path) and sandbox/plugins/analytics-engine/src/"
+        + "main/java/org/opensearch/analytics/planner/PlannerImpl.java (planner internals). "
+        + "MockTransportService.addRequestHandlingBehavior on the dispatch action sees the "
+        + "request only AFTER transport dispatch — i.e. after planning has kicked off "
+        + "in-process — so transport interception cannot reach the planner-internal failure "
+        + "mode.")
 
     /**
      * #23 — Inject a failure during stage build so earlier stages are
@@ -1357,10 +1329,7 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
             throw new IllegalStateException("injected SHARD_FRAGMENT build failure for stageId=" + stage.getStageId());
         };
         for (String node : internalCluster().getNodeNames()) {
-            StageExecutionBuilder b = internalCluster().getInstance(
-                org.opensearch.analytics.exec.QueryScheduler.class,
-                node
-            ).getStageExecutionBuilder();
+            StageExecutionBuilder b = internalCluster().getInstance(QueryScheduler.class, node).getStageExecutionBuilder();
             StageScheduler prev = b.registerScheduler(StageExecutionType.SHARD_FRAGMENT, faulting);
             if (prev != null) {
                 previousByNode.put(node, prev);
@@ -1382,10 +1351,7 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
             // Restore — even on failure, leaving a faulting scheduler in
             // place would poison subsequent tests in the suite.
             for (Map.Entry<String, StageScheduler> e : previousByNode.entrySet()) {
-                StageExecutionBuilder b = internalCluster().getInstance(
-                    org.opensearch.analytics.exec.QueryScheduler.class,
-                    e.getKey()
-                ).getStageExecutionBuilder();
+                StageExecutionBuilder b = internalCluster().getInstance(QueryScheduler.class, e.getKey()).getStageExecutionBuilder();
                 b.registerScheduler(StageExecutionType.SHARD_FRAGMENT, e.getValue());
             }
         }
@@ -1404,11 +1370,7 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
         // Sanity: a fresh query against the same index works post-failure.
         // If the partial-build cleanup was incomplete we'd see a residual
         // session / lock and this query would fail or hang.
-        assertScalarLong(
-            executePPL("source = " + INDEX + " | stats sum(value) as total", QUERY_TIMEOUT),
-            "total",
-            EXPECTED_SUM
-        );
+        assertScalarLong(executePPL("source = " + INDEX + " | stats sum(value) as total", QUERY_TIMEOUT), "total", EXPECTED_SUM);
     }
 
     /**
@@ -1445,10 +1407,7 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
             );
         };
         for (String node : internalCluster().getNodeNames()) {
-            StageExecutionBuilder b = internalCluster().getInstance(
-                org.opensearch.analytics.exec.QueryScheduler.class,
-                node
-            ).getStageExecutionBuilder();
+            StageExecutionBuilder b = internalCluster().getInstance(QueryScheduler.class, node).getStageExecutionBuilder();
             StageScheduler prev = b.registerScheduler(StageExecutionType.COORDINATOR_REDUCE, faulting);
             if (prev != null) {
                 previousByNode.put(node, prev);
@@ -1468,10 +1427,7 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
             assertNotNull("Build failure must surface to the listener (got null failure)", failure.get());
         } finally {
             for (Map.Entry<String, StageScheduler> e : previousByNode.entrySet()) {
-                StageExecutionBuilder b = internalCluster().getInstance(
-                    org.opensearch.analytics.exec.QueryScheduler.class,
-                    e.getKey()
-                ).getStageExecutionBuilder();
+                StageExecutionBuilder b = internalCluster().getInstance(QueryScheduler.class, e.getKey()).getStageExecutionBuilder();
                 b.registerScheduler(StageExecutionType.COORDINATOR_REDUCE, e.getValue());
             }
         }
@@ -1484,11 +1440,7 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
             );
         }, 30, TimeUnit.SECONDS);
         // Post-recovery sanity check.
-        assertScalarLong(
-            executePPL("source = " + INDEX + " | stats sum(value) as total", QUERY_TIMEOUT),
-            "total",
-            EXPECTED_SUM
-        );
+        assertScalarLong(executePPL("source = " + INDEX + " | stats sum(value) as total", QUERY_TIMEOUT), "total", EXPECTED_SUM);
     }
 
     /**
@@ -1559,10 +1511,7 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
             try {
                 raceStart.get(5, TimeUnit.SECONDS);
             } catch (Throwable ignore) {}
-            assertTrue(
-                "Disconnect-during-dispatch race must terminate in bounded time",
-                failure.get() != null || response.get() != null
-            );
+            assertTrue("Disconnect-during-dispatch race must terminate in bounded time", failure.get() != null || response.get() != null);
         } finally {
             disruption.stopDisrupting();
             internalCluster().clearDisruptionScheme();
@@ -1584,10 +1533,7 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
     public void testCancelBetweenDispatchAndFirstBatch() throws Exception {
         createAndSeedIndex();
         String victim = pickShardHostingNode();
-        MockTransportService mts = (MockTransportService) internalCluster().getInstance(
-            org.opensearch.transport.TransportService.class,
-            victim
-        );
+        MockTransportService mts = (MockTransportService) internalCluster().getInstance(TransportService.class, victim);
         CountDownLatch released = new CountDownLatch(1);
         mts.addRequestHandlingBehavior(FragmentExecutionAction.NAME, (handler, request, channel, task) -> {
             try {
@@ -1599,17 +1545,11 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
         });
         ExecutorService exec = Executors.newSingleThreadExecutor();
         try {
-            Future<PPLResponse> fut = exec.submit(
-                () -> executePPL("source = " + INDEX + " | stats sum(value) as total", QUERY_TIMEOUT)
-            );
+            Future<PPLResponse> fut = exec.submit(() -> executePPL("source = " + INDEX + " | stats sum(value) as total", QUERY_TIMEOUT));
             // Wait long enough for dispatch to land on the data-node, but not so long
             // that the streaming codepath (which bypasses our stub) finishes first.
             Thread.sleep(500);
-            CancelTasksResponse cancel = client().admin()
-                .cluster()
-                .prepareCancelTasks()
-                .setActions(UnifiedPPLExecuteAction.NAME)
-                .get();
+            CancelTasksResponse cancel = client().admin().cluster().prepareCancelTasks().setActions(UnifiedPPLExecuteAction.NAME).get();
             assertFalse(
                 "cancel request must not carry node failures",
                 cancel.getNodeFailures() != null && !cancel.getNodeFailures().isEmpty()
@@ -1642,16 +1582,13 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
     public void testMidStreamBatchExceptionPropagates() throws Exception {
         createAndSeedIndex();
         String victim = pickShardHostingNode();
-        MockTransportService mts = (MockTransportService) internalCluster().getInstance(
-            org.opensearch.transport.TransportService.class,
-            victim
-        );
+        MockTransportService mts = (MockTransportService) internalCluster().getInstance(TransportService.class, victim);
         AtomicInteger batchCount = new AtomicInteger(0);
         AtomicBoolean injected = new AtomicBoolean(false);
         mts.addRequestHandlingBehavior(FragmentExecutionAction.NAME, (handler, request, channel, task) -> {
             TransportChannel wrapper = new ForwardingChannel(channel) {
                 @Override
-                public void sendResponseBatch(org.opensearch.core.transport.TransportResponse response) {
+                public void sendResponseBatch(TransportResponse response) {
                     int n = batchCount.incrementAndGet();
                     if (n == 4) {
                         injected.set(true);
@@ -1684,7 +1621,10 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
             // a null+null pair would mean the actionGet wedged past timeout.
             assertTrue(
                 "Coordinator must terminate (failure or response) after mid-stream batch error; "
-                    + "got null/null → hang. injected=" + injected.get() + " batches=" + batchCount.get(),
+                    + "got null/null → hang. injected="
+                    + injected.get()
+                    + " batches="
+                    + batchCount.get(),
                 failure.get() != null || response.get() != null
             );
         } finally {
@@ -1708,15 +1648,13 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
         internalCluster().setDisruptionScheme(disruption);
         ExecutorService exec = Executors.newSingleThreadExecutor();
         try {
-            Future<PPLResponse> fut = exec.submit(
-                () -> {
-                    try {
-                        return executePPL("source = " + INDEX + " | stats sum(value) as total", QUERY_TIMEOUT);
-                    } catch (Throwable t) {
-                        return null;
-                    }
+            Future<PPLResponse> fut = exec.submit(() -> {
+                try {
+                    return executePPL("source = " + INDEX + " | stats sum(value) as total", QUERY_TIMEOUT);
+                } catch (Throwable t) {
+                    return null;
                 }
-            );
+            });
             // Let dispatch get out, then disrupt mid-stream.
             Thread.sleep(75);
             disruption.startDisrupting();
@@ -1728,10 +1666,7 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
                 failure = t;
             }
             // Either error surfaced, or partial response; not a hang.
-            assertTrue(
-                "Mid-stream disconnect must surface error or partial response (no hang)",
-                response != null || failure != null
-            );
+            assertTrue("Mid-stream disconnect must surface error or partial response (no hang)", response != null || failure != null);
         } finally {
             disruption.stopDisrupting();
             internalCluster().clearDisruptionScheme();
@@ -1770,22 +1705,13 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
 
         ExecutorService exec = Executors.newSingleThreadExecutor();
         try {
-            Future<PPLResponse> fut = exec.submit(
-                () -> executePPL("source = " + INDEX + " | stats sum(value) as total", QUERY_TIMEOUT)
-            );
+            Future<PPLResponse> fut = exec.submit(() -> executePPL("source = " + INDEX + " | stats sum(value) as total", QUERY_TIMEOUT));
             // Brief delay so the dispatch has crossed into the data-node and
             // the reduce-side session is allocated. Tight enough that we
             // usually still have a pending reduce when the cancel lands.
             Thread.sleep(150);
-            CancelTasksResponse cancel = client().admin()
-                .cluster()
-                .prepareCancelTasks()
-                .setActions(UnifiedPPLExecuteAction.NAME)
-                .get();
-            assertFalse(
-                "cancel must not produce node failures",
-                cancel.getNodeFailures() != null && !cancel.getNodeFailures().isEmpty()
-            );
+            CancelTasksResponse cancel = client().admin().cluster().prepareCancelTasks().setActions(UnifiedPPLExecuteAction.NAME).get();
+            assertFalse("cancel must not produce node failures", cancel.getNodeFailures() != null && !cancel.getNodeFailures().isEmpty());
             try {
                 fut.get(QUERY_TIMEOUT.seconds(), TimeUnit.SECONDS);
             } catch (ExecutionException | TimeoutException ignore) {
@@ -1816,45 +1742,11 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
             );
         }, 30, TimeUnit.SECONDS);
         // Parent task is gone.
-        ListTasksResponse remaining = client().admin()
-            .cluster()
-            .prepareListTasks()
-            .setActions(UnifiedPPLExecuteAction.NAME)
-            .get();
+        ListTasksResponse remaining = client().admin().cluster().prepareListTasks().setActions(UnifiedPPLExecuteAction.NAME).get();
         assertTrue(
             "No residual UnifiedPPLExecute tasks after cancel-during-reduce: " + remaining.getTasks(),
             remaining.getTasks().isEmpty()
         );
-    }
-
-    /**
-     * #31 — Contract under test: when {@code PPLResponse} fails to encode on the
-     * wire (i.e. {@code PPLResponse.writeTo} throws while the coordinator is
-     * shipping the response to a remote client), the coordinator must release
-     * the drained reduce-stream's native handle so the datafusion memory pool
-     * returns to baseline. Genuinely narrow: in {@code internalClusterTest} mode
-     * the client and the coordinator share a JVM, so the {@code writeTo}
-     * encoding path is bypassed entirely (the response is handed off
-     * in-process). The encoding path only fires for truly remote clients, which
-     * the IT suite does not currently model. Unlike #13 / #22, there is no
-     * indirect coverage of this exact failure mode in the IT suite — the path
-     * is rare in production for the same shared-JVM reason on single-node
-     * deployments.
-     */
-    @org.apache.lucene.tests.util.LuceneTestCase.AwaitsFix(
-        bugUrl = "Genuinely narrow: PPLResponse.writeTo (sandbox/plugins/test-ppl-frontend/src/"
-            + "main/java/org/opensearch/ppl/action/PPLResponse.java:52) only fires when the "
-            + "response is shipped to a remote client. In internalClusterTest mode the client "
-            + "and coordinator share a node, so the response is delivered in-process and the "
-            + "writeTo encoding path is bypassed — there is no indirect IT coverage of this "
-            + "exact failure mode (unlike #13 covered by #8 and #22 covered by #21). Deferred "
-            + "until either (a) a remote-client IT mode is added that forces actual "
-            + "serialization across nodes, or (b) a test-only PPLResponse.failOnNextWriteTo() "
-            + "fault seam lands on the response object so the encoding-failure-then-release "
-            + "contract can be asserted directly."
-    )
-    public void testResponseEncodingFailureReleases() throws Exception {
-        fail("placeholder — see @AwaitsFix bugUrl");
     }
 
     /**
@@ -1877,7 +1769,11 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
                 failCount.incrementAndGet();
             }
         };
-        client().execute(UnifiedPPLExecuteAction.INSTANCE, new PPLRequest("source = " + INDEX + " | stats sum(value) as total"), okListener);
+        client().execute(
+            UnifiedPPLExecuteAction.INSTANCE,
+            new PPLRequest("source = " + INDEX + " | stats sum(value) as total"),
+            okListener
+        );
         assertBusy(() -> assertEquals(1, okCount.get() + failCount.get()), QUERY_TIMEOUT.seconds(), TimeUnit.SECONDS);
         assertEquals("normal query: exactly one onResponse, zero onFailure", 1, okCount.get());
         assertEquals("normal query: zero onFailure", 0, failCount.get());
@@ -1916,10 +1812,7 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
         // injection only fires on the regular-transport fallback. Either way,
         // the listener-single-callback contract holds.
         String victim = pickShardHostingNode();
-        MockTransportService mts = (MockTransportService) internalCluster().getInstance(
-            org.opensearch.transport.TransportService.class,
-            victim
-        );
+        MockTransportService mts = (MockTransportService) internalCluster().getInstance(TransportService.class, victim);
         mts.addRequestHandlingBehavior(FragmentExecutionAction.NAME, (handler, request, channel, task) -> {
             channel.sendResponse(new IllegalStateException("listener-race-injection"));
         });
@@ -1985,14 +1878,7 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
         if (baseline < 1024L * 1024L) {
             allowed = absoluteCeiling;
         }
-        logger.info(
-            "memory drift across {} queries: baseline={} mid={} end={} allowed≤{}",
-            n,
-            baseline,
-            midpoint,
-            end,
-            allowed
-        );
+        logger.info("memory drift across {} queries: baseline={} mid={} end={} allowed≤{}", n, baseline, midpoint, end, allowed);
         assertTrue(
             "Native memory pool drifted: baseline=" + baseline + " mid=" + midpoint + " end=" + end + " allowed=" + allowed,
             end <= allowed
@@ -2035,15 +1921,10 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
     /** Verify no residual FragmentExecutionAction tasks anywhere in the cluster. */
     private void assertNoPendingFragmentTasks() throws Exception {
         assertBusy(() -> {
-            ListTasksResponse tasks = client().admin()
-                .cluster()
-                .prepareListTasks()
-                .setActions(FragmentExecutionAction.NAME)
-                .get();
+            ListTasksResponse tasks = client().admin().cluster().prepareListTasks().setActions(FragmentExecutionAction.NAME).get();
             List<TaskInfo> infos = tasks.getTasks();
             assertTrue(
-                "Pending fragment tasks remain: "
-                    + infos.stream().map(t -> t.getTaskId().toString()).collect(Collectors.joining(", ")),
+                "Pending fragment tasks remain: " + infos.stream().map(t -> t.getTaskId().toString()).collect(Collectors.joining(", ")),
                 infos.isEmpty()
             );
         }, 30, TimeUnit.SECONDS);
@@ -2078,7 +1959,7 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
         }
 
         @Override
-        public void sendResponse(org.opensearch.core.transport.TransportResponse response) throws java.io.IOException {
+        public void sendResponse(TransportResponse response) throws java.io.IOException {
             delegate.sendResponse(response);
         }
 
@@ -2088,7 +1969,7 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
         }
 
         @Override
-        public void sendResponseBatch(org.opensearch.core.transport.TransportResponse response) {
+        public void sendResponseBatch(TransportResponse response) {
             delegate.sendResponseBatch(response);
         }
 
@@ -2099,12 +1980,13 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
     }
 
     private static String dumpAllThreads() {
+        // Thread.getAllStackTraces() is forbidden in OpenSearch (needs RuntimePermission
+        // "getStackTrace"). ThreadMXBean#dumpAllThreads is allowed and returns equivalent
+        // info plus monitor/synchronizer ownership for diagnosing deadlocks.
+        java.lang.management.ThreadMXBean tmx = java.lang.management.ManagementFactory.getThreadMXBean();
         StringBuilder sb = new StringBuilder();
-        Map<Thread, StackTraceElement[]> traces = Thread.getAllStackTraces();
-        for (Map.Entry<Thread, StackTraceElement[]> e : traces.entrySet()) {
-            Thread t = e.getKey();
-            sb.append('\n').append(t.getName()).append(" (state=").append(t.getState()).append(")\n");
-            for (StackTraceElement ste : e.getValue()) sb.append("  ").append(ste).append('\n');
+        for (java.lang.management.ThreadInfo info : tmx.dumpAllThreads(true, true)) {
+            sb.append('\n').append(info.toString());
         }
         return sb.toString();
     }

@@ -423,6 +423,57 @@ pub async unsafe fn stream_next(stream_ptr: i64) -> Result<i64, DataFusionError>
     }
 }
 
+/// Sentinel returned by [`stream_try_next`] when no batch is currently ready
+/// without blocking. The value is intentionally `1` — `Box::into_raw` returns
+/// pointers that are at least 8-byte aligned, so `1` can never collide with
+/// a valid `FFI_ArrowArray*`. Negative values are reserved for the FFM error
+/// encoding (`NativeLibraryLoader::checkResult`), so we can't use those.
+pub const STREAM_PENDING: i64 = 1;
+
+/// Non-blocking variant of [`stream_next`]. Polls the underlying stream once
+/// without awaiting; returns immediately whether a batch is available, the
+/// stream is at EOF, or no batch is ready right now.
+///
+/// Encoding (matches the `i64` return-channel of the FFM bridge):
+/// - positive even pointer (`>= 8`): heap-allocated `FFI_ArrowArray*` (caller
+///   owns it, must release via `release` callback)
+/// - `0`: end-of-stream
+/// - [`STREAM_PENDING`] (`1`): no batch ready right now — caller may retry later
+/// - `Err(_)`: the stream produced an error (the FFM macro encodes as negative)
+///
+/// Used by callers (e.g. the Java reduce-sink drain path) that want to drain
+/// output opportunistically from the producer's own thread without spawning
+/// a dedicated puller. Producers can interleave `senderSend` (push to input
+/// mpsc) with `stream_try_next` (drain from output) so DataFusion's plan-level
+/// backpressure flows without an external drain loop.
+///
+/// # Safety
+/// `stream_ptr` must be a valid, non-zero pointer. Must not be called
+/// concurrently with itself or with [`stream_next`] on the same stream.
+pub unsafe fn stream_try_next(stream_ptr: i64) -> Result<i64, DataFusionError> {
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use futures::task::noop_waker_ref;
+    use futures::Stream;
+
+    let handle = &mut *(stream_ptr as *mut QueryStreamHandle);
+    let mut cx = Context::from_waker(noop_waker_ref());
+
+    // RecordBatchStreamAdapter is Unpin (TryStreamExt::try_next requires it),
+    // so Pin::new on a &mut to the stream is sound.
+    match Pin::new(&mut handle.stream).poll_next(&mut cx) {
+        Poll::Ready(Some(Ok(batch))) => {
+            let struct_array: StructArray = batch.into();
+            let array_data = struct_array.into_data();
+            let ffi_array = FFI_ArrowArray::new(&array_data);
+            Ok(Box::into_raw(Box::new(ffi_array)) as i64)
+        }
+        Poll::Ready(Some(Err(e))) => Err(e),
+        Poll::Ready(None) => Ok(0),
+        Poll::Pending => Ok(STREAM_PENDING),
+    }
+}
+
 /// Closes a result stream. Safe to call with 0 (no-op).
 ///
 /// # Safety

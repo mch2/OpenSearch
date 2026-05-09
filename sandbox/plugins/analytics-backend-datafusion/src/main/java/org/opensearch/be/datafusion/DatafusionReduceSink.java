@@ -10,9 +10,12 @@ package org.opensearch.be.datafusion;
 
 import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
+import org.apache.arrow.c.CDataDictionaryProvider;
 import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.types.pojo.Field;
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.spi.ExchangeSink;
@@ -23,8 +26,10 @@ import org.opensearch.be.datafusion.nativelib.StreamHandle;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
+
+import static org.apache.arrow.c.Data.importField;
 
 /**
  * Streaming coordinator-side reduce sink: opens one native partition stream per child
@@ -66,23 +71,24 @@ public final class DatafusionReduceSink extends AbstractDatafusionReduceSink imp
     /** Cumulative batches fed into any native sender. */
     private final AtomicLong feedCount = new AtomicLong();
     /**
-     * Background thread that drains {@link #outStream} into the downstream sink as soon
-     * as the FINAL plan emits batches — running concurrently with feeds.
-     *
-     * <p>Without this thread, the FINAL plan's downstream side is not polled until
-     * {@code close()} runs {@link #drainOutputIntoDownstream}. That polling chain is
-     * what causes DataFusion's input operators to pull from our partition stream's
-     * receiver. Without a concurrent puller, producers wedge past the input mpsc
-     * capacity (verified empirically with target_partitions=1; without RepartitionExec
-     * or this drain thread, the 2nd send_blocking parks indefinitely).
-     *
-     * <p>The thread starts polling immediately at construction. It exits naturally
-     * when the FINAL plan reaches EOF (after every {@link #sendersByChildStageId} entry
-     * has been closed and DataFusion completes the last aggregation).
+     * Output schema, cached on first drain. Acquired once via {@code streamGetSchema}
+     * and reused for every imported batch — schema is fixed for the lifetime of the
+     * stream, so a single fetch is sufficient.
      */
-    private final Thread drainThread;
-    /** Captures any throwable from the drain thread for surfacing during close(). */
-    private final AtomicReference<Throwable> drainFailure = new AtomicReference<>();
+    private volatile Schema outSchema;
+    /**
+     * Single-flight gate for the opportunistic drain in {@link #drainAvailable}.
+     * Producer threads CAS-acquire it before pulling from the output stream;
+     * concurrent producers that don't acquire skip and rely on the holder to
+     * finish draining. The Rust {@code stream_try_next} contract requires
+     * single-threaded access on a given stream.
+     */
+    private final AtomicBoolean draining = new AtomicBoolean(false);
+    /**
+     * Set when {@link NativeBridge#streamTryNext} returns {@code 0} — drain has
+     * seen end-of-stream and subsequent calls should skip the native poll.
+     */
+    private final AtomicBoolean eofSeen = new AtomicBoolean(false);
 
     public DatafusionReduceSink(ExchangeSinkContext ctx, NativeRuntimeHandle runtimeHandle) {
         super(ctx, runtimeHandle);
@@ -113,23 +119,72 @@ public final class DatafusionReduceSink extends AbstractDatafusionReduceSink imp
             throw e;
         }
         this.sendersByChildStageId = senders;
-        // Spawn the drain thread AFTER the native handles are constructed so the catch-block
-        // doesn't have to deal with thread teardown on construction failure.
-        this.drainThread = new Thread(this::drainLoop, "df-reduce-drain-q" + ctx.queryId() + "-s" + ctx.stageId());
-        this.drainThread.setDaemon(true);
-        this.drainThread.start();
     }
 
     /**
-     * Drain loop body. Runs on {@link #drainThread} from sink construction until the
-     * FINAL plan reaches EOF (which only happens after every sender is closed).
+     * Acquires (lazily, on first call) the output stream's schema so subsequent
+     * {@link #drainAvailable} invocations can import each batch into a fresh
+     * {@link VectorSchemaRoot}. Cached once — schema is fixed for the lifetime of
+     * the stream.
      */
-    private void drainLoop() {
+    private Schema acquireOutSchemaIfNeeded() {
+        Schema cached = outSchema;
+        if (cached != null) return cached;
+        synchronized (this) {
+            if (outSchema != null) return outSchema;
+            BufferAllocator alloc = ctx.allocator();
+            try (CDataDictionaryProvider dictProvider = new CDataDictionaryProvider()) {
+                long schemaAddr = asyncCall(listener -> NativeBridge.streamGetSchema(outStream.getPointer(), listener));
+                try (ArrowSchema arrowSchema = ArrowSchema.wrap(schemaAddr)) {
+                    Field structField = importField(alloc, arrowSchema, dictProvider);
+                    outSchema = new Schema(structField.getChildren(), structField.getMetadata());
+                }
+            }
+            return outSchema;
+        }
+    }
+
+    /**
+     * Opportunistically pulls every batch that's ready RIGHT NOW from the native
+     * output stream and forwards each to {@link ExchangeSinkContext#downstream()}.
+     * Returns immediately when the stream has nothing ready (Pending), reaches EOF,
+     * or another producer thread is already draining.
+     *
+     * <p>Callers (the per-sender feed path) invoke this after pushing into the
+     * input mpsc — DataFusion's pull-based execution model means the plan only
+     * processes input when its output is actively polled, so producers must
+     * collectively keep the output drained to avoid deadlocking on bounded mpsc
+     * backpressure.
+     *
+     * <p>Concurrent producers single-flight via {@link #draining}: only one
+     * thread polls the stream at a time (the {@code stream_try_next} contract
+     * requires that), but every producer's call ensures at least one drain pass
+     * happens after its push.
+     */
+    private void drainAvailable() {
+        if (closed || eofSeen.get()) return;
+        if (!draining.compareAndSet(false, true)) return;
         try {
-            drainOutputIntoDownstream(outStream);
-        } catch (Throwable t) {
-            drainFailure.set(t);
-            logger.warn("[ReduceSink] drain thread terminated with error", t);
+            Schema schema = acquireOutSchemaIfNeeded();
+            BufferAllocator alloc = ctx.allocator();
+            while (!closed) {
+                long arrayAddr = NativeBridge.streamTryNext(outStream.getPointer());
+                if (arrayAddr == NativeBridge.STREAM_PENDING) return;
+                if (arrayAddr == 0) {
+                    eofSeen.set(true);
+                    return;
+                }
+                try (
+                    CDataDictionaryProvider dictProvider = new CDataDictionaryProvider();
+                    ArrowArray arrowArray = ArrowArray.wrap(arrayAddr)
+                ) {
+                    VectorSchemaRoot vsr = VectorSchemaRoot.create(schema, alloc);
+                    Data.importIntoVectorSchemaRoot(alloc, arrowArray, vsr, dictProvider);
+                    ctx.downstream().feed(vsr);
+                }
+            }
+        } finally {
+            draining.set(false);
         }
     }
 
@@ -232,6 +287,13 @@ public final class DatafusionReduceSink extends AbstractDatafusionReduceSink imp
             array.close();
             arrowSchema.close();
         }
+        // Opportunistic drain on the producer's own thread: pulls any output batches
+        // that DataFusion's plan has emitted in response to recently-pushed input.
+        // Replaces the dedicated drain thread — DataFusion's pull-based execution
+        // model means the plan only processes input mpsc when its output stream is
+        // actively polled, so producers must keep the output drained to avoid
+        // deadlocking on bounded mpsc backpressure (cap=4 per partition_stream.rs).
+        drainAvailable();
     }
 
     /**
@@ -298,10 +360,8 @@ public final class DatafusionReduceSink extends AbstractDatafusionReduceSink imp
     @Override
     protected Throwable closeUnderLock() {
         Throwable failure = null;
-        // 1. Signal EOF on every still-open sender. The drain thread, which is already
-        // polling the output stream, will receive the final batches and then EOF, then
-        // exit cleanly. Senders that were already closed by their ChildSink wrapper are
-        // no-ops (the underlying senderClose is idempotent on the Rust side).
+        // 1. Signal EOF on every still-open sender. Senders that were already
+        // closed by their ChildSink wrapper are no-ops (idempotent on the Rust side).
         for (DatafusionPartitionSender sender : sendersByChildStageId.values()) {
             try {
                 sender.close();
@@ -309,19 +369,20 @@ public final class DatafusionReduceSink extends AbstractDatafusionReduceSink imp
                 failure = accumulate(failure, t);
             }
         }
-        // 2. Wait for the drain thread to finish processing remaining output.
-        try {
-            drainThread.join();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            failure = accumulate(failure, e);
+        // 2. Final blocking drain — until the FINAL plan reaches EOF (after every
+        // sender is closed and DataFusion completes the last aggregation, the
+        // output stream returns 0). Uses the parent's blocking drainOutputIntoDownstream
+        // since we want to wait for the rest, not return on Pending. The opportunistic
+        // drainAvailable on each feed has already pulled most batches; this catches
+        // any tail that the plan emits after the last sender close signal arrives.
+        if (!eofSeen.get()) {
+            try {
+                drainOutputIntoDownstream(outStream);
+            } catch (Throwable t) {
+                failure = accumulate(failure, t);
+            }
         }
-        // 3. Surface any error captured by the drain thread.
-        Throwable drainErr = drainFailure.get();
-        if (drainErr != null) {
-            failure = accumulate(failure, drainErr);
-        }
-        // 4. Close native resources.
+        // 3. Close native resources.
         try {
             outStream.close();
         } catch (Throwable t) {

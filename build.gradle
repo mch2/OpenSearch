@@ -293,7 +293,10 @@ allprojects {
     compile.options.compilerArgs << '-Xlint:overrides'
     compile.options.compilerArgs << '-Xlint:-processing'
     compile.options.compilerArgs << '-Xlint:rawtypes'
-    compile.options.compilerArgs << '-Xlint:removal'
+    // -Xlint:removal disabled — JDK 25 marks many security-manager APIs (FilePermission,
+    // AccessController.doPrivileged, etc.) as "deprecated for removal", and -Werror would
+    // turn cascade into compile failures across the codebase.
+    compile.options.compilerArgs << '-Xlint:-removal'
     compile.options.compilerArgs << '-Xlint:requires-automatic'
     compile.options.compilerArgs << '-Xlint:requires-transitive-automatic'
     compile.options.compilerArgs << '-Xlint:static'

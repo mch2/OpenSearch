@@ -133,10 +133,7 @@ public class PlanWalker {
                 exec.cancel(reason);
             } catch (Throwable t) {
                 logger.warn(
-                    new ParameterizedMessage(
-                        "[PlanWalker] cancel during partial-build cleanup threw for stageId={}",
-                        exec.getStageId()
-                    ),
+                    new ParameterizedMessage("[PlanWalker] cancel during partial-build cleanup threw for stageId={}", exec.getStageId()),
                     t
                 );
                 cause.addSuppressed(t);

@@ -178,16 +178,18 @@ dependencies {
   // factory must be registered or cluster bootstrap fails with
   // "multiple committer factories found: []".
   //
-  // Compile uses the original jar (so LucenePlugin.class resolves). Runtime uses
-  // a stripped variant produced by stripLuceneAnalyticsSpi (below) that removes
-  // META-INF/services/AnalyticsSearchBackendPlugin. Without that strip, the flat
-  // internalClusterTest classloader exposes both the lucene-side and DF-side SPI
-  // service files; SPIClassIterator (= ServiceLoader) iterates both for every
-  // extending plugin and PluginsService.createExtension throws on the
+  // Use ONLY the stripped jar produced by stripLuceneAnalyticsSpi for both
+  // compile and runtime. Pulling the project dep alongside it would put the
+  // analytics-backend-lucene main classes on the classpath twice (once as the
+  // module's compiled output, once as the stripped jar) — JarHell rejects.
+  // The stripped jar contains every .class the original does; only
+  // META-INF/services/AnalyticsSearchBackendPlugin is removed so SPIClassIterator
+  // can't see the lucene-side registration. Without that strip, the flat
+  // internalClusterTest classloader exposes both lucene-side and DF-side SPI
+  // service files; PluginsService.createExtension throws on the
   // (LucenePlugin)-vs-(DataFusionPlugin) ctor mismatch. Production runs each
   // plugin in its own URLClassLoader so the conflict is test-only.
-  internalClusterTestCompileOnly project(':sandbox:plugins:analytics-backend-lucene')
-  internalClusterTestRuntimeOnly files(tasks.named('stripLuceneAnalyticsSpi'))
+  internalClusterTestImplementation files(tasks.named('stripLuceneAnalyticsSpi'))
   // TestPPLPlugin + UnifiedPPL action for driving queries from ITs.
   internalClusterTestImplementation project(':sandbox:plugins:test-ppl-frontend')
 
