@@ -71,6 +71,10 @@ public class OpenSearchTableScanRule extends RelOptRule {
         List<String> delegationAcceptors = registry.delegationAcceptors(DelegationType.SCAN);
         List<String> viableBackends = new ArrayList<>(registry.scanCapableBackends());
 
+        // Track fields that no viable backend can scan — surfaced in the error message
+        // when viableBackends ends empty so the operator sees the actual culprit instead
+        // of a generic "no backend".
+        List<String> unscannableFields = new ArrayList<>();
         for (FieldStorageInfo field : fieldStorage) {
             if (field.isDerived()) {
                 throw new IllegalStateException(
@@ -80,15 +84,21 @@ public class OpenSearchTableScanRule extends RelOptRule {
             // Backends that can natively scan this field's doc values
             List<String> fieldBackends = registry.scanBackendsForField(field);
             // Keep candidates that can scan natively or delegate to one that can
+            List<String> beforeThisField = new ArrayList<>(viableBackends);
             viableBackends.removeIf(candidate -> {
                 if (fieldBackends.contains(candidate)) return false;
                 return !delegationSupporters.contains(candidate) || fieldBackends.stream().noneMatch(delegationAcceptors::contains);
             });
+            if (viableBackends.isEmpty() && !beforeThisField.isEmpty()) {
+                unscannableFields.add(field.getFieldName() + " (mapping=" + field.getMappingType() + ")");
+            }
         }
 
         if (viableBackends.isEmpty()) {
             throw new IllegalStateException(
-                "No backend can scan all requested fields on index [" + indexMetadata.getIndex().getName() + "]"
+                "No backend can scan all requested fields on index ["
+                    + indexMetadata.getIndex().getName()
+                    + "]; unscannable fields: " + unscannableFields
             );
         }
 

@@ -10,6 +10,8 @@ package org.opensearch.analytics.exec;
 
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.types.pojo.Field;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.backend.ExchangeSource;
 import org.opensearch.analytics.spi.ExchangeSink;
 import org.opensearch.core.concurrency.OpenSearchRejectedExecutionException;
@@ -41,6 +43,8 @@ import java.util.List;
  * search path.
  */
 public class RowProducingSink implements ExchangeSink, ExchangeSource {
+
+    private static final Logger logger = LogManager.getLogger(RowProducingSink.class);
 
     /**
      * Default maximum number of rows this sink will accept before rejecting
@@ -85,6 +89,13 @@ public class RowProducingSink implements ExchangeSink, ExchangeSource {
         }
         totalRows += incoming;
         batches.add(batch);
+        logger.debug(
+            "RowProducingSink.feed: batchIndex={} rows={} totalRows={} sink=0x{}",
+            batches.size() - 1,
+            incoming,
+            totalRows,
+            Integer.toHexString(System.identityHashCode(this))
+        );
     }
 
     /**

@@ -8,12 +8,15 @@
 
 package org.opensearch.be.datafusion;
 
+import org.opensearch.analytics.backend.jni.NativeHandle;
 import org.opensearch.be.datafusion.nativelib.NativeBridge;
 import org.opensearch.be.datafusion.nativelib.ReaderHandle;
 import org.opensearch.be.datafusion.nativelib.SessionContextHandle;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.test.OpenSearchTestCase;
 
+import java.lang.foreign.Arena;
+import java.lang.foreign.MemorySegment;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.CompletableFuture;
@@ -80,12 +83,20 @@ public class DataFusionNativeBridgeTests extends OpenSearchTestCase {
         ReaderHandle readerHandle = new ReaderHandle(dataDir.toString(), new String[] { "test.parquet" });
 
         // Create session context with table registered
+        long queryConfigPtr;
+        Arena arena = Arena.ofConfined();
+        MemorySegment configSegment = arena.allocate(WireConfigSnapshot.BYTE_SIZE);
+        WireConfigSnapshot.builder().build().writeTo(configSegment);
+        queryConfigPtr = configSegment.address();
+
         SessionContextHandle sessionCtx = NativeBridge.createSessionContext(
             readerHandle.getPointer(),
             runtimeHandle.get(),
             "test_table",
-            0L
+            0L,
+            queryConfigPtr
         );
+        arena.close();
         assertTrue("SessionContext pointer should be non-zero", sessionCtx.getPointer() != 0);
 
         // Execute a simple query to verify the session context is properly configured
@@ -95,8 +106,13 @@ public class DataFusionNativeBridgeTests extends OpenSearchTestCase {
             "SELECT message FROM test_table",
             runtimeHandle.get()
         );
+        // Capture the pointer value BEFORE execute — after execute the handle is marked consumed
+        // (which closes the Java wrapper), so getPointer() would throw IllegalStateException.
+        long sessionCtxPtrBefore = sessionCtx.getPointer();
+        assertTrue("SessionContext pointer should be live before execute", NativeHandle.isLivePointer(sessionCtxPtrBefore));
+
         CompletableFuture<Long> future = new CompletableFuture<>();
-        NativeBridge.executeWithContextAsync(sessionCtx.getPointer(), substrait, new ActionListener<>() {
+        NativeBridge.executeWithContextAsync(sessionCtx, substrait, new ActionListener<>() {
             @Override
             public void onResponse(Long streamPtr) {
                 future.complete(streamPtr);
@@ -110,8 +126,10 @@ public class DataFusionNativeBridgeTests extends OpenSearchTestCase {
         long streamPtr = future.join();
         assertTrue("Stream pointer should be non-zero", streamPtr != 0);
 
-        // Session context is consumed by execute — close the Java handle
-        sessionCtx.close();
+        // executeWithContextAsync marks the handle consumed (which closes the Java wrapper).
+        // Verify the pointer is no longer in the live registry and the wrapper rejects getPointer().
+        assertFalse("SessionContextHandle pointer must no longer be live after execute", NativeHandle.isLivePointer(sessionCtxPtrBefore));
+        expectThrows(IllegalStateException.class, sessionCtx::getPointer);
 
         NativeBridge.streamClose(streamPtr);
         readerHandle.close();

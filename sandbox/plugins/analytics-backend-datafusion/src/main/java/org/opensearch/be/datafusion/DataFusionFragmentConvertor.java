@@ -26,6 +26,7 @@ import org.apache.calcite.rel.type.RelDataTypeField;
 import org.apache.calcite.schema.ColumnStrategy;
 import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.fun.SqlLibraryOperators;
+import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.calcite.util.ImmutableBitSet;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -85,15 +86,35 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
      *   <li>{@link DelegatedPredicateFunction} → {@code delegated_predicate} (delegation to a peer backend).</li>
      *   <li>{@link SqlLibraryOperators#ILIKE} → {@code ilike} (case-insensitive LIKE; resolved by
      *       DataFusion's substrait consumer to a case-insensitive {@code LikeExpr}).</li>
+     *   <li>{@link SqlLibraryOperators#REGEXP_CONTAINS} → {@code regex_match} (boolean regex match;
+     *       resolved by DataFusion's substrait consumer to {@code Operator::RegexMatch}, the same
+     *       binary operator that backs PostgreSQL's {@code ~} regex match). Lowering target for PPL
+     *       {@code regex} command and {@code regexp_match()} function.</li>
+     *   <li>{@link SqlStdOperatorTable#REPLACE} → {@code replace} (literal string replacement;
+     *       lowering target for PPL `replace` command on non-wildcard patterns).</li>
+     *   <li>{@link SqlLibraryOperators#REGEXP_REPLACE_3} → {@code regexp_replace} (regex string
+     *       replacement; lowering target for PPL `replace` command on wildcard patterns and for
+     *       PPL `replace()` / `regexp_replace()` functions in `eval`).</li>
      * </ul>
      */
     private static final List<FunctionMappings.Sig> ADDITIONAL_SCALAR_SIGS = List.of(
         FunctionMappings.s(DelegatedPredicateFunction.FUNCTION, DelegatedPredicateFunction.NAME),
         FunctionMappings.s(SqlLibraryOperators.ILIKE, "ilike"),
-        FunctionMappings.s(DelegatedPredicateFunction.FUNCTION, DelegatedPredicateFunction.NAME),
         FunctionMappings.s(SqlLibraryOperators.DATE_PART, "date_part"),
         FunctionMappings.s(ConvertTzAdapter.LOCAL_CONVERT_TZ_OP, "convert_tz"),
-        FunctionMappings.s(UnixTimestampAdapter.LOCAL_TO_UNIXTIME_OP, "to_unixtime")
+        FunctionMappings.s(UnixTimestampAdapter.LOCAL_TO_UNIXTIME_OP, "to_unixtime"),
+        FunctionMappings.s(SqlLibraryOperators.REGEXP_CONTAINS, "regex_match"),
+        FunctionMappings.s(SqlStdOperatorTable.REPLACE, "replace"),
+        FunctionMappings.s(SqlLibraryOperators.REGEXP_REPLACE_3, "regexp_replace"),
+        FunctionMappings.s(SqlLibraryOperators.REGEXP_CONTAINS, "regex_match"),
+        FunctionMappings.s(UnixTimestampAdapter.LOCAL_TO_UNIXTIME_OP, "to_unixtime"),
+        FunctionMappings.s(SqlStdOperatorTable.TRUNCATE, "trunc"),
+        FunctionMappings.s(SqlStdOperatorTable.CBRT, "cbrt"),
+        FunctionMappings.s(SqlStdOperatorTable.COT, "cot"),
+        FunctionMappings.s(SqlStdOperatorTable.PI, "pi"),
+        FunctionMappings.s(SqlStdOperatorTable.RAND, "random"),
+        FunctionMappings.s(SqlLibraryOperators.LOG, "logb"),
+        FunctionMappings.s(SignumFunction.FUNCTION, SignumFunction.NAME)
     );
 
     private final SimpleExtension.ExtensionCollection extensions;
@@ -113,8 +134,11 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
         LOGGER.debug("Attaching partial aggregate on top of {} inner bytes", innerBytes.length);
         Plan inner = decodePlan(innerBytes);
         Rel wrapper = convertStandalone(partialAggFragment);
-        List<String> wrapperNames = rowTypeFieldNames(partialAggFragment);
-        Plan rewired = rewire(inner, withAggregationPhase(wrapper, Expression.AggregationPhase.INITIAL_TO_INTERMEDIATE), wrapperNames);
+        Plan rewired = rewire(
+            inner,
+            withAggregationPhase(wrapper, Expression.AggregationPhase.INITIAL_TO_INTERMEDIATE),
+            fieldNames(partialAggFragment)
+        );
         return serializePlan(rewired);
     }
 
@@ -138,15 +162,19 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
         // the visitor still walks them top-down to build the wrapper rel.
         RelNode rewritten = rewriteStageInputScans(fragment);
         Rel wrapper = convertStandalone(rewritten);
-        List<String> wrapperNames = rowTypeFieldNames(fragment);
-        return serializePlan(rewire(inner, wrapper, wrapperNames));
+        return serializePlan(rewire(inner, wrapper, fieldNames(fragment)));
     }
 
     // ── Core conversion helpers ─────────────────────────────────────────────────
 
     private byte[] convertToSubstrait(RelNode fragment) {
-        RelRoot root = RelRoot.of(fragment, SqlKind.SELECT);
-        SubstraitRelVisitor visitor = createVisitor(fragment);
+        // Rewrite SqlTypeName.NULL literals (Calcite's untyped null, emitted for the
+        // implicit ELSE arm of CASE) to typed nulls — isthmus' TypeConverter rejects NULL
+        // with "Unable to convert the type NULL". The widening only changes literal type
+        // tags; semantics and field names (used by Plan.Root.names) are unchanged.
+        RelNode preprocessed = UntypedNullPreprocessor.rewrite(fragment);
+        RelRoot root = RelRoot.of(preprocessed, SqlKind.SELECT);
+        SubstraitRelVisitor visitor = createVisitor(preprocessed);
         Rel substraitRel = visitor.apply(root.rel);
 
         List<String> fieldNames = root.fields.stream().map(field -> field.getValue()).toList();
@@ -170,24 +198,29 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
      * conversion and rewiring its input during {@link #rewire(Plan, Rel, List)}.
      */
     private Rel convertStandalone(RelNode operator) {
-        SubstraitRelVisitor visitor = createVisitor(operator);
-        return visitor.apply(operator);
+        // Same untyped-NULL preprocessing rationale as convertToSubstrait — the standalone
+        // wrapper conversion is just as susceptible to a SqlTypeName.NULL literal lurking in
+        // a CASE call attached on top of an inner plan.
+        RelNode preprocessed = UntypedNullPreprocessor.rewrite(operator);
+        SubstraitRelVisitor visitor = createVisitor(preprocessed);
+        return visitor.apply(preprocessed);
     }
 
     /**
      * Rewires the Substrait {@code wrapper} rel to sit above the root relation of
      * {@code inner}. Returns a new {@link Plan} whose single root is
      * {@code wrapper(inner.root)} with {@code wrapperNames} attached as the root's
-     * names list. Supports the known single-input wrappers emitted by our four SPI
-     * methods ({@link Aggregate}, {@link Sort}, {@link Filter}, {@link Project}).
+     * names list. Supports the known single-input wrappers emitted by our SPI
+     * methods ({@link Aggregate}, {@link Sort}, {@link Filter}, {@link Project},
+     * {@link Fetch}).
      *
-     * <p>The names list must describe the flattened leaf schema of the final plan —
-     * one entry per leaf field in the wrapper's output row type. DataFusion's
-     * Substrait consumer walks the top plan's output schema once per leaf and
-     * fails with "Names list must match exactly to nested schema" if the two
-     * disagree (e.g. reusing the inner's pre-wrap names when the wrapper shrinks
-     * or widens the schema — as an Aggregate-over-Join does, or as a windowed
-     * Project over an exchange-gathered Scan does).
+     * <p>{@code wrapperNames} must describe the wrapper's output schema — one entry
+     * per leaf field in the wrapper's row type. For schema-preserving wrappers
+     * (Sort, Filter, Fetch) these match the inner plan's names; for schema-reshaping
+     * wrappers (Aggregate, Project) they don't. Using the inner's names where the
+     * wrapper reshapes the schema causes DataFusion to reject the Plan with
+     * "Names list must match exactly to nested schema" — surfaces with
+     * Aggregate-over-Join and windowed Project over exchange-gathered Scan.
      */
     static Plan rewire(Plan inner, Rel wrapper, List<String> wrapperNames) {
         if (inner.getRoots().isEmpty()) {
@@ -199,9 +232,9 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
         return Plan.builder().addRoots(Plan.Root.builder().input(rewired).names(wrapperNames).build()).build();
     }
 
-    /** Top-level output column names of a Calcite RelNode — one entry per leaf field in the row type. */
-    private static List<String> rowTypeFieldNames(RelNode node) {
-        return node.getRowType().getFieldList().stream().map(f -> f.getName()).toList();
+    /** Wrapper's output column names from its Calcite row type. */
+    private static List<String> fieldNames(RelNode fragment) {
+        return fragment.getRowType().getFieldList().stream().map(RelDataTypeField::getName).toList();
     }
 
     private static Rel replaceInput(Rel wrapper, Rel newInput) {

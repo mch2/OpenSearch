@@ -1,0 +1,12 @@
+1. Enforce AggregateReduceFunctionsRule during planning.
+2. Remove rule at data node - CombinePartialFinalAggregate
+3. Traverse plan at both ends on rust side - on coordinator make it a FINAL always, on data node make it a PARTIAL always.
+4. Single shard case - we don't do any of this.
+
+
+
+
+  1. streamstats reset_before / reset_after — produces LogicalCorrelate (the segment-id-based self-correlate where each row gets its own filtered aggregate). Our transform doesn't recognize Correlate; this needs dedicated handling. Tracked in your earlier "FB-1
+  Correlate→PARTITION-BY rewrite" plan.
+  2. streamstats window=N global=true (with by key) — produces LogicalAggregate(...) → LogicalJoin(...) (sliding-range self-join + per-row aggregate). No window function involved at all — this is a Calcite-level rewrite of the bounded sliding window into a non-equi
+  self-join. Our transform correctly ignores it; the Aggregate path with PR 21480's coordinator-side machinery will need to handle it eventually.

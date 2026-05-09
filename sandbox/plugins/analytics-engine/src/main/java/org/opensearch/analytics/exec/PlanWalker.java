@@ -73,22 +73,72 @@ public class PlanWalker {
      * All stages are in {@link StageExecution.State#CREATED} state.
      * Listeners are wired. The graph is inspectable for EXPLAIN.
      *
+     * <p>If construction of any stage throws, every stage that was already
+     * built — including those whose backend factories may have allocated
+     * native resources via {@code ExchangeSinkProvider.createSink} — is
+     * cancelled before the original exception is rethrown. This prevents
+     * a mid-build failure from leaving a half-wired graph that would leak
+     * native handles / arrow buffers when the query is abandoned.
+     *
+     * <p>Order matters: the partial-build cancel walks each built stage,
+     * which transitions the root (if any) to CANCELLED and would normally
+     * fire the wired completion listener with a synthetic
+     * "Stage X CANCELLED" message — masking the real cause. To deliver the
+     * original exception, the build path latches the {@link #terminalFired}
+     * flag with {@code completionListener.onFailure(cause)} <i>before</i>
+     * running the partial cleanup; the cancel cascade then fires
+     * {@link #fireTerminal} but finds the latch already set and is a
+     * silent no-op. Callers see the original build exception via the
+     * listener, and {@link #build()} also rethrows so synchronous callers
+     * can react.
+     *
      * @return the fully-wired execution graph
      */
     public ExecutionGraph build() {
         Map<Integer, StageExecution> executions = new HashMap<>();
-
         Stage rootStage = config.dag().rootStage();
-        final StageExecution rootExec = stageExecutionBuilder.buildRootExecution(rootStage, config);
-        wireCompletionListener(rootExec);
-        executions.put(rootStage.getStageId(), rootExec);
 
-        buildChildrenRecursively(executions, rootExec, rootStage);
+        try {
+            final StageExecution rootExec = stageExecutionBuilder.buildRootExecution(rootStage, config);
+            wireCompletionListener(rootExec);
+            executions.put(rootStage.getStageId(), rootExec);
 
-        List<StageExecution> leaves = findLeaves(executions, rootStage);
+            buildChildrenRecursively(executions, rootExec, rootStage);
 
-        this.graph = new ExecutionGraph(config.queryId(), executions, rootExec, leaves);
-        return this.graph;
+            List<StageExecution> leaves = findLeaves(executions, rootStage);
+            this.graph = new ExecutionGraph(config.queryId(), executions, rootExec, leaves);
+            return this.graph;
+        } catch (RuntimeException | Error fatal) {
+            // Latch the terminal first with the real cause so the cancel
+            // cascade's synthetic CANCELLED notification (if any) is a no-op.
+            Exception cause = (fatal instanceof Exception ex) ? ex : new RuntimeException(fatal);
+            fireTerminal(() -> completionListener.onFailure(cause));
+            cancelPartialBuild(executions, fatal);
+            throw fatal;
+        }
+    }
+
+    /**
+     * Releases every stage that was successfully built before {@link #build()}
+     * threw. Called from the build-time failure path only — after-start
+     * cancellation goes through {@link #cancelAll(String)} on the live graph.
+     * Each already-built stage is in {@link StageExecution.State#CREATED};
+     * {@code cancel(...)} on a CREATED stage closes its backend sink (or
+     * other allocated resources) and transitions to CANCELLED.
+     */
+    private void cancelPartialBuild(Map<Integer, StageExecution> executions, Throwable cause) {
+        String reason = "stage-build failure: " + cause.getMessage();
+        for (StageExecution exec : executions.values()) {
+            try {
+                exec.cancel(reason);
+            } catch (Throwable t) {
+                logger.warn(
+                    new ParameterizedMessage("[PlanWalker] cancel during partial-build cleanup threw for stageId={}", exec.getStageId()),
+                    t
+                );
+                cause.addSuppressed(t);
+            }
+        }
     }
 
     /**

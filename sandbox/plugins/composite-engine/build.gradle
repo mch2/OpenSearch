@@ -43,7 +43,6 @@ internalClusterTest {
 
 dependencies {
   api project(':libs:opensearch-concurrent-queue')
-  api project(':sandbox:libs:composite-common')
   compileOnly project(':server')
   testImplementation project(':test:framework')
   testImplementation project(':sandbox:plugins:parquet-data-format')
@@ -52,4 +51,5 @@ dependencies {
   internalClusterTestImplementation project(':sandbox:plugins:parquet-data-format')
   internalClusterTestImplementation project(':sandbox:plugins:analytics-backend-lucene')
   internalClusterTestImplementation project(':sandbox:plugins:analytics-backend-datafusion')
+  internalClusterTestImplementation project(':sandbox:libs:analytics-framework')
 }

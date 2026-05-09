@@ -61,10 +61,16 @@ public class StageExecutionBuilder {
 
     /**
      * Registers a scheduler for a stage execution type. Enables adding new
-     * stage types without modifying this class's constructor.
+     * stage types without modifying this class's constructor, and lets
+     * callers swap an existing scheduler (for example to wrap it with
+     * extra observability or — in tests — replace it with a faulting one
+     * so partial-build teardown can be exercised). The returned value is
+     * the scheduler that was previously registered for {@code type}, or
+     * {@code null} if none was registered. Callers wanting save/restore
+     * semantics should hold the return value and re-register it later.
      */
-    public void registerScheduler(StageExecutionType type, StageScheduler scheduler) {
-        schedulers.put(type, scheduler);
+    public StageScheduler registerScheduler(StageExecutionType type, StageScheduler scheduler) {
+        return schedulers.put(type, scheduler);
     }
 
     /**

@@ -53,12 +53,13 @@ use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::prelude::SessionConfig;
 use futures::TryStreamExt;
 
+use crate::cancellation;
 use crate::cross_rt_stream::CrossRtStream;
 use crate::custom_cache_manager::CustomCacheManager;
 use crate::local_executor::LocalSession;
 use crate::memory::{DynamicLimitHandle, DynamicLimitPool};
 use crate::partition_stream::PartitionStreamSender;
-use crate::query_memory_pool_tracker::QueryTrackingContext;
+use crate::query_tracker::{self, QueryTrackingContext};
 use crate::runtime_manager::RuntimeManager;
 
 /// Bundles a stream with its query tracking context so that dropping the
@@ -68,6 +69,10 @@ pub struct QueryStreamHandle {
     /// Held for its `Drop` impl — marks the query completed when the
     /// stream is closed.
     _query_tracking_context: QueryTrackingContext,
+    /// Keeps the SessionContext alive while the stream is being consumed.
+    /// The physical plan may reference state (e.g. RuntimeEnv, caches) owned
+    /// by the session; dropping it prematurely causes use-after-free.
+    _session_ctx: Option<datafusion::prelude::SessionContext>,
 }
 
 impl QueryStreamHandle {
@@ -78,6 +83,19 @@ impl QueryStreamHandle {
         Self {
             stream,
             _query_tracking_context: query_context,
+            _session_ctx: None,
+        }
+    }
+
+    pub fn with_session_context(
+        stream: RecordBatchStreamAdapter<CrossRtStream>,
+        query_context: QueryTrackingContext,
+        ctx: datafusion::prelude::SessionContext,
+    ) -> Self {
+        Self {
+            stream,
+            _query_tracking_context: query_context,
+            _session_ctx: Some(ctx),
         }
     }
 }
@@ -114,6 +132,17 @@ pub struct DataFusionRuntime {
     pub runtime_env: datafusion::execution::runtime_env::RuntimeEnv,
     pub custom_cache_manager: Option<CustomCacheManager>,
     pub(crate) dynamic_limit_handle: DynamicLimitHandle,
+}
+
+impl DataFusionRuntime {
+    pub fn new_for_bench(runtime_env: datafusion::execution::runtime_env::RuntimeEnv) -> Self {
+        let (_pool, handle) = DynamicLimitPool::new(0);
+        Self {
+            runtime_env,
+            custom_cache_manager: None,
+            dynamic_limit_handle: handle,
+        }
+    }
 }
 
 /// Opaque shard view handle returned to the caller.
@@ -259,6 +288,8 @@ pub unsafe fn close_reader(ptr: i64) {
 
 /// Executes a query. Returns a heap-allocated pointer (as i64) to the result stream.
 /// Caller must call `stream_close` exactly once to free it.
+/// If `context_id != 0`, registers a cancellation token in ACTIVE_QUERIES before
+/// execution so `cancel_query()` can interrupt it even during planning.
 ///
 /// This is an async function — the bridge layer decides how to run it
 /// (`block_on` for synchronous delivery, `spawn` for async delivery).
@@ -290,32 +321,38 @@ pub async unsafe fn execute_query(
     // index_filter(bytes) calls. Cheap — just bytes inspection.
     let is_indexed = plan_bytes_mentions_index_filter(plan_bytes);
 
-    let stream_ptr = if is_indexed {
-        let qc = Arc::new(query_config);
-        crate::indexed_executor::execute_indexed_query(
-            plan_bytes.to_vec(),
-            table_name.to_string(),
-            shard_view,
-            qc.target_partitions.max(1),
-            runtime,
-            cpu_executor,
-            query_memory_pool,
-            qc,
-        )
-        .await?
-    } else {
-        crate::query_executor::execute_query(
-            shard_view.table_path.clone(),
-            shard_view.object_metas.clone(),
-            table_name.to_string(),
-            plan_bytes.to_vec(),
-            runtime,
-            cpu_executor,
-            query_memory_pool,
-            &query_config,
-        )
-        .await?
+    // Register cancellation token.
+    let token = query_tracker::get_cancellation_token(context_id);
+
+    let query_future = async move {
+        if is_indexed {
+            let qc = Arc::new(query_config);
+            crate::indexed_executor::execute_indexed_query(
+                plan_bytes.to_vec(),
+                table_name.to_string(),
+                shard_view,
+                runtime,
+                cpu_executor,
+                query_memory_pool,
+                qc,
+            ).await
+        } else {
+            crate::query_executor::execute_query(
+                shard_view.table_path.clone(),
+                shard_view.object_metas.clone(),
+                table_name.to_string(),
+                plan_bytes.to_vec(),
+                runtime,
+                cpu_executor,
+                query_memory_pool,
+                &query_config,
+            ).await
+        }
     };
+
+    let stream_ptr = cancellation::cancellable(token.as_ref(), context_id, query_future)
+        .await
+        .map_err(|e| DataFusionError::Execution(e))?;
 
     // Reconstruct the stream from the raw pointer returned by the executor.
     let stream = *Box::from_raw(stream_ptr as *mut RecordBatchStreamAdapter<CrossRtStream>);
@@ -356,7 +393,8 @@ pub unsafe fn stream_get_schema(stream_ptr: i64) -> Result<i64, DataFusionError>
 
 /// Loads the next record batch from the stream.
 ///
-/// Returns a heap-allocated FFI_ArrowArray pointer (as i64), or 0 if end-of-stream.
+/// Returns a heap-allocated FFI_ArrowArray pointer (as i64), or 0 if end-of-stream
+/// or cancelled.
 ///
 /// This is an async function — the bridge layer decides how to run it.
 ///
@@ -365,8 +403,14 @@ pub unsafe fn stream_get_schema(stream_ptr: i64) -> Result<i64, DataFusionError>
 /// on the same stream.
 pub async unsafe fn stream_next(stream_ptr: i64) -> Result<i64, DataFusionError> {
     let handle = &mut *(stream_ptr as *mut QueryStreamHandle);
+    let token = query_tracker::get_cancellation_token(handle._query_tracking_context.context_id());
 
-    let result = handle.stream.try_next().await?;
+    let result = cancellation::cancellable_or(
+        token.as_ref(),
+        None,
+        async { handle.stream.try_next().await.map_err(|e: DataFusionError| e) },
+    ).await
+    .map_err(|e| DataFusionError::Execution(e))?;
 
     match result {
         Some(batch) => {
@@ -376,6 +420,57 @@ pub async unsafe fn stream_next(stream_ptr: i64) -> Result<i64, DataFusionError>
             Ok(Box::into_raw(Box::new(ffi_array)) as i64)
         }
         None => Ok(0),
+    }
+}
+
+/// Sentinel returned by [`stream_try_next`] when no batch is currently ready
+/// without blocking. The value is intentionally `1` — `Box::into_raw` returns
+/// pointers that are at least 8-byte aligned, so `1` can never collide with
+/// a valid `FFI_ArrowArray*`. Negative values are reserved for the FFM error
+/// encoding (`NativeLibraryLoader::checkResult`), so we can't use those.
+pub const STREAM_PENDING: i64 = 1;
+
+/// Non-blocking variant of [`stream_next`]. Polls the underlying stream once
+/// without awaiting; returns immediately whether a batch is available, the
+/// stream is at EOF, or no batch is ready right now.
+///
+/// Encoding (matches the `i64` return-channel of the FFM bridge):
+/// - positive even pointer (`>= 8`): heap-allocated `FFI_ArrowArray*` (caller
+///   owns it, must release via `release` callback)
+/// - `0`: end-of-stream
+/// - [`STREAM_PENDING`] (`1`): no batch ready right now — caller may retry later
+/// - `Err(_)`: the stream produced an error (the FFM macro encodes as negative)
+///
+/// Used by callers (e.g. the Java reduce-sink drain path) that want to drain
+/// output opportunistically from the producer's own thread without spawning
+/// a dedicated puller. Producers can interleave `senderSend` (push to input
+/// mpsc) with `stream_try_next` (drain from output) so DataFusion's plan-level
+/// backpressure flows without an external drain loop.
+///
+/// # Safety
+/// `stream_ptr` must be a valid, non-zero pointer. Must not be called
+/// concurrently with itself or with [`stream_next`] on the same stream.
+pub unsafe fn stream_try_next(stream_ptr: i64) -> Result<i64, DataFusionError> {
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use futures::task::noop_waker_ref;
+    use futures::Stream;
+
+    let handle = &mut *(stream_ptr as *mut QueryStreamHandle);
+    let mut cx = Context::from_waker(noop_waker_ref());
+
+    // RecordBatchStreamAdapter is Unpin (TryStreamExt::try_next requires it),
+    // so Pin::new on a &mut to the stream is sound.
+    match Pin::new(&mut handle.stream).poll_next(&mut cx) {
+        Poll::Ready(Some(Ok(batch))) => {
+            let struct_array: StructArray = batch.into();
+            let array_data = struct_array.into_data();
+            let ffi_array = FFI_ArrowArray::new(&array_data);
+            Ok(Box::into_raw(Box::new(ffi_array)) as i64)
+        }
+        Poll::Ready(Some(Err(e))) => Err(e),
+        Poll::Ready(None) => Ok(0),
+        Poll::Pending => Ok(STREAM_PENDING),
     }
 }
 
@@ -389,6 +484,12 @@ pub unsafe fn stream_close(stream_ptr: i64) {
         // The context's Drop impl marks the query completed in the registry.
         let _ = Box::from_raw(stream_ptr as *mut QueryStreamHandle);
     }
+}
+
+/// Fires the cancellation token for the given context_id.
+/// No-op for unknown or already-completed queries.
+pub fn cancel_query(context_id: i64) {
+    query_tracker::cancel_query(context_id);
 }
 
 /// Converts SQL to Substrait plan bytes (test only).
@@ -609,9 +710,14 @@ pub unsafe fn sender_send(
 
     // `from_ffi` takes the array by value (consumes it) and the schema by
     // reference (it is still dropped when `ffi_schema` goes out of scope).
-    let array_data = arrow_array::ffi::from_ffi(ffi_array, &ffi_schema).map_err(|e| {
+    let mut array_data = arrow_array::ffi::from_ffi(ffi_array, &ffi_schema).map_err(|e| {
         DataFusionError::Execution(format!("Failed to import Arrow C Data array: {}", e))
     })?;
+
+    // Buffers from Java's Flight RPC deserialization may not meet Rust's
+    // native alignment requirements. align_buffers() is a no-op for
+    // already-aligned buffers; only misaligned ones are reallocated.
+    array_data.align_buffers();
 
     let struct_array = StructArray::from(array_data);
     let batch = RecordBatch::from(struct_array);

@@ -9,6 +9,8 @@
 package org.opensearch.be.datafusion.nativelib;
 
 import org.opensearch.analytics.backend.jni.NativeHandle;
+import org.opensearch.be.datafusion.stats.DataFusionStats;
+import org.opensearch.be.datafusion.stats.NativeExecutorsStats;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.nativebridge.spi.NativeCall;
 import org.opensearch.nativebridge.spi.NativeLibraryLoader;
@@ -18,6 +20,7 @@ import java.lang.foreign.Linker;
 import java.lang.foreign.SymbolLookup;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
+import java.util.LinkedHashMap;
 
 /**
  * FFM bridge to native DataFusion library.
@@ -52,6 +55,7 @@ public final class NativeBridge {
     private static final MethodHandle EXECUTE_QUERY;
     private static final MethodHandle STREAM_GET_SCHEMA;
     private static final MethodHandle STREAM_NEXT;
+    private static final MethodHandle STREAM_TRY_NEXT;
     private static final MethodHandle STREAM_CLOSE;
     private static final MethodHandle SQL_TO_SUBSTRAIT;
     private static final MethodHandle REGISTER_FILTER_TREE_CALLBACKS;
@@ -73,8 +77,11 @@ public final class NativeBridge {
     private static final MethodHandle CACHE_MANAGER_GET_TOTAL_MEMORY;
     private static final MethodHandle CACHE_MANAGER_CONTAINS_BY_TYPE;
     private static final MethodHandle CREATE_SESSION_CONTEXT;
+    private static final MethodHandle CREATE_SESSION_CONTEXT_INDEXED;
     private static final MethodHandle CLOSE_SESSION_CONTEXT;
     private static final MethodHandle EXECUTE_WITH_CONTEXT;
+    private static final MethodHandle CANCEL_QUERY;
+    private static final MethodHandle STATS;
 
     static {
         SymbolLookup lib = NativeLibraryLoader.symbolLookup();
@@ -158,6 +165,11 @@ public final class NativeBridge {
 
         STREAM_NEXT = linker.downcallHandle(
             lib.find("df_stream_next").orElseThrow(),
+            FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG)
+        );
+
+        STREAM_TRY_NEXT = linker.downcallHandle(
+            lib.find("df_stream_try_next").orElseThrow(),
             FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG)
         );
 
@@ -283,6 +295,22 @@ public final class NativeBridge {
                 ValueLayout.JAVA_LONG,
                 ValueLayout.ADDRESS,
                 ValueLayout.JAVA_LONG,
+                ValueLayout.JAVA_LONG,
+                ValueLayout.JAVA_LONG
+            )
+        );
+
+        CREATE_SESSION_CONTEXT_INDEXED = linker.downcallHandle(
+            lib.find("df_create_session_context_indexed").orElseThrow(),
+            FunctionDescriptor.of(
+                ValueLayout.JAVA_LONG,
+                ValueLayout.JAVA_LONG,
+                ValueLayout.JAVA_LONG,
+                ValueLayout.ADDRESS,
+                ValueLayout.JAVA_LONG,
+                ValueLayout.JAVA_LONG,
+                ValueLayout.JAVA_INT,
+                ValueLayout.JAVA_INT,
                 ValueLayout.JAVA_LONG
             )
         );
@@ -344,6 +372,8 @@ public final class NativeBridge {
             )
         );
 
+        CANCEL_QUERY = linker.downcallHandle(lib.find("df_cancel_query").orElseThrow(), FunctionDescriptor.ofVoid(ValueLayout.JAVA_LONG));
+
         // Hand the five filter-tree upcall stubs to Rust now. No explicit
         // caller step required — as soon as this class is loaded, callbacks
         // are installed and `df_execute_indexed_query` can dispatch into Java.
@@ -358,6 +388,12 @@ public final class NativeBridge {
             lib.find("df_execute_with_context").orElseThrow(),
             FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG)
         );
+
+        // i64 df_stats(out_ptr, out_cap)
+        STATS = linker.downcallHandle(
+            lib.find("df_stats").orElseThrow(),
+            FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG)
+        );
     }
 
     private NativeBridge() {}
@@ -371,7 +407,7 @@ public final class NativeBridge {
             MethodHandle createProvider = lookup.findStatic(
                 cb,
                 "createProvider",
-                java.lang.invoke.MethodType.methodType(int.class, java.lang.foreign.MemorySegment.class, long.class)
+                java.lang.invoke.MethodType.methodType(int.class, int.class)
             );
             MethodHandle releaseProvider = lookup.findStatic(
                 cb,
@@ -403,7 +439,7 @@ public final class NativeBridge {
 
             java.lang.foreign.MemorySegment createProviderStub = linker.upcallStub(
                 createProvider,
-                FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG),
+                FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_INT),
                 arena
             );
             java.lang.foreign.MemorySegment releaseProviderStub = linker.upcallStub(
@@ -581,8 +617,78 @@ public final class NativeBridge {
         }
     }
 
+    /**
+     * Sentinel returned by {@link #streamTryNext} when no batch is currently ready
+     * without blocking. Mirrors {@code api::STREAM_PENDING} on the Rust side —
+     * {@code 1} can never be a valid {@code FFI_ArrowArray*} (those are
+     * 8-byte-aligned), and negatives are reserved for the FFM error encoding.
+     */
+    public static final long STREAM_PENDING = 1L;
+
+    /**
+     * Non-blocking variant of {@link #streamNext}. Returns:
+     * <ul>
+     *   <li>positive even pointer ({@code >= 8}): heap-allocated {@code FFI_ArrowArray*}
+     *       — caller must release once the import is done</li>
+     *   <li>{@code 0}: end-of-stream</li>
+     *   <li>{@link #STREAM_PENDING} ({@code 1}): no batch ready right now</li>
+     * </ul>
+     * Errors surface as a thrown exception via {@link NativeLibraryLoader#checkResult}.
+     *
+     * <p>Used by callers that want to drain a result stream opportunistically from
+     * the producer's own thread — e.g. the reduce-sink drain path interleaves
+     * {@code senderSend} (push to input mpsc) with {@code streamTryNext} (pull
+     * from output) so DataFusion's plan-level backpressure flows without a
+     * dedicated puller thread.
+     */
+    public static long streamTryNext(long streamPtr) {
+        try {
+            NativeHandle.validatePointer(streamPtr, "stream");
+            return NativeLibraryLoader.checkResult((long) STREAM_TRY_NEXT.invokeExact(streamPtr));
+        } catch (Throwable t) {
+            throw t instanceof RuntimeException re ? re : new RuntimeException(t);
+        }
+    }
+
     public static void streamClose(long streamPtr) {
         NativeCall.invokeVoid(STREAM_CLOSE, streamPtr);
+    }
+
+    // ---- Cancellation ----
+
+    /** Fires the cancellation token for the given context. No-op if already completed. */
+    public static void cancelQuery(long contextId) {
+        NativeCall.invokeVoid(CANCEL_QUERY, contextId);
+    }
+
+    // ---- Stats collection ----
+
+    /**
+     * Collects all native executor metrics in a single FFM call.
+     * Decodes directly from the MemorySegment — no intermediate long[].
+     *
+     * @return a fully constructed {@link DataFusionStats}
+     * @throws IllegalStateException if the runtime manager is not initialized
+     */
+    public static DataFusionStats stats() {
+        try (var call = new NativeCall()) {
+            var seg = call.buf((int) StatsLayout.LAYOUT.byteSize());
+            call.invoke(STATS, seg, StatsLayout.LAYOUT.byteSize());
+
+            // IO runtime (always present — zeroed if not yet initialized)
+            var ioRuntime = StatsLayout.readRuntimeMetrics(seg, "io_runtime");
+
+            // CPU runtime (always present — zeroed when absent)
+            var cpuRuntime = StatsLayout.readRuntimeMetrics(seg, "cpu_runtime");
+
+            // Task monitors
+            var taskMonitors = new LinkedHashMap<String, NativeExecutorsStats.TaskMonitorStats>();
+            for (NativeExecutorsStats.OperationType op : NativeExecutorsStats.OperationType.values()) {
+                taskMonitors.put(op.key(), StatsLayout.readTaskMonitor(seg, op.key()));
+            }
+
+            return new DataFusionStats(new NativeExecutorsStats(ioRuntime, cpuRuntime, taskMonitors));
+        }
     }
 
     // ---- Stubs ----
@@ -722,30 +828,99 @@ public final class NativeBridge {
     /**
      * Creates a SessionContext with the default ListingTable registered.
      * Returns a tracked handle consumed by {@link #executeWithContextAsync}.
+     *
+     * @param queryConfigPtr pointer to a WireDatafusionQueryConfig struct, or 0 for fallback defaults
      */
-    public static SessionContextHandle createSessionContext(long readerPtr, long runtimePtr, String tableName, long contextId) {
+    public static SessionContextHandle createSessionContext(
+        long readerPtr,
+        long runtimePtr,
+        String tableName,
+        long contextId,
+        long queryConfigPtr
+    ) {
         NativeHandle.validatePointer(readerPtr, "reader");
         NativeHandle.validatePointer(runtimePtr, "runtime");
         try (var call = new NativeCall()) {
             var table = call.str(tableName);
-            long ptr = call.invoke(CREATE_SESSION_CONTEXT, readerPtr, runtimePtr, table.segment(), table.len(), contextId);
+            long ptr = call.invoke(CREATE_SESSION_CONTEXT, readerPtr, runtimePtr, table.segment(), table.len(), contextId, queryConfigPtr);
             return new SessionContextHandle(ptr);
         }
     }
 
     /**
-     * Executes a Substrait plan against the configured SessionContext.
-     * Consumes the session context handle (freed internally when stream closes).
+     * Creates a SessionContext configured for indexed execution with filter delegation.
+     * Registers the delegated_predicate UDF and stores treeShape + delegatedPredicateCount
+     * on the Rust handle for use during execution.
+     *
+     * @param queryConfigPtr pointer to a WireDatafusionQueryConfig struct, or 0 for fallback defaults
      */
-    /** Frees a native SessionContext handle. Safe to call once. */
+    public static SessionContextHandle createSessionContextForIndexedExecution(
+        long readerPtr,
+        long runtimePtr,
+        String tableName,
+        long contextId,
+        int treeShapeOrdinal,
+        int delegatedPredicateCount,
+        long queryConfigPtr
+    ) {
+        NativeHandle.validatePointer(readerPtr, "reader");
+        NativeHandle.validatePointer(runtimePtr, "runtime");
+        try (NativeCall call = new NativeCall()) {
+            NativeCall.Str table = call.str(tableName);
+            long ptr = call.invoke(
+                CREATE_SESSION_CONTEXT_INDEXED,
+                readerPtr,
+                runtimePtr,
+                table.segment(),
+                table.len(),
+                contextId,
+                treeShapeOrdinal,
+                delegatedPredicateCount,
+                queryConfigPtr
+            );
+            return new SessionContextHandle(ptr);
+        }
+    }
+
+    /**
+     * Frees a native {@code SessionContext} handle. Invoked from
+     * {@link SessionContextHandle#doCloseNative()} ()} on error / never-executed paths; not called on the
+     * happy path where Rust's {@code execute_with_context} consumes the handle itself.
+     * Safe to call at most once per pointer.
+     */
     public static void closeSessionContext(long ptr) {
         NativeCall.invokeVoid(CLOSE_SESSION_CONTEXT, ptr);
     }
 
-    public static void executeWithContextAsync(long sessionCtxPtr, byte[] substraitPlan, ActionListener<Long> listener) {
-        NativeHandle.validatePointer(sessionCtxPtr, "sessionContext");
+    /**
+     * Executes a Substrait plan against the configured SessionContext.
+     *
+     * <p>Rust's {@code execute_with_context} takes ownership of the {@code SessionContext} via
+     * {@code Box::from_raw} on entry, regardless of whether the rest of the call then succeeds or
+     * returns an error. The handle is therefore marked consumed in a {@code finally} block so
+     * that both success and native-error paths skip {@code df_close_session_context} (which
+     * would otherwise double-free). Only a Java-side failure before the downcall dispatches
+     * (argument marshalling) leaves the handle unconsumed, in which case its
+     * {@link SessionContextHandle#doCloseNative()} ()} will free it.
+     */
+    public static void executeWithContextAsync(SessionContextHandle sessionContext, byte[] substraitPlan, ActionListener<Long> listener) {
+        final long sessionCtxPtr;
+        try {
+            sessionCtxPtr = sessionContext.getPointer();
+        } catch (Exception e) {
+            listener.onFailure(e);
+            return;
+        }
         try (var call = new NativeCall()) {
-            long result = call.invoke(EXECUTE_WITH_CONTEXT, sessionCtxPtr, call.bytes(substraitPlan), (long) substraitPlan.length);
+            var plan = call.bytes(substraitPlan);
+            long planLen = (long) substraitPlan.length;
+            long result;
+            try {
+                result = call.invoke(EXECUTE_WITH_CONTEXT, sessionCtxPtr, plan, planLen);
+            } finally {
+                // Rust took ownership via Box::from_raw; do not let doClose() double-free.
+                sessionContext.markConsumed();
+            }
             listener.onResponse(result);
         } catch (Throwable throwable) {
             listener.onFailure(throwable instanceof Exception ? (Exception) throwable : new RuntimeException(throwable));

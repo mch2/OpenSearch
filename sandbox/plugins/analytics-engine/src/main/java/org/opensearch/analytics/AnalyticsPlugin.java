@@ -97,7 +97,7 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
         for (AnalyticsSearchBackendPlugin be : backEnds) {
             backEndsByName.put(be.name(), be);
         }
-        searchService = new AnalyticsSearchService(backEndsByName);
+        searchService = new AnalyticsSearchService(backEndsByName, namedWriteableRegistry);
 
         // Returned as components so Guice can inject them into DefaultPlanExecutor
         // (a HandledTransportAction registered via getActions() — constructed by Guice
@@ -112,6 +112,15 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
             b.bind(new TypeLiteral<QueryPlanExecutor<RelNode, Iterable<Object[]>>>() {
             }).to(DefaultPlanExecutor.class);
             b.bind(EngineContext.class).to(DefaultEngineContext.class);
+            // Bind the concrete QueryScheduler as a singleton in addition to
+            // the Scheduler interface alias. Without the explicit
+            // QueryScheduler binding, looking up the concrete class via the
+            // node injector (e.g. tests that need to register a custom
+            // StageScheduler) drops back to a JIT binding and re-runs
+            // QueryScheduler's @Inject constructor — which transitively
+            // re-builds AnalyticsSearchTransportService and tries to register
+            // the streaming fragment handler twice.
+            b.bind(QueryScheduler.class).asEagerSingleton();
             b.bind(Scheduler.class).to(QueryScheduler.class);
         });
     }
