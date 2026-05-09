@@ -62,10 +62,12 @@ public class OpenSearchSortRule extends RelOptRule {
             throw new IllegalStateException("No backend supports SORT capability among " + childViableBackends);
         }
 
+        // plus(): Calcite's Sort constructor asserts the trait set contains the collation.
+        // replace() is a no-op if the slot is missing; plus() appends or overrides.
         call.transformTo(
             new OpenSearchSort(
                 sort.getCluster(),
-                child.getTraitSet(),
+                child.getTraitSet().plus(sort.getCollation()),
                 RelNodeUtils.unwrapHep(sort.getInput()),
                 sort.getCollation(),
                 sort.offset,

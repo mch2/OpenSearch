@@ -185,12 +185,14 @@ public class OpenSearchAggregate extends Aggregate implements OpenSearchRelNode 
 
     @Override
     public RelNode stripAnnotations(List<RelNode> strippedChildren, Function<OperatorAnnotation, RexNode> annotationResolver) {
+        RelNode strippedInput = strippedChildren.getFirst();
         List<AggregateCall> strippedCalls = new ArrayList<>();
         for (AggregateCall aggCall : getAggCallList()) {
             // TODO: when aggregate delegation is implemented, use annotationResolver
             // to replace delegated AggregateCallAnnotations with placeholders instead
             // of just filtering them out.
             List<RexNode> cleanRexList = aggCall.rexList.stream().filter(rex -> !(rex instanceof AggregateCallAnnotation)).toList();
+            // null type lets Calcite re-derive the agg call's return type from the new input.
             strippedCalls.add(
                 AggregateCall.create(
                     aggCall.getAggregation(),
@@ -202,11 +204,13 @@ public class OpenSearchAggregate extends Aggregate implements OpenSearchRelNode 
                     aggCall.filterArg,
                     aggCall.distinctKeys,
                     aggCall.collation,
-                    aggCall.type,
+                    getGroupSet().cardinality(),
+                    strippedInput,
+                    null,
                     aggCall.name
                 )
             );
         }
-        return LogicalAggregate.create(strippedChildren.getFirst(), List.of(), getGroupSet(), getGroupSets(), strippedCalls);
+        return LogicalAggregate.create(strippedInput, List.of(), getGroupSet(), getGroupSets(), strippedCalls);
     }
 }

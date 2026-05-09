@@ -216,14 +216,12 @@ public class FilterRuleTests extends BasePlannerRulesTests {
     // ---- Derived columns ----
 
     /**
-     * HAVING on a derived column (here, the aggregate's {@code total_size} output)
-     * fails fast — derived-column filtering is not yet supported. A delegation model
-     * for derived/expression columns is required to map the column back to a physical
-     * backend (within-stage delegation); until that exists, the planner refuses to
-     * produce a plan rather than silently picking a backend that might not be able to
-     * read the operator's output at runtime.
+     * HAVING on a derived column (the aggregate's {@code total_size} output) plans without
+     * throwing. The filter has no per-field storage to narrow on, so its viable backends are
+     * just the upstream aggregate's. The filter runs on the same backend that produced the
+     * derived column.
      */
-    public void testFilterOnDerivedColumnFailsFast() {
+    public void testFilterOnDerivedColumnPlansSuccessfully() {
         PlannerContext context = buildContext("parquet", 1, Map.of("status", Map.of("type", "integer"), "size", Map.of("type", "integer")));
 
         RelOptTable table = mockTable("test_index", "status", "size");
@@ -252,15 +250,8 @@ public class FilterRuleTests extends BasePlannerRulesTests {
         );
         LogicalFilter having = LogicalFilter.create(aggregate, havingCondition);
 
-        IllegalStateException exception = expectThrows(IllegalStateException.class, () -> runPlanner(having, context));
-        assertTrue(
-            "exception message must mention the derived column name; got: " + exception.getMessage(),
-            exception.getMessage().contains("total_size")
-        );
-        assertTrue(
-            "exception message must identify the unsupported path; got: " + exception.getMessage(),
-            exception.getMessage().contains("derived column")
-        );
+        RelNode result = runPlanner(having, context);
+        assertNotNull("Planner must produce a plan for HAVING on derived column", result);
     }
 
     // ---- Helpers ----

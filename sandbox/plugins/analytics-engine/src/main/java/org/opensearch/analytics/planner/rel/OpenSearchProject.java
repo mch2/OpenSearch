@@ -197,16 +197,27 @@ public class OpenSearchProject extends Project implements OpenSearchRelNode {
                 return super.visitCall(call);
             }
         };
+        // Re-stamp RexInputRef types from the new input column types.
+        RelNode strippedInput = strippedChildren.getFirst();
+        RexShuttle inputRefRetyper = new RexShuttle() {
+            @Override
+            public RexNode visitInputRef(org.apache.calcite.rex.RexInputRef ref) {
+                org.apache.calcite.rel.type.RelDataType newType = strippedInput.getRowType().getFieldList().get(ref.getIndex()).getType();
+                return newType.equals(ref.getType()) ? ref : new org.apache.calcite.rex.RexInputRef(ref.getIndex(), newType);
+            }
+        };
         List<RexNode> strippedExprs = new ArrayList<>();
         for (RexNode expr : getProjects()) {
+            RexNode unwrapped;
             if (expr instanceof AnnotatedProjectExpression annotated) {
-                RexNode resolved = annotationResolver.apply(annotated);
-                strippedExprs.add(resolved.accept(nestedAnnotationStripper));
+                unwrapped = annotationResolver.apply(annotated).accept(nestedAnnotationStripper);
             } else {
                 // Plain expressions have no annotation to strip — pass through.
-                strippedExprs.add(expr);
+                unwrapped = expr;
             }
+            strippedExprs.add(unwrapped.accept(inputRefRetyper));
         }
-        return LogicalProject.create(strippedChildren.getFirst(), List.of(), strippedExprs, getRowType());
+        // null fieldNames lets Calcite re-derive the row type from the new exprs.
+        return LogicalProject.create(strippedInput, List.of(), strippedExprs, (List<String>) null);
     }
 }

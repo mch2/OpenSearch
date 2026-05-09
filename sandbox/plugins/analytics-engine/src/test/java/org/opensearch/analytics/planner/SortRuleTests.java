@@ -9,12 +9,20 @@
 package org.opensearch.analytics.planner;
 
 import org.apache.calcite.plan.RelOptUtil;
+import org.apache.calcite.plan.hep.HepMatchOrder;
+import org.apache.calcite.plan.hep.HepPlanner;
+import org.apache.calcite.plan.hep.HepProgramBuilder;
+import org.apache.calcite.rel.RelCollation;
+import org.apache.calcite.rel.RelCollationTraitDef;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.opensearch.analytics.planner.rel.OpenSearchAggregate;
 import org.opensearch.analytics.planner.rel.OpenSearchFilter;
 import org.opensearch.analytics.planner.rel.OpenSearchSort;
 import org.opensearch.analytics.planner.rel.OpenSearchTableScan;
+import org.opensearch.analytics.planner.rules.OpenSearchFilterRule;
+import org.opensearch.analytics.planner.rules.OpenSearchSortRule;
+import org.opensearch.analytics.planner.rules.OpenSearchTableScanRule;
 
 import java.util.List;
 import java.util.Set;
@@ -61,6 +69,27 @@ public class SortRuleTests extends BasePlannerRulesTests {
             types,
             10
         );
+    }
+
+    /** The marked OpenSearchSort's trait set must carry the sort's collation. */
+    public void testSortRuleStampsCollationOnTraitSet() {
+        PlannerContext context = defaultContext();
+        RelNode logicalSort = makeSort(makeFilter(stubScan(mockTable("test_index", "status", "size")), makeEquals(0, SqlTypeName.INTEGER, 200)), -1);
+
+        HepProgramBuilder programBuilder = new HepProgramBuilder();
+        programBuilder.addMatchOrder(HepMatchOrder.BOTTOM_UP);
+        programBuilder.addRuleCollection(
+            List.of(new OpenSearchTableScanRule(context), new OpenSearchFilterRule(context), new OpenSearchSortRule(context))
+        );
+        HepPlanner hepPlanner = new HepPlanner(programBuilder.build());
+        hepPlanner.setRoot(logicalSort);
+        RelNode marked = hepPlanner.findBestExp();
+
+        assertTrue("expected OpenSearchSort root, got " + marked.getClass().getSimpleName(), marked instanceof OpenSearchSort);
+        OpenSearchSort osSort = (OpenSearchSort) marked;
+        RelCollation collation = osSort.getTraitSet().getTrait(RelCollationTraitDef.INSTANCE);
+        assertNotNull("OpenSearchSort trait set must carry the sort's collation (rule must call .plus(sort.getCollation()))", collation);
+        assertEquals("Trait set collation must match the sort's declared collation", osSort.getCollation(), collation);
     }
 
     /** Sort(Agg(Filter(Scan))) with and without fetch — full OLAP pipeline. */

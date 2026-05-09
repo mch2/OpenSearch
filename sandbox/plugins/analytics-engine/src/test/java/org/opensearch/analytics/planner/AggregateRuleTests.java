@@ -11,8 +11,10 @@ package org.opensearch.analytics.planner;
 import org.apache.calcite.plan.RelOptUtil;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.AggregateCall;
+import org.apache.calcite.rel.logical.LogicalAggregate;
 import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.calcite.sql.type.SqlTypeName;
+import org.apache.calcite.util.ImmutableBitSet;
 import org.opensearch.analytics.planner.rel.AggregateCallAnnotation;
 import org.opensearch.analytics.planner.rel.AggregateMode;
 import org.opensearch.analytics.planner.rel.OpenSearchAggregate;
@@ -82,6 +84,53 @@ public class AggregateRuleTests extends BasePlannerRulesTests {
             List.of(OpenSearchAggregate.class, OpenSearchTableScan.class),
             Set.of(MockDataFusionBackend.NAME)
         );
+    }
+
+    /**
+     * stripAnnotations must re-derive each agg call's return type from the new input.
+     * Without re-derivation, a stale type on the agg call trips the assertion in
+     * LogicalAggregate's constructor and kills the JVM under -ea. Tests with SUM over
+     * DECIMAL → INTEGER schema swap, which yields different inferred types.
+     */
+    public void testStripAnnotationsRederivesAggCallType() {
+        RelNode origScan = stubScan(
+            mockTable("test_index", new String[] { "k", "v" }, new SqlTypeName[] { SqlTypeName.VARCHAR, SqlTypeName.DECIMAL })
+        );
+        AggregateCall sumOverDecimal = AggregateCall.create(
+            SqlStdOperatorTable.SUM,
+            false,
+            false,
+            false,
+            List.of(),
+            List.of(1),
+            -1,
+            null,
+            org.apache.calcite.rel.RelCollations.EMPTY,
+            0,
+            origScan,
+            null,
+            "total"
+        );
+        OpenSearchAggregate agg = new OpenSearchAggregate(
+            origScan.getCluster(),
+            origScan.getTraitSet(),
+            origScan,
+            ImmutableBitSet.of(),
+            null,
+            List.of(sumOverDecimal),
+            AggregateMode.SINGLE,
+            List.of(MockDataFusionBackend.NAME)
+        );
+
+        RelNode newScan = stubScan(
+            mockTable("test_index", new String[] { "k", "v" }, new SqlTypeName[] { SqlTypeName.VARCHAR, SqlTypeName.INTEGER })
+        );
+
+        RelNode result = agg.stripAnnotations(List.of(newScan));
+
+        LogicalAggregate logicalAgg = (LogicalAggregate) result;
+        AggregateCall stripped = logicalAgg.getAggCallList().getFirst();
+        assertEquals("SUM type re-derived from the new INTEGER input", SqlTypeName.INTEGER, stripped.getType().getSqlTypeName());
     }
 
     // ---- Error cases ----

@@ -229,9 +229,12 @@ public class DataFusionFragmentConvertorTests extends OpenSearchTestCase {
         assertTrue("root must be an AggregateRel", root.hasAggregate());
         AggregateRel agg = root.getAggregate();
         assertFalse("aggregate must have at least one measure", agg.getMeasuresList().isEmpty());
-        // Isthmus defaults final-mode aggregates to INITIAL_TO_RESULT.
+        // FINAL agg uses default INITIAL_TO_RESULT phase. COUNT decomposition (in
+        // OpenSearchAggregateSplitRule) rewrites COUNT to SUM(partial_count_col), and SUM
+        // is idempotent under single-pass — INITIAL_TO_RESULT and INTERMEDIATE_TO_RESULT
+        // give the same answer here.
         AggregateFunction fn = agg.getMeasures(0).getMeasure();
-        assertEquals("final-agg phase must be INITIAL_TO_RESULT", AggregationPhase.AGGREGATION_PHASE_INITIAL_TO_RESULT, fn.getPhase());
+        assertEquals("final-agg phase is INITIAL_TO_RESULT", AggregationPhase.AGGREGATION_PHASE_INITIAL_TO_RESULT, fn.getPhase());
         Rel inner = agg.getInput();
         assertTrue("Aggregate input must be a ReadRel", inner.hasRead());
         assertEquals(

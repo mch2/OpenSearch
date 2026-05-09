@@ -98,6 +98,42 @@ public class ProjectRuleTests extends BasePlannerRulesTests {
         }
     }
 
+    /**
+     * stripAnnotations must re-stamp RexInputRef types from the new input. If the stripped
+     * child's column types differ (e.g. an upstream aggregate re-derived COUNT to BIGINT),
+     * stale RexInputRef types fail LogicalProject's isValid check and kill the JVM.
+     */
+    public void testStripAnnotationsRestampsInputRefTypes() {
+        RelOptTable origTable = mockTable(
+            "test_index",
+            new String[] { "k", "v" },
+            new SqlTypeName[] { SqlTypeName.VARCHAR, SqlTypeName.INTEGER }
+        );
+        RelNode origScan = stubScan(origTable);
+        RexNode refV = rexBuilder.makeInputRef(typeFactory.createSqlType(SqlTypeName.INTEGER), 1);
+        OpenSearchProject project = new OpenSearchProject(
+            origScan.getCluster(),
+            origScan.getTraitSet(),
+            origScan,
+            ImmutableList.of(refV),
+            typeFactory.builder().add("v", SqlTypeName.INTEGER).build(),
+            List.of(MockDataFusionBackend.NAME)
+        );
+
+        RelOptTable newTable = mockTable(
+            "test_index",
+            new String[] { "k", "v" },
+            new SqlTypeName[] { SqlTypeName.VARCHAR, SqlTypeName.BIGINT }
+        );
+        RelNode newScan = stubScan(newTable);
+
+        RelNode result = project.stripAnnotations(List.of(newScan));
+
+        LogicalProject logicalProject = (LogicalProject) result;
+        SqlTypeName actual = logicalProject.getProjects().getFirst().getType().getSqlTypeName();
+        assertEquals("Project's RexInputRef type must follow the new input column type", SqlTypeName.BIGINT, actual);
+    }
+
     public void testExpressionProjectionStillRequiresCapabilityWithoutDeclaration() {
         // Negative guard: the short-circuit must apply only to passthrough. If a RexCall is
         // present and the backend declares no matching scalar ProjectCapability, the rule must

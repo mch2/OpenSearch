@@ -164,18 +164,10 @@ public class OpenSearchFilterRule extends RelOptRule {
             FieldStorageInfo storageInfo = FieldStorageInfo.resolve(fieldStorageInfos, fieldIndex);
 
             if (storageInfo.isDerived()) {
-                // Derived columns (post-Union, post-Project, HAVING on aggregate outputs) have no
-                // physical storage formats. Picking a backend for the filter therefore requires a
-                // within-stage delegation model (DelegationType split plus a DataTransferCapability
-                // telling the planner which backend can read the producing operator's output).
-                // Until that model exists, refuse to produce a plan rather than silently picking
-                // a backend that might not be able to consume the upstream column at runtime.
-                throw new IllegalStateException(
-                    "filter on derived column ["
-                        + storageInfo.getFieldName()
-                        + "] not supported: "
-                        + "delegation model for derived columns is not yet implemented"
-                );
+                // Derived columns (post-aggregate, post-Union, post-Project) are computed
+                // in memory by the upstream operator. The filter runs on the same backend
+                // as that operator's output — no per-field storage narrowing applies.
+                continue;
             }
             // Format-aware: backends that can access this field's storage (doc values + index).
             // A backend is viable only if it has the field in its own storage formats — ensuring
