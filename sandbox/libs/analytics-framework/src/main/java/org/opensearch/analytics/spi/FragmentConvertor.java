@@ -90,4 +90,21 @@ public interface FragmentConvertor {
     default byte[] attachFragmentOnTop(RelNode fragment, byte[] innerBytes) {
         throw new UnsupportedOperationException("attachFragmentOnTop not implemented for this backend");
     }
+
+    /**
+     * Attaches a Join on top of two already-converted inner-bytes branches. Used when
+     * a coordinator-side fragment contains a Join whose left/right inputs are themselves
+     * compound sub-fragments (e.g. each input is a FINAL Aggregate over a child stage,
+     * or a nested Join).
+     *
+     * @param joinFragment       the Join RelNode (annotations stripped). Its substrait
+     *                           output type comes from this RelNode; its children
+     *                           are replaced by the converted left / right branches.
+     * @param leftInnerBytes     serialized bytes for the join's left branch
+     * @param rightInnerBytes    serialized bytes for the join's right branch
+     * @return serialized plan bytes with the join attached over both branches
+     */
+    default byte[] attachJoinFragment(RelNode joinFragment, byte[] leftInnerBytes, byte[] rightInnerBytes) {
+        throw new UnsupportedOperationException("attachJoinFragment not implemented for this backend");
+    }
 }

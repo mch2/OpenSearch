@@ -24,9 +24,9 @@ import java.util.Set;
  * the entire input that broadcasts a global aggregate value to every row. Lower-form is the
  * same shape as {@code streamstats} (a {@link org.apache.calcite.rex.RexOver} inside an
  * {@link org.apache.calcite.rel.core.Project}) just with a different frame: {@code OVER ()}
- * vs {@code OVER (ROWS UNBOUNDED PRECEDING)}. The {@code WindowedGatherTransform} treats
- * both identically, so anything that works for streamstats's running aggregate works for
- * eventstats's broadcast aggregate too.
+ * vs {@code OVER (ROWS UNBOUNDED PRECEDING)}. {@code OpenSearchWindowedProjectGatherRule}
+ * treats both identically, so anything that works for streamstats's running aggregate
+ * works for eventstats's broadcast aggregate too.
  *
  * <p>Each test pins the broadcast value across multiple rows. If the windowed gather were
  * mis-positioned (e.g. computed per-shard and concatenated), the broadcast would vary by

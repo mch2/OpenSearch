@@ -44,20 +44,25 @@ public class OpenSearchTableScan extends TableScan implements OpenSearchRelNode 
     }
 
     /**
-     * Creates an OpenSearchTableScan with distribution trait based on shard count.
-     * Multi-shard → RANDOM (data partitioned across nodes).
-     * Single shard → SINGLETON (all data on one node).
+     * Creates an OpenSearchTableScan with RANDOM distribution regardless of shard count.
+     *
+     * <p>Single-shard scans report RANDOM rather than SINGLETON because the data still
+     * lives on a data node, not the coordinator. The Calcite distribution trait can't
+     * distinguish "one source on a data node" from "one source on the coord", so we
+     * collapse to RANDOM and let {@code OpenSearchExchangeReducer} (the trait converter
+     * for {@code RANDOM → SINGLETON}) be the sole producer of SINGLETON. This makes
+     * trait propagation uniform across shard counts and lets gather rules ride the
+     * normal {@code AbstractConverter.ExpandConversionRule} machinery instead of
+     * special-casing the single-shard case.
      */
     public static OpenSearchTableScan create(
         RelOptCluster cluster,
         RelOptTable table,
         List<String> viableBackends,
         List<FieldStorageInfo> outputFieldStorage,
-        int shardCount,
         OpenSearchDistributionTraitDef distTraitDef
     ) {
-        OpenSearchDistribution distribution = shardCount > 1 ? distTraitDef.random() : distTraitDef.singleton();
-        RelTraitSet traitSet = RelTraitSet.createEmpty().plus(OpenSearchConvention.INSTANCE).plus(distribution);
+        RelTraitSet traitSet = RelTraitSet.createEmpty().plus(OpenSearchConvention.INSTANCE).plus(distTraitDef.random());
         return new OpenSearchTableScan(cluster, traitSet, table, viableBackends, outputFieldStorage);
     }
 

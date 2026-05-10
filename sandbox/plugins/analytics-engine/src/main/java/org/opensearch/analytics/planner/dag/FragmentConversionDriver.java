@@ -99,7 +99,7 @@ public class FragmentConversionDriver {
                 : FilterTreeShape.NO_DELEGATION;
 
             IntraOperatorDelegationBytes delegationBytes = new IntraOperatorDelegationBytes(registry);
-            byte[] bytes = convert(plan.resolvedFragment(), convertor, delegationBytes);
+            byte[] bytes = convert(plan.resolvedFragment(), convertor, delegationBytes, stage.getChildStages().size());
 
             // Assemble instruction list
             List<InstructionNode> instructions = assembleInstructions(backend, plan, treeShape, delegationBytes);
@@ -213,7 +213,12 @@ public class FragmentConversionDriver {
     /**
      * Dispatches conversion based on the fragment's leaf and top node types.
      */
-    static byte[] convert(RelNode resolvedFragment, FragmentConvertor convertor, IntraOperatorDelegationBytes delegationBytes) {
+    static byte[] convert(
+        RelNode resolvedFragment,
+        FragmentConvertor convertor,
+        IntraOperatorDelegationBytes delegationBytes,
+        int childStageCount
+    ) {
         RelNode leaf = findLeaf(resolvedFragment);
 
         if (leaf instanceof OpenSearchTableScan scan) {
@@ -234,7 +239,7 @@ public class FragmentConversionDriver {
         }
 
         if (leaf instanceof OpenSearchStageInputScan) {
-            return convertReduceFragment(resolvedFragment, convertor, delegationBytes);
+            return convertReduceFragment(resolvedFragment, convertor, delegationBytes, childStageCount);
         }
 
         throw new IllegalStateException(
@@ -257,16 +262,22 @@ public class FragmentConversionDriver {
      * when shuffle joins are implemented (check if all inputs are StageInputScan
      * and dispatch to a dedicated convertJoinFragment method).
      */
-    private static byte[] convertReduceFragment(RelNode node, FragmentConvertor convertor, IntraOperatorDelegationBytes delegationBytes) {
+    private static byte[] convertReduceFragment(
+        RelNode node,
+        FragmentConvertor convertor,
+        IntraOperatorDelegationBytes delegationBytes,
+        int childStageCount
+    ) {
         // Find the ExchangeReducer and collect operators above it
-        return convertReduceNode(node, convertor, false, delegationBytes);
+        return convertReduceNode(node, convertor, false, delegationBytes, childStageCount);
     }
 
     private static byte[] convertReduceNode(
         RelNode node,
         FragmentConvertor convertor,
         boolean finalAggConverted,
-        IntraOperatorDelegationBytes delegationBytes
+        IntraOperatorDelegationBytes delegationBytes,
+        int childStageCount
     ) {
         if (node instanceof OpenSearchExchangeReducer) {
             // Root ExchangeReducer — the coordinator fragment is just the reducer over
@@ -279,7 +290,7 @@ public class FragmentConversionDriver {
             Function<OperatorAnnotation, RexNode> resolver = delegationBytes.resolverFor(openSearchNode, node.getCluster().getRexBuilder());
             RelNode strippedNode = openSearchNode.stripAnnotations(strippedInputs, resolver);
 
-            if (!finalAggConverted && isFinalAggBoundary(node)) {
+            if (!finalAggConverted && isFinalAggBoundary(node, childStageCount)) {
                 // Boundary between coordinator-side fragment and data-node child stages. For
                 // single-input shapes (Sort/Project/Aggregate over a partial agg) this is the
                 // final-aggregate operator; for multi-input shapes (Union, coord-side Join,
@@ -293,8 +304,20 @@ public class FragmentConversionDriver {
                 return convertor.convertFinalAggFragment(strippedNode);
             }
 
+            // A Join sitting in the coordinator-side fragment without per-branch ExchangeReducer
+            // children — both branches are stage-internal compound sub-fragments (e.g. each
+            // branch is a FINAL Aggregate → ER, or a deeper nested Join). Recurse separately
+            // into each branch, then call attachJoinFragment to wire them under the join.
+            // This shape arises when one or both join inputs are SINGLETON-already (so
+            // OpenSearchJoinGatherRule's convert() didn't insert an ER there).
+            if (node instanceof org.opensearch.analytics.planner.rel.OpenSearchJoin) {
+                byte[] leftBytes = convertReduceNode(node.getInputs().get(0), convertor, false, delegationBytes, childStageCount);
+                byte[] rightBytes = convertReduceNode(node.getInputs().get(1), convertor, false, delegationBytes, childStageCount);
+                return convertor.attachJoinFragment(strippedNode, leftBytes, rightBytes);
+            }
+
             // Operator above the final-fragment boundary — convert child first, then attach.
-            byte[] innerBytes = convertReduceNode(node.getInputs().getFirst(), convertor, false, delegationBytes);
+            byte[] innerBytes = convertReduceNode(node.getInputs().getFirst(), convertor, false, delegationBytes, childStageCount);
             return convertor.attachFragmentOnTop(strippedNode, innerBytes);
         }
         throw new IllegalStateException("Unexpected reduce stage node: " + node.getClass().getSimpleName());
@@ -302,15 +325,29 @@ public class FragmentConversionDriver {
 
     /**
      * True when {@code node} sits on the boundary between the coordinator-side fragment and
-     * the data-node child stages — either a multi-input shape with every branch in its own
-     * ExchangeReducer (Union, coord-side Join) or a single-input operator directly above
-     * one ExchangeReducer (final agg over a partial-agg child stage).
+     * the data-node child stages. For a multi-input stage (Union, coord-side Join, future
+     * set-ops) the boundary is the multi-input root: its arity matches the stage's child
+     * count and every input is an {@link OpenSearchExchangeReducer}. For a single-input
+     * stage (final agg over a partial-agg child) the boundary is the operator directly
+     * above the lone ExchangeReducer.
+     *
+     * <p>{@code childStageCount} comes from the surrounding {@code Stage} — using it lets
+     * us avoid the structural per-branch validation that {@link MultiInputShape#detect}
+     * does (verifying every branch is ER → StageInputScan), since the DAG builder already
+     * guarantees one ExchangeReducer per child stage at this boundary.
      */
-    private static boolean isFinalAggBoundary(RelNode node) {
-        if (MultiInputShape.detect(node).isPresent()) {
-            return true;
+    private static boolean isFinalAggBoundary(RelNode node, int childStageCount) {
+        if (childStageCount > 1) {
+            return node.getInputs().size() == childStageCount && allInputsAreExchangeReducers(node);
         }
         return node.getInputs().size() == 1 && node.getInputs().getFirst() instanceof OpenSearchExchangeReducer;
+    }
+
+    private static boolean allInputsAreExchangeReducers(RelNode node) {
+        for (RelNode input : node.getInputs()) {
+            if (!(input instanceof OpenSearchExchangeReducer)) return false;
+        }
+        return true;
     }
 
     /** Recursively strips annotations bottom-up. Keeps OpenSearchStageInputScan as-is. */

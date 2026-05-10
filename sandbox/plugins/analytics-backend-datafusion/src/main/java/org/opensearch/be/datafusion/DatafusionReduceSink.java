@@ -360,34 +360,39 @@ public final class DatafusionReduceSink extends AbstractDatafusionReduceSink imp
     @Override
     protected Throwable closeUnderLock() {
         Throwable failure = null;
+        logger.info("[ReduceSink] closeUnderLock START senders={} eofSeen={}", sendersByChildStageId.size(), eofSeen.get());
         // 1. Signal EOF on every still-open sender. Senders that were already
         // closed by their ChildSink wrapper are no-ops (idempotent on the Rust side).
-        for (DatafusionPartitionSender sender : sendersByChildStageId.values()) {
+        for (Map.Entry<Integer, DatafusionPartitionSender> entry : sendersByChildStageId.entrySet()) {
             try {
-                sender.close();
+                logger.info("[ReduceSink] closing sender for child stage {}", entry.getKey());
+                entry.getValue().close();
+                logger.info("[ReduceSink] closed sender for child stage {}", entry.getKey());
             } catch (Throwable t) {
                 failure = accumulate(failure, t);
             }
         }
-        // 2. Final blocking drain — until the FINAL plan reaches EOF (after every
-        // sender is closed and DataFusion completes the last aggregation, the
-        // output stream returns 0). Uses the parent's blocking drainOutputIntoDownstream
-        // since we want to wait for the rest, not return on Pending. The opportunistic
-        // drainAvailable on each feed has already pulled most batches; this catches
-        // any tail that the plan emits after the last sender close signal arrives.
+        // 2. Final blocking drain — until the FINAL plan reaches EOF.
         if (!eofSeen.get()) {
             try {
+                logger.info("[ReduceSink] drainOutputIntoDownstream START");
                 drainOutputIntoDownstream(outStream);
+                logger.info("[ReduceSink] drainOutputIntoDownstream END");
             } catch (Throwable t) {
                 failure = accumulate(failure, t);
             }
+        } else {
+            logger.info("[ReduceSink] drainOutputIntoDownstream skipped (eofSeen)");
         }
         // 3. Close native resources.
         try {
+            logger.info("[ReduceSink] outStream.close START");
             outStream.close();
+            logger.info("[ReduceSink] outStream.close END");
         } catch (Throwable t) {
             failure = accumulate(failure, t);
         }
+        logger.info("[ReduceSink] closeUnderLock END");
         return failure;
     }
 

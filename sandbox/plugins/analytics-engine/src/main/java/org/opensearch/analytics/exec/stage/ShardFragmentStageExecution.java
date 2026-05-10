@@ -120,7 +120,7 @@ final class ShardFragmentStageExecution extends AbstractStageExecution implement
         return new StreamingResponseListener<>() {
             @Override
             public void onStreamResponse(T response, boolean isLast) {
-                config.searchExecutor().execute(() -> {
+//                config.searchExecutor().execute(() -> {
                     if (isDone()) {
                         logger.debug(
                             "[stage={}] onStreamResponse short-circuited (state={}); isLast={} response={}",
@@ -168,7 +168,7 @@ final class ShardFragmentStageExecution extends AbstractStageExecution implement
                         metrics.incrementTasksCompleted();
                         onShardTerminated();
                     }
-                });
+//                });
             }
 
             @Override

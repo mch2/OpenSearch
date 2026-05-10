@@ -19,7 +19,7 @@ import org.opensearch.analytics.spi.BackendCapabilityProvider;
 import org.opensearch.analytics.spi.BackendExecutionContext;
 import org.opensearch.analytics.spi.DelegationType;
 import org.opensearch.analytics.spi.EngineCapability;
-import org.opensearch.analytics.spi.JoinAlgorithm;
+import org.opensearch.analytics.spi.JoinCapability;
 import org.opensearch.analytics.spi.ExchangeSinkProvider;
 import org.opensearch.analytics.spi.FieldType;
 import org.opensearch.analytics.spi.FilterCapability;
@@ -225,8 +225,21 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
             }
 
             @Override
-            public Set<JoinAlgorithm> supportedJoinAlgorithms() {
-                return Set.of(JoinAlgorithm.COORDINATOR_HASH);
+            public Set<JoinCapability> joinCapabilities() {
+                return Set.of(
+                    new JoinCapability(
+                        Set.of(
+                            JoinCapability.JoinKind.INNER,
+                            JoinCapability.JoinKind.LEFT,
+                            JoinCapability.JoinKind.RIGHT,
+                            JoinCapability.JoinKind.FULL,
+                            JoinCapability.JoinKind.SEMI,
+                            JoinCapability.JoinKind.ANTI,
+                            JoinCapability.JoinKind.CROSS
+                        ),
+                        Set.copyOf(plugin.getSupportedFormats())
+                    )
+                );
             }
 
             @Override

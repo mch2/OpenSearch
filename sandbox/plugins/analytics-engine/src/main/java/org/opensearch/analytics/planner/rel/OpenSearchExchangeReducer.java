@@ -14,7 +14,7 @@ import org.apache.calcite.plan.RelOptPlanner;
 import org.apache.calcite.plan.RelTraitSet;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.RelWriter;
-import org.apache.calcite.rel.SingleRel;
+import org.apache.calcite.rel.convert.ConverterImpl;
 import org.apache.calcite.rel.metadata.RelMetadataQuery;
 import org.opensearch.analytics.planner.RelNodeUtils;
 import org.opensearch.analytics.planner.dag.ExchangeInfo;
@@ -39,7 +39,7 @@ import java.util.List;
  *
  * @opensearch.internal
  */
-public class OpenSearchExchangeReducer extends SingleRel implements OpenSearchRelNode {
+public class OpenSearchExchangeReducer extends ConverterImpl implements OpenSearchRelNode {
 
     private final List<String> viableBackends;
     private final ExchangeInfo exchangeInfo;
@@ -56,7 +56,11 @@ public class OpenSearchExchangeReducer extends SingleRel implements OpenSearchRe
         List<String> viableBackends,
         ExchangeInfo exchangeInfo
     ) {
-        super(cluster, traitSet, input);
+        // Extending ConverterImpl makes this a Calcite-recognized trait converter — when
+        // registered, it joins the input's RelSet (in the SINGLETON subset) instead of
+        // landing in a fresh standalone set. This is what lets gather-rule chains across
+        // stacked windowed Projects share their existing SINGLETON variants and dedup.
+        super(cluster, null, traitSet, input);
         this.viableBackends = viableBackends;
         this.exchangeInfo = exchangeInfo;
     }

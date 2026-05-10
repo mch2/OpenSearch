@@ -58,12 +58,14 @@ public interface BackendCapabilityProvider {
     }
 
     /**
-     * Join algorithms this backend can execute. The planner selects a strategy per join
-     * and narrows viable backends to those that declare matching algorithm support. An
-     * empty set means the backend cannot execute joins (independent of
-     * {@link EngineCapability#JOIN}, which remains as a coarser presence check).
+     * Join capabilities this backend can execute. Each {@link JoinCapability} declares a
+     * set of {@link JoinCapability.JoinKind}s (INNER, LEFT, etc.) and the storage formats
+     * those joins apply to. The planner narrows viable backends to those whose
+     * capabilities cover the query's required kind. An empty set means the backend cannot
+     * execute joins (independent of {@link EngineCapability#JOIN}, which remains a coarser
+     * presence check).
      */
-    default Set<JoinAlgorithm> supportedJoinAlgorithms() {
+    default Set<JoinCapability> joinCapabilities() {
         return Set.of();
     }
 

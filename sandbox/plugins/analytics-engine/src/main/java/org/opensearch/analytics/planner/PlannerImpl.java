@@ -29,12 +29,17 @@ import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.planner.rel.OpenSearchDistributionTraitDef;
 import org.opensearch.analytics.planner.rules.OpenSearchAggregateRule;
 import org.opensearch.analytics.planner.rules.OpenSearchAggregateSplitRule;
+import org.opensearch.analytics.planner.rules.OpenSearchFilterDistributionDeriveRule;
 import org.opensearch.analytics.planner.rules.OpenSearchFilterRule;
+import org.opensearch.analytics.planner.rules.OpenSearchJoinGatherRule;
 import org.opensearch.analytics.planner.rules.OpenSearchJoinRule;
+import org.opensearch.analytics.planner.rules.OpenSearchProjectDistributionDeriveRule;
 import org.opensearch.analytics.planner.rules.OpenSearchProjectRule;
+import org.opensearch.analytics.planner.rules.OpenSearchSortDistributionDeriveRule;
 import org.opensearch.analytics.planner.rules.OpenSearchSortRule;
 import org.opensearch.analytics.planner.rules.OpenSearchTableScanRule;
 import org.opensearch.analytics.planner.rules.OpenSearchUnionRule;
+import org.opensearch.analytics.planner.rules.OpenSearchWindowedProjectGatherRule;
 
 import java.util.List;
 
@@ -114,12 +119,13 @@ public class PlannerImpl {
 
         LOGGER.info("After marking:\n{}", RelOptUtil.toString(marked));
 
-        // Phase 1.5 (windowed-only): lower the SINGLETON exchange position for windowed-Project
-        // subtrees. See WindowedGatherTransform's class javadoc for why this is a deterministic
-        // pre-CBO AST rewrite rather than a Calcite rule. No-op for plans without RexOver.
-        marked = WindowedGatherTransform.apply(marked, context.getDistributionTraitDef());
+        // Phase 1.5 (windowed-only): propagate any upstream Sort's collation into a windowed
+        // Project's RexOver ORDER BY. Pre-CBO so the marked tree carries the corrected RexOver
+        // before Volcano explores conversions. No-op for plans without RexOver. Gather placement
+        // is handled by OpenSearchWindowedProjectGatherRule during Volcano CBO.
+        marked = WindowOrderByPropagationTransform.apply(marked);
 
-        LOGGER.info("After windowed-gather lowering:\n{}", RelOptUtil.toString(marked));
+        LOGGER.info("After windowed-sort propagation:\n{}", RelOptUtil.toString(marked));
 
         // Phase 2: CBO — VolcanoPlanner for trait propagation + exchange insertion
         VolcanoPlanner volcanoPlanner = new VolcanoPlanner();
@@ -127,6 +133,11 @@ public class PlannerImpl {
         OpenSearchDistributionTraitDef distTraitDef = context.getDistributionTraitDef();
         volcanoPlanner.addRelTraitDef(distTraitDef);
         volcanoPlanner.addRule(new OpenSearchAggregateSplitRule(context));
+        volcanoPlanner.addRule(new OpenSearchJoinGatherRule(context));
+        volcanoPlanner.addRule(new OpenSearchWindowedProjectGatherRule(context));
+        volcanoPlanner.addRule(new OpenSearchSortDistributionDeriveRule(context));
+        volcanoPlanner.addRule(new OpenSearchProjectDistributionDeriveRule(context));
+        volcanoPlanner.addRule(new OpenSearchFilterDistributionDeriveRule(context));
         volcanoPlanner.addRule(AbstractConverter.ExpandConversionRule.INSTANCE);
 
         RelOptCluster volcanoCluster = RelOptCluster.create(volcanoPlanner, rawRelNode.getCluster().getRexBuilder());

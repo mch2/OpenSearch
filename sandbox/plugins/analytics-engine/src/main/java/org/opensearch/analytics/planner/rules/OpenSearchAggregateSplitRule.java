@@ -100,7 +100,7 @@ public class OpenSearchAggregateSplitRule extends RelOptRule {
         // Build FINAL agg calls. COUNT decomposes to SUM(partial_count) — counting partial
         // rows would give wrong totals. SUM/MIN/MAX are idempotent across phases.
         int groupCardinality = aggregate.getGroupSet().cardinality();
-        List<AggregateCall> finalCalls = decomposeForFinal(aggregate.getAggCallList(), groupCardinality, partial);
+        List<AggregateCall> finalCalls = decomposeForFinal(aggregate, aggregate.getAggCallList(), groupCardinality, partial);
 
         OpenSearchAggregate finalAggregate = new OpenSearchAggregate(
             aggregate.getCluster(),
@@ -133,8 +133,13 @@ public class OpenSearchAggregateSplitRule extends RelOptRule {
         return false;
     }
 
-    /** FINAL agg calls. COUNT → SUM(partial_count) auto-typed; SUM/MIN/MAX preserved. */
-    private static List<AggregateCall> decomposeForFinal(List<AggregateCall> partialCalls, int groupCardinality, RelNode partialInput) {
+    /** FINAL agg calls. COUNT → SUM(partial_count) pinned non-nullable BIGINT; SUM/MIN/MAX preserved. */
+    private static List<AggregateCall> decomposeForFinal(
+        OpenSearchAggregate aggregate,
+        List<AggregateCall> partialCalls,
+        int groupCardinality,
+        RelNode partialInput
+    ) {
         List<AggregateCall> finalCalls = new ArrayList<>();
         for (int i = 0; i < partialCalls.size(); i++) {
             AggregateCall pc = partialCalls.get(i);
@@ -177,11 +182,9 @@ public class OpenSearchAggregateSplitRule extends RelOptRule {
     ) {
         RexBuilder rexBuilder = originalAggregate.getCluster().getRexBuilder();
         List<RexNode> projects = new ArrayList<>();
-        // Pass-through group keys.
         for (int g = 0; g < groupCardinality; g++) {
             projects.add(rexBuilder.makeInputRef(finalAggregate, g));
         }
-        // Aggregate columns: COALESCE COUNT-derived SUMs to 0, others pass-through.
         List<AggregateCall> origCalls = originalAggregate.getAggCallList();
         for (int i = 0; i < origCalls.size(); i++) {
             int colIndex = groupCardinality + i;

@@ -165,6 +165,31 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
         return serializePlan(rewire(inner, wrapper, fieldNames(fragment)));
     }
 
+    @Override
+    public byte[] attachJoinFragment(RelNode joinFragment, byte[] leftInnerBytes, byte[] rightInnerBytes) {
+        LOGGER.debug(
+            "Attaching join fragment [{}] over left={} bytes / right={} bytes",
+            joinFragment.getClass().getSimpleName(),
+            leftInnerBytes.length,
+            rightInnerBytes.length
+        );
+        Plan leftInner = decodePlan(leftInnerBytes);
+        Plan rightInner = decodePlan(rightInnerBytes);
+        // Standalone-convert the join itself. isthmus walks the join's children to build
+        // the wrapper rel; we then replace those children with the converted left / right
+        // inner plans via replaceJoinInputs (analog of single-input rewire).
+        RelNode rewritten = rewriteStageInputScans(joinFragment);
+        Rel wrapper = convertStandalone(rewritten);
+        Rel rewired = replaceJoinInputs(
+            wrapper,
+            leftInner.getRoots().get(0).getInput(),
+            rightInner.getRoots().get(0).getInput()
+        );
+        return serializePlan(
+            Plan.builder().addRoots(Plan.Root.builder().input(rewired).names(fieldNames(joinFragment)).build()).build()
+        );
+    }
+
     // ── Core conversion helpers ─────────────────────────────────────────────────
 
     private byte[] convertToSubstrait(RelNode fragment) {
@@ -258,6 +283,23 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
         }
         throw new UnsupportedOperationException(
             "Cannot attach-on-top a Substrait Rel of type " + wrapper.getClass().getSimpleName() + " — no single-input rewire defined"
+        );
+    }
+
+    /**
+     * Two-input analog of {@link #replaceInput}: replaces a Join wrapper's left/right
+     * children with the given converted branches. Used by {@link #attachJoinFragment} to
+     * wire two inner-bytes plans under a single join wrapper.
+     */
+    private static Rel replaceJoinInputs(Rel wrapper, Rel newLeft, Rel newRight) {
+        if (wrapper instanceof io.substrait.relation.Join join) {
+            return io.substrait.relation.Join.builder().from(join).left(newLeft).right(newRight).build();
+        }
+        if (wrapper instanceof io.substrait.relation.Cross cross) {
+            return io.substrait.relation.Cross.builder().from(cross).left(newLeft).right(newRight).build();
+        }
+        throw new UnsupportedOperationException(
+            "Cannot attach-on-top a two-input Substrait Rel of type " + wrapper.getClass().getSimpleName() + " — no two-input rewire defined"
         );
     }
 

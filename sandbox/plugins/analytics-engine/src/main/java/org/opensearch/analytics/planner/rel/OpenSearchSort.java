@@ -63,6 +63,21 @@ public class OpenSearchSort extends Sort implements OpenSearchRelNode {
         return new OpenSearchSort(getCluster(), traitSet, input, collation, offset, fetch, viableBackends);
     }
 
+    /**
+     * Override Calcite's default — Calcite treats a "pure" Sort (has collation, no fetch/offset)
+     * as a collation-trait enforcer, which causes Volcano to register it via
+     * {@code getOrCreateSubset(traits, required=true)} and never call {@code setDelivered()}
+     * on its RelSubset. The subset stays required-only, which breaks the
+     * {@code addConverters} filter that looks for delivered subsets when converting an
+     * inner Sort's RelSet to SINGLETON (gather rule path). We don't use Calcite's collation
+     * trait infrastructure — our Sort is a concrete physical operator that should be marked
+     * DELIVERED on registration like any other operator.
+     */
+    @Override
+    public boolean isEnforcer() {
+        return false;
+    }
+
     @Override
     public org.apache.calcite.plan.RelOptCost computeSelfCost(
         org.apache.calcite.plan.RelOptPlanner planner,

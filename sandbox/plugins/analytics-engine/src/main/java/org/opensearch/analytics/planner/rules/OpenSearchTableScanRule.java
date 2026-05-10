@@ -110,7 +110,6 @@ public class OpenSearchTableScanRule extends RelOptRule {
                 indexNameTable,
                 viableBackends,
                 fieldStorage,
-                indexMetadata.getNumberOfShards(),
                 context.getDistributionTraitDef()
             )
         );

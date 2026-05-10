@@ -11,7 +11,9 @@ package org.opensearch.analytics.planner.rel;
 import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelOptCost;
 import org.apache.calcite.plan.RelOptPlanner;
+import org.apache.calcite.plan.RelTrait;
 import org.apache.calcite.plan.RelTraitSet;
+import org.apache.calcite.rel.RelDistribution;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.RelWriter;
 import org.apache.calcite.rel.core.CorrelationId;
@@ -101,6 +103,22 @@ public class OpenSearchJoin extends Join implements OpenSearchRelNode {
 
     @Override
     public RelOptCost computeSelfCost(RelOptPlanner planner, RelMetadataQuery mq) {
+        // Joins require both inputs at the same node (the coordinator). Returning infinite
+        // cost when an input's distribution isn't SINGLETON forces Volcano to prefer the
+        // SINGLETON-input alternatives (HEP-time wrapped via OpenSearchJoinRule, or future
+        // CBO gather rules). Without this, Volcano would otherwise eliminate the HEP-time
+        // ExchangeReducers because OpenSearchExchangeReducer is a Calcite Converter and
+        // a "scan-direct + root ER" plan looks cheaper than "Join over per-side ERs".
+        for (RelNode input : getInputs()) {
+            for (int i = 0; i < input.getTraitSet().size(); i++) {
+                RelTrait trait = input.getTraitSet().getTrait(i);
+                if (trait instanceof OpenSearchDistribution dist
+                    && dist.getType() != RelDistribution.Type.SINGLETON
+                    && dist.getType() != RelDistribution.Type.ANY) {
+                    return planner.getCostFactory().makeInfiniteCost();
+                }
+            }
+        }
         // Constant non-zero cost — enough to keep Volcano from oscillating, not enough
         // to compete with future broadcast-join rules. Stats-driven costing is a future spec.
         return planner.getCostFactory().makeCost(100, 100, 0);

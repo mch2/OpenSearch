@@ -94,16 +94,12 @@ public class PlanForker {
         return results;
     }
 
-    private interface ComboHandler {
-        void accept(String chosenBackend, List<RelNode> combo);
-    }
-
     private static void crossProduct(
         List<List<Resolved>> childAlternativeSets,
         int depth,
         List<RelNode> partial,
         String agreedBackend,
-        ComboHandler handler
+        java.util.function.BiConsumer<String, List<RelNode>> handler
     ) {
         if (depth == childAlternativeSets.size()) {
             handler.accept(agreedBackend, List.copyOf(partial));

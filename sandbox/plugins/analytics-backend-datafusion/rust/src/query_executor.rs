@@ -171,14 +171,20 @@ pub async fn execute_with_context(
     })?;
 
     let logical_plan = from_substrait_plan(&handle.ctx.state(), &substrait_plan).await?;
+    eprintln!("[SHARD-EXEC] logical plan:\n{}", logical_plan.display_indent());
     let dataframe = handle.ctx.execute_logical_plan(logical_plan).await?;
     let physical_plan = dataframe.create_physical_plan().await?;
+    eprintln!(
+        "[SHARD-EXEC] physical plan:\n{}",
+        datafusion::physical_plan::displayable(physical_plan.as_ref()).indent(false)
+    );
 
     let df_stream = execute_stream(physical_plan, handle.ctx.task_ctx()).map_err(|e| {
         error!("execute_with_context: failed to create stream: {}", e);
         e
     })?;
 
+    let df_stream = crate::local_executor::wrap_logging("SHARD-EXEC", df_stream);
     let cross_rt_stream = CrossRtStream::new_with_df_error_stream(df_stream, cpu_executor);
     let wrapped = datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
         cross_rt_stream.schema(),

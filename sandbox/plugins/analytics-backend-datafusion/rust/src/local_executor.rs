@@ -43,6 +43,69 @@ use substrait::proto::Plan;
 
 use crate::partition_stream::{channel, PartitionStreamSender, SingleReceiverPartition};
 
+use datafusion::physical_plan::RecordBatchStream;
+use futures::stream::Stream;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+/// Diagnostic wrapper logging each batch emitted by a stream. Tagged so we can
+/// distinguish coordinator (LOCAL-EXEC) from per-shard (SHARD-EXEC) output.
+pub struct LoggingStream {
+    inner: SendableRecordBatchStream,
+    schema: SchemaRef,
+    tag: &'static str,
+    batch_idx: usize,
+}
+
+impl LoggingStream {
+    pub fn new(tag: &'static str, inner: SendableRecordBatchStream) -> Self {
+        let schema = inner.schema();
+        Self { inner, schema, tag, batch_idx: 0 }
+    }
+}
+
+pub fn wrap_logging(tag: &'static str, inner: SendableRecordBatchStream) -> SendableRecordBatchStream {
+    Box::pin(LoggingStream::new(tag, inner))
+}
+
+impl Stream for LoggingStream {
+    type Item = Result<RecordBatch, DataFusionError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let result = Pin::new(&mut self.inner).poll_next(cx);
+        match &result {
+            Poll::Ready(Some(Ok(batch))) => {
+                let pretty = datafusion::arrow::util::pretty::pretty_format_batches(&[batch.clone()])
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|e| format!("<failed to format: {}>", e));
+                eprintln!(
+                    "[{}] batch[{}] rows={} cols={}\n{}",
+                    self.tag,
+                    self.batch_idx,
+                    batch.num_rows(),
+                    batch.num_columns(),
+                    pretty
+                );
+                self.batch_idx += 1;
+            }
+            Poll::Ready(None) => {
+                eprintln!("[{}] EOS after {} batches", self.tag, self.batch_idx);
+            }
+            Poll::Ready(Some(Err(e))) => {
+                eprintln!("[{}] ERROR after {} batches: {}", self.tag, self.batch_idx, e);
+            }
+            Poll::Pending => {}
+        }
+        result
+    }
+}
+
+impl RecordBatchStream for LoggingStream {
+    fn schema(&self) -> SchemaRef {
+        Arc::clone(&self.schema)
+    }
+}
+
 /// Coordinator-reduce DataFusion session.
 ///
 /// Owns a [`SessionContext`] that reuses the caller's [`RuntimeEnv`] so memory
@@ -141,11 +204,15 @@ impl LocalSession {
             DataFusionError::Execution(format!("Failed to decode Substrait plan: {}", e))
         })?;
         let logical_plan = from_substrait_plan(&self.ctx.state(), &plan).await?;
-        self.ctx
-            .execute_logical_plan(logical_plan)
-            .await?
-            .execute_stream()
-            .await
+        eprintln!("[LOCAL-EXEC] logical plan:\n{}", logical_plan.display_indent());
+        let dataframe = self.ctx.execute_logical_plan(logical_plan).await?;
+        let physical_plan = dataframe.clone().create_physical_plan().await?;
+        eprintln!(
+            "[LOCAL-EXEC] physical plan:\n{}",
+            datafusion::physical_plan::displayable(physical_plan.as_ref()).indent(false)
+        );
+        let stream = dataframe.execute_stream().await?;
+        Ok(wrap_logging("LOCAL-EXEC", stream))
     }
 
     /// Returns the memory pool the session's `RuntimeEnv` was built with.

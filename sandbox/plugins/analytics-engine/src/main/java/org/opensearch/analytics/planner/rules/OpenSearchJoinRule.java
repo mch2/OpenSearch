@@ -17,16 +17,14 @@ import org.apache.calcite.rel.core.JoinInfo;
 import org.apache.calcite.rel.core.JoinRelType;
 import org.apache.calcite.rel.logical.LogicalJoin;
 import org.opensearch.analytics.planner.PlannerContext;
-import org.opensearch.analytics.planner.dag.ExchangeInfo;
+import org.opensearch.analytics.planner.RelNodeUtils;
 import org.opensearch.analytics.planner.join.CoordinatorHashJoin;
-import org.opensearch.analytics.planner.join.JoinContext;
 import org.opensearch.analytics.planner.join.JoinStrategy;
 import org.opensearch.analytics.planner.rel.OpenSearchConvention;
-import org.opensearch.analytics.planner.rel.OpenSearchExchangeReducer;
 import org.opensearch.analytics.planner.rel.OpenSearchJoin;
 import org.opensearch.analytics.planner.rel.OpenSearchRelNode;
 import org.opensearch.analytics.spi.EngineCapability;
-import org.opensearch.analytics.spi.JoinAlgorithm;
+import org.opensearch.analytics.spi.JoinCapability;
 
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -39,11 +37,16 @@ import java.util.Set;
  *
  * <p>Strategy selection: the rule picks a {@link JoinStrategy} for the join (today
  * always {@link CoordinatorHashJoin} — stats / hint-driven selection is a future
- * spec) and attaches it to the {@link OpenSearchJoin}. The strategy provides per-side
- * {@link ExchangeInfo} which is placed on each input's {@link OpenSearchExchangeReducer};
- * {@code DAGBuilder} reads it directly off the reducer when cutting child stages.
- * Adding shuffle / broadcast strategies later requires implementing {@link JoinStrategy}
- * and adjusting selection here — no DAGBuilder changes needed.
+ * spec) and attaches it to the {@link OpenSearchJoin}. Adding shuffle / broadcast
+ * strategies later requires implementing {@link JoinStrategy} and adjusting selection
+ * here — no DAGBuilder changes needed.
+ *
+ * <p>Gather insertion: this HEP rule emits the {@code OpenSearchJoin} with raw inputs.
+ * The Volcano-CBO {@link OpenSearchJoinGatherRule} requests SINGLETON on each input via
+ * {@code convert(input, SINGLETON)}; {@code AbstractConverter.ExpandConversionRule} +
+ * {@code OpenSearchDistributionTraitDef.convert} insert
+ * {@code OpenSearchExchangeReducer}s only when the input distribution doesn't already
+ * satisfy SINGLETON.
  *
  * <p><b>Match criteria</b> (Requirement 1):
  * <ul>
@@ -112,24 +115,21 @@ public class OpenSearchJoinRule extends RelOptRule {
         }
 
         // Pick a strategy. Today only CoordinatorHashJoin exists; future work picks based on
-        // stats/hints. Narrow viable backends to those declaring the chosen algorithm so a
-        // backend with EngineCapability.JOIN but no support for this specific algorithm
-        // is dropped.
+        // stats/hints. Narrow viable backends to those whose joinCapabilities declare the
+        // join's required JoinKind — a backend with EngineCapability.JOIN but no support
+        // for (say) LEFT outer is dropped.
         JoinStrategy strategy = new CoordinatorHashJoin();
+        JoinCapability.JoinKind requiredKind = toJoinKind(join.getJoinType());
         viableBackends.removeIf(backend -> {
             var caps = context.getCapabilityRegistry().getBackend(backend).getCapabilityProvider();
-            return !caps.supportedJoinAlgorithms().contains(strategy.algorithm());
+            for (JoinCapability cap : caps.joinCapabilities()) {
+                if (cap.kinds().contains(requiredKind)) return false;
+            }
+            return true;
         });
         if (viableBackends.isEmpty()) {
-            throw new IllegalStateException(
-                "No backend supports join algorithm [" + strategy.algorithm() + "] among viable backends"
-            );
+            throw new IllegalStateException("No backend supports join kind [" + requiredKind + "] among viable backends");
         }
-        JoinInfo info = join.analyzeCondition();
-        JoinContext joinCtx = new JoinContext(info.leftKeys, info.rightKeys, 1, join.getJoinType());
-        ExchangeInfo leftExchange = strategy.leftExchange(joinCtx);
-        ExchangeInfo rightExchange = strategy.rightExchange(joinCtx);
-
         // Trait set for the marked join. CoordinatorHashJoin gathers SINGLETON; this is
         // currently the only strategy and the trait set reflects that. When non-singleton
         // strategies land, the join's own distribution trait will need to come from the
@@ -138,17 +138,13 @@ public class OpenSearchJoinRule extends RelOptRule {
             .replace(OpenSearchConvention.INSTANCE)
             .replace(context.getDistributionTraitDef().singleton());
 
-        // Wrap each input in an OpenSearchExchangeReducer carrying the strategy's
-        // per-side ExchangeInfo. DAGBuilder reads ExchangeInfo straight off the
-        // reducer when cutting — it doesn't need to know about joins.
-        RelNode left = wrapInExchange(join.getLeft(), joinTraits, viableBackends, leftExchange);
-        RelNode right = wrapInExchange(join.getRight(), joinTraits, viableBackends, rightExchange);
-
+        // Inputs are passed through unwrapped — gather insertion is handled by
+        // OpenSearchJoinGatherRule during Volcano CBO via convert(input, SINGLETON).
         OpenSearchJoin osJoin = new OpenSearchJoin(
             join.getCluster(),
             joinTraits,
-            left,
-            right,
+            RelNodeUtils.unwrapHep(join.getLeft()),
+            RelNodeUtils.unwrapHep(join.getRight()),
             join.getCondition(),
             join.getJoinType(),
             viableBackends,
@@ -157,8 +153,18 @@ public class OpenSearchJoinRule extends RelOptRule {
         call.transformTo(osJoin);
     }
 
-    private static RelNode wrapInExchange(RelNode input, RelTraitSet joinTraits, List<String> viableBackends, ExchangeInfo exchange) {
-        return new OpenSearchExchangeReducer(input.getCluster(), joinTraits, input, viableBackends, exchange);
+    private static JoinCapability.JoinKind toJoinKind(JoinRelType joinType) {
+        return switch (joinType) {
+            case INNER -> JoinCapability.JoinKind.INNER;
+            case LEFT -> JoinCapability.JoinKind.LEFT;
+            case RIGHT -> JoinCapability.JoinKind.RIGHT;
+            case FULL -> JoinCapability.JoinKind.FULL;
+            case SEMI -> JoinCapability.JoinKind.SEMI;
+            case ANTI -> JoinCapability.JoinKind.ANTI;
+            // Calcite's JoinRelType has variants beyond standard SQL. Routes here aren't
+            // enabled — matches() only accepts INNER/LEFT/RIGHT today.
+            default -> throw new IllegalStateException("Unhandled JoinRelType: " + joinType);
+        };
     }
 
     /** Intersection of viable backends from left and right children. Children may be

@@ -157,6 +157,7 @@ abstract class AbstractDatafusionReduceSink implements ExchangeSink {
      */
     protected final void drainOutputIntoDownstream(StreamHandle outStream) {
         BufferAllocator alloc = ctx.allocator();
+        int batchIdx = 0;
         try (CDataDictionaryProvider dictProvider = new CDataDictionaryProvider()) {
             long schemaAddr = asyncCall(listener -> NativeBridge.streamGetSchema(outStream.getPointer(), listener));
             Schema outSchema;
@@ -165,7 +166,10 @@ abstract class AbstractDatafusionReduceSink implements ExchangeSink {
                 outSchema = new Schema(structField.getChildren(), structField.getMetadata());
             }
             while (true) {
+                final int idx = batchIdx;
+                System.err.println("[DRAIN] streamNext call idx=" + idx);
                 long arrayAddr = asyncCall(listener -> NativeBridge.streamNext(runtimeHandle.get(), outStream.getPointer(), listener));
+                System.err.println("[DRAIN] streamNext returned idx=" + idx + " addr=" + arrayAddr);
                 if (arrayAddr == 0) {
                     break;
                 }
@@ -173,7 +177,10 @@ abstract class AbstractDatafusionReduceSink implements ExchangeSink {
                 try (ArrowArray arrowArray = ArrowArray.wrap(arrayAddr)) {
                     Data.importIntoVectorSchemaRoot(alloc, arrowArray, vsr, dictProvider);
                 }
+                System.err.println("[DRAIN] feeding batch idx=" + idx + " rows=" + vsr.getRowCount());
                 ctx.downstream().feed(vsr);
+                System.err.println("[DRAIN] fed batch idx=" + idx);
+                batchIdx++;
             }
         }
     }

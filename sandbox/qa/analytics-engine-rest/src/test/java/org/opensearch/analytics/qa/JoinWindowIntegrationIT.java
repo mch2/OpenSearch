@@ -153,7 +153,7 @@ public class JoinWindowIntegrationIT extends AnalyticsRestTestCase {
     }
 
     /** Group by two keys (str0, bool2) on each side, inner-join on both. 5 groups. */
-    @AwaitsFix(bugUrl = "DataFusion: composite-equi-key (AND) hash join over multi-shard composite-key Aggregate output hangs. Composite stats alone works (testStatsCountByCompositeKey_diagnostic), and composite stats + single-key join works (testStatsCompositeKeyJoinOnSingleKey_diagnostic). Issue is specifically the AND-condition join over composite-key inputs.")
+    @AwaitsFix(bugUrl = "DataFusion runtime: a join whose RIGHT input is a multi-shard composite-key FINAL Aggregate hangs in close(). Right-side LocalStageExecution.backendSink.close() never returns. Verified: composite stats alone passes (testStatsCountByCompositeKey_diagnostic); composite stats + single-key join passes when the RIGHT side is single-key stats (testStatsCompositeKeyJoinOnSingleKey_diagnostic); only composite stats on BOTH sides hangs. Not specific to AND condition (manual rewrite to single-key join + post-filter also hangs). Not a planner issue.")
     public void testJoinOnTwoGroupKeys_multiShard() throws IOException {
         String ppl = "source=" + CALCS.indexName
             + " | stats count() as left_cnt by str0, bool2"
@@ -263,6 +263,100 @@ public class JoinWindowIntegrationIT extends AnalyticsRestTestCase {
             assertEquals("str0 at row " + i, expectedStr0[i], rows.get(i).get(0));
             assertEquals("running_left at row " + i, expectedRunning[i], ((Number) rows.get(i).get(1)).longValue());
         }
+    }
+
+    // ── Outer joins with stats / windows ──────────────────────────────────────
+
+    /** LEFT outer join after grouped stats. RHS filter narrows to one group; LHS keeps all 3 groups, non-matches NULL-padded on right side. */
+    public void testLeftOuterJoinAfterStats_multiShard() throws IOException {
+        String ppl = "source=" + CALCS.indexName
+            + " | stats count() as left_cnt by str0"
+            + " | left join left=a, right=b ON a.str0 = b.str0"
+            + " [ source=" + CALCS_ALT.indexName + " | where str0 = 'TECHNOLOGY' | stats count() as right_cnt by str0 ]"
+            + " | stats count() as cnt";
+        assertSingleCount(ppl, 3L);
+    }
+
+    /** LEFT outer join then a running window. Tests that streamstats handles NULL-padded rows. */
+    public void testLeftOuterJoinThenStreamstats_multiShard() throws IOException {
+        String ppl = "source=" + CALCS.indexName
+            + " | stats count() as left_cnt by str0"
+            + " | left join left=a, right=b ON a.str0 = b.str0"
+            + " [ source=" + CALCS_ALT.indexName + " | where str0 = 'TECHNOLOGY' | stats count() as right_cnt by str0 ]"
+            + " | sort str0"
+            + " | streamstats count() as running"
+            + " | stats count() as cnt";
+        assertSingleCount(ppl, 3L);
+    }
+
+    /** RIGHT outer join after grouped stats. Mirror of the LEFT case. */
+    public void testRightOuterJoinAfterStats_multiShard() throws IOException {
+        String ppl = "source=" + CALCS.indexName
+            + " | where str0 = 'TECHNOLOGY' | stats count() as left_cnt by str0"
+            + " | right join left=a, right=b ON a.str0 = b.str0"
+            + " [ source=" + CALCS_ALT.indexName + " | stats count() as right_cnt by str0 ]"
+            + " | stats count() as cnt";
+        assertSingleCount(ppl, 3L);
+    }
+
+    // ── Multi-window queries ──────────────────────────────────────────────────
+
+    /** streamstats then eventstats. Running count followed by global max of the running count. After 17 rows max=17. */
+    public void testStreamstatsThenEventstats_multiShard() throws IOException {
+        String ppl = "source=" + CALCS.indexName
+            + " | sort key"
+            + " | streamstats count() as running"
+            + " | eventstats max(running) as max_run"
+            + " | head 1"
+            + " | fields max_run";
+        Map<String, Object> response = executePpl(ppl);
+        @SuppressWarnings("unchecked")
+        List<List<Object>> rows = (List<List<Object>>) response.get("rows");
+        assertNotNull("Response missing 'rows' for: " + ppl, rows);
+        assertEquals(1, rows.size());
+        assertEquals("max running count over 17 rows = 17", 17L, ((Number) rows.get(0).get(0)).longValue());
+    }
+
+    // ── Top-K (sort + head after stats) ──────────────────────────────────────
+
+    /** sort+head after multi-shard group-by. Bottom-2 by count: FURNITURE(2), OFFICE SUPPLIES(6). */
+    @AwaitsFix(
+        bugUrl = "DataFusion runtime: Sort+Fetch (TopK) over the FINAL Aggregate's Project(COALESCE-on-COUNT) output is flaky in suite runs. "
+            + "Plan is correct: After-CBO has Sort(sort0=$0, ASC, fetch=2) above the FINAL Aggregate, both SINGLETON. The redundant outer-Sort drop in "
+            + "OpenSearchSortRule keeps the plan to a single Sort+Fetch chain, avoiding DataFusion's logical-Limit-pushdown that pushes fetch below "
+            + "SortExec into CoalescePartitionsExec. Solo runs pass; suite runs ~1/3 still return rows out of cnt-ASC order or with the wrong group "
+            + "set. Symptoms vary by suite ordering: e.g. [(TECHNOLOGY,9),(OFFICE SUPPLIES,6)] (top-2 instead of bottom-2). Needs DataFusion-side "
+            + "investigation of Sort+Fetch over a Project(CASE/COALESCE) on Aggregate output."
+    )
+    public void testTopKAfterStats_multiShard() throws IOException {
+        String ppl = "source=" + CALCS.indexName
+            + " | stats count() as cnt by str0"
+            + " | sort cnt"
+            + " | head 2"
+            + " | fields str0, cnt";
+        Map<String, Object> response = executePpl(ppl);
+        @SuppressWarnings("unchecked")
+        List<List<Object>> rows = (List<List<Object>>) response.get("rows");
+        assertNotNull("Response missing 'rows' for: " + ppl, rows);
+        assertEquals("head 2 keeps bottom-2 groups by count ASC", 2, rows.size());
+        // FURNITURE=2, OFFICE SUPPLIES=6.
+        Map<String, Long> byStr0 = new HashMap<>();
+        for (List<Object> row : rows) {
+            byStr0.put((String) row.get(0), ((Number) row.get(1)).longValue());
+        }
+        assertEquals("rows actually returned: " + rows, 2L, byStr0.getOrDefault("FURNITURE", -1L).longValue());
+        assertEquals("rows actually returned: " + rows, 6L, byStr0.getOrDefault("OFFICE SUPPLIES", -1L).longValue());
+    }
+
+    // ── HAVING on multiple agg columns ────────────────────────────────────────
+
+    /** Filter with AND across two stats-derived columns. FURNITURE fails s>5; OFFICE / TECHNOLOGY pass both. */
+    public void testHavingMultipleAggColumns_multiShard() throws IOException {
+        String ppl = "source=" + CALCS.indexName
+            + " | stats sum(int0) as s, count() as c by str0"
+            + " | where s > 5 AND c > 3"
+            + " | stats count() as cnt";
+        assertSingleCount(ppl, 2L);
     }
 
     // ── helpers ────────────────────────────────────────────────────────────────

@@ -105,17 +105,21 @@ public class OpenSearchDistributionTraitDef extends RelTraitDef<OpenSearchDistri
 
         CapabilityRegistry registry = plannerContext.getCapabilityRegistry();
 
-        RelNode result;
-        if (toTrait.getType() == RelDistribution.Type.SINGLETON) {
-            List<String> reduceViable = CapabilityResolutionUtils.filterByReduceCapability(registry, viableBackends);
-            result = new OpenSearchExchangeReducer(rel.getCluster(), rel.getTraitSet().replace(toTrait), rel, reduceViable);
-        } else {
+        if (toTrait.getType() != RelDistribution.Type.SINGLETON) {
+            // Only SINGLETON gather is implemented today. Return null so Volcano's
+            // ExpandConversionRule treats this conversion as unavailable rather than
+            // throwing — Volcano probes both directions when adding AbstractConverters
+            // (e.g. SINGLETON→RANDOM scatter), and we don't want those probes to abort
+            // planning.
             // TODO: implement HASH/RANGE shuffle exchange when joins and shuffle aggregates are added.
-            // Requires DataTransferCapability producer/consumer intersection for shuffle impl selection.
-            throw new UnsupportedOperationException("HASH/RANGE exchange not yet implemented [toTrait=" + toTrait + "]");
+            return null;
         }
-
-        return planner.register(result, rel);
+        List<String> reduceViable = CapabilityResolutionUtils.filterByReduceCapability(registry, viableBackends);
+        // Construct the converter only — caller (changeTraitsUsingConverters) registers it.
+        // This matches Drill's DrillDistributionTraitDef.convert pattern; calling
+        // planner.register here additionally would result in double-registration paths
+        // that interact poorly with Volcano's converter-set-merge logic.
+        return new OpenSearchExchangeReducer(rel.getCluster(), rel.getTraitSet().replace(toTrait), rel, reduceViable);
     }
 
     @Override
