@@ -72,12 +72,11 @@ public class JoinRuleTests extends BasePlannerRulesTests {
         assertEquiJoinMatches(JoinRelType.RIGHT);
     }
 
-    public void testFullOuterJoinDoesNotMatch() {
-        // FULL OUTER remains out of scope for this wave: DataFusion's substrait consumer
-        // historically has gaps around FULL OUTER execution, so we deliberately don't
-        // widen the rule to it yet. When it's enabled, flip this to
-        // {@link #assertEquiJoinMatches(JoinRelType)} and add an IT validation.
-        assertNonInnerJoinDoesNotMatch(JoinRelType.FULL);
+    public void testFullOuterJoinMatches() {
+        // FULL OUTER is needed by PPL's `appendcol` lowering (ROW_NUMBER pairing via a
+        // full outer join on the row numbers). DataFusion's substrait consumer handles
+        // FULL OUTER end-to-end so the rule marks it like INNER/LEFT/RIGHT.
+        assertEquiJoinMatches(JoinRelType.FULL);
     }
 
     private void assertEquiJoinMatches(JoinRelType joinType) {

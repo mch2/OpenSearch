@@ -206,7 +206,7 @@ public class StreamstatsCommandIT extends AnalyticsRestTestCase {
      * {@code PlanUtils.makeOver}, emit a single {@code RexOver} per function. Once landed and
      * the SNAPSHOT artifact picked up by our build, this test passes.
      */
-    @AwaitsFix(bugUrl = "SQL plugin PlanUtils.makeOver decomposes AVG-OVER into nested Sum/Count which DataFusion's substrait consumer can't lift")
+    @AwaitsFix(bugUrl = "DataFusion Rust side does not implement Sum window function with frame 'Rows Preceding(NULL)..CurrentRow' (running sum). 'Physical plan does not support logical expression WindowFunction(... Sum)'. Runtime gap, not a planner regression.")
     public void testStreamstatsRunningAvgOverInteger() throws IOException {
         Map<String, Object> response = executePpl(
             "source=" + DATASET.indexName + " | sort key | streamstats avg(int0) as running_avg | fields key, int0, running_avg | head 5"

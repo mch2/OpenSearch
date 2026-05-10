@@ -130,16 +130,45 @@ public class BackendPlanAdapter {
             if (adapted != projectExpr) projectsChanged = true;
         }
         if (projectsChanged || childrenChanged) {
+            // Re-derive the row type when expression types change. PPL polymorphic UDFs
+            // (e.g. SCALAR_MAX, SCALAR_MIN) declare ANY return; the adapter rewrites them
+            // to GREATEST / LEAST whose inferred return type is concrete (DOUBLE for
+            // numeric inputs). The Project's cached row type still has ANY for the
+            // affected column, which would later trip isthmus's TypeConverter — it
+            // walks the row type to build the output NamedStruct and rejects ANY.
+            // Recompute the row type from the adapted expressions so column types match.
             return new OpenSearchProject(
                 project.getCluster(),
                 project.getTraitSet(),
                 childrenChanged ? adaptedChildren.getFirst() : project.getInput(),
                 adaptedProjects,
-                project.getRowType(),
+                deriveRowType(project, adaptedProjects),
                 project.getViableBackends()
             );
         }
         return project;
+    }
+
+    /**
+     * Builds a new row type using each adapted expression's inferred type, preserving
+     * the original column names. When no adapter ran on a column, its expression type
+     * matches the cached row type and we still use the cached type to avoid picking
+     * up unrelated nullability changes from re-inference.
+     */
+    private static org.apache.calcite.rel.type.RelDataType deriveRowType(
+        OpenSearchProject project,
+        List<RexNode> adaptedProjects
+    ) {
+        org.apache.calcite.rel.type.RelDataTypeFactory typeFactory = project.getCluster().getTypeFactory();
+        org.apache.calcite.rel.type.RelDataTypeFactory.Builder builder = typeFactory.builder();
+        List<? extends org.apache.calcite.rel.type.RelDataTypeField> oldFields = project.getRowType().getFieldList();
+        List<RexNode> oldProjects = project.getProjects();
+        for (int i = 0; i < adaptedProjects.size(); i++) {
+            RexNode adapted = adaptedProjects.get(i);
+            org.apache.calcite.rel.type.RelDataType type = adapted == oldProjects.get(i) ? oldFields.get(i).getType() : adapted.getType();
+            builder.add(oldFields.get(i).getName(), type);
+        }
+        return builder.build();
     }
 
     /**

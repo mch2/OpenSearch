@@ -87,6 +87,19 @@ public class FragmentConversionDriver {
         for (Stage child : stage.getChildStages()) {
             convertStage(child, registry);
         }
+        // StageInputScan's row type is captured at DAG-build time from the immediate
+        // pre-ER rel. If a downstream BackendPlanAdapter pass has rewritten any column's
+        // type in the child stage's resolved fragment (e.g. SCALAR_MAX → GREATEST swaps
+        // ANY → DOUBLE), the parent stage's StageInputScan still carries the stale type
+        // and isthmus's TypeConverter rejects ANY when building the output NamedStruct.
+        // Refresh each StageInputScan's row type from the corresponding child stage's
+        // resolved fragment before converting this stage.
+        java.util.Map<Integer, org.apache.calcite.rel.type.RelDataType> childOutputTypes = new java.util.HashMap<>();
+        for (Stage child : stage.getChildStages()) {
+            if (!child.getPlanAlternatives().isEmpty()) {
+                childOutputTypes.put(child.getStageId(), child.getPlanAlternatives().getFirst().resolvedFragment().getRowType());
+            }
+        }
         List<StagePlan> converted = new ArrayList<>(stage.getPlanAlternatives().size());
         for (StagePlan plan : stage.getPlanAlternatives()) {
             AnalyticsSearchBackendPlugin backend = registry.getBackend(plan.backendId());
@@ -98,8 +111,9 @@ public class FragmentConversionDriver {
                 ? FilterTreeShapeDeriver.derive(filter, plan.backendId())
                 : FilterTreeShape.NO_DELEGATION;
 
+            RelNode fragment = childOutputTypes.isEmpty() ? plan.resolvedFragment() : refreshStageInputTypes(plan.resolvedFragment(), childOutputTypes);
             IntraOperatorDelegationBytes delegationBytes = new IntraOperatorDelegationBytes(registry);
-            byte[] bytes = convert(plan.resolvedFragment(), convertor, delegationBytes, stage.getChildStages().size());
+            byte[] bytes = convert(fragment, convertor, delegationBytes, stage.getChildStages().size());
 
             // Assemble instruction list
             List<InstructionNode> instructions = assembleInstructions(backend, plan, treeShape, delegationBytes);
@@ -268,8 +282,46 @@ public class FragmentConversionDriver {
         IntraOperatorDelegationBytes delegationBytes,
         int childStageCount
     ) {
-        // Find the ExchangeReducer and collect operators above it
-        return convertReduceNode(node, convertor, false, delegationBytes, childStageCount);
+        // Single-shot conversion: recursively strip ERs and annotations from the whole
+        // coord fragment, then hand the resulting tree to convertFinalAggFragment in one
+        // call. The strip() helper turns ER → StageInputScan and resolves every operator's
+        // annotations, so the result is a clean RelNode tree ready for isthmus.
+        //
+        // The previous layered approach (recursive convertReduceNode that called
+        // attachFragmentOnTop for each ancestor of the boundary) produced a structurally
+        // equivalent Substrait plan in principle but went through DataFusion as if every
+        // wrapper was a separate plan reattached to the inner — DataFusion's runtime
+        // failed for several shapes (mixed-type column projections, single-VARCHAR-column
+        // sort-with-offset-fetch, stacked Sorts) that converting the whole subtree at once
+        // handles correctly.
+        //
+        // Coord-side joins where both branches are stage-internal compound subtrees still
+        // need the recursive path: each branch converts standalone via convertReduceNode
+        // and the join wires them via attachJoinFragment with separate inner-bytes.
+        if (containsCoordSideJoinWithCompoundBranch(node)) {
+            return convertReduceNode(node, convertor, false, delegationBytes, childStageCount);
+        }
+        return convertor.convertFinalAggFragment(strip(node, delegationBytes));
+    }
+
+    /**
+     * True if the coord-side fragment has an OpenSearchJoin whose branches are NOT both
+     * direct ER → StageInputScan stage boundaries. Such joins need per-branch conversion
+     * via {@code attachJoinFragment} because each branch is its own compound sub-fragment
+     * (e.g. one branch is a final aggregate of a child stage). For joins where both
+     * branches are simple ER boundaries, the join + branches all live in one Substrait
+     * plan and single-shot conversion handles them correctly.
+     */
+    private static boolean containsCoordSideJoinWithCompoundBranch(RelNode node) {
+        if (node instanceof org.opensearch.analytics.planner.rel.OpenSearchJoin) {
+            for (RelNode branch : node.getInputs()) {
+                if (!(branch instanceof OpenSearchExchangeReducer)) return true;
+            }
+        }
+        for (RelNode input : node.getInputs()) {
+            if (containsCoordSideJoinWithCompoundBranch(input)) return true;
+        }
+        return false;
     }
 
     private static byte[] convertReduceNode(
@@ -348,6 +400,55 @@ public class FragmentConversionDriver {
             if (!(input instanceof OpenSearchExchangeReducer)) return false;
         }
         return true;
+    }
+
+    /**
+     * Returns a copy of {@code node} where each {@link OpenSearchStageInputScan} has its
+     * row type refreshed from the matching child stage's adapted output (looked up by
+     * {@code childStageId}). The DAG builder snapshots the StageInputScan row type at
+     * DAG-construction time from the pre-ER rel; if {@code BackendPlanAdapter} later
+     * rewrites a column's type (e.g. {@code SCALAR_MAX → GREATEST} swaps ANY → DOUBLE),
+     * the cached row type in the parent stage's StageInputScan is stale. Without this
+     * refresh, isthmus's {@code TypeConverter.toNamedStruct} rejects the ANY type when
+     * building the output schema for the parent stage's converted fragment.
+     */
+    private static RelNode refreshStageInputTypes(
+        RelNode node,
+        java.util.Map<Integer, org.apache.calcite.rel.type.RelDataType> childOutputTypes
+    ) {
+        if (node instanceof OpenSearchStageInputScan scan) {
+            // Only refresh when the cached row type has an ANY field (signal that
+            // BackendPlanAdapter rewrote a polymorphic UDF's type on the child fragment
+            // but the cached scan didn't see the update). Otherwise keep the cached
+            // type — it's what runtime stage execution agrees on across plan alternatives.
+            if (!containsAny(scan.getRowType())) return scan;
+            org.apache.calcite.rel.type.RelDataType freshType = childOutputTypes.get(scan.getChildStageId());
+            if (freshType != null && !freshType.equals(scan.getRowType())) {
+                return new OpenSearchStageInputScan(
+                    scan.getCluster(),
+                    scan.getTraitSet(),
+                    scan.getChildStageId(),
+                    freshType,
+                    scan.getViableBackends()
+                );
+            }
+            return scan;
+        }
+        java.util.List<RelNode> newInputs = new ArrayList<>(node.getInputs().size());
+        boolean changed = false;
+        for (RelNode input : node.getInputs()) {
+            RelNode refreshed = refreshStageInputTypes(input, childOutputTypes);
+            newInputs.add(refreshed);
+            if (refreshed != input) changed = true;
+        }
+        return changed ? node.copy(node.getTraitSet(), newInputs) : node;
+    }
+
+    private static boolean containsAny(org.apache.calcite.rel.type.RelDataType type) {
+        for (org.apache.calcite.rel.type.RelDataTypeField field : type.getFieldList()) {
+            if (field.getType().getSqlTypeName() == org.apache.calcite.sql.type.SqlTypeName.ANY) return true;
+        }
+        return false;
     }
 
     /** Recursively strips annotations bottom-up. Keeps OpenSearchStageInputScan as-is. */

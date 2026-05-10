@@ -139,7 +139,7 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
             withAggregationPhase(wrapper, Expression.AggregationPhase.INITIAL_TO_INTERMEDIATE),
             fieldNames(partialAggFragment)
         );
-        return serializePlan(rewired);
+        return serializePlan(SubstraitPlanRewriter.rewrite(rewired));
     }
 
     @Override
@@ -162,7 +162,14 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
         // the visitor still walks them top-down to build the wrapper rel.
         RelNode rewritten = rewriteStageInputScans(fragment);
         Rel wrapper = convertStandalone(rewritten);
-        return serializePlan(rewire(inner, wrapper, fieldNames(fragment)));
+        // SubstraitPlanRewriter must run on the assembled wrapper-over-inner plan, not
+        // just on the inner bytes (those came in already rewritten from the leaf path).
+        // The wrapper rel was just produced by isthmus and carries un-rewritten literals
+        // (e.g. timestamp precision 6 vs Parquet's 3) — without this pass the rewritten
+        // inner gets reattached under a non-rewritten wrapper, leaving the new wrapper
+        // expressions out of sync with the rest of the plan and tripping DataFusion at
+        // execution time. Same fix applied to attachPartialAggOnTop / attachJoinFragment.
+        return serializePlan(SubstraitPlanRewriter.rewrite(rewire(inner, wrapper, fieldNames(fragment))));
     }
 
     @Override
@@ -186,7 +193,9 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
             rightInner.getRoots().get(0).getInput()
         );
         return serializePlan(
-            Plan.builder().addRoots(Plan.Root.builder().input(rewired).names(fieldNames(joinFragment)).build()).build()
+            SubstraitPlanRewriter.rewrite(
+                Plan.builder().addRoots(Plan.Root.builder().input(rewired).names(fieldNames(joinFragment)).build()).build()
+            )
         );
     }
 

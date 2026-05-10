@@ -153,7 +153,6 @@ public class JoinWindowIntegrationIT extends AnalyticsRestTestCase {
     }
 
     /** Group by two keys (str0, bool2) on each side, inner-join on both. 5 groups. */
-    @AwaitsFix(bugUrl = "DataFusion runtime: a join whose RIGHT input is a multi-shard composite-key FINAL Aggregate hangs in close(). Right-side LocalStageExecution.backendSink.close() never returns. Verified: composite stats alone passes (testStatsCountByCompositeKey_diagnostic); composite stats + single-key join passes when the RIGHT side is single-key stats (testStatsCompositeKeyJoinOnSingleKey_diagnostic); only composite stats on BOTH sides hangs. Not specific to AND condition (manual rewrite to single-key join + post-filter also hangs). Not a planner issue.")
     public void testJoinOnTwoGroupKeys_multiShard() throws IOException {
         String ppl = "source=" + CALCS.indexName
             + " | stats count() as left_cnt by str0, bool2"
@@ -320,14 +319,6 @@ public class JoinWindowIntegrationIT extends AnalyticsRestTestCase {
     // ── Top-K (sort + head after stats) ──────────────────────────────────────
 
     /** sort+head after multi-shard group-by. Bottom-2 by count: FURNITURE(2), OFFICE SUPPLIES(6). */
-    @AwaitsFix(
-        bugUrl = "DataFusion runtime: Sort+Fetch (TopK) over the FINAL Aggregate's Project(COALESCE-on-COUNT) output is flaky in suite runs. "
-            + "Plan is correct: After-CBO has Sort(sort0=$0, ASC, fetch=2) above the FINAL Aggregate, both SINGLETON. The redundant outer-Sort drop in "
-            + "OpenSearchSortRule keeps the plan to a single Sort+Fetch chain, avoiding DataFusion's logical-Limit-pushdown that pushes fetch below "
-            + "SortExec into CoalescePartitionsExec. Solo runs pass; suite runs ~1/3 still return rows out of cnt-ASC order or with the wrong group "
-            + "set. Symptoms vary by suite ordering: e.g. [(TECHNOLOGY,9),(OFFICE SUPPLIES,6)] (top-2 instead of bottom-2). Needs DataFusion-side "
-            + "investigation of Sort+Fetch over a Project(CASE/COALESCE) on Aggregate output."
-    )
     public void testTopKAfterStats_multiShard() throws IOException {
         String ppl = "source=" + CALCS.indexName
             + " | stats count() as cnt by str0"

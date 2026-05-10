@@ -132,12 +132,34 @@ final class LocalStageScheduler implements StageScheduler {
         List<ExchangeSinkContext.ChildInput> inputs = new ArrayList<>(children.size());
         for (Stage child : children) {
             inputs.add(
-                new ExchangeSinkContext.ChildInput(
-                    child.getStageId(),
-                    ArrowSchemaFromCalcite.arrowSchemaFromRowType(child.getFragment().getRowType())
-                )
+                new ExchangeSinkContext.ChildInput(child.getStageId(), ArrowSchemaFromCalcite.arrowSchemaFromRowType(resolveChildRowType(child)))
             );
         }
         return inputs;
+    }
+
+    /**
+     * Returns the row type to use for the child stage's wire schema. Prefers the cached
+     * {@code child.getFragment()} type since it was set at DAG-build time and is what
+     * the runtime planner alternatives all converge on. Falls back to the resolved
+     * fragment's row type only when the cached type contains an ANY field — that
+     * happens when {@code BackendPlanAdapter} swapped a PPL polymorphic UDF
+     * (e.g. {@code SCALAR_MAX} → {@code GREATEST}: ANY → DOUBLE) on the resolved
+     * fragment but the cached fragment still carries the ANY type, which the Arrow
+     * schema builder rejects.
+     */
+    private static org.apache.calcite.rel.type.RelDataType resolveChildRowType(Stage child) {
+        org.apache.calcite.rel.type.RelDataType cached = child.getFragment().getRowType();
+        if (containsAny(cached) && !child.getPlanAlternatives().isEmpty()) {
+            return child.getPlanAlternatives().getFirst().resolvedFragment().getRowType();
+        }
+        return cached;
+    }
+
+    private static boolean containsAny(org.apache.calcite.rel.type.RelDataType type) {
+        for (org.apache.calcite.rel.type.RelDataTypeField field : type.getFieldList()) {
+            if (field.getType().getSqlTypeName() == org.apache.calcite.sql.type.SqlTypeName.ANY) return true;
+        }
+        return false;
     }
 }

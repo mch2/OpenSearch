@@ -79,15 +79,22 @@ public class OpenSearchSort extends Sort implements OpenSearchRelNode {
     }
 
     /**
-     * A Sort over non-SINGLETON input only sorts within each partition; the plain
-     * {@link OpenSearchExchangeReducer} we use for gather concatenates partitions in
-     * arbitrary order and is not a merge-sort exchange. So a non-SINGLETON Sort
-     * doesn't produce a globally sorted result, which is the entire purpose of Sort.
+     * A Sort with collation over non-SINGLETON input only sorts within each partition;
+     * the plain {@link OpenSearchExchangeReducer} we use for gather concatenates
+     * partitions in arbitrary order and is not a merge-sort exchange. So a non-SINGLETON
+     * Sort doesn't produce a globally sorted result, which is the entire purpose of Sort.
      * Returning infinite cost on non-SINGLETON inputs forces Volcano to pick the
      * SINGLETON-input alternative produced by
      * {@link org.opensearch.analytics.planner.rules.OpenSearchSortDistributionDeriveRule}
      * (Sort over ER over RANDOM child) instead of the cheaper-looking but incorrect
      * "Sort over RANDOM + top-level ER" plan.
+     *
+     * <p>For a Sort with empty collation (a pure LIMIT — {@code head N} or
+     * {@code head N from K}) there's nothing to sort, so partition-local fetch + a
+     * downstream global ER yields the correct result and the penalty would just push
+     * the Fetch onto the coord stage, blowing wire bandwidth and triggering an Arrow
+     * buffer mis-slice in DataFusion's Substrait Fetch over a sliced VARCHAR vector.
+     * Skip the penalty in that case.
      *
      * <p>Once a SortedExchange / merge-sort gather exists, this can drop to a finite
      * additive cost so the planner can pick by I/O.
@@ -97,6 +104,9 @@ public class OpenSearchSort extends Sort implements OpenSearchRelNode {
         org.apache.calcite.plan.RelOptPlanner planner,
         org.apache.calcite.rel.metadata.RelMetadataQuery mq
     ) {
+        if (getCollation().getFieldCollations().isEmpty()) {
+            return planner.getCostFactory().makeTinyCost();
+        }
         for (org.apache.calcite.rel.RelNode input : getInputs()) {
             for (int i = 0; i < input.getTraitSet().size(); i++) {
                 org.apache.calcite.plan.RelTrait trait = input.getTraitSet().getTrait(i);

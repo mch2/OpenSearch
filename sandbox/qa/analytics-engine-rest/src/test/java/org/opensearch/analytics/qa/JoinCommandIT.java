@@ -174,7 +174,6 @@ public class JoinCommandIT extends AnalyticsRestTestCase {
      * over an aggregation frame — modelling them as scalars breaks the
      * capability-type contract). Wiring the full track is a follow-up.
      */
-    @AwaitsFix(bugUrl = "analytics-framework lacks a window-function capability track — appendcol's ROW_NUMBER() cannot register")
     public void testAppendcol() throws IOException {
         final String ppl = "source="
             + CALCS.indexName
