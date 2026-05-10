@@ -63,6 +63,19 @@ public class OpenSearchFilter extends Filter implements OpenSearchRelNode {
 
     @Override
     public RelOptCost computeSelfCost(RelOptPlanner planner, RelMetadataQuery mq) {
+        // Prefer running Filter on the data-node side (RANDOM) so the predicate runs
+        // before gather and only matching rows ship across the wire. A SINGLETON
+        // variant produced by OpenSearchFilterDistributionDeriveRule is still valid for
+        // the windowed-stack propagation case (Filter above a windowed-gathered Project
+        // whose output is already SINGLETON) — it just costs more so Volcano picks the
+        // RANDOM-Filter + ER-above plan when both are viable.
+        for (int i = 0; i < getTraitSet().size(); i++) {
+            org.apache.calcite.plan.RelTrait trait = getTraitSet().getTrait(i);
+            if (trait instanceof OpenSearchDistribution distribution
+                && distribution.getType() == org.apache.calcite.rel.RelDistribution.Type.SINGLETON) {
+                return planner.getCostFactory().makeCost(10, 10, 0);
+            }
+        }
         return planner.getCostFactory().makeTinyCost();
     }
 

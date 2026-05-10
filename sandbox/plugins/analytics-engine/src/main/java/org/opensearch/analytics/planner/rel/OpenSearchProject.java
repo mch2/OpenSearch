@@ -108,6 +108,22 @@ public class OpenSearchProject extends Project implements OpenSearchRelNode {
                     return planner.getCostFactory().makeInfiniteCost();
                 }
             }
+            return planner.getCostFactory().makeTinyCost();
+        }
+        // Non-windowed Project: prefer running on data-node side (RANDOM) so column
+        // pruning shrinks the row width before gather. A SINGLETON variant of the Project
+        // (produced by OpenSearchProjectDistributionDeriveRule for the windowed-stack
+        // propagation case) is still valid — it just costs more so Volcano picks the
+        // RANDOM-Project + ER-above plan when both are viable. When the only viable
+        // SINGLETON path is via this Project (e.g. above a windowed-gathered Project
+        // whose output is already SINGLETON), the cost penalty doesn't matter — there's
+        // no RANDOM alternative because the input doesn't deliver RANDOM.
+        for (int i = 0; i < getTraitSet().size(); i++) {
+            RelTrait trait = getTraitSet().getTrait(i);
+            if (trait instanceof OpenSearchDistribution distribution
+                && distribution.getType() == RelDistribution.Type.SINGLETON) {
+                return planner.getCostFactory().makeCost(10, 10, 0);
+            }
         }
         return planner.getCostFactory().makeTinyCost();
     }

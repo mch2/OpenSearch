@@ -92,10 +92,13 @@ public class SortRuleTests extends BasePlannerRulesTests {
         assertEquals("Trait set collation must match the sort's declared collation", osSort.getCollation(), collation);
     }
 
-    /** Sort(Agg(Filter(Scan))) with and without fetch — full OLAP pipeline. */
+    /** Sort(Agg(Filter(Scan))) with and without fetch — full OLAP pipeline.
+     *  Aggregate splits into FINAL → ER → PARTIAL even for single-shard now (scans
+     *  always RANDOM); the helper skips ER, so the expected list has two Aggregates. */
     public void testSortOnAggregateOnFilteredScan() {
         List<Class<? extends org.opensearch.analytics.planner.rel.OpenSearchRelNode>> types = List.of(
             OpenSearchSort.class,
+            OpenSearchAggregate.class,
             OpenSearchAggregate.class,
             OpenSearchFilter.class,
             OpenSearchTableScan.class

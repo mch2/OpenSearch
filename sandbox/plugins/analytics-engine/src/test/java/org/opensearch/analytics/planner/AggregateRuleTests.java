@@ -52,9 +52,10 @@ public class AggregateRuleTests extends BasePlannerRulesTests {
 
     public void testViableBackendsPopulated() {
         OpenSearchAggregate agg = runAggregate(1, sumCall());
+        // Single-shard splits like multi-shard now: FINAL → ER → PARTIAL → Scan.
         assertPipelineViableBackends(
             agg,
-            List.of(OpenSearchAggregate.class, OpenSearchTableScan.class),
+            List.of(OpenSearchAggregate.class, OpenSearchAggregate.class, OpenSearchTableScan.class),
             Set.of(MockDataFusionBackend.NAME)
         );
     }
@@ -76,14 +77,24 @@ public class AggregateRuleTests extends BasePlannerRulesTests {
         assertEquals(AggregateMode.PARTIAL, partialAgg.getMode());
     }
 
-    public void testNoSplitOnSingleShard() {
+    /**
+     * Single-shard plans now split aggregates into PARTIAL (data node) + FINAL (coord)
+     * with an ER between, same shape as multi-shard. The split was historically skipped
+     * for single-shard because the scan reported SINGLETON, but the scan now declares
+     * RANDOM regardless of shard count (data lives on a data node, not the coord), so
+     * the split rule fires uniformly. Cost-wise the partial+ER+final beats raw row
+     * shipping when the partial pre-aggregates effectively.
+     */
+    public void testSplitOnSingleShard() {
         OpenSearchAggregate agg = runAggregate(1, sumCall());
-        assertEquals(AggregateMode.SINGLE, agg.getMode());
+        assertEquals(AggregateMode.FINAL, agg.getMode());
         assertPipelineViableBackends(
             agg,
-            List.of(OpenSearchAggregate.class, OpenSearchTableScan.class),
+            List.of(OpenSearchAggregate.class, OpenSearchAggregate.class, OpenSearchTableScan.class),
             Set.of(MockDataFusionBackend.NAME)
         );
+        OpenSearchAggregate partialAgg = (OpenSearchAggregate) agg.getInputs().get(0).getInputs().get(0);
+        assertEquals(AggregateMode.PARTIAL, partialAgg.getMode());
     }
 
     /**
@@ -162,7 +173,7 @@ public class AggregateRuleTests extends BasePlannerRulesTests {
         logger.info("Plan:\n{}", RelOptUtil.toString(result));
         assertPipelineViableBackends(
             result,
-            List.of(OpenSearchAggregate.class, OpenSearchTableScan.class),
+            List.of(OpenSearchAggregate.class, OpenSearchAggregate.class, OpenSearchTableScan.class),
             Set.of(MockDataFusionBackend.NAME)
         );
         OpenSearchAggregate agg = (OpenSearchAggregate) result;
@@ -192,7 +203,7 @@ public class AggregateRuleTests extends BasePlannerRulesTests {
         logger.info("Plan:\n{}", RelOptUtil.toString(result));
         assertPipelineViableBackends(
             result,
-            List.of(OpenSearchAggregate.class, OpenSearchTableScan.class),
+            List.of(OpenSearchAggregate.class, OpenSearchAggregate.class, OpenSearchTableScan.class),
             Set.of(MockDataFusionBackend.NAME, MockLuceneBackend.NAME)
         );
         OpenSearchAggregate agg = (OpenSearchAggregate) result;
@@ -215,9 +226,10 @@ public class AggregateRuleTests extends BasePlannerRulesTests {
             defaultContext(1)
         );
         logger.info("Plan:\n{}", RelOptUtil.toString(result));
+        // FINAL → ER → PARTIAL → Filter → Scan; ER is skipped by the helper.
         assertPipelineViableBackends(
             result,
-            List.of(OpenSearchAggregate.class, OpenSearchFilter.class, OpenSearchTableScan.class),
+            List.of(OpenSearchAggregate.class, OpenSearchAggregate.class, OpenSearchFilter.class, OpenSearchTableScan.class),
             Set.of(MockDataFusionBackend.NAME)
         );
     }
@@ -234,12 +246,25 @@ public class AggregateRuleTests extends BasePlannerRulesTests {
         PlannerContext context = buildContextWithExplicitStorage(1, duplicatedIntFields(), List.of(DATAFUSION, lucenePartialAgg));
         RelNode result = runPlanner(makeMultiCallAggregate(sumCall(), countCall()), context);
         logger.info("Plan:\n{}", RelOptUtil.toString(result));
+        // COUNT triggers a projectCountsToNotNull wrap above FINAL, so root is Project.
+        // Pipeline: Project → FINAL → ER → PARTIAL → Scan; ER skipped by the helper.
         assertPipelineViableBackends(
             result,
-            List.of(OpenSearchAggregate.class, OpenSearchTableScan.class),
+            List.of(
+                org.opensearch.analytics.planner.rel.OpenSearchProject.class,
+                OpenSearchAggregate.class,
+                OpenSearchAggregate.class,
+                OpenSearchTableScan.class
+            ),
             Set.of(MockDataFusionBackend.NAME)
         );
-        OpenSearchAggregate agg = (OpenSearchAggregate) result;
+        // PARTIAL preserves the original AggregateCalls including their viable-backend
+        // annotations. FINAL's decomposeForFinal rewrites COUNT → SUM(partial_count) which
+        // is a different call without annotation by construction. Walk down through
+        // FINAL → ER → PARTIAL to find the agg the test wants to inspect.
+        RelNode finalAgg = result.getInputs().get(0);
+        RelNode partialAggNode = finalAgg.getInputs().get(0).getInputs().get(0);
+        OpenSearchAggregate agg = (OpenSearchAggregate) partialAggNode;
         assertFalse(
             "Lucene not viable at operator level — can handle SUM but not COUNT",
             agg.getViableBackends().contains(MockLuceneBackend.NAME)
@@ -291,7 +316,7 @@ public class AggregateRuleTests extends BasePlannerRulesTests {
         logger.info("Plan:\n{}", RelOptUtil.toString(result));
         assertPipelineViableBackends(
             result,
-            List.of(OpenSearchAggregate.class, OpenSearchTableScan.class),
+            List.of(OpenSearchAggregate.class, OpenSearchAggregate.class, OpenSearchTableScan.class),
             Set.of(MockDataFusionBackend.NAME)
         );
     }

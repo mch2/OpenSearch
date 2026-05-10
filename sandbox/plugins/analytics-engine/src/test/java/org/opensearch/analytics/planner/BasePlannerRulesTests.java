@@ -233,16 +233,26 @@ public abstract class BasePlannerRulesTests extends OpenSearchTestCase {
     /**
      * Walks the single-input chain asserting each node matches the expected type
      * and has viableBackends containing all expectedBackends.
-     * TODO: extend to per-node expected backends when delegation is implemented.
+     *
+     * <p>{@link OpenSearchExchangeReducer} nodes are skipped at depths where the
+     * expected type is a different logical operator — ERs are trait-driven gather
+     * points, not part of the logical pipeline. Tests that *do* want to verify an
+     * ER at a specific depth list {@code OpenSearchExchangeReducer.class}
+     * explicitly; the walk does not skip past it in that case.
+     *
+     * <p>TODO: extend to per-node expected backends when delegation is implemented.
      */
     protected static void assertPipelineViableBackends(
         RelNode root,
         List<Class<? extends OpenSearchRelNode>> expectedTypes,
         Set<String> expectedBackends
     ) {
-        RelNode current = root;
+        RelNode current = RelNodeUtils.unwrapHep(root);
         for (int i = 0; i < expectedTypes.size(); i++) {
             Class<? extends OpenSearchRelNode> expectedType = expectedTypes.get(i);
+            if (!OpenSearchExchangeReducer.class.isAssignableFrom(expectedType)) {
+                current = skipExchangeReducers(current);
+            }
             assertTrue(
                 "Node at depth " + i + " must be " + expectedType.getSimpleName() + " but was " + current.getClass().getSimpleName(),
                 expectedType.isInstance(current)
@@ -261,6 +271,14 @@ public abstract class BasePlannerRulesTests extends OpenSearchTestCase {
                 current = RelNodeUtils.unwrapHep(current.getInputs().get(0));
             }
         }
+    }
+
+    private static RelNode skipExchangeReducers(RelNode rel) {
+        RelNode current = rel;
+        while (current instanceof OpenSearchExchangeReducer) {
+            current = RelNodeUtils.unwrapHep(current.getInputs().get(0));
+        }
+        return current;
     }
 
     // ---- Cluster service ----

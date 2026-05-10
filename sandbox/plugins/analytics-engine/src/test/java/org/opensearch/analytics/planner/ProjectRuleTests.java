@@ -557,14 +557,15 @@ public class ProjectRuleTests extends BasePlannerRulesTests {
     }
 
     /**
-     * Project(Agg(Scan)) — single shard: Project → Aggregate(SINGLE) → Scan.
-     * Multi shard: Project → Aggregate(FINAL) → ExchangeReducer → Aggregate(PARTIAL) → Scan.
+     * Project(Agg(Scan)) — single shard: Project → Aggregate(FINAL) → ExchangeReducer →
+     * Aggregate(PARTIAL) → Scan, same shape as multi-shard now that scans always declare
+     * RANDOM distribution.
      */
     public void testProjectOnAggregateScanSingleShard() {
         RelNode result = runProjectOnAgg(1);
         assertPipelineViableBackends(
             result,
-            List.of(OpenSearchProject.class, OpenSearchAggregate.class, OpenSearchTableScan.class),
+            List.of(OpenSearchProject.class, OpenSearchAggregate.class, OpenSearchAggregate.class, OpenSearchTableScan.class),
             Set.of(MockDataFusionBackend.NAME)
         );
         assertAnnotation(((OpenSearchProject) result).getProjects().get(0), MockDataFusionBackend.NAME);

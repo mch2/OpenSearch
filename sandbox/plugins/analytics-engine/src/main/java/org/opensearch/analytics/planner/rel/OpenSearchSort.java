@@ -78,11 +78,35 @@ public class OpenSearchSort extends Sort implements OpenSearchRelNode {
         return false;
     }
 
+    /**
+     * A Sort over non-SINGLETON input only sorts within each partition; the plain
+     * {@link OpenSearchExchangeReducer} we use for gather concatenates partitions in
+     * arbitrary order and is not a merge-sort exchange. So a non-SINGLETON Sort
+     * doesn't produce a globally sorted result, which is the entire purpose of Sort.
+     * Returning infinite cost on non-SINGLETON inputs forces Volcano to pick the
+     * SINGLETON-input alternative produced by
+     * {@link org.opensearch.analytics.planner.rules.OpenSearchSortDistributionDeriveRule}
+     * (Sort over ER over RANDOM child) instead of the cheaper-looking but incorrect
+     * "Sort over RANDOM + top-level ER" plan.
+     *
+     * <p>Once a SortedExchange / merge-sort gather exists, this can drop to a finite
+     * additive cost so the planner can pick by I/O.
+     */
     @Override
     public org.apache.calcite.plan.RelOptCost computeSelfCost(
         org.apache.calcite.plan.RelOptPlanner planner,
         org.apache.calcite.rel.metadata.RelMetadataQuery mq
     ) {
+        for (org.apache.calcite.rel.RelNode input : getInputs()) {
+            for (int i = 0; i < input.getTraitSet().size(); i++) {
+                org.apache.calcite.plan.RelTrait trait = input.getTraitSet().getTrait(i);
+                if (trait instanceof OpenSearchDistribution dist
+                    && dist.getType() != org.apache.calcite.rel.RelDistribution.Type.SINGLETON
+                    && dist.getType() != org.apache.calcite.rel.RelDistribution.Type.ANY) {
+                    return planner.getCostFactory().makeInfiniteCost();
+                }
+            }
+        }
         return planner.getCostFactory().makeTinyCost();
     }
 

@@ -137,14 +137,15 @@ public class FragmentConversionDriverTests extends BasePlannerRulesTests {
     // ---- Single-stage query shapes ----
 
     /**
-     * Scan, Filter(Scan), Aggregate(Scan), Sort(Filter(Scan)) — all single-stage.
-     * Verifies convertShardScanFragment is called and fragment is fully stripped.
+     * Scan, Filter(Scan), Aggregate(Scan), Sort(Filter(Scan)) — single-shard plans now
+     * have a coord stage above the data-node stage (since scans declare RANDOM, the
+     * coord must gather). The test verifies convertShardScanFragment is called on the
+     * data-node child stage and the fragment is fully stripped.
      */
     public void testSingleStageQueryShapes() {
         RecordingConvertor scanConvertor = new RecordingConvertor();
         QueryDAG scanDag = buildAndConvert(1, stubScan(mockTable("test_index", "status", "size")), scanConvertor);
-        assertTrue(scanDag.rootStage().getChildStages().isEmpty());
-        assertShardScanConverted(scanConvertor, scanDag.rootStage());
+        assertShardScanConverted(scanConvertor, dataNodeStage(scanDag));
 
         RecordingConvertor filterConvertor = new RecordingConvertor();
         QueryDAG filterDag = buildAndConvert(
@@ -152,13 +153,11 @@ public class FragmentConversionDriverTests extends BasePlannerRulesTests {
             LogicalFilter.create(stubScan(mockTable("test_index", "status", "size")), makeEquals(0, SqlTypeName.INTEGER, 200)),
             filterConvertor
         );
-        assertTrue(filterDag.rootStage().getChildStages().isEmpty());
-        assertShardScanConverted(filterConvertor, filterDag.rootStage());
+        assertShardScanConverted(filterConvertor, dataNodeStage(filterDag));
 
         RecordingConvertor aggConvertor = new RecordingConvertor();
         QueryDAG aggDag = buildAndConvert(1, makeAggregate(sumCall()), aggConvertor);
-        assertTrue(aggDag.rootStage().getChildStages().isEmpty());
-        assertShardScanConverted(aggConvertor, aggDag.rootStage());
+        assertShardScanConverted(aggConvertor, dataNodeStage(aggDag));
 
         RecordingConvertor sortConvertor = new RecordingConvertor();
         QueryDAG sortDag = buildAndConvert(
@@ -166,8 +165,18 @@ public class FragmentConversionDriverTests extends BasePlannerRulesTests {
             makeSort(makeFilter(stubScan(mockTable("test_index", "status", "size")), makeEquals(0, SqlTypeName.INTEGER, 200)), 10),
             sortConvertor
         );
-        assertTrue(sortDag.rootStage().getChildStages().isEmpty());
-        assertShardScanConverted(sortConvertor, sortDag.rootStage());
+        assertShardScanConverted(sortConvertor, dataNodeStage(sortDag));
+    }
+
+    /** Walks to the deepest leaf stage (the data-node fragment) — used by tests that
+     *  assert SHARD_SCAN behavior, which lives on the data-node side regardless of
+     *  whether a coord stage sits above. */
+    private static Stage dataNodeStage(QueryDAG dag) {
+        Stage current = dag.rootStage();
+        while (!current.getChildStages().isEmpty()) {
+            current = current.getChildStages().get(0);
+        }
+        return current;
     }
 
     // ---- Composed pipeline shapes ----
@@ -183,7 +192,7 @@ public class FragmentConversionDriverTests extends BasePlannerRulesTests {
             ),
             convertor
         );
-        assertShardScanConverted(convertor, dag.rootStage());
+        assertShardScanConverted(convertor, dataNodeStage(dag));
     }
 
     /** Sort(Aggregate(Filter(Scan))) with limit — full OLAP pipeline. */
@@ -200,7 +209,7 @@ public class FragmentConversionDriverTests extends BasePlannerRulesTests {
             ),
             convertor
         );
-        assertShardScanConverted(convertor, dag.rootStage());
+        assertShardScanConverted(convertor, dataNodeStage(dag));
     }
 
     // ---- Two-stage shapes ----

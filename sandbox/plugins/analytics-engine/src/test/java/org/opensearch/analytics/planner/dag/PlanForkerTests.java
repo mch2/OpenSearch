@@ -91,6 +91,34 @@ public class PlanForkerTests extends BasePlannerRulesTests {
      * annotation viable backends differ from operator backend, one plan per annotation target is generated
      * (e.g. DF operator with Lucene annotation for filter delegation produces a separate alternative).
      */
+    /**
+     * Walks the DAG depth-first and returns the first stage whose fragment root is
+     * an instance of {@code expected}. Used to find the data-node stage (where the
+     * test's operator lives) without coupling tests to the coord/data-node split —
+     * after the always-RANDOM scan trait change, single-shard plans gain a coord
+     * stage above the data-node fragment, so {@code dag.rootStage()} no longer
+     * holds the operator the test wants to inspect.
+     */
+    private static Stage findStageWithFragment(QueryDAG dag, Class<? extends OpenSearchRelNode> expected) {
+        Stage found = findStageWithFragmentInTree(dag.rootStage(), expected);
+        if (found == null) {
+            throw new AssertionError("No stage in DAG holds a " + expected.getSimpleName() + " fragment");
+        }
+        return found;
+    }
+
+    private static Stage findStageWithFragmentInTree(Stage stage, Class<? extends OpenSearchRelNode> expected) {
+        // Post-order: prefer deepest match. The split aggregate produces a FINAL on the
+        // coord stage and a PARTIAL on the data-node stage; both are OpenSearchAggregate,
+        // and the test wants the data-node one (where forking produces N alternatives).
+        for (Stage child : stage.getChildStages()) {
+            Stage found = findStageWithFragmentInTree(child, expected);
+            if (found != null) return found;
+        }
+        if (expected.isInstance(stage.getFragment())) return stage;
+        return null;
+    }
+
     private static void assertTwoAlternatives(Stage stage, Class<? extends OpenSearchRelNode> expectedRootType) {
         List<StagePlan> alternatives = stage.getPlanAlternatives();
         assertEquals("expected two alternatives (one per viable backend)", 2, alternatives.size());
@@ -110,19 +138,24 @@ public class PlanForkerTests extends BasePlannerRulesTests {
         assertNotEquals("both alternatives must have distinct backends", alternatives.get(0).backendId(), alternatives.get(1).backendId());
     }
 
-    /** Single-shard scan, filter, and aggregate — two alternatives each, one per backend. */
+    /**
+     * Single-shard scan, filter, and aggregate — the data-node stage (where the operator
+     * lives) gets two alternatives, one per backend. Tests find the operator's stage
+     * via fragment type rather than assuming the DAG is single-stage; the always-RANDOM
+     * scan trait gives every plan a coord stage above the data-node fragment.
+     */
     public void testSingleStageQueryShapes() {
         QueryDAG scanDag = buildAndFork(1, stubScan(mockTable("test_index", "status", "size")));
-        assertTwoAlternatives(scanDag.rootStage(), OpenSearchTableScan.class);
+        assertTwoAlternatives(findStageWithFragment(scanDag, OpenSearchTableScan.class), OpenSearchTableScan.class);
 
         QueryDAG filterDag = buildAndFork(
             1,
             LogicalFilter.create(stubScan(mockTable("test_index", "status", "size")), makeEquals(0, SqlTypeName.INTEGER, 200))
         );
-        assertTwoAlternatives(filterDag.rootStage(), OpenSearchFilter.class);
+        assertTwoAlternatives(findStageWithFragment(filterDag, OpenSearchFilter.class), OpenSearchFilter.class);
 
         QueryDAG aggDag = buildAndFork(1, makeAggregate(sumCall()));
-        assertTwoAlternatives(aggDag.rootStage(), OpenSearchAggregate.class);
+        assertTwoAlternatives(findStageWithFragment(aggDag, OpenSearchAggregate.class), OpenSearchAggregate.class);
     }
 
     /**
@@ -130,21 +163,23 @@ public class PlanForkerTests extends BasePlannerRulesTests {
      * produces two alternatives with correct pipeline shape at each level.
      */
     public void testSortQueryShapes() {
-        // Sort(Filter(Scan)) with limit
+        // Sort(Filter(Scan)) with limit. Sort runs on SINGLETON (correctness-required —
+        // a partition-local sort isn't a global sort), so Sort lives on the coord stage.
+        // The coord stage gets one alternative per backend with an ExchangeSinkProvider
+        // (only DF in the mock setup). The data-node stage holds the scan and gets
+        // two alternatives (one per backend with a scan capability).
         QueryDAG sortFilterDag = buildAndFork(
             1,
             makeSort(makeFilter(stubScan(mockTable("test_index", "status", "size")), makeEquals(0, SqlTypeName.INTEGER, 200)), 10)
         );
-        assertTwoAlternatives(sortFilterDag.rootStage(), OpenSearchSort.class);
-        for (StagePlan plan : sortFilterDag.rootStage().getPlanAlternatives()) {
-            assertPipelineViableBackends(
-                plan.resolvedFragment(),
-                List.of(OpenSearchSort.class, OpenSearchFilter.class, OpenSearchTableScan.class),
-                Set.of(plan.backendId())
-            );
-        }
+        // Filter pushes down to the data-node side now (cost penalty on SINGLETON Filter
+        // makes the RANDOM-Filter + ER-above plan cheaper), so the data-node stage's
+        // root is the Filter, not the Scan. Forking still produces two alternatives.
+        Stage filterStage = findStageWithFragment(sortFilterDag, OpenSearchFilter.class);
+        assertTwoAlternatives(filterStage, OpenSearchFilter.class);
 
-        // Sort(Agg(Filter(Scan))) with limit
+        // Sort(Agg(Filter(Scan))) with limit — Aggregate splits across coord/data-node,
+        // Filter runs on the data-node side (with PARTIAL agg over Filter over Scan).
         QueryDAG sortAggDag = buildAndFork(
             1,
             makeSort(
@@ -155,11 +190,12 @@ public class PlanForkerTests extends BasePlannerRulesTests {
                 10
             )
         );
-        assertTwoAlternatives(sortAggDag.rootStage(), OpenSearchSort.class);
-        for (StagePlan plan : sortAggDag.rootStage().getPlanAlternatives()) {
+        Stage partialAggStage = findStageWithFragment(sortAggDag, OpenSearchAggregate.class);
+        assertTwoAlternatives(partialAggStage, OpenSearchAggregate.class);
+        for (StagePlan plan : partialAggStage.getPlanAlternatives()) {
             assertPipelineViableBackends(
                 plan.resolvedFragment(),
-                List.of(OpenSearchSort.class, OpenSearchAggregate.class, OpenSearchFilter.class, OpenSearchTableScan.class),
+                List.of(OpenSearchAggregate.class, OpenSearchFilter.class, OpenSearchTableScan.class),
                 Set.of(plan.backendId())
             );
         }
@@ -180,10 +216,14 @@ public class PlanForkerTests extends BasePlannerRulesTests {
             sumCall()
         );
         QueryDAG dag = buildAndFork(1, pipeline);
-        assertTwoAlternatives(dag.rootStage(), OpenSearchAggregate.class);
+        // Aggregate splits into FINAL (coord) + PARTIAL (data node). Each side gets its
+        // own stage; both stages get two alternatives during forking. The data-node
+        // PARTIAL stage's pipeline includes Aggregate → Filter → Scan (no FINAL above).
+        Stage partialStage = findStageWithFragment(dag, OpenSearchAggregate.class);
+        assertTwoAlternatives(partialStage, OpenSearchAggregate.class);
 
         // Each alternative's full pipeline must be narrowed to the same single backend
-        for (StagePlan plan : dag.rootStage().getPlanAlternatives()) {
+        for (StagePlan plan : partialStage.getPlanAlternatives()) {
             assertPipelineViableBackends(
                 plan.resolvedFragment(),
                 List.of(OpenSearchAggregate.class, OpenSearchFilter.class, OpenSearchTableScan.class),
@@ -225,7 +265,7 @@ public class PlanForkerTests extends BasePlannerRulesTests {
                 )
             )
         );
-        assertTwoAlternatives(dag.rootStage(), OpenSearchAggregate.class);
+        assertTwoAlternatives(findStageWithFragment(dag, OpenSearchAggregate.class), OpenSearchAggregate.class);
     }
 
     /**
@@ -247,7 +287,7 @@ public class PlanForkerTests extends BasePlannerRulesTests {
                 )
             )
         );
-        assertTwoAlternatives(dag.rootStage(), OpenSearchFilter.class);
+        assertTwoAlternatives(findStageWithFragment(dag, OpenSearchFilter.class), OpenSearchFilter.class);
     }
 
     /**
@@ -263,8 +303,12 @@ public class PlanForkerTests extends BasePlannerRulesTests {
         );
         LogicalFilter filter = LogicalFilter.create(stubScan(mockTable("test_index", "status", "size")), constant);
         RelNode result = runPlanner(filter, context);
-        // ReduceExpressionsRule folds 1=1 → TRUE, then filter on TRUE is removed
+        // ReduceExpressionsRule folds 1=1 → TRUE, then filter on TRUE is removed.
+        // Scans always declare RANDOM, so the root requires SINGLETON which Volcano
+        // satisfies by inserting an ER on top of the scan — the elimination is verified
+        // by the scan being the ER's only child rather than by the root type.
         assertFalse("filter on constant true must be eliminated", result instanceof OpenSearchFilter);
-        assertTrue("root must be the scan after filter elimination", result instanceof OpenSearchTableScan);
+        RelNode underRoot = result instanceof org.opensearch.analytics.planner.rel.OpenSearchExchangeReducer er ? er.getInput() : result;
+        assertTrue("scan must be directly under any top-level gather after filter elimination", underRoot instanceof OpenSearchTableScan);
     }
 }

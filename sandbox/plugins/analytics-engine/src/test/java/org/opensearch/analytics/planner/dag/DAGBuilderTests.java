@@ -48,29 +48,25 @@ public class DAGBuilderTests extends BasePlannerRulesTests {
     }
 
     /**
-     * Single-shard scan and aggregate both produce one stage with a shard target resolver
-     * and no exchange sink — no coordinator stage needed.
+     * Single-shard plans produce the same coord/data-node split as multi-shard now that
+     * scans always declare RANDOM distribution — single-shard data still lives on a
+     * data node, so a top-level gather (ER) is always needed for the coord to read it.
+     * The data-node child stage holds the operator (or scan) and has a target resolver;
+     * the root coord stage has the ER and a sink provider.
      */
-    public void testSingleStageQueries() {
+    public void testSingleShardSplitsIntoCoordAndDataNode() {
         QueryDAG scanDag = buildDAG(1, stubScan(mockTable("test_index", "status", "size")));
-        assertEquals(0, scanDag.rootStage().getChildStages().size());
-        assertNotNull(scanDag.rootStage().getTargetResolver());
-        assertNull(scanDag.rootStage().getExchangeSinkProvider());
+        assertEquals(1, scanDag.rootStage().getChildStages().size());
+        assertNull(scanDag.rootStage().getTargetResolver());
+        assertTrue(scanDag.rootStage().getFragment() instanceof OpenSearchExchangeReducer);
+        Stage scanChild = scanDag.rootStage().getChildStages().get(0);
+        assertNotNull(scanChild.getTargetResolver());
+        assertTrue(scanChild.getFragment() instanceof OpenSearchTableScan);
 
         QueryDAG aggDag = buildDAG(1, makeAggregate(sumCall()));
-        assertEquals(0, aggDag.rootStage().getChildStages().size());
-        assertNotNull(aggDag.rootStage().getTargetResolver());
-        assertNull(aggDag.rootStage().getExchangeSinkProvider());
-
-        // Sort(Filter(Scan)) with limit — single stage, sort-capable backend
-        QueryDAG sortDag = buildDAG(
-            1,
-            makeSort(makeFilter(stubScan(mockTable("test_index", "status", "size")), makeEquals(0, SqlTypeName.INTEGER, 200)), 10)
-        );
-        assertEquals(0, sortDag.rootStage().getChildStages().size());
-        assertNotNull(sortDag.rootStage().getTargetResolver());
-        assertNull(sortDag.rootStage().getExchangeSinkProvider());
-        assertTrue(sortDag.rootStage().getFragment() instanceof OpenSearchSort);
+        assertEquals(1, aggDag.rootStage().getChildStages().size());
+        assertNull(aggDag.rootStage().getTargetResolver());
+        assertNotNull(aggDag.rootStage().getExchangeSinkProvider());
     }
 
     /**
