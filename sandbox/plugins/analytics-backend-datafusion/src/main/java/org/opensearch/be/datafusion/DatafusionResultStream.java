@@ -112,7 +112,6 @@ public class DatafusionResultStream implements EngineResultStream {
 
         private boolean loadNextBatch() {
             ensureSchema();
-            // Once exhausted, never poll again or re-synthesize the empty batch.
             if (nativeStreamExhausted) return false;
             long arrayAddr = callNativeFn(
                 listener -> NativeBridge.streamNext(streamHandle.getRuntimeHandle().get(), streamHandle.getPointer(), listener)

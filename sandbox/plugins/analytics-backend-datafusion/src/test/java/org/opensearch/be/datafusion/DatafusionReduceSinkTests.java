@@ -36,6 +36,7 @@ import org.opensearch.test.OpenSearchTestCase;
 
 import java.nio.file.Path;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
 
 import io.substrait.extension.DefaultExtensionCatalog;
 import io.substrait.extension.SimpleExtension;
@@ -83,7 +84,7 @@ public class DatafusionReduceSinkTests extends OpenSearchTestCase {
         // Wrap in NativeRuntimeHandle so the pointer is registered in the
         // NativeHandle live-set that validatePointer consults.
         NativeRuntimeHandle runtimeHandle = new NativeRuntimeHandle(runtimePtr);
-        java.util.concurrent.ExecutorService drainExec = java.util.concurrent.Executors.newSingleThreadExecutor();
+        ExecutorService drainExec = java.util.concurrent.Executors.newSingleThreadExecutor();
 
         try (RootAllocator alloc = new RootAllocator(Long.MAX_VALUE)) {
             Schema inputSchema = new Schema(List.of(new Field("x", FieldType.nullable(new ArrowType.Int(64, true)), null)));
@@ -129,7 +130,7 @@ public class DatafusionReduceSinkTests extends OpenSearchTestCase {
         Path spillDir = createTempDir("datafusion-spill");
         long runtimePtr = NativeBridge.createGlobalRuntime(64 * 1024 * 1024, 0L, spillDir.toString(), 32 * 1024 * 1024);
         NativeRuntimeHandle runtimeHandle = new NativeRuntimeHandle(runtimePtr);
-        java.util.concurrent.ExecutorService drainExec = java.util.concurrent.Executors.newSingleThreadExecutor();
+        ExecutorService drainExec = java.util.concurrent.Executors.newSingleThreadExecutor();
 
         try (RootAllocator alloc = new RootAllocator(Long.MAX_VALUE)) {
             Schema inputSchema = new Schema(List.of(new Field("x", FieldType.nullable(new ArrowType.Int(64, true)), null)));

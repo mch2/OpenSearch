@@ -219,7 +219,8 @@ public final class DatafusionReduceSink extends AbstractDatafusionReduceSink imp
                 // the exported buffers back to the Java allocator. (ArrowArray.close /
                 // ArrowSchema.close in the finally below frees the wrapper but does NOT
                 // invoke the C release callback.)
-                releaseExportedFfiStructs(array, arrowSchema);
+                array.release();
+                arrowSchema.release();
                 if (closed) {
                     logger.debug("[ReduceSink] send-after-close race caught, discarding batch");
                     return;
@@ -232,19 +233,6 @@ public final class DatafusionReduceSink extends AbstractDatafusionReduceSink imp
             // release explicitly above.
             array.close();
             arrowSchema.close();
-        }
-    }
-
-    private static void releaseExportedFfiStructs(ArrowArray array, ArrowSchema arrowSchema) {
-        try {
-            array.release();
-        } catch (RuntimeException t) {
-            logger.warn("[ReduceSink] error releasing exported ArrowArray on failure path", t);
-        }
-        try {
-            arrowSchema.release();
-        } catch (RuntimeException t) {
-            logger.warn("[ReduceSink] error releasing exported ArrowSchema on failure path", t);
         }
     }
 
