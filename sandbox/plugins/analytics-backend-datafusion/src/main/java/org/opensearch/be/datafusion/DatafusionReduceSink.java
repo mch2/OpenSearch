@@ -128,15 +128,12 @@ public final class DatafusionReduceSink extends AbstractDatafusionReduceSink imp
                 // owns them, the state's close() will.
                 if (preparedState == null) {
                     for (DatafusionPartitionSender sender : senders.values()) {
-                        try {
-                            sender.close();
-                        } catch (RuntimeException ignore) {}
+                        sender.close();
                     }
                     session.close();
                 }
             }
         }
-        assert success && outStreamLocal != null : "ctor body must have completed successfully to reach this point";
         this.outStream = outStreamLocal;
         this.sendersByChildStageId = senders;
 
