@@ -8,6 +8,7 @@
 
 package org.opensearch.analytics.qa;
 
+import org.apache.lucene.tests.util.LuceneTestCase.AwaitsFix;
 import org.opensearch.client.Request;
 import org.opensearch.client.Response;
 
@@ -64,6 +65,7 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
         );
     }
 
+    @AwaitsFix(bugUrl = "Requires sql repo fix to CalciteRelNodeVisitor.containsNestedAggregator (try/catch around relBuilder.field)")
     public void testMinOnObjectField() throws IOException {
         assertRowsEqual(
             "source=" + DATASET.indexName + " | stats min(account.balance)",
@@ -71,6 +73,7 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
         );
     }
 
+    @AwaitsFix(bugUrl = "Requires sql repo fix to CalciteRelNodeVisitor.containsNestedAggregator (try/catch around relBuilder.field)")
     public void testMaxOnDeeplyNestedObjectField() throws IOException {
         assertRowsEqual(
             "source=" + DATASET.indexName + " | stats max(city.location.latitude)",
@@ -78,6 +81,7 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
         );
     }
 
+    @AwaitsFix(bugUrl = "Requires sql repo fix to CalciteRelNodeVisitor.containsNestedAggregator (try/catch around relBuilder.field)")
     public void testSumOnObjectField() throws IOException {
         assertRowsEqual(
             "source=" + DATASET.indexName + " | stats sum(city.population)",

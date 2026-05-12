@@ -90,7 +90,8 @@ final class ShardFragmentStageExecution extends AbstractStageExecution implement
             // Runs inline on the per-stream virtual thread driving handleStreamResponse.
             // Must NOT offload to a thread pool: reordering across batches would let the
             // isLast=true task race ahead, flip state to SUCCEEDED, and drop queued
-            // earlier batches via the isDone() short-circuit.
+            // earlier batches via the isDone() short-circuit. Inline also preserves
+            // end-to-end backpressure (next nextResponse() blocks until feed() returns).
             @Override
             public void onStreamResponse(FragmentExecutionArrowResponse response, boolean isLast) {
                 if (isDone()) {
@@ -105,8 +106,13 @@ final class ShardFragmentStageExecution extends AbstractStageExecution implement
                 try {
                     outputSink.feed(vsr);
                 } catch (Exception e) {
-                    // Without this guard the exception only surfaces on the stream's virtual
-                    // thread; inFlight never decrements and the stage hangs to QUERY_TIMEOUT.
+                    // On feed failure, close the VSR ourselves — sink didn't take ownership.
+                    // Without surfacing via captureFailure the exception only lives on the
+                    // stream's virtual thread; inFlight never decrements and the stage hangs
+                    // to QUERY_TIMEOUT.
+                    try {
+                        vsr.close();
+                    } catch (Throwable ignore) {}
                     captureFailure(new RuntimeException("Stage " + stage.getStageId() + " sink feed failed", e));
                     metrics.incrementTasksFailed();
                     onShardTerminated();
@@ -130,7 +136,9 @@ final class ShardFragmentStageExecution extends AbstractStageExecution implement
     }
 
     private void onShardTerminated() {
-        if (inFlight.decrementAndGet() == 0) {
+        int after = inFlight.decrementAndGet();
+        assert after >= 0 : "inFlight count went negative — a shard terminated more than once: " + after;
+        if (after == 0) {
             Exception captured = getFailure();
             transitionTo(captured != null ? StageExecution.State.FAILED : StageExecution.State.SUCCEEDED);
         }

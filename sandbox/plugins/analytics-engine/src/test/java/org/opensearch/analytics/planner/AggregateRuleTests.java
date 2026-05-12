@@ -18,7 +18,6 @@ import org.opensearch.analytics.planner.rel.AggregateMode;
 import org.opensearch.analytics.planner.rel.OpenSearchAggregate;
 import org.opensearch.analytics.planner.rel.OpenSearchExchangeReducer;
 import org.opensearch.analytics.planner.rel.OpenSearchFilter;
-import org.opensearch.analytics.planner.rel.OpenSearchProject;
 import org.opensearch.analytics.planner.rel.OpenSearchTableScan;
 import org.opensearch.analytics.spi.AggregateCapability;
 import org.opensearch.analytics.spi.AggregateFunction;
@@ -241,35 +240,24 @@ public class AggregateRuleTests extends BasePlannerRulesTests {
         PlannerContext context = buildContext("parquet", 1, intFields(), List.of(dfWithDelegation, luceneAccepting));
         RelNode result = runPlanner(makeMultiCallAggregate(sumCall(), stddevCall()), context);
         logger.info("Plan:\n{}", RelOptUtil.toString(result));
-        // OpenSearchAggregateReduceRule decomposes STDDEV_POP into SUM+COUNT wrapped in
-        // Project(sqrt) above / Project(squared-inputs) below the Aggregate.
         assertPipelineViableBackends(
             result,
-            List.of(OpenSearchProject.class, OpenSearchAggregate.class, OpenSearchProject.class, OpenSearchTableScan.class),
+            List.of(OpenSearchAggregate.class, OpenSearchTableScan.class),
             Set.of(MockDataFusionBackend.NAME)
         );
     }
 
     public void testAggregateErrorsWithoutDelegation() {
-        // DF declares only COUNT — can't satisfy STDDEV_POP's reduction (needs SUM(x) and
-        // SUM(x*x)) on its own. Lucene has SUM but refuses delegation.
-        MockDataFusionBackend dfNoSum = new MockDataFusionBackend() {
+        MockLuceneBackend luceneWithStddev = new MockLuceneBackend() {
             @Override
             protected Set<AggregateCapability> aggregateCapabilities() {
                 return aggCaps(
-                    Set.of(MockDataFusionBackend.PARQUET_DATA_FORMAT),
-                    Map.of(AggregateFunction.COUNT, Set.of(FieldType.INTEGER))
+                    Set.of(MockLuceneBackend.LUCENE_DATA_FORMAT),
+                    Map.of(AggregateFunction.STDDEV_POP, Set.of(FieldType.INTEGER))
                 );
             }
         };
-        MockLuceneBackend luceneWithSum = new MockLuceneBackend() {
-            @Override
-            protected Set<AggregateCapability> aggregateCapabilities() {
-                return aggCaps(Set.of(MockLuceneBackend.LUCENE_DATA_FORMAT), Map.of(AggregateFunction.SUM, Set.of(FieldType.INTEGER)));
-            }
-            // No acceptedDelegations() override → delegation is refused.
-        };
-        PlannerContext context = buildContext("parquet", 1, intFields(), List.of(dfNoSum, luceneWithSum));
+        PlannerContext context = buildContext("parquet", 1, intFields(), List.of(DATAFUSION, luceneWithStddev));
         IllegalStateException exception = expectThrows(
             IllegalStateException.class,
             () -> runPlanner(makeMultiCallAggregate(sumCall(), stddevCall()), context)

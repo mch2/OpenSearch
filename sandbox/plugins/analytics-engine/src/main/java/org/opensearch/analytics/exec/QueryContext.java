@@ -9,6 +9,8 @@
 package org.opensearch.analytics.exec;
 
 import org.apache.arrow.memory.BufferAllocator;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.backend.AnalyticsOperationListener;
 import org.opensearch.analytics.exec.task.AnalyticsQueryTask;
 import org.opensearch.analytics.planner.dag.QueryDAG;
@@ -29,6 +31,30 @@ import java.util.concurrent.Executor;
  * @opensearch.internal
  */
 public class QueryContext {
+
+    private static final Logger logger = LogManager.getLogger(QueryContext.class);
+
+    /**
+     * Process-wide latch flipped by {@link #closeBufferAllocator} whenever Arrow's
+     * allocator close throws "Memory was leaked". Intended for test-only oracles —
+     * {@code closeBufferAllocator} fires inside the query-failure listener chain,
+     * and its thrown exception is attached as a Suppressed that test clients can
+     * swallow. This flag survives the physical close (Arrow releases tracked memory
+     * before it throws), so {@code @After} hooks can read it without racing teardown.
+     * Reset via {@link #clearLeakSignal} at test setup.
+     */
+    private static final java.util.concurrent.atomic.AtomicReference<String> LEAK_SIGNAL =
+        new java.util.concurrent.atomic.AtomicReference<>();
+
+    /** True if any query-context's allocator close in this JVM threw a leak. Test-only. */
+    public static String detectedLeak() {
+        return LEAK_SIGNAL.get();
+    }
+
+    /** Reset the leak latch. Call from test setup so each test starts clean. */
+    public static void clearLeakSignal() {
+        LEAK_SIGNAL.set(null);
+    }
 
     // TODO: make configurable via cluster setting (like search.max_concurrent_shard_requests)
     private static final int DEFAULT_MAX_CONCURRENT_SHARD_REQUESTS = 5;
@@ -138,7 +164,19 @@ public class QueryContext {
             if (closed) return;
             closed = true;
             if (bufferAllocator != null) {
-                bufferAllocator.close();
+                long allocated = bufferAllocator.getAllocatedMemory();
+                try {
+                    bufferAllocator.close();
+                } catch (IllegalStateException e) {
+                    // Arrow's close() throws on leak. This exception is attached as a
+                    // Suppressed on the already-failing query error and frequently swallowed
+                    // by the listener chain. Log + latch on LEAK_SIGNAL so tests can observe
+                    // it out-of-band even when the Suppressed is lost.
+                    logger.error("[QueryContext] Arrow allocator leaked {} bytes on close: {}", allocated, e.getMessage(), e);
+                    LEAK_SIGNAL.compareAndSet(null, "leaked " + allocated + " bytes: " + e.getMessage());
+                    assert false : "Arrow allocator leaked " + allocated + " bytes — tighten the failure-path cleanup: " + e.getMessage();
+                    throw e;
+                }
                 bufferAllocator = null;
             }
         }

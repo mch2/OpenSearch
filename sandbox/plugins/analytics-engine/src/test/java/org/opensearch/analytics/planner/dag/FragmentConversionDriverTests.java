@@ -124,12 +124,14 @@ public class FragmentConversionDriverTests extends BasePlannerRulesTests {
         assertTrue("convertFinalAggFragment must be called", convertor.finalAggCalled);
         assertDoesntContainOperators(convertor.reduceFragment, OPENSEARCH_OPERATORS);
         assertDoesntContainOperators(convertor.reduceFragment, ANNOTATION_MARKERS);
-        // Coord-side reduce stages no longer register FinalAggregateInstructionHandler.
-        // DataFusion plans the substrait Aggregate's Partial+Final pair itself via the legacy
-        // executeLocalPlan path; the previous SETUP_FINAL_AGGREGATE instruction routed through
-        // Rust's apply_aggregate_mode strip, which corrupted column refs (cnt[sum]/cnt[count]).
+        // Instruction assertions
         StagePlan plan = stage.getPlanAlternatives().getFirst();
-        assertTrue("coord-side reduce instructions must be empty", plan.instructions().isEmpty());
+        assertFalse("instructions must not be empty", plan.instructions().isEmpty());
+        assertEquals(
+            "reduce stage must have FINAL_AGGREGATE",
+            InstructionType.SETUP_FINAL_AGGREGATE,
+            plan.instructions().getFirst().type()
+        );
     }
 
     // ---- Single-stage query shapes ----
