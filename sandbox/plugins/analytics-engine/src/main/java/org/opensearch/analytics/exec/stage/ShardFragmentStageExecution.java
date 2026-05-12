@@ -110,10 +110,13 @@ final class ShardFragmentStageExecution extends AbstractStageExecution implement
                     // Without surfacing via captureFailure the exception only lives on the
                     // stream's virtual thread; inFlight never decrements and the stage hangs
                     // to QUERY_TIMEOUT.
+                    RuntimeException wrapped = new RuntimeException("Stage " + stage.getStageId() + " sink feed failed", e);
                     try {
                         vsr.close();
-                    } catch (Throwable ignore) {}
-                    captureFailure(new RuntimeException("Stage " + stage.getStageId() + " sink feed failed", e));
+                    } catch (IllegalStateException closeFailure) {
+                        wrapped.addSuppressed(closeFailure);
+                    }
+                    captureFailure(wrapped);
                     metrics.incrementTasksFailed();
                     onShardTerminated();
                     return;

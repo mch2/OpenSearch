@@ -116,23 +116,26 @@ public class PlanWalker {
     }
 
     /**
-     * Cancels every stage built before {@link #build()} threw. Per-stage cancel failures
-     * are logged and suppressed so one bad cancel doesn't skip the rest; Errors
-     * (OOM/StackOverflow/etc.) propagate to the JVM uncaught handler.
+     * Cancels every stage built before {@link #build()} threw. If a stage's cancel itself
+     * throws, subsequent stages still get a chance to cancel — the first cancel failure
+     * is rethrown at the end with later ones attached as suppressed.
      */
     private void cancelPartialBuild(Map<Integer, StageExecution> executions) {
         String reason = "stage-build failure";
+        IllegalStateException primary = null;
         for (StageExecution exec : executions.values()) {
             try {
                 exec.cancel(reason);
-            } catch (RuntimeException t) {
-                logger.warn(
-                    new ParameterizedMessage("[PlanWalker] cancel during partial-build cleanup threw for stageId={}", exec.getStageId()),
-                    t
-                );
+            } catch (IllegalStateException t) {
+                if (primary == null) {
+                    primary = t;
+                } else {
+                    primary.addSuppressed(t);
+                }
             }
         }
         assert allTerminal(executions) : "cancelPartialBuild left non-terminal stages";
+        if (primary != null) throw primary;
     }
 
     private static boolean allTerminal(Map<Integer, StageExecution> executions) {
@@ -274,7 +277,10 @@ public class PlanWalker {
                     if (producer.outputSource() instanceof ExchangeSink sink) {
                         try {
                             sink.close();
-                        } catch (Exception e) {
+                        } catch (IllegalStateException e) {
+                            // Arrow's allocator and FFI close paths throw IllegalStateException
+                            // on leak / double-release. Don't let a close failure replace the
+                            // primary stage failure en route to the completion listener.
                             logger.warn(
                                 new ParameterizedMessage("[PlanWalker] terminal sink close failed on {}", to),
                                 e

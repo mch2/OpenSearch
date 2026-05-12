@@ -374,11 +374,7 @@ public final class DatafusionReduceSink extends AbstractDatafusionReduceSink imp
         } catch (Throwable t) {
             failure = accumulate(failure, t);
         }
-        try {
-            session.close();
-        } catch (RuntimeException t) {
-            failure = accumulate(failure, t);
-        }
+        session.close();
         assert drainTask.isDone() : "drainTask must be DONE on closeUnderLock exit (closeUnderLock must await it)";
         return failure;
     }

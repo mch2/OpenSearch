@@ -154,11 +154,7 @@ public final class DatafusionMemtableReduceSink extends AbstractDatafusionReduce
             if (streamPtr != 0) {
                 NativeBridge.streamClose(streamPtr);
             }
-            try {
-                session.close();
-            } catch (RuntimeException t) {
-                failure = accumulate(failure, t);
-            }
+            session.close();
         }
         return failure;
     }

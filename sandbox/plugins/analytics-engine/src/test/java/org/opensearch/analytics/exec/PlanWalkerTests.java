@@ -253,7 +253,7 @@ public class PlanWalkerTests extends OpenSearchTestCase {
 
         @Override
         public void close() {
-            throw new RuntimeException("close() throws by design");
+            throw new IllegalStateException("close() throws by design");
         }
 
         @Override
