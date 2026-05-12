@@ -8,6 +8,7 @@
 
 package org.opensearch.analytics.planner.dag;
 
+import org.apache.calcite.rel.RelDistribution;
 import org.apache.calcite.rel.RelNode;
 import org.opensearch.analytics.planner.CapabilityRegistry;
 import org.opensearch.analytics.planner.CapabilityResolutionUtils;
@@ -119,7 +120,10 @@ public class DAGBuilder {
                 childStageId,
                 childFragment,
                 grandchildren,
-                ExchangeInfo.singleton(),
+                // The cut's distribution lives on the reducer's traitset — read it there so
+                // the Stage reflects whatever the planner chose (SINGLETON today, HASH/BROADCAST
+                // once those convert paths land in OpenSearchDistributionTraitDef).
+                distributionOf(reducer),
                 null,
                 new ShardTargetResolver(childFragment, clusterService)
             )
@@ -136,5 +140,19 @@ public class DAGBuilder {
             reducer.getViableBackends()
         );
         return new OpenSearchExchangeReducer(reducer.getCluster(), reducer.getTraitSet(), stageInput, reducer.getViableBackends());
+    }
+
+    /**
+     * Pulls the distribution trait off the reducer's traitset. The trait is registered
+     * under a per-query {@link org.opensearch.analytics.planner.rel.OpenSearchDistributionTraitDef},
+     * so we look it up by scanning for the RelDistribution trait rather than by a static
+     * TraitDef reference (which we don't have here).
+     */
+    private static RelDistribution distributionOf(OpenSearchExchangeReducer reducer) {
+        for (int i = 0; i < reducer.getTraitSet().size(); i++) {
+            org.apache.calcite.plan.RelTrait t = reducer.getTraitSet().getTrait(i);
+            if (t instanceof RelDistribution d) return d;
+        }
+        return null;
     }
 }

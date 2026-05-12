@@ -98,7 +98,7 @@ public class DAGBuilderTests extends BasePlannerRulesTests {
         Stage aggChild = aggDag.rootStage().getChildStages().get(0);
         assertNotNull(aggChild.getTargetResolver());
         assertNull(aggChild.getExchangeSinkProvider());
-        assertNotNull(aggChild.getExchangeInfo());
-        assertEquals(RelDistribution.Type.SINGLETON, aggChild.getExchangeInfo().distributionType());
+        assertNotNull(aggChild.getDistribution());
+        assertEquals(RelDistribution.Type.SINGLETON, aggChild.getDistribution().getType());
     }
 }

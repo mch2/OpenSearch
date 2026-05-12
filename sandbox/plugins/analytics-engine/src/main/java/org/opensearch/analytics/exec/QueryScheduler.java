@@ -62,6 +62,17 @@ public class QueryScheduler implements Scheduler {
 
     @Override
     public void execute(QueryContext config, ActionListener<Iterable<VectorSchemaRoot>> listener) {
+        executeAndReturnWalker(config, listener);
+    }
+
+    /**
+     * Variant of {@link #execute} that returns the {@link PlanWalker} it built. Callers
+     * that need to observe the {@link ExecutionGraph} after terminal (e.g. the profile
+     * API) hold onto the returned walker and read {@code walker.getGraph()} from inside
+     * their listener wrapper — the graph survives the pool-removal that happens before
+     * our own listener fires.
+     */
+    public PlanWalker executeAndReturnWalker(QueryContext config, ActionListener<Iterable<VectorSchemaRoot>> listener) {
         final String queryId = config.queryId();
         final long queryStartNanos = System.nanoTime();
         final AnalyticsOperationListener.CompositeListener opListener = new AnalyticsOperationListener.CompositeListener(
@@ -91,6 +102,7 @@ public class QueryScheduler implements Scheduler {
         opListener.onQueryStart(queryId, graph.stageCount());
         logger.info("[QueryScheduler] ExecutionGraph built:\n{}", graph.explain());
         walker.start(graph);
+        return walker;
     }
 
     private PlanWalker createWalker(

@@ -30,8 +30,8 @@ public record QueryDAG(String queryId, Stage rootStage) {
     private static void appendStage(StringBuilder sb, Stage stage, int depth) {
         String indent = "  ".repeat(depth);
         sb.append(indent).append("Stage ").append(stage.getStageId());
-        if (stage.getExchangeInfo() != null) {
-            sb.append(" exchange=").append(stage.getExchangeInfo().distributionType());
+        if (stage.getDistribution() != null) {
+            sb.append(" exchange=").append(stage.getDistribution().getType());
         }
         sb.append("\n");
         if (stage.getFragment() != null) {

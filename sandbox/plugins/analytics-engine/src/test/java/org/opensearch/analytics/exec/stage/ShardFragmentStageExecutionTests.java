@@ -167,6 +167,7 @@ public class ShardFragmentStageExecutionTests extends OpenSearchTestCase {
         when(config.parentTask()).thenReturn(mock(AnalyticsQueryTask.class));
         when(config.maxConcurrentShardRequests()).thenReturn(5);
         when(config.bufferAllocator()).thenReturn(allocator);
+        when(config.taskTracker()).thenReturn(new TaskTracker());
         return config;
     }
 

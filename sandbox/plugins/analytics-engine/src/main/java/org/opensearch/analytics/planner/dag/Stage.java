@@ -8,6 +8,7 @@
 
 package org.opensearch.analytics.planner.dag;
 
+import org.apache.calcite.rel.RelDistribution;
 import org.apache.calcite.rel.RelNode;
 import org.opensearch.analytics.spi.ExchangeSinkProvider;
 import org.opensearch.analytics.spi.FragmentInstructionHandlerFactory;
@@ -41,7 +42,7 @@ public class Stage {
     private final int stageId;
     private final RelNode fragment;
     private final List<Stage> childStages;
-    private final ExchangeInfo exchangeInfo;
+    private final RelDistribution distribution;
     private final ExchangeSinkProvider exchangeSinkProvider;
     private final TargetResolver targetResolver;
     private final StageExecutionType executionType;
@@ -52,14 +53,14 @@ public class Stage {
         int stageId,
         RelNode fragment,
         List<Stage> childStages,
-        ExchangeInfo exchangeInfo,
+        RelDistribution distribution,
         ExchangeSinkProvider exchangeSinkProvider,
         TargetResolver targetResolver
     ) {
         this.stageId = stageId;
         this.fragment = fragment;
         this.childStages = List.copyOf(childStages);
-        this.exchangeInfo = exchangeInfo;
+        this.distribution = distribution;
         this.exchangeSinkProvider = exchangeSinkProvider;
         this.targetResolver = targetResolver;
         this.executionType = setStageExecutionType(exchangeSinkProvider, targetResolver);
@@ -79,10 +80,15 @@ public class Stage {
         return childStages;
     }
 
-    /** How this stage connects to its parent. Null for the root stage. */
+    /**
+     * Distribution this stage produces to its parent (i.e. the exchange trait of the
+     * child side of the cut). Null for the root stage (no parent). Read directly from
+     * the upstream {@code OpenSearchExchangeReducer}'s trait at DAG-build time — the
+     * source of truth is Calcite's trait system.
+     */
     @Nullable
-    public ExchangeInfo getExchangeInfo() {
-        return exchangeInfo;
+    public RelDistribution getDistribution() {
+        return distribution;
     }
 
     /**
