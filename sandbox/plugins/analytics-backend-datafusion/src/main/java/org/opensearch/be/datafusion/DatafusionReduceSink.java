@@ -102,7 +102,7 @@ public final class DatafusionReduceSink extends AbstractDatafusionReduceSink imp
                 for (Map.Entry<Integer, byte[]> child : childInputs.entrySet()) {
                     senders.put(child.getKey(), preparedState.senders().get(i++));
                 }
-                streamPtr = NativeBridge.executeLocalPreparedPlan(session.getPointer());
+                streamPtr = NativeBridge.executeLocalPreparedPlan(session.getPointer(), ctx.taskId());
             } else {
                 // Legacy path (non-aggregate reduce): register partitions and execute the
                 // fragment bytes directly. Used when no prior instruction prepared a plan.
@@ -115,7 +115,7 @@ public final class DatafusionReduceSink extends AbstractDatafusionReduceSink imp
                     long senderPtr = NativeBridge.registerPartitionStream(session.getPointer(), inputIdFor(childStageId), schemaIpc);
                     senders.put(childStageId, new DatafusionPartitionSender(senderPtr));
                 }
-                streamPtr = NativeBridge.executeLocalPlan(session.getPointer(), ctx.fragmentBytes());
+                streamPtr = NativeBridge.executeLocalPlan(session.getPointer(), ctx.fragmentBytes(), ctx.taskId());
             }
             outStreamLocal = new StreamHandle(streamPtr, runtimeHandle);
             success = true;

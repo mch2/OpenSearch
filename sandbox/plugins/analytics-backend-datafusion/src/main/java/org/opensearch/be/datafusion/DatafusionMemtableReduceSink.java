@@ -123,7 +123,7 @@ public final class DatafusionMemtableReduceSink extends AbstractDatafusionReduce
             int singleChildStageId = childInputs.keySet().iterator().next();
             NativeBridge.registerMemtable(session.getPointer(), inputIdFor(singleChildStageId), schemaIpc, arrayPtrs, schemaPtrs);
 
-            streamPtr = NativeBridge.executeLocalPlan(session.getPointer(), ctx.fragmentBytes());
+            streamPtr = NativeBridge.executeLocalPlan(session.getPointer(), ctx.fragmentBytes(), ctx.taskId());
             try (StreamHandle outStream = new StreamHandle(streamPtr, runtimeHandle)) {
                 streamPtr = 0;
                 drainOutputIntoDownstream(outStream);
