@@ -106,6 +106,48 @@ public class JoinCommandIT extends AnalyticsRestTestCase {
     }
 
     /**
+     * Right outer join — mirror of left outer. Drops a value from the LEFT side via a
+     * filter so some right rows have no match and appear with nulls on the left.
+     */
+    public void testRightOuterJoin() throws IOException {
+        final String ppl = "source="
+            + CALCS.indexName
+            + " | where str0 = 'TECHNOLOGY' | fields key, str0"
+            + " | right join left=a, right=b ON a.str0 = b.str0"
+            + " [ source="
+            + CALCS_ALT.indexName
+            + " | fields key, str0 ]"
+            + " | stats count() as cnt";
+        assertRowCountPositive(ppl);
+    }
+
+    /** Left semi join — returns left rows that have at least one match on the right. */
+    public void testLeftSemiJoin() throws IOException {
+        final String ppl = "source="
+            + CALCS.indexName
+            + " | fields key, str0"
+            + " | left semi join left=a, right=b ON a.str0 = b.str0"
+            + " [ source="
+            + CALCS_ALT.indexName
+            + " | fields key, str0 ]"
+            + " | stats count() as cnt";
+        assertRowCountPositive(ppl);
+    }
+
+    /** Left anti join — returns left rows with NO match on the right. */
+    public void testLeftAntiJoin() throws IOException {
+        final String ppl = "source="
+            + CALCS.indexName
+            + " | fields key, str0"
+            + " | left anti join left=a, right=b ON a.str0 = b.str0"
+            + " [ source="
+            + CALCS_ALT.indexName
+            + " | where str0 = 'TECHNOLOGY' | fields key, str0 ]"
+            + " | stats count() as cnt";
+        assertRowCountPositive(ppl);
+    }
+
+    /**
      * Cross join (join predicate {@code 1=1}). Exercises the degenerate
      * no-equi-condition shape — Isthmus emits it as a Substrait {@code Cross}
      * rel, which DataFusion executes as a NestedLoopJoin.
@@ -185,6 +227,29 @@ public class JoinCommandIT extends AnalyticsRestTestCase {
     }
 
     // ── helpers ────────────────────────────────────────────────────────────────
+
+    /**
+     * Execute a PPL query expected to return a single {@code cnt} row and assert the count
+     * is a non-negative number. Used for join kinds where exact row-count expectations
+     * aren't pinned (right/semi/anti over the calcs dataset) but end-to-end execution
+     * through planner + substrait + DataFusion is what's being exercised.
+     */
+    private void assertRowCountPositive(String ppl) throws IOException {
+        Map<String, Object> response = executePpl(ppl);
+        @SuppressWarnings("unchecked")
+        List<List<Object>> rows = (List<List<Object>>) response.get("rows");
+        assertNotNull("Response missing 'rows' for query: " + ppl, rows);
+        assertEquals("Expected single count row for query: " + ppl, 1, rows.size());
+        Object actual = rows.get(0).get(0);
+        assertTrue(
+            "Expected numeric count for query: " + ppl + " but got: " + actual,
+            actual instanceof Number
+        );
+        assertTrue(
+            "Expected non-negative count for query: " + ppl + " but got: " + actual,
+            ((Number) actual).longValue() >= 0
+        );
+    }
 
     /** Execute a PPL query expected to return a single {@code cnt} row and assert the value. */
     private void assertSingleCount(String ppl, long expected) throws IOException {

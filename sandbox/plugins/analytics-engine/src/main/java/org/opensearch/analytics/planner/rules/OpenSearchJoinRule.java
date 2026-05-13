@@ -58,15 +58,15 @@ public class OpenSearchJoinRule extends RelOptRule {
     public boolean matches(RelOptRuleCall call) {
         LogicalJoin join = call.rel(0);
         JoinRelType joinType = join.getJoinType();
-        // Accept INNER / LEFT / RIGHT / FULL equi-joins. FULL is needed by PPL's
-        // `appendcol` lowering, which pairs the outer pipeline with a subsearch via
-        // ROW_NUMBER() OVER () and a full outer join on the row numbers. SEMI / ANTI
-        // remain out until DataFusion execution is verified for them; the toJoinKind
-        // mapping covers all four accepted kinds plus SEMI / ANTI for future use.
+        // Accept INNER / LEFT / RIGHT / FULL / SEMI / ANTI equi-joins. FULL is needed
+        // by PPL's `appendcol` lowering (ROW_NUMBER pairing via a full outer join on the
+        // row numbers). Pure non-equi joins are rejected below via JoinInfo.isEqui().
         if (joinType != JoinRelType.INNER
             && joinType != JoinRelType.LEFT
             && joinType != JoinRelType.RIGHT
-            && joinType != JoinRelType.FULL) {
+            && joinType != JoinRelType.FULL
+            && joinType != JoinRelType.SEMI
+            && joinType != JoinRelType.ANTI) {
             return false;
         }
         // Accept equi-joins and cross joins (both satisfy JoinInfo.isEqui() — empty
