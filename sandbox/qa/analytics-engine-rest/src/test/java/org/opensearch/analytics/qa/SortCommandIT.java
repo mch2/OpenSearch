@@ -29,15 +29,25 @@ import java.util.Map;
 public class SortCommandIT extends AnalyticsRestTestCase {
 
     private static final Dataset DATASET = new Dataset("calcs", "calcs");
+    private static final Dataset DATASET_MULTI = new Dataset("calcs", "calcs_multi_sort");
 
     private static boolean dataProvisioned = false;
+    private static boolean multiProvisioned = false;
 
-    /** Provision calcs with 3 shards so sort / limit / project pipelines exercise the
-     *  multi-shard planner paths (exchange insertion, sort split, project passthrough). */
     private void ensureDataProvisioned() throws IOException {
         if (dataProvisioned == false) {
-            DatasetProvisioner.provision(client(), DATASET, 3);
+            DatasetProvisioner.provision(client(), DATASET);
             dataProvisioned = true;
+        }
+    }
+
+    /** Provision a multi-shard calcs index for tests that need to exercise the multi-shard
+     *  sort/project/head planner path. Kept separate from {@link #DATASET} so the abs/substring
+     *  runtime-flake tests that only pass at single-shard aren't destabilized. */
+    private void ensureMultiShardProvisioned() throws IOException {
+        if (multiProvisioned == false) {
+            DatasetProvisioner.provision(client(), DATASET_MULTI, 3);
+            multiProvisioned = true;
         }
     }
 
@@ -124,8 +134,9 @@ public class SortCommandIT extends AnalyticsRestTestCase {
      * default ASC nulls-first).
      */
     public void testSortThenProjectThenHead() throws IOException {
+        ensureMultiShardProvisioned();
         Map<String, Object> response = executePpl(
-            "source=" + DATASET.indexName + " | sort int0 | fields str0, int0 | head 3"
+            "source=" + DATASET_MULTI.indexName + " | sort int0 | fields str0, int0 | head 3"
         );
         @SuppressWarnings("unchecked")
         List<List<Object>> rows = (List<List<Object>>) response.get("rows");

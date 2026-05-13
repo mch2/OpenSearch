@@ -38,10 +38,8 @@ import java.util.Map;
  * exploratory coverage — the IT focuses on whether each command plans, converts
  * to Substrait, and executes end-to-end rather than on exact row values.
  *
- * <p>All join / lookup tests pass end-to-end. {@code testAppendcol} remains
- * {@code @AwaitsFix} — the analytics-framework has no window-function
- * capability track yet, so {@code ROW_NUMBER()} (emitted by the appendcol
- * lowering) cannot be declared by any backend.
+ * <p>All join / lookup tests pass end-to-end. {@code testAppendcol} is
+ * {@code @AwaitsFix} — see task #113.
  */
 public class JoinCommandIT extends AnalyticsRestTestCase {
 
@@ -216,7 +214,7 @@ public class JoinCommandIT extends AnalyticsRestTestCase {
      * over an aggregation frame — modelling them as scalars breaks the
      * capability-type contract). Wiring the full track is a follow-up.
      */
-    @AwaitsFix(bugUrl = "Pending window-function track: appendcol lowers to ROW_NUMBER() OVER (...) which no backend can declare until the WindowFunction capability is added.")
+    @AwaitsFix(bugUrl = "Task #113: appendcol plans correctly (ROW_NUMBER supported) but hits the same AggregateSplit-under-per-side-ER issue surfacing a runtime schema coercion mismatch.")
     public void testAppendcol() throws IOException {
         final String ppl = "source="
             + CALCS.indexName

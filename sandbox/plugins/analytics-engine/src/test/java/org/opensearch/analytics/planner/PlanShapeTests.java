@@ -881,6 +881,42 @@ public class PlanShapeTests extends BasePlannerRulesTests {
         assertEquals("Plan shape mismatch — actual:\n" + actualStr, normalizedExpected, normalizedActual);
     }
 
+    /**
+     * Walks the plan depth-first and asserts that {@code chain} appears somewhere as a parent
+     * → first-child → first-child → ... sequence of concrete rel types. Looser than
+     * {@link #assertPlanShape}: ignores field orders, viable-backend annotations, and sibling
+     * branches, so tests can fix on pipeline <em>structure</em> without binding to particular
+     * projected-column layouts.
+     */
+    private static void assertContainsPipeline(RelNode root, List<Class<?>> chain) {
+        if (matchesPipeline(RelNodeUtils.unwrapHep(root), chain)) return;
+        for (RelNode input : RelNodeUtils.unwrapHep(root).getInputs()) {
+            if (containsPipeline(input, chain)) return;
+        }
+        fail("Expected pipeline " + chain + " not found in plan:\n" + RelOptUtil.toString(root));
+    }
+
+    private static boolean containsPipeline(RelNode node, List<Class<?>> chain) {
+        RelNode unwrapped = RelNodeUtils.unwrapHep(node);
+        if (matchesPipeline(unwrapped, chain)) return true;
+        for (RelNode input : unwrapped.getInputs()) {
+            if (containsPipeline(input, chain)) return true;
+        }
+        return false;
+    }
+
+    private static boolean matchesPipeline(RelNode node, List<Class<?>> chain) {
+        RelNode cursor = RelNodeUtils.unwrapHep(node);
+        for (Class<?> expectedType : chain) {
+            if (!expectedType.isInstance(cursor)) return false;
+            if (cursor.getInputs().isEmpty()) {
+                return chain.indexOf(expectedType) == chain.size() - 1;
+            }
+            cursor = RelNodeUtils.unwrapHep(cursor.getInputs().getFirst());
+        }
+        return true;
+    }
+
     private static String normalizeLines(String s) {
         StringBuilder sb = new StringBuilder();
         for (String line : s.split("\n", -1)) {
