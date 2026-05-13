@@ -21,6 +21,7 @@ import org.opensearch.analytics.planner.rel.AggregateMode;
 import org.opensearch.analytics.planner.rel.OpenSearchAggregate;
 import org.opensearch.analytics.planner.rel.OpenSearchExchangeReducer;
 import org.opensearch.analytics.planner.rel.OpenSearchFilter;
+import org.opensearch.analytics.planner.rel.OpenSearchJoin;
 import org.opensearch.analytics.planner.rel.OpenSearchRelNode;
 import org.opensearch.analytics.planner.rel.OpenSearchStageInputScan;
 import org.opensearch.analytics.planner.rel.OpenSearchTableScan;
@@ -241,18 +242,16 @@ public class FragmentConversionDriver {
      * (with StageInputScan as leaf for schema), then attaches any operators above it
      * (Sort, Project, etc.) via attachFragmentOnTop.
      *
-     * The node immediately above ExchangeReducer is the final agg — it goes to
-     * convertFinalAggFragment together with StageInputScan. Only operators strictly
-     * above the final agg use attachFragmentOnTop.
+     * <p>Single-input ancestors of a single gathered subtree (Sort/Project/Aggregate over
+     * a partial agg) reach convertFinalAggFragment as soon as we see a node whose inputs
+     * are all ExchangeReducers, and attach via attachFragmentOnTop on the way back up.
      *
-     * TODO: for joins, the coordinator fragment has a join node directly above two
-     * StageInputScan leaves (no ExchangeReducer between them). convertReduceNode
-     * currently only recognizes the ExchangeReducer boundary — add join handling
-     * when shuffle joins are implemented (check if all inputs are StageInputScan
-     * and dispatch to a dedicated convertJoinFragment method).
+     * <p>Multi-input nodes (Join, Cross) are handled separately: each branch converts
+     * independently and the node itself wires them via attachJoinFragment. This handles
+     * both the "Join directly over two ERs" shape and the "Join over pass-through
+     * operators (Project, Sort) over ER" shape that coord-side hash join produces today.
      */
     private static byte[] convertReduceFragment(RelNode node, FragmentConvertor convertor, IntraOperatorDelegationBytes delegationBytes) {
-        // Find the ExchangeReducer and collect operators above it
         return convertReduceNode(node, convertor, false, delegationBytes);
     }
 
@@ -263,8 +262,7 @@ public class FragmentConversionDriver {
         IntraOperatorDelegationBytes delegationBytes
     ) {
         if (node instanceof OpenSearchExchangeReducer) {
-            // Strip ExchangeReducer — StageInputScan below it is the schema source
-            // This should never be reached directly; handled by the parent (final agg)
+            // Strip ExchangeReducer — StageInputScan below it is the schema source.
             return convertor.convertFinalAggFragment(strip(node.getInputs().getFirst(), delegationBytes));
         }
         if (node instanceof OpenSearchRelNode openSearchNode) {
@@ -282,7 +280,7 @@ public class FragmentConversionDriver {
                 // respective input partitions.
                 boolean allChildrenAreExchangeReducer = !node.getInputs().isEmpty()
                     && node.getInputs().stream().allMatch(input -> input instanceof OpenSearchExchangeReducer);
-                if (allChildrenAreExchangeReducer) {
+                if (allChildrenAreExchangeReducer && node.getInputs().size() == 1) {
                     List<RelNode> finalAggInputs = new ArrayList<>(node.getInputs().size());
                     for (RelNode input : node.getInputs()) {
                         // Skip the ER, keep StageInputScan below it as the leaf for schema inference.
@@ -293,7 +291,24 @@ public class FragmentConversionDriver {
                 }
             }
 
-            // Operator above the final-fragment boundary — convert child first, then attach.
+            // Multi-input Join (or Cross): convert each branch independently and attach via the
+            // Substrait-level join rewire path. Each branch may itself be a gathered subtree
+            // (ER → StageInputScan) or carry pass-through operators above an ER.
+            if (node instanceof OpenSearchJoin && node.getInputs().size() >= 2) {
+                byte[] leftBytes = convertReduceNode(node.getInputs().get(0), convertor, false, delegationBytes);
+                byte[] rightBytes = convertReduceNode(node.getInputs().get(1), convertor, false, delegationBytes);
+                return convertor.attachJoinFragment(strippedNode, leftBytes, rightBytes);
+            }
+
+            // Multi-input non-Join (Union / Intersect / Minus): the Substrait Set rel is N-ary
+            // and has no two-input rewire path. Isthmus handles Union/Intersect/Minus natively,
+            // so convert the whole subtree in one shot via convertFinalAggFragment. ERs beneath
+            // each arm get stripped by strip(), leaving StageInputScan leaves for schema inference.
+            if (node.getInputs().size() >= 2) {
+                return convertor.convertFinalAggFragment(strip(node, delegationBytes));
+            }
+
+            // Single-input operator above the final-fragment boundary — convert child first, then attach.
             byte[] innerBytes = convertReduceNode(node.getInputs().getFirst(), convertor, false, delegationBytes);
             return convertor.attachFragmentOnTop(strippedNode, innerBytes);
         }

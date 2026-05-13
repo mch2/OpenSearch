@@ -23,9 +23,10 @@ import java.util.List;
 
 /**
  * Trait definition for OpenSearch distribution.
- * Called by Volcano (via ExpandConversionRule) when a distribution trait
- * mismatch is detected. Creates an {@link OpenSearchExchangeReducer} for
- * SINGLETON exchanges. HASH/RANGE shuffle exchanges are not yet implemented.
+ *
+ * <p>Called by Volcano via ExpandConversionRule when a distribution trait mismatch
+ * is detected. Produces an {@link OpenSearchExchangeReducer} for SINGLETON demands.
+ * HASH/RANGE shuffle exchanges are not yet implemented.
  *
  * <p>One instance per query — created by {@link PlannerContext}.
  *
@@ -41,26 +42,48 @@ public class OpenSearchDistributionTraitDef extends RelTraitDef<OpenSearchDistri
         this.plannerContext = plannerContext;
     }
 
-    // ---- Factory methods for distributions tied to this trait def ----
+    // ---- Factory methods ----
 
+    /** SINGLETON(GATHERED) — result of a runtime exchange: ER output, FINAL aggregate output,
+     *  Join/Union output. Also the default for generic SINGLETON demands (root, AggregateSplit). */
     public OpenSearchDistribution singleton() {
-        return new OpenSearchDistribution(this, RelDistribution.Type.SINGLETON, List.of());
+        return new OpenSearchDistribution(this, RelDistribution.Type.SINGLETON, List.of(), OpenSearchDistribution.Origin.GATHERED);
     }
 
+    /** SINGLETON(SCAN) — single-shard scan: data already lives on one node by storage layout. */
+    public OpenSearchDistribution scanSingleton() {
+        return new OpenSearchDistribution(this, RelDistribution.Type.SINGLETON, List.of(), OpenSearchDistribution.Origin.SCAN);
+    }
+
+    /** SINGLETON with null origin — "get onto one node, don't care how". Used by root demand
+     *  and DeriveRule so single-shard scans (SCAN) and gathered pipelines (GATHERED) both
+     *  satisfy it without an extra ER. */
+    public OpenSearchDistribution singletonAnyOrigin() {
+        return new OpenSearchDistribution(this, RelDistribution.Type.SINGLETON, List.of(), null);
+    }
+
+    /** RANDOM — multi-shard scan output. */
     public OpenSearchDistribution random() {
-        return new OpenSearchDistribution(this, RelDistribution.Type.RANDOM_DISTRIBUTED, List.of());
+        return new OpenSearchDistribution(this, RelDistribution.Type.RANDOM_DISTRIBUTED, List.of(), null);
     }
 
+    /** ANY — universal sink; any distribution satisfies it. Used as {@link #getDefault}. */
     public OpenSearchDistribution any() {
-        return new OpenSearchDistribution(this, RelDistribution.Type.ANY, List.of());
+        return new OpenSearchDistribution(this, RelDistribution.Type.ANY, List.of(), null);
     }
 
     public OpenSearchDistribution hash(List<Integer> keys) {
-        return new OpenSearchDistribution(this, RelDistribution.Type.HASH_DISTRIBUTED, keys);
+        return new OpenSearchDistribution(this, RelDistribution.Type.HASH_DISTRIBUTED, keys, null);
+    }
+
+    /** Copies a distribution from another trait def — preserves type, keys, and origin. */
+    public OpenSearchDistribution from(OpenSearchDistribution other) {
+        return new OpenSearchDistribution(this, other.getType(), other.getKeys(), other.getOrigin());
     }
 
     public OpenSearchDistribution fromType(RelDistribution.Type type, List<Integer> keys) {
-        return new OpenSearchDistribution(this, type, keys);
+        OpenSearchDistribution.Origin origin = type == RelDistribution.Type.SINGLETON ? OpenSearchDistribution.Origin.GATHERED : null;
+        return new OpenSearchDistribution(this, type, keys, origin);
     }
 
     // ---- RelTraitDef ----
@@ -111,7 +134,6 @@ public class OpenSearchDistributionTraitDef extends RelTraitDef<OpenSearchDistri
             result = new OpenSearchExchangeReducer(rel.getCluster(), rel.getTraitSet().replace(toTrait), rel, reduceViable);
         } else {
             // TODO: implement HASH/RANGE shuffle exchange when joins and shuffle aggregates are added.
-            // Requires DataTransferCapability producer/consumer intersection for shuffle impl selection.
             throw new UnsupportedOperationException("HASH/RANGE exchange not yet implemented [toTrait=" + toTrait + "]");
         }
 

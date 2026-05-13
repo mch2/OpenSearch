@@ -56,7 +56,8 @@ public class OpenSearchTableScan extends TableScan implements OpenSearchRelNode 
         int shardCount,
         OpenSearchDistributionTraitDef distTraitDef
     ) {
-        OpenSearchDistribution distribution = shardCount > 1 ? distTraitDef.random() : distTraitDef.singleton();
+        // Multi-shard → RANDOM; single-shard → SINGLETON(SCAN) (data already lives on one node).
+        OpenSearchDistribution distribution = shardCount > 1 ? distTraitDef.random() : distTraitDef.scanSingleton();
         RelTraitSet traitSet = RelTraitSet.createEmpty().plus(OpenSearchConvention.INSTANCE).plus(distribution);
         return new OpenSearchTableScan(cluster, traitSet, table, viableBackends, outputFieldStorage);
     }
