@@ -26,6 +26,8 @@ import org.opensearch.analytics.spi.FilterDelegationHandle;
 import org.opensearch.analytics.spi.FragmentConvertor;
 import org.opensearch.analytics.spi.FragmentInstructionHandlerFactory;
 import org.opensearch.analytics.spi.JoinCapability;
+import org.opensearch.analytics.spi.WindowCapability;
+import org.opensearch.analytics.spi.WindowFunction;
 import org.opensearch.analytics.spi.ProjectCapability;
 import org.opensearch.analytics.spi.ScalarFunction;
 import org.opensearch.analytics.spi.ScalarFunctionAdapter;
@@ -338,6 +340,25 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
                             JoinCapability.JoinKind.SEMI,
                             JoinCapability.JoinKind.ANTI,
                             JoinCapability.JoinKind.CROSS
+                        ),
+                        Set.copyOf(plugin.getSupportedFormats())
+                    )
+                );
+            }
+
+            @Override
+            public Set<WindowCapability> windowCapabilities() {
+                return Set.of(
+                    new WindowCapability(
+                        Set.of(
+                            WindowFunction.ROW_NUMBER,
+                            WindowFunction.RANK,
+                            WindowFunction.DENSE_RANK,
+                            WindowFunction.SUM,
+                            WindowFunction.AVG,
+                            WindowFunction.COUNT,
+                            WindowFunction.MIN,
+                            WindowFunction.MAX
                         ),
                         Set.copyOf(plugin.getSupportedFormats())
                     )

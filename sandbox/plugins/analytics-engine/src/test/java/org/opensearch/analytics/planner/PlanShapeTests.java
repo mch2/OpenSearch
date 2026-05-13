@@ -394,6 +394,62 @@ public class PlanShapeTests extends BasePlannerRulesTests {
     }
 
     /**
+     * PPL: {@code source=t | sort score | fields name, score | head 3}
+     *
+     * <p>Inner collated Sort (by score) forces {@code Sort ← ER ← Scan} via
+     * {@link org.opensearch.analytics.planner.rules.OpenSearchSortSplitRule} — concat gather
+     * can't preserve global order. A narrowing Project over that Sort preserves the SINGLETON
+     * input (project is single-input, passthrough-marked, no ER required). Outer pure-LIMIT
+     * Sort (no collation) sits at the top; its input is already SINGLETON, so no additional ER.
+     */
+    public void testSortThenProjectThenLimit_multiShard() {
+        Map<String, Map<String, Object>> fields = Map.of("name", Map.of("type", "keyword"), "score", Map.of("type", "integer"));
+        RelOptTable table = mockTable(
+            "test_index",
+            new String[] { "name", "score" },
+            new SqlTypeName[] { SqlTypeName.VARCHAR, SqlTypeName.INTEGER }
+        );
+        RelNode scan = stubScan(table);
+
+        // Inner Sort: ORDER BY score (field 1).
+        RelNode innerSort = LogicalSort.create(
+            scan,
+            RelCollations.of(new RelFieldCollation(1, RelFieldCollation.Direction.ASCENDING)),
+            null,
+            null
+        );
+
+        // Project: name ($0), score ($1) — identity here but exercises the OpenSearchProjectRule
+        // path (single-input passthrough) between the inner Sort and the outer LIMIT.
+        RelNode project = LogicalProject.create(
+            innerSort,
+            List.of(),
+            List.of(rexBuilder.makeInputRef(innerSort, 0), rexBuilder.makeInputRef(innerSort, 1)),
+            List.of("name", "score")
+        );
+
+        // Outer LIMIT (fetch=3, no collation).
+        RelNode limit = LogicalSort.create(
+            project,
+            RelCollations.EMPTY,
+            null,
+            rexBuilder.makeLiteral(3, typeFactory.createSqlType(SqlTypeName.INTEGER), true)
+        );
+
+        RelNode result = runPlanner(limit, buildContext("parquet", 3, fields));
+        assertPlanShape(
+            """
+                OpenSearchSort(fetch=[3], viableBackends=[[mock-parquet]])
+                  OpenSearchProject(name=[$0], score=[$1], viableBackends=[[mock-parquet]])
+                    OpenSearchSort(sort0=[$1], dir0=[ASC], viableBackends=[[mock-parquet]])
+                      OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
+                        OpenSearchTableScan(table=[[test_index]], viableBackends=[[mock-parquet]])
+                """,
+            result
+        );
+    }
+
+    /**
      * PPL: {@code source=t}
      * Baseline: a bare scan at root. Volcano's root SINGLETON request wraps the RANDOM scan in one ER.
      */

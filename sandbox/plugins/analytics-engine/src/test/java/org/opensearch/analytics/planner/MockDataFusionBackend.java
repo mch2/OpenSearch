@@ -17,6 +17,8 @@ import org.opensearch.analytics.spi.ExchangeSinkProvider;
 import org.opensearch.analytics.spi.FieldType;
 import org.opensearch.analytics.spi.FilterCapability;
 import org.opensearch.analytics.spi.JoinCapability;
+import org.opensearch.analytics.spi.WindowCapability;
+import org.opensearch.analytics.spi.WindowFunction;
 import org.opensearch.analytics.spi.ScalarFunction;
 import org.opensearch.analytics.spi.ScanCapability;
 import org.opensearch.index.engine.dataformat.ReaderManagerConfig;
@@ -127,6 +129,25 @@ public class MockDataFusionBackend extends MockBackend implements SearchBackEndP
                     JoinCapability.JoinKind.SEMI,
                     JoinCapability.JoinKind.ANTI,
                     JoinCapability.JoinKind.CROSS
+                ),
+                Set.of(PARQUET_DATA_FORMAT)
+            )
+        );
+    }
+
+    @Override
+    protected Set<WindowCapability> windowCapabilities() {
+        return Set.of(
+            new WindowCapability(
+                Set.of(
+                    WindowFunction.ROW_NUMBER,
+                    WindowFunction.RANK,
+                    WindowFunction.DENSE_RANK,
+                    WindowFunction.SUM,
+                    WindowFunction.AVG,
+                    WindowFunction.COUNT,
+                    WindowFunction.MIN,
+                    WindowFunction.MAX
                 ),
                 Set.of(PARQUET_DATA_FORMAT)
             )

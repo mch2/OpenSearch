@@ -32,9 +32,11 @@ public class SortCommandIT extends AnalyticsRestTestCase {
 
     private static boolean dataProvisioned = false;
 
+    /** Provision calcs with 3 shards so sort / limit / project pipelines exercise the
+     *  multi-shard planner paths (exchange insertion, sort split, project passthrough). */
     private void ensureDataProvisioned() throws IOException {
         if (dataProvisioned == false) {
-            DatasetProvisioner.provision(client(), DATASET);
+            DatasetProvisioner.provision(client(), DATASET, 3);
             dataProvisioned = true;
         }
     }
@@ -106,6 +108,34 @@ public class SortCommandIT extends AnalyticsRestTestCase {
                 ((Number) v).doubleValue(),
                 1e-9
             );
+        }
+    }
+
+    /**
+     * Sort → Project → head pipeline. Exercises the exact shape flagged as a planner
+     * landmine in {@code OpenSearchDistributionTraitDef.convert()}: a collated Sort
+     * under a LIMIT with a narrowing Project in between, over a multi-shard-ish scan.
+     * The planner has to place an ER under the collated Sort (concat gather + global
+     * sort) and leave the outer LIMIT without an additional ER — if Volcano ever
+     * explores a SINGLETON→RANDOM scatter path in the resulting RelSets, convert()
+     * throws "HASH/RANGE exchange not yet implemented [toTrait=RANDOM]".
+     *
+     * <p>Asserts top-3 int0 values from calcs: [null, null, null] (6 nulls total,
+     * default ASC nulls-first).
+     */
+    public void testSortThenProjectThenHead() throws IOException {
+        Map<String, Object> response = executePpl(
+            "source=" + DATASET.indexName + " | sort int0 | fields str0, int0 | head 3"
+        );
+        @SuppressWarnings("unchecked")
+        List<List<Object>> rows = (List<List<Object>>) response.get("rows");
+        assertNotNull("Response missing 'rows'", rows);
+        assertEquals("head 3 returns 3 rows", 3, rows.size());
+        // ASC nulls-first over calcs int0 ([1, null×3, 7, 3, 8, null×2, 8, 4, 10,
+        // null, 4, 11, 4, 8]): top 3 are all null.
+        for (int i = 0; i < 3; i++) {
+            assertEquals("Row " + i + " has 2 columns", 2, rows.get(i).size());
+            assertNull("Top-3 nulls-first: int0 at row " + i + " should be null", rows.get(i).get(1));
         }
     }
 
