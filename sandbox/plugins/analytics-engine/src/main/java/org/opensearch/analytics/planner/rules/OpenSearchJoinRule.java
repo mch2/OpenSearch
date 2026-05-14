@@ -98,25 +98,17 @@ public class OpenSearchJoinRule extends RelOptRule {
         if (viableBackends.isEmpty()) {
             throw new IllegalStateException("No backend supports join kind [" + requiredKind + "] among viable backends");
         }
-        // Wrap both inputs in an OpenSearchExchangeReducer at HEP time so DAGBuilder cuts
-        // a separate child stage per side — same pattern as OpenSearchUnionRule. If the
-        // input already delivers SINGLETON (e.g. a FINAL aggregate's output), the
-        // ConverterImpl-based ER dedupes into the same RelSet subset.
+        // HEP marking only — no ER insertion. OpenSearchJoin's cost gate (SINGLETON input
+        // required) drives Volcano to insert ERs on each input via TraitDef.convert.
         OpenSearchDistributionTraitDef distTraitDef = context.getDistributionTraitDef();
-        List<String> reduceViable = CapabilityResolutionUtils.filterByReduceCapability(context.getCapabilityRegistry(), viableBackends);
         RelNode leftUnwrapped = RelNodeUtils.unwrapHep(join.getLeft());
         RelNode rightUnwrapped = RelNodeUtils.unwrapHep(join.getRight());
-        RelTraitSet leftSingletonTraits = leftUnwrapped.getTraitSet().replace(distTraitDef.singleton());
-        RelTraitSet rightSingletonTraits = rightUnwrapped.getTraitSet().replace(distTraitDef.singleton());
-        RelNode gatheredLeft = new OpenSearchExchangeReducer(join.getCluster(), leftSingletonTraits, leftUnwrapped, reduceViable);
-        RelNode gatheredRight = new OpenSearchExchangeReducer(join.getCluster(), rightSingletonTraits, rightUnwrapped, reduceViable);
-
-        RelTraitSet joinTraits = gatheredLeft.getTraitSet().replace(distTraitDef.singleton());
+        RelTraitSet joinTraits = leftUnwrapped.getTraitSet().replace(distTraitDef.coordSingleton());
         OpenSearchJoin osJoin = new OpenSearchJoin(
             join.getCluster(),
             joinTraits,
-            gatheredLeft,
-            gatheredRight,
+            leftUnwrapped,
+            rightUnwrapped,
             join.getCondition(),
             join.getJoinType(),
             viableBackends,

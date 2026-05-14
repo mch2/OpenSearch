@@ -259,7 +259,7 @@ public class PlanForkerTests extends BasePlannerRulesTests {
         );
         LogicalFilter filter = LogicalFilter.create(stubScan(mockTable("test_index", "status", "size")), constant);
         RelNode result = runPlanner(filter, context);
-        // ReduceExpressionsRule folds 1=1 → TRUE, then filter on TRUE is removed
+        // ReduceExpressionsRule folds 1=1 → TRUE, then filter on TRUE is removed.
         assertFalse("filter on constant true must be eliminated", result instanceof OpenSearchFilter);
         assertTrue("root must be the scan after filter elimination", result instanceof OpenSearchTableScan);
     }

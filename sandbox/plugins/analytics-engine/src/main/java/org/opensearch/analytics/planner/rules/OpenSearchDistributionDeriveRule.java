@@ -40,6 +40,48 @@ import java.util.List;
  * Aggregate (needs OpenSearchAggregateSplitRule's structural split), and PARTIAL
  * Aggregate (shard-side by contract).
  *
+ * <h2>Why this rule exists at all</h2>
+ *
+ * <p>Volcano is running in <b>bottom-up</b> mode. In bottom-up mode it does not
+ * auto-propagate trait demands from a parent down to a child's RelSet — a parent only
+ * sees the variants its child has already produced.
+ *
+ * <p>Concrete failure without this rule:
+ * <pre>
+ * Marked tree (multi-shard, all SHARD+RANDOM after HEP):
+ *   Project(RANDOM)
+ *     Aggregate(SINGLE, RANDOM)
+ *       Scan(RANDOM)
+ *
+ * After AggregateSplitRule fires the Aggregate's RelSet contains:
+ *   [SHARD+RANDOM]            : SINGLE
+ *   [COORDINATOR+SINGLETON]   : FINAL ← ER ← PARTIAL ← Scan
+ *
+ * Root demands SINGLETON. Volcano walks down looking for a SINGLETON subset.
+ * Project's RelSet only contains the (RANDOM) variant — no SINGLETON Project exists,
+ * so Volcano falls back to its converter machinery and plants an ER ABOVE the Project:
+ *   ER ← Project(RANDOM) ← Aggregate(SINGLE, RANDOM) ← Scan
+ * Raw rows ship to coord, the FINAL-SINGLETON variant AggregateSplit built is unreached.
+ * </pre>
+ *
+ * <p>This rule fixes that by manufacturing a SINGLETON-trait copy of each spine
+ * operator. The Project's RelSet now contains a {@code Project(SINGLETON)} variant
+ * which demands SINGLETON from its child, hitting the {@code FINAL-SINGLETON} subset
+ * directly. The ER stays <i>inside</i> the aggregate split (between PARTIAL and FINAL)
+ * where only pre-aggregated rows transit.
+ *
+ * <p>Split rules don't cover this: each split only adds variants for its own operator
+ * and doesn't know about its parents. Trait propagation up the spine has to come from
+ * somewhere else.
+ *
+ * <h2>The fix that would let us delete this rule</h2>
+ *
+ * <p>Switch Volcano to top-down mode ({@code setTopDownOpt}) and implement
+ * {@code PhysicalNode.passThrough()} on each operator. Calcite would then auto-generate
+ * the SINGLETON variants of parents during planning, and this rule + the marker rules +
+ * AggregateSplit-as-Volcano-rule would collapse into a much smaller set. Tracked as a
+ * future refactor — out of scope for the CBO-only ER insertion work.
+ *
  * @opensearch.internal
  */
 public class OpenSearchDistributionDeriveRule extends RelOptRule {
@@ -72,7 +114,7 @@ public class OpenSearchDistributionDeriveRule extends RelOptRule {
     @Override
     public void onMatch(RelOptRuleCall call) {
         RelNode rel = call.rel(0);
-        RelTraitSet singletonTraits = rel.getTraitSet().replace(distTraitDef.singletonAnyOrigin());
+        RelTraitSet singletonTraits = rel.getTraitSet().replace(distTraitDef.coordSingleton());
         RelNode singletonInput = convert(rel.getInputs().getFirst(), singletonTraits);
         List<RelNode> newInputs = new ArrayList<>(rel.getInputs().size());
         newInputs.add(singletonInput);

@@ -49,7 +49,7 @@ public class OpenSearchSortSplitRule extends RelOptRule {
     @Override
     public void onMatch(RelOptRuleCall call) {
         OpenSearchSort sort = call.rel(0);
-        RelTraitSet singletonTraits = sort.getTraitSet().replace(distTraitDef.singleton());
+        RelTraitSet singletonTraits = sort.getTraitSet().replace(distTraitDef.coordSingleton());
         RelNode gatheredInput = convert(sort.getInput(), singletonTraits);
         call.transformTo(sort.copy(singletonTraits, gatheredInput, sort.getCollation(), sort.offset, sort.fetch));
     }

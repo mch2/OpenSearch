@@ -109,16 +109,10 @@ public class OpenSearchUnionRule extends RelOptRule {
             throw new IllegalStateException("No backend supports UNION among viable backends after intersecting inputs");
         }
 
+        // HEP marking only — no ER insertion. OpenSearchUnion's cost gate (all inputs
+        // must be SINGLETON) drives Volcano to insert ERs on each arm via TraitDef.convert.
         OpenSearchDistributionTraitDef distTraitDef = context.getDistributionTraitDef();
-        List<String> reduceViable = CapabilityResolutionUtils.filterByReduceCapability(context.getCapabilityRegistry(), viableBackends);
-
-        List<RelNode> gatheredInputs = new ArrayList<>(markedInputs.size());
-        for (RelNode markedInput : markedInputs) {
-            RelTraitSet singletonTraits = markedInput.getTraitSet().replace(distTraitDef.singleton());
-            gatheredInputs.add(new OpenSearchExchangeReducer(union.getCluster(), singletonTraits, markedInput, reduceViable));
-        }
-
-        RelTraitSet unionTraits = gatheredInputs.getFirst().getTraitSet().replace(distTraitDef.singleton());
-        call.transformTo(new OpenSearchUnion(union.getCluster(), unionTraits, gatheredInputs, union.all, viableBackends));
+        RelTraitSet unionTraits = markedInputs.getFirst().getTraitSet().replace(distTraitDef.coordSingleton());
+        call.transformTo(new OpenSearchUnion(union.getCluster(), unionTraits, markedInputs, union.all, viableBackends));
     }
 }

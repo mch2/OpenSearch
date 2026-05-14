@@ -20,44 +20,69 @@ import java.util.Objects;
 /**
  * Distribution trait for OpenSearch Analytics operators.
  *
- * <p>Carries Calcite's {@link Type} (SINGLETON / RANDOM / HASH / ANY), optional
- * HASH keys, and — for SINGLETON only — an {@link Origin} distinguishing "data
- * already at one node because of storage layout" (SCAN, single-shard scan) from
- * "data gathered onto one node by a runtime exchange" (GATHERED, ER / FINAL
- * aggregate output).
+ * <p>Carries three pieces of information:
+ * <ul>
+ *   <li>{@link Locality} — where the rows physically live. {@code SHARD} means data sits
+ *       at its storage location (TableScan output, shard-local Filter/Project/PARTIAL agg).
+ *       {@code COORDINATOR} means data has been gathered to the coord (ER output, FINAL
+ *       aggregate output, Join/Union output).</li>
+ *   <li>{@link Type} — Calcite's partitioning model (SINGLETON / RANDOM / HASH / ANY).</li>
+ *   <li>{@code tableId} — for {@code SHARD} distributions, identifies the source table so
+ *       the planner can reason about when two SHARD streams belong to the same physical
+ *       layout (future: co-located joins). Null on COORDINATOR distributions.</li>
+ * </ul>
  *
- * <p>The origin lets ConverterImpl-based ExchangeReducer dedupe correctly: an ER
- * over a GATHERED input is redundant (two ERs in a row), but an ER over a SCAN
- * input is a real stage boundary and must survive.
+ * <p><b>Satisfies semantics.</b> {@code SINGLETON} with the same locality satisfies; a
+ * SINGLETON demand with null locality accepts either (used by callers that don't care
+ * whether data is shard-local or gathered). Non-SINGLETON types fall back to plain
+ * type+keys equality.
  *
  * @opensearch.internal
  */
 @SuppressWarnings("unchecked")
 public class OpenSearchDistribution implements RelDistribution {
 
-    /**
-     * For SINGLETON only. SCAN = data happens to live on one node (single-shard scan).
-     * GATHERED = runtime exchange produced this SINGLETON. Null for non-SINGLETON types.
-     */
-    public enum Origin {
-        SCAN,
-        GATHERED
+    /** Where the rows physically live. */
+    public enum Locality {
+        /** Data sits at shard storage nodes. */
+        SHARD,
+        /** Data has been gathered to the coordinator. */
+        COORDINATOR
     }
 
     private final OpenSearchDistributionTraitDef traitDef;
+    private final Locality locality;
     private final Type type;
     private final List<Integer> keys;
-    private final Origin origin;
+    private final Integer tableId;
+    private final Integer shardCount;
 
-    OpenSearchDistribution(OpenSearchDistributionTraitDef traitDef, Type type, List<Integer> keys, Origin origin) {
+    OpenSearchDistribution(
+        OpenSearchDistributionTraitDef traitDef,
+        Locality locality,
+        Type type,
+        List<Integer> keys,
+        Integer tableId,
+        Integer shardCount
+    ) {
         this.traitDef = traitDef;
+        this.locality = locality;
         this.type = type;
         this.keys = keys;
-        this.origin = origin;
+        this.tableId = tableId;
+        this.shardCount = shardCount;
     }
 
-    public Origin getOrigin() {
-        return origin;
+    public Locality getLocality() {
+        return locality;
+    }
+
+    public Integer getTableId() {
+        return tableId;
+    }
+
+    public Integer getShardCount() {
+        return shardCount;
     }
 
     @Override
@@ -86,13 +111,13 @@ public class OpenSearchDistribution implements RelDistribution {
         if (this.type != other.type || !this.keys.equals(other.keys)) {
             return false;
         }
-        // SINGLETON origin: demand with null origin accepts any origin (used by root demand
-        // and DeriveRule — "get me onto one node, don't care how"). Demand with a specific
-        // origin requires exact match — so SINGLETON(GATHERED) demand by a HEP-wrapped ER
-        // does NOT dedupe into a SINGLETON(SCAN) subset, keeping the ER over single-shard
-        // scans as a real stage boundary.
-        if (this.type == Type.SINGLETON && other.origin != null) {
-            return this.origin == other.origin;
+        if (this.type == Type.SINGLETON) {
+            // SINGLETON demand with null locality accepts either SHARD or COORDINATOR.
+            // Otherwise the locality must match exactly — this is what prevents an ER over a
+            // SHARD scan from dedup-ing into a COORDINATOR-producing sibling subset, and keeps
+            // the two classes of "on one node" distinguishable during plan search.
+            if (other.locality == null) return true;
+            return this.locality == other.locality;
         }
         return true;
     }
@@ -113,11 +138,11 @@ public class OpenSearchDistribution implements RelDistribution {
         for (int key : keys) {
             int target = mapping.getTargetOpt(key);
             if (target < 0) {
-                return new OpenSearchDistribution(traitDef, Type.ANY, List.of(), null);
+                return new OpenSearchDistribution(traitDef, null, Type.ANY, List.of(), null, null);
             }
             newKeys.add(target);
         }
-        return new OpenSearchDistribution(traitDef, Type.HASH_DISTRIBUTED, newKeys, null);
+        return new OpenSearchDistribution(traitDef, locality, Type.HASH_DISTRIBUTED, newKeys, tableId, shardCount);
     }
 
     @Override
@@ -137,22 +162,39 @@ public class OpenSearchDistribution implements RelDistribution {
     public boolean equals(Object obj) {
         if (this == obj) return true;
         if (!(obj instanceof OpenSearchDistribution other)) return false;
-        return type == other.type && Objects.equals(keys, other.keys) && origin == other.origin;
+        return type == other.type
+            && locality == other.locality
+            && Objects.equals(keys, other.keys)
+            && Objects.equals(tableId, other.tableId)
+            && Objects.equals(shardCount, other.shardCount);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(type, keys, origin);
+        return Objects.hash(type, locality, keys, tableId, shardCount);
     }
 
     @Override
     public String toString() {
-        return switch (type) {
-            case SINGLETON -> origin == null ? "SINGLETON" : "SINGLETON(" + origin + ")";
+        String base = switch (type) {
+            case SINGLETON -> "SINGLETON";
             case RANDOM_DISTRIBUTED -> "RANDOM";
             case HASH_DISTRIBUTED -> "HASH" + keys;
             case ANY -> "ANY";
             default -> type.shortName;
         };
+        if (type == Type.ANY) return base;
+        StringBuilder sb = new StringBuilder(base);
+        if (locality != null) {
+            sb.append('(').append(locality);
+            if (tableId != null) {
+                sb.append(":t=").append(tableId);
+            }
+            if (shardCount != null) {
+                sb.append(":s=").append(shardCount);
+            }
+            sb.append(')');
+        }
+        return sb.toString();
     }
 }

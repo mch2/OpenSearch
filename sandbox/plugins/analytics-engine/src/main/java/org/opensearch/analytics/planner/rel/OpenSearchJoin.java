@@ -88,14 +88,57 @@ public class OpenSearchJoin extends Join implements OpenSearchRelNode {
         return new OpenSearchJoin(getCluster(), traitSet, left, right, conditionExpr, joinType, viableBackends, strategy);
     }
 
+    /**
+     * Cost gate. The join's locality must match its inputs' locality:
+     * <ul>
+     *   <li>If the join is at {@code COORDINATOR+SINGLETON}, every input must also be
+     *       {@code COORDINATOR+SINGLETON}. {@code OpenSearchJoinSplitRule} drives this
+     *       by calling {@code convert(input, COORDINATOR+SINGLETON)} which inserts an ER
+     *       wherever the input doesn't already deliver that.</li>
+     *   <li>If the join is at {@code SHARD+SINGLETON} (co-location fast path), every input
+     *       must also be {@code SHARD+SINGLETON} with the same {@code tableId} and
+     *       {@code shardCount=1}. Anything else is infinite cost.</li>
+     * </ul>
+     */
     @Override
     public org.apache.calcite.plan.RelOptCost computeSelfCost(
         org.apache.calcite.plan.RelOptPlanner planner,
         org.apache.calcite.rel.metadata.RelMetadataQuery mq
     ) {
-        // No cost gate — OpenSearchJoinRule wraps inputs in ERs at HEP time, so by the
-        // time Volcano sees the join its inputs are already EXECUTION(SINGLETON).
+        OpenSearchDistribution selfDist = distributionOf(this);
+        if (selfDist == null || selfDist.getType() != org.apache.calcite.rel.RelDistribution.Type.SINGLETON) {
+            return planner.getCostFactory().makeInfiniteCost();
+        }
+        for (RelNode input : getInputs()) {
+            OpenSearchDistribution inputDist = distributionOf(input);
+            if (inputDist == null) continue;
+            if (inputDist.getType() == org.apache.calcite.rel.RelDistribution.Type.ANY) continue;
+            if (inputDist.getType() != org.apache.calcite.rel.RelDistribution.Type.SINGLETON) {
+                return planner.getCostFactory().makeInfiniteCost();
+            }
+            // Locality must match the join's own locality.
+            if (selfDist.getLocality() != inputDist.getLocality()) {
+                return planner.getCostFactory().makeInfiniteCost();
+            }
+            // SHARD case additionally requires the input to share the join's tableId and shardCount=1.
+            if (selfDist.getLocality() == OpenSearchDistribution.Locality.SHARD) {
+                if (selfDist.getTableId() == null || !selfDist.getTableId().equals(inputDist.getTableId())) {
+                    return planner.getCostFactory().makeInfiniteCost();
+                }
+                if (!Integer.valueOf(1).equals(inputDist.getShardCount())) {
+                    return planner.getCostFactory().makeInfiniteCost();
+                }
+            }
+        }
         return planner.getCostFactory().makeTinyCost();
+    }
+
+    private static OpenSearchDistribution distributionOf(RelNode rel) {
+        for (int i = 0; i < rel.getTraitSet().size(); i++) {
+            org.apache.calcite.plan.RelTrait trait = rel.getTraitSet().getTrait(i);
+            if (trait instanceof OpenSearchDistribution dist) return dist;
+        }
+        return null;
     }
 
     @Override

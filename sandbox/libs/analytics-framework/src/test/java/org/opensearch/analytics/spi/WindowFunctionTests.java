@@ -17,16 +17,6 @@ import org.opensearch.test.OpenSearchTestCase;
  */
 public class WindowFunctionTests extends OpenSearchTestCase {
 
-    public void testRowNumberMapsToRowNumberKind() {
-        assertEquals(SqlKind.ROW_NUMBER, WindowFunction.ROW_NUMBER.getSqlKind());
-        assertEquals(WindowFunction.ROW_NUMBER, WindowFunction.fromSqlKind(SqlKind.ROW_NUMBER));
-    }
-
-    public void testRankKinds() {
-        assertEquals(WindowFunction.RANK, WindowFunction.fromSqlKind(SqlKind.RANK));
-        assertEquals(WindowFunction.DENSE_RANK, WindowFunction.fromSqlKind(SqlKind.DENSE_RANK));
-    }
-
     public void testAggregateOverKinds() {
         assertEquals(WindowFunction.SUM, WindowFunction.fromSqlKind(SqlKind.SUM));
         assertEquals(WindowFunction.COUNT, WindowFunction.fromSqlKind(SqlKind.COUNT));
@@ -36,6 +26,11 @@ public class WindowFunctionTests extends OpenSearchTestCase {
     }
 
     public void testUnsupportedKindReturnsNull() {
+        // Ranking functions are not on this route yet — streamstats (which lowers to them)
+        // isn't wired through analytics-engine. Verifying the enum doesn't claim them.
+        assertNull(WindowFunction.fromSqlKind(SqlKind.ROW_NUMBER));
+        assertNull(WindowFunction.fromSqlKind(SqlKind.RANK));
+        assertNull(WindowFunction.fromSqlKind(SqlKind.DENSE_RANK));
         assertNull(WindowFunction.fromSqlKind(SqlKind.LAG));
         assertNull(WindowFunction.fromSqlKind(SqlKind.LEAD));
         assertNull(WindowFunction.fromSqlKind(SqlKind.NTILE));

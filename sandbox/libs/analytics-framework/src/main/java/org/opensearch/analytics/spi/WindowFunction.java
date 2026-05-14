@@ -11,16 +11,15 @@ package org.opensearch.analytics.spi;
 import org.apache.calcite.sql.SqlKind;
 
 /**
- * Window functions a backend may support. Covers ranking functions (per-row, derived
- * from the OVER clause's ordering) and aggregate-as-window (SUM/AVG/COUNT/MIN/MAX
- * over a frame). PARTITION BY is not currently supported by the planner.
+ * Window functions a backend may support. Covers aggregate-as-window
+ * (SUM/AVG/COUNT/MIN/MAX over a frame) — these are what PPL {@code eventstats} lowers
+ * to. PARTITION BY is not currently supported by the planner. Ranking functions
+ * (ROW_NUMBER / RANK / DENSE_RANK) are not yet reachable on this route since
+ * {@code streamstats} (which lowers to them) isn't wired here.
  *
  * @opensearch.internal
  */
 public enum WindowFunction {
-    ROW_NUMBER(SqlKind.ROW_NUMBER),
-    RANK(SqlKind.RANK),
-    DENSE_RANK(SqlKind.DENSE_RANK),
     SUM(SqlKind.SUM),
     AVG(SqlKind.AVG),
     COUNT(SqlKind.COUNT),

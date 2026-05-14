@@ -9,7 +9,6 @@
 package org.opensearch.analytics.planner;
 
 import org.apache.calcite.plan.RelOptTable;
-import org.apache.calcite.plan.RelOptUtil;
 import org.apache.calcite.rel.RelCollations;
 import org.apache.calcite.rel.RelFieldCollation;
 import org.apache.calcite.rel.RelNode;
@@ -22,30 +21,22 @@ import org.apache.calcite.rel.logical.LogicalUnion;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.calcite.sql.type.SqlTypeName;
-import org.opensearch.analytics.planner.rel.AggregateMode;
-import org.opensearch.analytics.planner.rel.OpenSearchAggregate;
-import org.opensearch.analytics.planner.rel.OpenSearchExchangeReducer;
-import org.opensearch.analytics.planner.rel.OpenSearchJoin;
-import org.opensearch.analytics.planner.rel.OpenSearchProject;
-import org.opensearch.analytics.planner.rel.OpenSearchSort;
-import org.opensearch.analytics.planner.rel.OpenSearchTableScan;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
 /**
- * End-to-end plan-shape assertions on the After-CBO RelNode produced by
- * {@link PlannerImpl#markAndOptimize}. These cases construct PPL-shaped
- * Calcite trees (skipping the PPL frontend) and assert the planner emits
- * a plan whose structure won't trip downstream backends — DataFusion
- * specifically — when the substrait is sent to them.
+ * Combinations file. Per-operator plan shapes live in dedicated files:
+ * {@link ScanPlanShapeTests}, {@link FilterPlanShapeTests}, {@link ProjectPlanShapeTests},
+ * {@link SortPlanShapeTests}, {@link AggregatePlanShapeTests}, {@link WindowPlanShapeTests},
+ * {@link JoinPlanShapeTests}, {@link UnionPlanShapeTests}.
+ *
+ * <p>This file covers <em>multi-operator pipelines</em> — the interesting interactions
+ * (filter+stats+sort, join over aggregates, window over join/union, etc.) where trait
+ * propagation across operator boundaries matters most.
  */
-public class PlanShapeTests extends BasePlannerRulesTests {
-
-    private PlannerContext multiShardContext() {
-        return buildContext("parquet", 3, intFields());
-    }
+public class PlanShapeTests extends PlanShapeTestBase {
 
     /**
      * PPL: {@code | stats count() as cnt by k | sort cnt | head 2 | fields k, cnt}
@@ -124,67 +115,6 @@ public class PlanShapeTests extends BasePlannerRulesTests {
     }
 
     /**
-     * Multi-shard {@code stats by k} must split into PARTIAL+ExchangeReducer+FINAL. The
-     * ExchangeReducer must be SINGLETON (single coordinator-side gather) and sit between
-     * the two Aggregate phases.
-     */
-    public void testStatsByKey_multiShardSplits() {
-        AggregateCall countCall = countStarCall();
-        RelNode input = makeAggregate(stubScan(mockTable("test_index", "status", "size")), countCall);
-        RelNode result = runPlanner(input, multiShardContext());
-        assertPlanShape(
-            """
-                OpenSearchAggregate(group=[{0}], cnt=[COUNT(AGG_CALL_ANNOTATION(id=0, viableBackends=[mock-parquet]))], mode=[FINAL], viableBackends=[[mock-parquet]])
-                  OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
-                    OpenSearchAggregate(group=[{0}], cnt=[COUNT(AGG_CALL_ANNOTATION(id=0, viableBackends=[mock-parquet]))], mode=[PARTIAL], viableBackends=[[mock-parquet]])
-                      OpenSearchTableScan(table=[[test_index]], viableBackends=[[mock-parquet]])
-                """,
-            result
-        );
-    }
-
-    /**
-     * Two multi-shard scans joined on an equi-condition. The planner must wrap each join
-     * input in exactly one {@link OpenSearchExchangeReducer} so both sides gather to the
-     * coordinator before the hash join runs. The join itself is stamped SINGLETON by
-     * {@link org.opensearch.analytics.planner.rules.OpenSearchJoinRule} wraps each input
-     * in an ER at HEP marking time, so no extra top-level gather is needed.
-     *
-     * <pre>
-     * OpenSearchJoin(INNER, $0 = $2)           ← SINGLETON
-     *   ├── OpenSearchExchangeReducer
-     *   │     └── OpenSearchTableScan(test_index)
-     *   └── OpenSearchExchangeReducer
-     *         └── OpenSearchTableScan(test_index)
-     * </pre>
-     */
-    public void testJoinWithoutAggregate_erPerSideDirectlyAboveScans() {
-        PlannerContext context = multiShardContext();
-        RelOptTable table = mockTable("test_index", "status", "size");
-        RelNode left = stubScan(table);
-        RelNode right = stubScan(table);
-
-        RexNode condition = rexBuilder.makeCall(
-            SqlStdOperatorTable.EQUALS,
-            rexBuilder.makeInputRef(typeFactory.createSqlType(SqlTypeName.INTEGER), 0),
-            rexBuilder.makeInputRef(typeFactory.createSqlType(SqlTypeName.INTEGER), 2)
-        );
-        RelNode join = LogicalJoin.create(left, right, List.of(), condition, Set.of(), JoinRelType.INNER);
-
-        RelNode result = runPlanner(join, context);
-        assertPlanShape(
-            """
-                OpenSearchJoin(condition=[=($0, $2)], joinType=[inner], viableBackends=[[mock-parquet]], strategy=[CoordinatorHashJoin])
-                  OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
-                    OpenSearchTableScan(table=[[test_index]], viableBackends=[[mock-parquet]])
-                  OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
-                    OpenSearchTableScan(table=[[test_index]], viableBackends=[[mock-parquet]])
-                """,
-            result
-        );
-    }
-
-    /**
      * Each side of the join pre-aggregates with {@code count()} before the join. The planner
      * splits each Aggregate into PARTIAL + FINAL with a gather between them. The join's
      * {@code convert(input, SINGLETON)} is a no-op because each FINAL already delivers
@@ -236,47 +166,6 @@ public class PlanShapeTests extends BasePlannerRulesTests {
                 """,
             result
         );
-    }
-
-    /**
-     * Asserts Project(COALESCE) → Aggregate(FINAL) → ER → Aggregate(PARTIAL) → TableScan
-     * for a COUNT-containing branch. The Project wrap exists because SUM(partial_count)
-     * returns nullable BIGINT and the original COUNT is non-nullable; the wrap
-     * re-establishes the original row type.
-     */
-    private static void assertCountAggregateChain(RelNode branchRoot) {
-        assertTrue(
-            "branch root must be OpenSearchProject (COALESCE wrap), got " + branchRoot.getClass().getSimpleName(),
-            branchRoot instanceof OpenSearchProject
-        );
-        RelNode beneathProject = RelNodeUtils.unwrapHep(((OpenSearchProject) branchRoot).getInput());
-        assertTrue(
-            "Project wrap's child must be OpenSearchAggregate(FINAL), got " + beneathProject.getClass().getSimpleName(),
-            beneathProject instanceof OpenSearchAggregate
-        );
-        OpenSearchAggregate finalAgg = (OpenSearchAggregate) beneathProject;
-        assertEquals("wrapped aggregate must be FINAL", AggregateMode.FINAL, finalAgg.getMode());
-
-        RelNode beneathFinal = RelNodeUtils.unwrapHep(finalAgg.getInput());
-        assertTrue(
-            "FINAL aggregate's child must be OpenSearchExchangeReducer, got " + beneathFinal.getClass().getSimpleName(),
-            beneathFinal instanceof OpenSearchExchangeReducer
-        );
-        RelNode beneathEr = RelNodeUtils.unwrapHep(((OpenSearchExchangeReducer) beneathFinal).getInput());
-        assertTrue(
-            "ER's child must be OpenSearchAggregate(PARTIAL), got " + beneathEr.getClass().getSimpleName(),
-            beneathEr instanceof OpenSearchAggregate
-        );
-        assertEquals("beneath-ER aggregate must be PARTIAL", AggregateMode.PARTIAL, ((OpenSearchAggregate) beneathEr).getMode());
-        RelNode beneathPartial = RelNodeUtils.unwrapHep(beneathEr.getInputs().get(0));
-        assertTrue(
-            "PARTIAL aggregate's child must be OpenSearchTableScan, got " + beneathPartial.getClass().getSimpleName(),
-            beneathPartial instanceof OpenSearchTableScan
-        );
-    }
-
-    private PlannerContext singleShardContext() {
-        return buildContext("parquet", 1, intFields());
     }
 
     // ── builders ───────────────────────────────────────────────────────────────
@@ -353,45 +242,10 @@ public class PlanShapeTests extends BasePlannerRulesTests {
         );
     }
 
-    // ── IT-shape coverage: aggregate × join × sort compositions ──────────────
-    //
-    // Each shape has single-shard and multi-shard variants.
-    //
-    // Single-shard scans declare SOURCE(SINGLETON) and satisfy the root's
-    // RESULT(SINGLETON) demand directly — no ER above. Multi-shard scans declare
-    // SOURCE(RANDOM); split rules drive ER insertion below operators that require
-    // SINGLETON input (Aggregate→FINAL, collated Sort, Join inputs).
+    // ── Multi-operator pipelines below ────────────────────────────────────
 
-    /**
-     * PPL: {@code source=t | head 10} (pure scan with LIMIT, no stats).
-     * Pure LIMIT Sort (no collation) is exempt from the SINGLETON requirement (see
-     * {@link OpenSearchSort#computeSelfCost}). The Sort sits above a partition-local scan
-     * and the ER appears above the Sort, not below it (fetch-then-gather).
-     * Multi-shard: one ER above the Sort. Single-shard: no ERs.
-     */
-    public void testLimitAfterScan_multiShard_noForceSingleton() {
-        RelNode plan = buildLimitAfterScan();
-        RelNode result = runPlanner(plan, multiShardContext());
-        assertPlanShape(
-            """
-                OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
-                  OpenSearchSort(fetch=[10], viableBackends=[[mock-parquet]])
-                    OpenSearchTableScan(table=[[test_index]], viableBackends=[[mock-parquet]])
-                """,
-            result
-        );
-    }
-
-    public void testLimitAfterScan_singleShard_noTopER() {
-        RelNode plan = buildLimitAfterScan();
-        RelNode result = runPlanner(plan, singleShardContext());
-        // Single-shard: scan is SOURCE(SINGLETON), which satisfies root's RESULT(SINGLETON)
-        // demand without a gather — plan collapses to a single stage, no top ER.
-        assertPlanShape("""
-            OpenSearchSort(fetch=[10], viableBackends=[[mock-parquet]])
-              OpenSearchTableScan(table=[[test_index]], viableBackends=[[mock-parquet]])
-            """, result);
-    }
+    // testLimitAfterScan_multiShard_noForceSingleton + _singleShard_noTopER removed —
+    // covered by SortPlanShapeTests.testPureLimit_2shard / _1shard.
 
     /**
      * PPL: {@code source=t | sort score | fields name, score | head 3}
@@ -406,8 +260,8 @@ public class PlanShapeTests extends BasePlannerRulesTests {
         Map<String, Map<String, Object>> fields = Map.of("name", Map.of("type", "keyword"), "score", Map.of("type", "integer"));
         RelOptTable table = mockTable(
             "test_index",
-            new String[] { "name", "score" },
-            new SqlTypeName[] { SqlTypeName.VARCHAR, SqlTypeName.INTEGER }
+            new String[]{"name", "score"},
+            new SqlTypeName[]{SqlTypeName.VARCHAR, SqlTypeName.INTEGER}
         );
         RelNode scan = stubScan(table);
 
@@ -449,44 +303,8 @@ public class PlanShapeTests extends BasePlannerRulesTests {
         );
     }
 
-    /**
-     * PPL: {@code source=t}
-     * Baseline: a bare scan at root. Volcano's root SINGLETON request wraps the RANDOM scan in one ER.
-     */
-    public void testPureScan_multiShard_rootER() {
-        RelNode plan = stubScan(mockTable("test_index", "status", "size"));
-        RelNode result = runPlanner(plan, multiShardContext());
-        assertPlanShape(
-            """
-                OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
-                  OpenSearchTableScan(table=[[test_index]], viableBackends=[[mock-parquet]])
-                """,
-            result
-        );
-    }
-
-    public void testPureScan_singleShard_noTopER() {
-        RelNode plan = stubScan(mockTable("test_index", "status", "size"));
-        RelNode result = runPlanner(plan, singleShardContext());
-        // Single-shard bare scan: SOURCE(SINGLETON) already satisfies root's RESULT(SINGLETON)
-        // demand, so no ER is inserted — plan is just the scan.
-        assertPlanShape("""
-            OpenSearchTableScan(table=[[test_index]], viableBackends=[[mock-parquet]])
-            """, result);
-    }
-
-    private void assertPureScanShape(RelNode result) {
-        assertTrue(
-            "root should be OpenSearchExchangeReducer wrapping the scan, got " + result.getClass().getSimpleName(),
-            result instanceof OpenSearchExchangeReducer
-        );
-        RelNode beneath = RelNodeUtils.unwrapHep(((OpenSearchExchangeReducer) result).getInput());
-        assertTrue(
-            "ER's input must be OpenSearchTableScan, got " + beneath.getClass().getSimpleName(),
-            beneath instanceof OpenSearchTableScan
-        );
-        assertEquals("exactly one ER", 1, collectAll(result, OpenSearchExchangeReducer.class).size());
-    }
+    // testPureScan_multiShard_rootER + _singleShard_noTopER removed —
+    // covered by ScanPlanShapeTests.testBareScan_2shard / _1shard.
 
     /**
      * PPL: {@code stats count() by status | inner join ... [source=u | stats count() by size]}
@@ -514,130 +332,28 @@ public class PlanShapeTests extends BasePlannerRulesTests {
     }
 
     public void testJoinWithDifferentGroupKeys_singleShard() {
+        // Both sides scan the same 1-shard index → co-location fast path even though the
+        // group keys differ. Aggregates run at the shard, Join runs there. Locality-agnostic
+        // root demand is satisfied by the SHARD+SINGLETON output of the Join — no top ER.
         RelNode plan = buildJoinWithDifferentGroupKeys();
         RelNode result = runPlanner(plan, singleShardContext());
         assertPlanShape(
             """
                 OpenSearchJoin(condition=[=($0, $2)], joinType=[inner], viableBackends=[[mock-parquet]], strategy=[CoordinatorHashJoin])
-                  OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
-                    OpenSearchAggregate(group=[{0}], s=[SUM(AGG_CALL_ANNOTATION(id=0, viableBackends=[mock-parquet]), $1)], mode=[SINGLE], viableBackends=[[mock-parquet]])
-                      OpenSearchTableScan(table=[[test_index]], viableBackends=[[mock-parquet]])
-                  OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
-                    OpenSearchAggregate(group=[{1}], s=[SUM(AGG_CALL_ANNOTATION(id=1, viableBackends=[mock-parquet]), $0)], mode=[SINGLE], viableBackends=[[mock-parquet]])
-                      OpenSearchTableScan(table=[[test_index]], viableBackends=[[mock-parquet]])
-                """,
-            result
-        );
-    }
-
-    private void assertJoinWithDifferentGroupKeysShape(RelNode result) {
-        OpenSearchJoin join = findFirst(result, OpenSearchJoin.class);
-        assertNotNull(join);
-        List<OpenSearchAggregate> aggs = collectAll(result, OpenSearchAggregate.class);
-        long finalCount = aggs.stream().filter(a -> a.getMode() == AggregateMode.FINAL).count();
-        assertEquals("two FINAL aggregates (one per branch)", 2, finalCount);
-        List<OpenSearchExchangeReducer> ers = collectAll(result, OpenSearchExchangeReducer.class);
-        assertEquals("two ERs (one per branch's PARTIAL→FINAL)", 2, ers.size());
-    }
-
-    // ── Mixed-shard join variants: one side single-shard, the other multi-shard ───
-    //
-    // A single-shard scan is SINGLETON (already at one node). A multi-shard scan is
-    // RANDOM. When joined together, JoinSplitRule's per-side convert() inserts an ER
-    // only on the RANDOM side. The SINGLETON side passes through untouched.
-
-    /** Left scan single-shard, right scan multi-shard. One ER, above right scan. */
-    public void testJoinMixedShards_leftSingle_rightMulti() {
-        PlannerContext context = buildContextPerIndex("parquet", Map.of("left_idx", 1, "right_idx", 3));
-        RelNode join = buildJoinOfTwoScans("left_idx", "right_idx");
-        RelNode result = runPlanner(join, context);
-        assertPlanShape(
-            """
-                OpenSearchJoin(condition=[=($0, $2)], joinType=[inner], viableBackends=[[mock-parquet]], strategy=[CoordinatorHashJoin])
-                  OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
-                    OpenSearchTableScan(table=[[left_idx]], viableBackends=[[mock-parquet]])
-                  OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
-                    OpenSearchTableScan(table=[[right_idx]], viableBackends=[[mock-parquet]])
-                """,
-            result
-        );
-    }
-
-    /** Left scan multi-shard, right scan single-shard. Mirror. One ER, above left scan. */
-    public void testJoinMixedShards_leftMulti_rightSingle() {
-        PlannerContext context = buildContextPerIndex("parquet", Map.of("left_idx", 3, "right_idx", 1));
-        RelNode join = buildJoinOfTwoScans("left_idx", "right_idx");
-        RelNode result = runPlanner(join, context);
-        assertPlanShape(
-            """
-                OpenSearchJoin(condition=[=($0, $2)], joinType=[inner], viableBackends=[[mock-parquet]], strategy=[CoordinatorHashJoin])
-                  OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
-                    OpenSearchTableScan(table=[[left_idx]], viableBackends=[[mock-parquet]])
-                  OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
-                    OpenSearchTableScan(table=[[right_idx]], viableBackends=[[mock-parquet]])
-                """,
-            result
-        );
-    }
-
-    /** Both scans single-shard. Join has SINGLETON inputs already; no ER anywhere. */
-    public void testJoinMixedShards_bothSingle() {
-        PlannerContext context = buildContextPerIndex("parquet", Map.of("left_idx", 1, "right_idx", 1));
-        RelNode join = buildJoinOfTwoScans("left_idx", "right_idx");
-        RelNode result = runPlanner(join, context);
-        assertPlanShape(
-            """
-                OpenSearchJoin(condition=[=($0, $2)], joinType=[inner], viableBackends=[[mock-parquet]], strategy=[CoordinatorHashJoin])
-                  OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
-                    OpenSearchTableScan(table=[[left_idx]], viableBackends=[[mock-parquet]])
-                  OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
-                    OpenSearchTableScan(table=[[right_idx]], viableBackends=[[mock-parquet]])
-                """,
-            result
-        );
-    }
-
-    // ── Union coverage: multisearch / appendpipe shapes ──────────────────────
-    //
-    // Three structural cases × two shard variants. Every arm gets wrapped in an ER at HEP
-    // marking time (OpenSearchUnionRule) so DAGBuilder can cut a separate stage per branch
-    // — this is how per-branch ShardTargetResolver routing works for arms that may scan
-    // different indices.
-
-    /** Two multi-shard scans, same index, unioned. Each arm gets its own ER over the scan. */
-    public void testUnion_twoArmScans_multiShard() {
-        RelNode union = buildUnionOfTwoScans("test_index", "test_index");
-        RelNode result = runPlanner(union, unionContextSingleIndex("test_index", 3));
-        assertPlanShape(
-            """
-                OpenSearchUnion(all=[true], viableBackends=[[mock-parquet]])
-                  OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
+                  OpenSearchAggregate(group=[{0}], s=[SUM(AGG_CALL_ANNOTATION(id=0, viableBackends=[mock-parquet]), $1)], mode=[SINGLE], viableBackends=[[mock-parquet]])
                     OpenSearchTableScan(table=[[test_index]], viableBackends=[[mock-parquet]])
-                  OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
+                  OpenSearchAggregate(group=[{1}], s=[SUM(AGG_CALL_ANNOTATION(id=1, viableBackends=[mock-parquet]), $0)], mode=[SINGLE], viableBackends=[[mock-parquet]])
                     OpenSearchTableScan(table=[[test_index]], viableBackends=[[mock-parquet]])
                 """,
             result
         );
     }
 
-    public void testUnion_twoArmScans_singleShard() {
-        RelNode union = buildUnionOfTwoScans("test_index", "test_index");
-        RelNode result = runPlanner(union, unionContextSingleIndex("test_index", 1));
-        // Each arm gets a HEP-time ER even over a single-shard scan — the ER is the
-        // stage-cut marker DAGBuilder needs to split per-arm stages. ConverterImpl dedup
-        // only fires when origins match (e.g. ER over a FINAL aggregate at GATHERED);
-        // ER(GATHERED) over Scan(SCAN) lives in a distinct subset and survives.
-        assertPlanShape(
-            """
-                OpenSearchUnion(all=[true], viableBackends=[[mock-parquet]])
-                  OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
-                    OpenSearchTableScan(table=[[test_index]], viableBackends=[[mock-parquet]])
-                  OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
-                    OpenSearchTableScan(table=[[test_index]], viableBackends=[[mock-parquet]])
-                """,
-            result
-        );
-    }
+    // testJoinMixedShards_* removed — covered by JoinPlanShapeTests
+    // (testInnerJoin_mixedShards / _leftMulti_rightSingle / _differentTables_1shard).
+
+    // testUnion_twoArmScans_* removed — covered by UnionPlanShapeTests
+    // (testUnion_sameTable_2shard, testUnion_sameTable_1shard).
 
     /**
      * Each arm has stats — arm-level aggregate split produces FINAL at EXECUTION(SINGLETON).
@@ -666,60 +382,203 @@ public class PlanShapeTests extends BasePlannerRulesTests {
     }
 
     public void testUnion_twoArmsWithStats_singleShard() {
+        // Both arms scan the same 1-shard index → co-location fast path. Aggregates run at
+        // the shard (no PARTIAL/FINAL split needed at 1 shard), Union runs there. Root demand
+        // (locality-agnostic SINGLETON) is satisfied directly — no top ER.
         RelNode union = buildUnionOfTwoStatsArms("test_index");
         RelNode result = runPlanner(union, unionContextSingleIndex("test_index", 1));
         assertPlanShape(
             """
                 OpenSearchUnion(all=[true], viableBackends=[[mock-parquet]])
-                  OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
-                    OpenSearchAggregate(group=[{0}], cnt=[COUNT(AGG_CALL_ANNOTATION(id=0, viableBackends=[mock-parquet]))], mode=[SINGLE], viableBackends=[[mock-parquet]])
+                  OpenSearchAggregate(group=[{0}], cnt=[COUNT(AGG_CALL_ANNOTATION(id=0, viableBackends=[mock-parquet]))], mode=[SINGLE], viableBackends=[[mock-parquet]])
+                    OpenSearchTableScan(table=[[test_index]], viableBackends=[[mock-parquet]])
+                  OpenSearchAggregate(group=[{0}], cnt=[COUNT(AGG_CALL_ANNOTATION(id=0, viableBackends=[mock-parquet]))], mode=[SINGLE], viableBackends=[[mock-parquet]])
+                    OpenSearchTableScan(table=[[test_index]], viableBackends=[[mock-parquet]])
+                """,
+            result
+        );
+    }
+
+    // testUnion_twoArmsDifferentIndices_* removed — covered by UnionPlanShapeTests
+    // (testUnion_differentTables_1shard / _2shard).
+
+    // ── Downstream-of-Join / Union / Window combinations ─────────────────────
+
+    /**
+     * Join → Aggregate (multi-shard, different tables). Common PPL shape:
+     * {@code source=a | inner join b ON ... | stats count() by k}.
+     * Each Join input is gathered via per-side ER, the Join runs at coord, then a SINGLE
+     * aggregate runs above it (no PARTIAL/FINAL split — the Join's output is already
+     * coord-local SINGLETON, no shuffle to split across).
+     */
+    public void testJoinThenAggregate_2shard() {
+        RelNode plan = org.apache.calcite.rel.logical.LogicalAggregate.create(
+            buildJoinOfTwoScans("left_idx", "right_idx"),
+            List.of(),
+            org.apache.calcite.util.ImmutableBitSet.of(0),
+            null,
+            List.of(countStarCall())
+        );
+        RelNode result = runPlanner(plan, perIndexContext(Map.of("left_idx", 2, "right_idx", 2)));
+        assertPlanShape(
+            """
+                OpenSearchAggregate(group=[{0}], cnt=[COUNT(AGG_CALL_ANNOTATION(id=0, viableBackends=[mock-parquet]))], mode=[SINGLE], viableBackends=[[mock-parquet]])
+                  OpenSearchJoin(condition=[=($0, $2)], joinType=[inner], viableBackends=[[mock-parquet]], strategy=[CoordinatorHashJoin])
+                    OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
+                      OpenSearchTableScan(table=[[left_idx]], viableBackends=[[mock-parquet]])
+                    OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
+                      OpenSearchTableScan(table=[[right_idx]], viableBackends=[[mock-parquet]])
+                """,
+            result
+        );
+    }
+
+    /**
+     * Join → Sort (multi-shard, different tables). PPL: {@code | join b | sort x}.
+     * Join gathers each side to coord; Sort over the Join output stays at coord (Join
+     * already delivers SINGLETON). No extra ER between Join and Sort.
+     */
+    public void testJoinThenSort_2shard() {
+        RelNode join = buildJoinOfTwoScans("left_idx", "right_idx");
+        RelNode plan = LogicalSort.create(
+            join,
+            RelCollations.of(new RelFieldCollation(0, RelFieldCollation.Direction.ASCENDING)),
+            null,
+            null
+        );
+        RelNode result = runPlanner(plan, perIndexContext(Map.of("left_idx", 2, "right_idx", 2)));
+        assertPlanShape(
+            """
+                OpenSearchSort(sort0=[$0], dir0=[ASC], viableBackends=[[mock-parquet]])
+                  OpenSearchJoin(condition=[=($0, $2)], joinType=[inner], viableBackends=[[mock-parquet]], strategy=[CoordinatorHashJoin])
+                    OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
+                      OpenSearchTableScan(table=[[left_idx]], viableBackends=[[mock-parquet]])
+                    OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
+                      OpenSearchTableScan(table=[[right_idx]], viableBackends=[[mock-parquet]])
+                """,
+            result
+        );
+    }
+
+    /**
+     * Union → Sort (multi-shard, same table). Union gathers each arm to coord; Sort runs
+     * at coord over the unioned result. No extra ER between Union and Sort.
+     */
+    public void testUnionThenSort_2shard() {
+        RelNode union = LogicalUnion.create(
+            List.of(stubScan(mockTable("test_index", "status", "size")), stubScan(mockTable("test_index", "status", "size"))),
+            /* all */ true
+        );
+        RelNode plan = LogicalSort.create(
+            union,
+            RelCollations.of(new RelFieldCollation(0, RelFieldCollation.Direction.ASCENDING)),
+            null,
+            null
+        );
+        RelNode result = runPlanner(plan, unionContextSingleIndex("test_index", 2));
+        assertPlanShape(
+            """
+                OpenSearchSort(sort0=[$0], dir0=[ASC], viableBackends=[[mock-parquet]])
+                  OpenSearchUnion(all=[true], viableBackends=[[mock-parquet]])
+                    OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
                       OpenSearchTableScan(table=[[test_index]], viableBackends=[[mock-parquet]])
-                  OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
-                    OpenSearchAggregate(group=[{0}], cnt=[COUNT(AGG_CALL_ANNOTATION(id=0, viableBackends=[mock-parquet]))], mode=[SINGLE], viableBackends=[[mock-parquet]])
+                    OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
                       OpenSearchTableScan(table=[[test_index]], viableBackends=[[mock-parquet]])
                 """,
             result
         );
     }
 
-    /** Each arm scans a different index — exercises the per-branch stage isolation requirement. */
-    public void testUnion_twoArmsDifferentIndices_multiShard() {
-        RelNode union = buildUnionOfTwoScans("left_idx", "right_idx");
-        RelNode result = runPlanner(union, unionContextTwoIndices(Map.of("left_idx", 3, "right_idx", 3)));
+    /**
+     * Window → Sort (multi-shard). RexOver Project gathers to coord, Sort stays at coord.
+     * Verifies the Sort's collated split rule does not insert a redundant ER over the
+     * Project's already-SINGLETON output.
+     */
+    public void testWindowThenSort_2shard() {
+        RelOptTable table = mockTable("test_index", "status", "size");
+        RelNode scan = stubScan(table);
+        org.apache.calcite.rex.RexBuilder rb = scan.getCluster().getRexBuilder();
+
+        RexNode sumOver = rb.makeOver(
+            typeFactory.createSqlType(SqlTypeName.BIGINT),
+            (org.apache.calcite.sql.SqlAggFunction) SqlStdOperatorTable.SUM,
+            List.of(rb.makeInputRef(scan, 1)),
+            com.google.common.collect.ImmutableList.of(),
+            com.google.common.collect.ImmutableList.of(),
+            org.apache.calcite.rex.RexWindowBounds.UNBOUNDED_PRECEDING,
+            org.apache.calcite.rex.RexWindowBounds.UNBOUNDED_FOLLOWING,
+            true,
+            true,
+            false,
+            false,
+            false
+        );
+        RelNode project = LogicalProject.create(
+            scan,
+            List.of(),
+            List.of(rb.makeInputRef(scan, 0), rb.makeInputRef(scan, 1), sumOver),
+            List.of("status", "size", "s")
+        );
+        RelNode plan = LogicalSort.create(
+            project,
+            RelCollations.of(new RelFieldCollation(0, RelFieldCollation.Direction.ASCENDING)),
+            null,
+            null
+        );
+        RelNode result = runPlanner(plan, multiShardContext());
         assertPlanShape(
             """
-                OpenSearchUnion(all=[true], viableBackends=[[mock-parquet]])
-                  OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
-                    OpenSearchTableScan(table=[[left_idx]], viableBackends=[[mock-parquet]])
-                  OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
-                    OpenSearchTableScan(table=[[right_idx]], viableBackends=[[mock-parquet]])
+                OpenSearchSort(sort0=[$0], dir0=[ASC], viableBackends=[[mock-parquet]])
+                  OpenSearchProject(status=[$0], size=[$1], s=[SUM($1) OVER ()], viableBackends=[[mock-parquet]])
+                    OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
+                      OpenSearchTableScan(table=[[test_index]], viableBackends=[[mock-parquet]])
                 """,
             result
         );
     }
 
-    public void testUnion_twoArmsDifferentIndices_singleShard() {
-        RelNode union = buildUnionOfTwoScans("left_idx", "right_idx");
-        RelNode result = runPlanner(union, unionContextTwoIndices(Map.of("left_idx", 1, "right_idx", 1)));
+    /**
+     * Chained inner join: {@code (a ⨝ b) ⨝ c}. Nested join: each leaf Join input has its
+     * own per-side ER, the outer Join also has per-side ERs. Verifies trait propagation
+     * through a nested Join doesn't degenerate (e.g. duplicate ERs) and that all three
+     * inputs end up gathered exactly once.
+     */
+    public void testChainedJoin_2shard() {
+        RelOptTable a = mockTable("a", "status", "size");
+        RelOptTable b = mockTable("b", "status", "size");
+        RelOptTable c = mockTable("c", "status", "size");
+        RelNode aScan = stubScan(a);
+        RelNode bScan = stubScan(b);
+        RelNode cScan = stubScan(c);
+        RexNode ab = rexBuilder.makeCall(
+            SqlStdOperatorTable.EQUALS,
+            rexBuilder.makeInputRef(typeFactory.createSqlType(SqlTypeName.INTEGER), 0),
+            rexBuilder.makeInputRef(typeFactory.createSqlType(SqlTypeName.INTEGER), 2)
+        );
+        RelNode abJoin = LogicalJoin.create(aScan, bScan, List.of(), ab, Set.of(), JoinRelType.INNER);
+        RexNode abc = rexBuilder.makeCall(
+            SqlStdOperatorTable.EQUALS,
+            rexBuilder.makeInputRef(typeFactory.createSqlType(SqlTypeName.INTEGER), 0),
+            rexBuilder.makeInputRef(typeFactory.createSqlType(SqlTypeName.INTEGER), 4)
+        );
+        RelNode plan = LogicalJoin.create(abJoin, cScan, List.of(), abc, Set.of(), JoinRelType.INNER);
+        RelNode result = runPlanner(plan, perIndexContext(Map.of("a", 2, "b", 2, "c", 2)));
         assertPlanShape(
             """
-                OpenSearchUnion(all=[true], viableBackends=[[mock-parquet]])
+                OpenSearchJoin(condition=[=($0, $4)], joinType=[inner], viableBackends=[[mock-parquet]], strategy=[CoordinatorHashJoin])
+                  OpenSearchJoin(condition=[=($0, $2)], joinType=[inner], viableBackends=[[mock-parquet]], strategy=[CoordinatorHashJoin])
+                    OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
+                      OpenSearchTableScan(table=[[a]], viableBackends=[[mock-parquet]])
+                    OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
+                      OpenSearchTableScan(table=[[b]], viableBackends=[[mock-parquet]])
                   OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
-                    OpenSearchTableScan(table=[[left_idx]], viableBackends=[[mock-parquet]])
-                  OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
-                    OpenSearchTableScan(table=[[right_idx]], viableBackends=[[mock-parquet]])
+                    OpenSearchTableScan(table=[[c]], viableBackends=[[mock-parquet]])
                 """,
             result
         );
     }
 
     // ── Union builders / contexts ─────────────────────────────────────────────
-
-    private RelNode buildUnionOfTwoScans(String leftTable, String rightTable) {
-        RelNode left = stubScan(mockTable(leftTable, "status", "size"));
-        RelNode right = stubScan(mockTable(rightTable, "status", "size"));
-        return LogicalUnion.create(List.of(left, right), /* all */ true);
-    }
 
     private RelNode buildUnionOfTwoStatsArms(String table) {
         RelNode arm1 = org.apache.calcite.rel.logical.LogicalAggregate.create(
@@ -739,17 +598,16 @@ public class PlanShapeTests extends BasePlannerRulesTests {
         return LogicalUnion.create(List.of(arm1, arm2), /* all */ true);
     }
 
-    /** Planner context with UNION engine capability declared, for a single index. */
+    /**
+     * Planner context with UNION engine capability declared, for a single index.
+     */
     private PlannerContext unionContextSingleIndex(String indexName, int shardCount) {
         return buildContextPerIndex("parquet", Map.of(indexName, shardCount), intFields(), List.of(new UnionCapableBackend(), LUCENE));
     }
 
-    /** Planner context with UNION engine capability declared, across multiple indices. */
-    private PlannerContext unionContextTwoIndices(Map<String, Integer> shardsByIndex) {
-        return buildContextPerIndex("parquet", shardsByIndex, intFields(), List.of(new UnionCapableBackend(), LUCENE));
-    }
-
-    /** MockDataFusionBackend with EngineCapability.UNION declared. */
+    /**
+     * MockDataFusionBackend with EngineCapability.UNION declared.
+     */
     private static final class UnionCapableBackend extends MockDataFusionBackend {
         @Override
         protected Set<org.opensearch.analytics.spi.EngineCapability> supportedEngineCapabilities() {
@@ -759,32 +617,18 @@ public class PlanShapeTests extends BasePlannerRulesTests {
         }
     }
 
+    // ── Logical-plan builders ────────────────────────────────────────────────
+
+    /** Inner equi-join {@code left.$0 = right.$0} on two bare scans. */
     private RelNode buildJoinOfTwoScans(String leftTable, String rightTable) {
-        RelOptTable left = mockTable(leftTable, "status", "size");
-        RelOptTable right = mockTable(rightTable, "status", "size");
-        RelNode leftScan = stubScan(left);
-        RelNode rightScan = stubScan(right);
-        // equi-join on status column — left.$0 == right.$0 (offset by left fieldCount=2)
+        RelNode leftScan = stubScan(mockTable(leftTable, "status", "size"));
+        RelNode rightScan = stubScan(mockTable(rightTable, "status", "size"));
         RexNode cond = rexBuilder.makeCall(
             SqlStdOperatorTable.EQUALS,
             rexBuilder.makeInputRef(typeFactory.createSqlType(SqlTypeName.INTEGER), 0),
             rexBuilder.makeInputRef(typeFactory.createSqlType(SqlTypeName.INTEGER), 2)
         );
         return LogicalJoin.create(leftScan, rightScan, List.of(), cond, Set.of(), JoinRelType.INNER);
-    }
-
-    // ── Logical-plan builders for the IT-shape tests ──────────────────────────
-
-    private RelNode buildLimitAfterScan() {
-        RelOptTable table = mockTable("test_index", "status", "size");
-        RelNode scan = stubScan(table);
-        // head 10: pure LIMIT, empty collation
-        return LogicalSort.create(
-            scan,
-            RelCollations.EMPTY,
-            null,
-            rexBuilder.makeLiteral(10, typeFactory.createSqlType(SqlTypeName.INTEGER), true)
-        );
     }
 
     private RelNode buildJoinWithDifferentGroupKeys() {
@@ -829,105 +673,5 @@ public class PlanShapeTests extends BasePlannerRulesTests {
         );
     }
 
-    private AggregateCall countStarCallOn(RelNode input) {
-        return AggregateCall.create(
-            SqlStdOperatorTable.COUNT,
-            false,
-            List.of(),
-            -1,
-            input,
-            typeFactory.createSqlType(SqlTypeName.BIGINT),
-            "cnt"
-        );
-    }
-
-    // ── plan walkers ───────────────────────────────────────────────────────────
-
-    private List<OpenSearchSort> collectSorts(RelNode node) {
-        java.util.ArrayList<OpenSearchSort> out = new java.util.ArrayList<>();
-        collectInto(node, OpenSearchSort.class, out);
-        return out;
-    }
-
-    private static <T extends RelNode> List<T> collectAll(RelNode node, Class<T> type) {
-        java.util.ArrayList<T> out = new java.util.ArrayList<>();
-        collectInto(node, type, out);
-        return out;
-    }
-
-    private static <T extends RelNode> void collectInto(RelNode node, Class<T> type, java.util.List<T> out) {
-        if (type.isInstance(node)) out.add(type.cast(node));
-        for (RelNode child : node.getInputs())
-            collectInto(child, type, out);
-    }
-
-    private static <T extends RelNode> T findFirst(RelNode root, Class<T> type) {
-        if (type.isInstance(root)) return type.cast(root);
-        for (RelNode child : root.getInputs()) {
-            T found = findFirst(child, type);
-            if (found != null) return found;
-        }
-        return null;
-    }
-
-    /**
-     * Asserts {@link RelOptUtil#toString(RelNode)} equals the expected text-block. On mismatch
-     * the full actual plan is shown so reviewers see the complete tree.
-     */
-    private static void assertPlanShape(String expected, RelNode actual) {
-        String actualStr = RelOptUtil.toString(actual);
-        String normalizedExpected = normalizeLines(expected);
-        String normalizedActual = normalizeLines(actualStr);
-        assertEquals("Plan shape mismatch — actual:\n" + actualStr, normalizedExpected, normalizedActual);
-    }
-
-    /**
-     * Walks the plan depth-first and asserts that {@code chain} appears somewhere as a parent
-     * → first-child → first-child → ... sequence of concrete rel types. Looser than
-     * {@link #assertPlanShape}: ignores field orders, viable-backend annotations, and sibling
-     * branches, so tests can fix on pipeline <em>structure</em> without binding to particular
-     * projected-column layouts.
-     */
-    private static void assertContainsPipeline(RelNode root, List<Class<?>> chain) {
-        if (matchesPipeline(RelNodeUtils.unwrapHep(root), chain)) return;
-        for (RelNode input : RelNodeUtils.unwrapHep(root).getInputs()) {
-            if (containsPipeline(input, chain)) return;
-        }
-        fail("Expected pipeline " + chain + " not found in plan:\n" + RelOptUtil.toString(root));
-    }
-
-    private static boolean containsPipeline(RelNode node, List<Class<?>> chain) {
-        RelNode unwrapped = RelNodeUtils.unwrapHep(node);
-        if (matchesPipeline(unwrapped, chain)) return true;
-        for (RelNode input : unwrapped.getInputs()) {
-            if (containsPipeline(input, chain)) return true;
-        }
-        return false;
-    }
-
-    private static boolean matchesPipeline(RelNode node, List<Class<?>> chain) {
-        RelNode cursor = RelNodeUtils.unwrapHep(node);
-        for (Class<?> expectedType : chain) {
-            if (!expectedType.isInstance(cursor)) return false;
-            if (cursor.getInputs().isEmpty()) {
-                return chain.indexOf(expectedType) == chain.size() - 1;
-            }
-            cursor = RelNodeUtils.unwrapHep(cursor.getInputs().getFirst());
-        }
-        return true;
-    }
-
-    private static String normalizeLines(String s) {
-        StringBuilder sb = new StringBuilder();
-        for (String line : s.split("\n", -1)) {
-            int end = line.length();
-            while (end > 0 && (line.charAt(end - 1) == ' ' || line.charAt(end - 1) == '\t'))
-                end--;
-            sb.append(line, 0, end).append('\n');
-        }
-        while (sb.length() >= 2 && sb.charAt(sb.length() - 1) == '\n' && sb.charAt(sb.length() - 2) == '\n') {
-            sb.setLength(sb.length() - 1);
-        }
-        return sb.toString();
-    }
+    // Plan-shape and structural-pipeline assertions are inherited from PlanShapeTestBase.
 }

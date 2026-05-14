@@ -56,12 +56,9 @@ public class OpenSearchExchangeReducer extends ConverterImpl implements OpenSear
         List<String> viableBackends,
         ExchangeInfo exchangeInfo
     ) {
-        // ConverterImpl makes this a Calcite-recognized trait converter. When HEP wraps an ER
-        // around a SINGLE aggregate and Volcano then splits the aggregate into FINAL (which
-        // also delivers SINGLETON(GATHERED)), the ER and FINAL land in the same RelSet subset
-        // and Volcano picks FINAL as the cheaper alternative — no redundant ER-over-FINAL.
-        // Origin.SCAN keeps ERs over single-shard scans in a distinct subset so they survive
-        // as stage-cut boundaries (e.g. per-arm Union / Join inputs).
+        // ConverterImpl makes this a Calcite-recognized trait converter — inserted by
+        // Volcano via OpenSearchDistributionTraitDef.convert when a downstream operator
+        // demands SINGLETON input and the child delivers RANDOM.
         super(cluster, null, traitSet, input);
         this.viableBackends = viableBackends;
         this.exchangeInfo = exchangeInfo;
@@ -91,9 +88,19 @@ public class OpenSearchExchangeReducer extends ConverterImpl implements OpenSear
         return new OpenSearchExchangeReducer(getCluster(), traitSet, sole(inputs), viableBackends, exchangeInfo);
     }
 
+    /**
+     * Cost = setup overhead + transport per row. The fixed overhead per ER ensures Volcano
+     * prefers fewer ERs over more ERs even when the total row count shipped is identical:
+     * e.g. {@code Union(SHARD) ← 1 ER above} (one ER moving 20 rows) is cheaper than
+     * {@code Union(COORDINATOR) ← 2 ERs below} (two ERs moving 10 rows each, same total
+     * transport but double the setup).
+     */
+    private static final double SETUP_COST = 10.0;
+
     @Override
     public RelOptCost computeSelfCost(RelOptPlanner planner, RelMetadataQuery mq) {
-        return planner.getCostFactory().makeTinyCost();
+        double rows = mq.getRowCount(getInput());
+        return planner.getCostFactory().makeCost(SETUP_COST + rows, SETUP_COST + rows, 0);
     }
 
     @Override

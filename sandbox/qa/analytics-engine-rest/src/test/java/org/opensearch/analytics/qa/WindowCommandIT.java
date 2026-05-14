@@ -107,9 +107,7 @@ public class WindowCommandIT extends AnalyticsRestTestCase {
     /**
      * Window over union output: main pipeline with stats, appended with a second stats arm,
      * then eventstats over the unioned result.
-     * <p><b>Pending:</b> same root cause as {@link #testWindowAfterJoin} — task #113.
      */
-    @org.apache.lucene.tests.util.LuceneTestCase.AwaitsFix(bugUrl = "Task #113: AggregateSplit under per-side HEP-wrapped ER needs DeriveRule to produce SINGLETON(GATHERED), which exposes a stripAnnotations type-reinference bug.")
     public void testWindowAfterUnion() throws IOException {
         Map<String, Object> response = executePpl(
             "source="
@@ -133,11 +131,7 @@ public class WindowCommandIT extends AnalyticsRestTestCase {
 
     /**
      * Window after join: inner-join two indices, then eventstats over the joined output.
-     * <p><b>Pending:</b> see task #113 — fix requires DeriveRule to produce SINGLETON(GATHERED)
-     * variants, but that exposes a type re-inference bug in OpenSearchAggregate.stripAnnotations
-     * affecting multi-shard aggregate correctness. Separate PR.
      */
-    @org.apache.lucene.tests.util.LuceneTestCase.AwaitsFix(bugUrl = "Task #113: AggregateSplit under per-side HEP-wrapped ER needs DeriveRule to produce SINGLETON(GATHERED), which exposes a stripAnnotations type-reinference bug.")
     public void testWindowAfterJoin() throws IOException {
         ensureDataProvisionedAlt();
         Map<String, Object> response = executePpl(
@@ -156,6 +150,84 @@ public class WindowCommandIT extends AnalyticsRestTestCase {
         assertTrue("window total should be positive, got " + firstTotal, firstTotal > 0);
         for (int i = 1; i < rows.size(); i++) {
             assertEquals("SUM OVER () broadcasts same value across rows", firstTotal, ((Number) rows.get(i).get(3)).longValue());
+        }
+    }
+
+    /**
+     * Window after a Filter — {@code where int0 > 5 | eventstats sum(int0) as s}.
+     * The filter narrows the dataset and the window runs over the filtered rows. Asserts
+     * the window total reflects the filter (i.e. is below the unfiltered total of 68).
+     */
+    public void testEventstatsAfterWhere() throws IOException {
+        Map<String, Object> response = executePpl(
+            "source=" + DATASET.indexName + " | where int0 > 5 | eventstats sum(int0) as s | fields int0, s | head 3"
+        );
+        @SuppressWarnings("unchecked")
+        List<List<Object>> rows = (List<List<Object>>) response.get("rows");
+        assertNotNull("Response missing 'rows'", rows);
+        assertTrue("at least 1 row", rows.size() > 0);
+        // calcs int0 values > 5: 7, 8, 8, 10, 11, 8 = 52.
+        long firstTotal = ((Number) rows.get(0).get(1)).longValue();
+        assertEquals("SUM(int0) OVER () after where int0 > 5 = 52", 52L, firstTotal);
+        for (int i = 1; i < rows.size(); i++) {
+            assertEquals("SUM OVER () broadcasts same value", firstTotal, ((Number) rows.get(i).get(1)).longValue());
+        }
+    }
+
+    /**
+     * Window after a collated Sort — {@code sort int0 | eventstats sum(int0) as s}.
+     * Sort gathers to coord; the window runs over its (already-singleton) output.
+     * Tests that the rule ordering doesn't put a redundant ER between Sort and Project.
+     */
+    public void testEventstatsAfterSort() throws IOException {
+        Map<String, Object> response = executePpl(
+            "source=" + DATASET.indexName + " | sort int0 | eventstats sum(int0) as s | fields int0, s | head 3"
+        );
+        @SuppressWarnings("unchecked")
+        List<List<Object>> rows = (List<List<Object>>) response.get("rows");
+        assertNotNull("Response missing 'rows'", rows);
+        assertTrue("at least 1 row", rows.size() > 0);
+        long firstTotal = ((Number) rows.get(0).get(1)).longValue();
+        assertEquals("SUM(int0) OVER () = 68 (full unfiltered total)", 68L, firstTotal);
+        for (int i = 1; i < rows.size(); i++) {
+            assertEquals("SUM OVER () broadcasts same value", firstTotal, ((Number) rows.get(i).get(1)).longValue());
+        }
+    }
+
+    /**
+     * Multiple windows in one {@code eventstats}: {@code sum(int0) as s, count() as n}.
+     * PPL emits two RexOvers in the same Project — the planner must produce a single
+     * Project carrying both, not two separate Projects each with its own ER.
+     */
+    public void testEventstatsMultipleWindows() throws IOException {
+        Map<String, Object> response = executePpl(
+            "source=" + DATASET.indexName + " | eventstats sum(int0) as s, count() as n | fields int0, s, n | head 3"
+        );
+        @SuppressWarnings("unchecked")
+        List<List<Object>> rows = (List<List<Object>>) response.get("rows");
+        assertNotNull("Response missing 'rows'", rows);
+        assertEquals("head 3 rows", 3, rows.size());
+        for (int i = 0; i < 3; i++) {
+            assertEquals("SUM(int0) OVER () = 68", 68L, ((Number) rows.get(i).get(1)).longValue());
+            assertEquals("COUNT() OVER () = 17", 17L, ((Number) rows.get(i).get(2)).longValue());
+        }
+    }
+
+    /**
+     * Mirrors {@code PlanShapeTests.testWindowThenSort_2shard}: window function then
+     * Sort. The RexOver Project gathers to coord; Sort runs at coord with no extra ER.
+     * Asserts the window total broadcasts to every row regardless of sort order.
+     */
+    public void testEventstatsThenSort() throws IOException {
+        Map<String, Object> response = executePpl(
+            "source=" + DATASET.indexName + " | eventstats sum(int0) as s | sort int0 | fields int0, s | head 3"
+        );
+        @SuppressWarnings("unchecked")
+        List<List<Object>> rows = (List<List<Object>>) response.get("rows");
+        assertNotNull("Response missing 'rows'", rows);
+        assertEquals("head 3 rows", 3, rows.size());
+        for (int i = 0; i < 3; i++) {
+            assertEquals("SUM(int0) OVER () = 68 broadcasts to every row after sort", 68L, ((Number) rows.get(i).get(1)).longValue());
         }
     }
 

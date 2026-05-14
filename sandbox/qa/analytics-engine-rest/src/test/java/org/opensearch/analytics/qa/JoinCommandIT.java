@@ -224,6 +224,61 @@ public class JoinCommandIT extends AnalyticsRestTestCase {
         assertSingleCount(ppl, 3L);
     }
 
+    // ── Combinations: matches the structural UTs in PlanShapeTests ──────────────
+
+    /**
+     * Mirrors {@code PlanShapeTests.testJoinThenAggregate_2shard}: inner join across
+     * two indices then a SINGLE aggregate above the join. The Join's COORDINATOR
+     * SINGLETON output satisfies the aggregate's input demand; no PARTIAL/FINAL
+     * split fires (no shuffle to split across).
+     */
+    public void testJoinThenAggregate() throws IOException {
+        final String ppl = "source="
+            + CALCS.indexName
+            + " | fields key, str0"
+            + " | inner join left=a, right=b ON a.str0 = b.str0"
+            + " [ source=" + CALCS_ALT.indexName + " | fields key, str0 ]"
+            + " | stats count() as cnt by str0"
+            + " | stats count() as cnt";
+        // 3 distinct str0 values after grouping.
+        assertSingleCount(ppl, 3L);
+    }
+
+    /**
+     * Mirrors {@code PlanShapeTests.testJoinThenSort_2shard}: inner join then Sort
+     * over the joined output. Sort runs at coord (Join already delivers SINGLETON)
+     * with no extra ER between them.
+     */
+    public void testJoinThenSort() throws IOException {
+        final String ppl = "source="
+            + CALCS.indexName
+            + " | stats count() as left_cnt by str0"
+            + " | inner join left=a, right=b ON a.str0 = b.str0"
+            + " [ source=" + CALCS_ALT.indexName + " | stats count() as right_cnt by str0 ]"
+            + " | sort str0"
+            + " | stats count() as cnt";
+        assertSingleCount(ppl, 3L);
+    }
+
+    /**
+     * Mirrors {@code PlanShapeTests.testChainedJoin_2shard}: A ⨝ B ⨝ C. Each leaf
+     * scan is gathered to coord with its own per-side ER; the outer join sits over
+     * the inner join's SINGLETON output. Verifies trait propagation through nested
+     * joins.
+     */
+    public void testChainedInnerJoin() throws IOException {
+        final String ppl = "source="
+            + CALCS.indexName
+            + " | stats count() as cnt_a by str0"
+            + " | inner join left=a, right=b ON a.str0 = b.str0"
+            + " [ source=" + CALCS_ALT.indexName + " | stats count() as cnt_b by str0 ]"
+            + " | inner join left=ab, right=c ON ab.str0 = c.str0"
+            + " [ source=" + CALCS.indexName + " | stats count() as cnt_c by str0 ]"
+            + " | stats count() as cnt";
+        // All 3 chained joins on str0 — each side groups to 3 rows, equi-join yields 3.
+        assertSingleCount(ppl, 3L);
+    }
+
     // ── helpers ────────────────────────────────────────────────────────────────
 
     /**

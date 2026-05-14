@@ -35,7 +35,9 @@ import org.opensearch.analytics.planner.rules.OpenSearchFilterRule;
 import org.opensearch.analytics.planner.rules.OpenSearchJoinRule;
 import org.opensearch.analytics.planner.rules.OpenSearchProjectRule;
 import org.opensearch.analytics.planner.rules.OpenSearchSortRule;
+import org.opensearch.analytics.planner.rules.OpenSearchJoinSplitRule;
 import org.opensearch.analytics.planner.rules.OpenSearchSortSplitRule;
+import org.opensearch.analytics.planner.rules.OpenSearchUnionSplitRule;
 import org.opensearch.analytics.planner.rules.OpenSearchTableScanRule;
 import org.opensearch.analytics.planner.rules.OpenSearchUnionRule;
 
@@ -138,6 +140,8 @@ public class PlannerImpl {
         volcanoPlanner.addRelTraitDef(distTraitDef);
         volcanoPlanner.addRule(new OpenSearchAggregateSplitRule(context));
         volcanoPlanner.addRule(new OpenSearchSortSplitRule(context));
+        volcanoPlanner.addRule(new OpenSearchJoinSplitRule(context));
+        volcanoPlanner.addRule(new OpenSearchUnionSplitRule(context));
         volcanoPlanner.addRule(new OpenSearchDistributionDeriveRule(context));
         volcanoPlanner.addRule(AbstractConverter.ExpandConversionRule.INSTANCE);
 
@@ -147,11 +151,12 @@ public class PlannerImpl {
         // TODO: eliminate this copy
         RelNode copied = RelNodeUtils.copyToCluster(marked, volcanoCluster, distTraitDef);
 
-        // Root demands SINGLETON. Multi-shard scans stamp RANDOM → ER inserted by
-        // ExpandConversionRule + trait def's convert(). Single-shard scans stamp SINGLETON →
-        // already satisfies, no top ER.
+        // Root demands SINGLETON with null locality — satisfied by either SHARD+SINGLETON
+        // (1-shard scan, no ER) or COORDINATOR+SINGLETON (after ER). Multi-shard scans stamp
+        // RANDOM → ER inserted by ExpandConversionRule + trait def's convert(). Single-shard
+        // scans stamp SHARD+SINGLETON → already satisfies, no top ER.
         volcanoPlanner.setRoot(copied);
-        RelTraitSet desiredTraits = copied.getTraitSet().replace(distTraitDef.singletonAnyOrigin());
+        RelTraitSet desiredTraits = copied.getTraitSet().replace(distTraitDef.anySingleton());
         if (!copied.getTraitSet().equals(desiredTraits)) {
             volcanoPlanner.setRoot(volcanoPlanner.changeTraits(copied, desiredTraits));
         }

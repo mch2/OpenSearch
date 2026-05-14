@@ -44,46 +44,51 @@ public class OpenSearchDistributionTraitDef extends RelTraitDef<OpenSearchDistri
 
     // ---- Factory methods ----
 
-    /** SINGLETON(GATHERED) — result of a runtime exchange: ER output, FINAL aggregate output,
-     *  Join/Union output. Also the default for generic SINGLETON demands (root, AggregateSplit). */
-    public OpenSearchDistribution singleton() {
-        return new OpenSearchDistribution(this, RelDistribution.Type.SINGLETON, List.of(), OpenSearchDistribution.Origin.GATHERED);
+    /** COORDINATOR + SINGLETON — data gathered to coord. Stamped on ER output, FINAL
+     *  aggregate output, Join/Union output; demanded by cost gates on collated Sort /
+     *  RexOver Project / Join / Union. */
+    public OpenSearchDistribution coordSingleton() {
+        return new OpenSearchDistribution(this, OpenSearchDistribution.Locality.COORDINATOR, RelDistribution.Type.SINGLETON, List.of(), null, null);
     }
 
-    /** SINGLETON(SCAN) — single-shard scan: data already lives on one node by storage layout. */
-    public OpenSearchDistribution scanSingleton() {
-        return new OpenSearchDistribution(this, RelDistribution.Type.SINGLETON, List.of(), OpenSearchDistribution.Origin.SCAN);
+    /** SINGLETON with null locality — accepts either SHARD+SINGLETON or COORDINATOR+SINGLETON.
+     *  Used as the root demand: a 1-shard SHARD+SINGLETON subtree already satisfies, so no top
+     *  ER is inserted; a multi-shard RANDOM subtree still mismatches and triggers ER insertion. */
+    public OpenSearchDistribution anySingleton() {
+        return new OpenSearchDistribution(this, null, RelDistribution.Type.SINGLETON, List.of(), null, null);
     }
 
-    /** SINGLETON with null origin — "get onto one node, don't care how". Used by root demand
-     *  and DeriveRule so single-shard scans (SCAN) and gathered pipelines (GATHERED) both
-     *  satisfy it without an extra ER. */
-    public OpenSearchDistribution singletonAnyOrigin() {
-        return new OpenSearchDistribution(this, RelDistribution.Type.SINGLETON, List.of(), null);
+    /** SHARD + SINGLETON — single-shard TableScan output. {@code shardCount=1} is what lets
+     *  {@code UnionSplitRule} / {@code JoinSplitRule} skip inserting an ER when all inputs
+     *  co-locate (same {@code tableId}, {@code shardCount=1}). */
+    public OpenSearchDistribution shardSingleton(int tableId, int shardCount) {
+        return new OpenSearchDistribution(this, OpenSearchDistribution.Locality.SHARD, RelDistribution.Type.SINGLETON, List.of(), tableId, shardCount);
     }
 
-    /** RANDOM — multi-shard scan output. */
-    public OpenSearchDistribution random() {
-        return new OpenSearchDistribution(this, RelDistribution.Type.RANDOM_DISTRIBUTED, List.of(), null);
+    /** SHARD + RANDOM — multi-shard TableScan output, and also the shape for shard-local
+     *  Filter/Project/PARTIAL aggregate that pass through the scan's trait. */
+    public OpenSearchDistribution shardRandom(int tableId, int shardCount) {
+        return new OpenSearchDistribution(this, OpenSearchDistribution.Locality.SHARD, RelDistribution.Type.RANDOM_DISTRIBUTED, List.of(), tableId, shardCount);
     }
 
     /** ANY — universal sink; any distribution satisfies it. Used as {@link #getDefault}. */
     public OpenSearchDistribution any() {
-        return new OpenSearchDistribution(this, RelDistribution.Type.ANY, List.of(), null);
+        return new OpenSearchDistribution(this, null, RelDistribution.Type.ANY, List.of(), null, null);
     }
 
     public OpenSearchDistribution hash(List<Integer> keys) {
-        return new OpenSearchDistribution(this, RelDistribution.Type.HASH_DISTRIBUTED, keys, null);
+        // HASH is currently only used as a downstream demand (future: shuffle exchanges);
+        // we never stamp HASH on a scan, so locality/tableId/shardCount aren't meaningful.
+        return new OpenSearchDistribution(this, null, RelDistribution.Type.HASH_DISTRIBUTED, keys, null, null);
     }
 
-    /** Copies a distribution from another trait def — preserves type, keys, and origin. */
+    /** Copies a distribution from another trait def — preserves all fields. */
     public OpenSearchDistribution from(OpenSearchDistribution other) {
-        return new OpenSearchDistribution(this, other.getType(), other.getKeys(), other.getOrigin());
+        return new OpenSearchDistribution(this, other.getLocality(), other.getType(), other.getKeys(), other.getTableId(), other.getShardCount());
     }
 
     public OpenSearchDistribution fromType(RelDistribution.Type type, List<Integer> keys) {
-        OpenSearchDistribution.Origin origin = type == RelDistribution.Type.SINGLETON ? OpenSearchDistribution.Origin.GATHERED : null;
-        return new OpenSearchDistribution(this, type, keys, origin);
+        return new OpenSearchDistribution(this, null, type, keys, null, null);
     }
 
     // ---- RelTraitDef ----
@@ -131,7 +136,10 @@ public class OpenSearchDistributionTraitDef extends RelTraitDef<OpenSearchDistri
         RelNode result;
         if (toTrait.getType() == RelDistribution.Type.SINGLETON) {
             List<String> reduceViable = CapabilityResolutionUtils.filterByReduceCapability(registry, viableBackends);
-            result = new OpenSearchExchangeReducer(rel.getCluster(), rel.getTraitSet().replace(toTrait), rel, reduceViable);
+            // ER output always lives at the coordinator. Even if the demand is null-locality
+            // (root demand), stamp COORDINATOR so the resulting subset is well-typed.
+            OpenSearchDistribution stamp = toTrait.getLocality() == null ? coordSingleton() : toTrait;
+            result = new OpenSearchExchangeReducer(rel.getCluster(), rel.getTraitSet().replace(stamp), rel, reduceViable);
         } else {
             // TODO: implement HASH/RANGE shuffle exchange when joins and shuffle aggregates are added.
             throw new UnsupportedOperationException("HASH/RANGE exchange not yet implemented [toTrait=" + toTrait + "]");

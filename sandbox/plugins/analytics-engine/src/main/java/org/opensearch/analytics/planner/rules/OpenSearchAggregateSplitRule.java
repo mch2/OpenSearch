@@ -77,7 +77,7 @@ public class OpenSearchAggregateSplitRule extends RelOptRule {
         );
 
         // Request SINGLETON distribution — Volcano inserts Exchange automatically
-        RelTraitSet singletonTraits = partial.getTraitSet().replace(context.getDistributionTraitDef().singleton());
+        RelTraitSet singletonTraits = partial.getTraitSet().replace(context.getDistributionTraitDef().coordSingleton());
         RelNode gathered = convert(partial, singletonTraits);
 
         // Final aggregate: merges partial states at coordinator

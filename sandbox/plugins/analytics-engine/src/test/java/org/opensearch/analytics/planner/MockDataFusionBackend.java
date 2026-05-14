@@ -140,9 +140,6 @@ public class MockDataFusionBackend extends MockBackend implements SearchBackEndP
         return Set.of(
             new WindowCapability(
                 Set.of(
-                    WindowFunction.ROW_NUMBER,
-                    WindowFunction.RANK,
-                    WindowFunction.DENSE_RANK,
                     WindowFunction.SUM,
                     WindowFunction.AVG,
                     WindowFunction.COUNT,
