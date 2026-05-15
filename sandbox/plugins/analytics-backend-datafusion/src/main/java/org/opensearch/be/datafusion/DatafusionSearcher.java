@@ -18,6 +18,8 @@ import org.opensearch.index.engine.exec.EngineSearcher;
 
 import java.io.IOException;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutionException;
 
 /**
  * DataFusion searcher — executes substrait query plans against a native DataFusion reader.
@@ -73,7 +75,8 @@ public class DatafusionSearcher implements EngineSearcher<DatafusionContext> {
         try {
             streamPtr = future.join();
         } catch (Exception exception) {
-            throw new IOException("Query execution with session context failed", exception);
+            Throwable root = peelJdkAsyncWrappers(exception);
+            throw new IOException("Query execution with session context failed: " + root.getMessage(), root);
         }
         // NativeBridge#executeWithContextAsync has already marked the handle consumed (which
         // closes the Java wrapper) on both success and native-error paths; no explicit close
@@ -114,9 +117,23 @@ public class DatafusionSearcher implements EngineSearcher<DatafusionContext> {
         try {
             streamPtr = future.join();
         } catch (Exception e) {
-            throw new IOException("Query execution failed", e);
+            Throwable root = peelJdkAsyncWrappers(e);
+            throw new IOException("Query execution failed: " + root.getMessage(), root);
         }
         context.setStreamHandle(new StreamHandle(streamPtr, runtimeHandle));
+    }
+
+    /**
+     * Strips {@link CompletionException} / {@link ExecutionException} wrappers from JDK
+     * async machinery so the IOException raised by {@link #search} carries the real
+     * native error (and message) directly. Without this, a planning error reaches the
+     * REST layer three frames deep with the meaningful message buried.
+     */
+    static Throwable peelJdkAsyncWrappers(Throwable t) {
+        while (t != null && t.getCause() != null && (t instanceof CompletionException || t instanceof ExecutionException)) {
+            t = t.getCause();
+        }
+        return t;
     }
 
     /**

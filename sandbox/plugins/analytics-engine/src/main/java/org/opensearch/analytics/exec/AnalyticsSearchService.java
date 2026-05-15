@@ -99,7 +99,17 @@ public class AnalyticsSearchService implements AutoCloseable {
             throw e;
         } catch (Exception e) {
             listener.onFragmentFailure(resolved.queryId, resolved.stageId, resolved.shardIdStr, e);
-            throw new RuntimeException("Failed to start streaming fragment on " + shard.shardId(), e);
+            throw new RuntimeException(
+                "Failed to start streaming fragment [queryId="
+                    + resolved.queryId
+                    + ", stageId="
+                    + resolved.stageId
+                    + ", shard="
+                    + resolved.shardIdStr
+                    + "]: "
+                    + e.getMessage(),
+                e
+            );
         }
     }
 
