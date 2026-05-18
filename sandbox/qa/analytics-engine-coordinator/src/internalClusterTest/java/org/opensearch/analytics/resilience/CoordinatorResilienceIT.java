@@ -18,10 +18,10 @@ import org.opensearch.action.admin.cluster.node.tasks.list.ListTasksResponse;
 import org.opensearch.action.admin.indices.create.CreateIndexResponse;
 import org.opensearch.analytics.AnalyticsPlugin;
 import org.opensearch.analytics.backend.jni.NativeHandle;
-import org.opensearch.analytics.exec.QueryScheduler;
+import org.opensearch.analytics.exec.schedule.QueryScheduler;
 import org.opensearch.analytics.exec.action.FragmentExecutionAction;
-import org.opensearch.analytics.exec.stage.StageExecutionBuilder;
-import org.opensearch.analytics.exec.stage.StageExecutionFactory;
+import org.opensearch.analytics.exec.schedule.StageExecutionBuilder;
+import org.opensearch.analytics.exec.schedule.StageExecutionFactory;
 import org.opensearch.analytics.planner.dag.StageExecutionType;
 import org.opensearch.analytics.spi.ExchangeSink;
 import org.opensearch.arrow.flight.transport.FlightStreamPlugin;
@@ -87,7 +87,7 @@ import static org.hamcrest.Matchers.lessThan;
 /**
  * Resilience / fault-injection suite for the analytics-engine coordinator
  * (a.k.a. stage scheduler —
- * {@link org.opensearch.analytics.exec.stage.shard.ShardFragmentStageExecutionFactory}).
+ * {@link org.opensearch.analytics.exec.schedule.shard.ShardFragmentStageExecutionFactory}).
  *
  * <p>Covers four failure domains:
  * <ul>

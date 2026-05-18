@@ -20,6 +20,7 @@ import org.opensearch.action.support.HandledTransportAction;
 import org.opensearch.action.support.TimeoutTaskCancellationUtility;
 import org.opensearch.analytics.EngineContext;
 import org.opensearch.analytics.exec.action.AnalyticsQueryAction;
+import org.opensearch.analytics.exec.schedule.Scheduler;
 import org.opensearch.analytics.exec.task.AnalyticsQueryTask;
 import org.opensearch.analytics.exec.task.AnalyticsQueryTaskRequest;
 import org.opensearch.analytics.planner.CapabilityRegistry;
