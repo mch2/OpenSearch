@@ -9,7 +9,9 @@
 package org.opensearch.analytics;
 
 import org.apache.calcite.rel.RelNode;
+import org.apache.calcite.schema.SchemaPlus;
 import org.apache.calcite.sql.SqlOperatorTable;
+import org.apache.calcite.sql.util.SqlOperatorTables;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.action.ActionRequest;
@@ -21,6 +23,7 @@ import org.opensearch.analytics.exec.Scheduler;
 import org.opensearch.analytics.exec.action.AnalyticsQueryAction;
 import org.opensearch.analytics.planner.CapabilityRegistry;
 import org.opensearch.analytics.planner.FieldStorageResolver;
+import org.opensearch.analytics.schema.OpenSearchSchemaBuilder;
 import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
 import org.opensearch.arrow.memory.ArrowAllocatorService;
 import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
@@ -108,7 +111,9 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
             backEndsByName.put(be.name(), be);
         }
         searchService = new AnalyticsSearchService(backEndsByName, allocatorService, namedWriteableRegistry);
-        return List.of(searchService, capabilityRegistry);
+        operatorTable = aggregateOperatorTables();
+        DefaultEngineContext ctx = new DefaultEngineContext(clusterService, operatorTable);
+        return List.of(searchService, ctx, capabilityRegistry);
     }
 
     @Override
@@ -123,6 +128,7 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
             // transport handlers and is only legal to call once per node).
             b.bind(QueryScheduler.class).asEagerSingleton();
             b.bind(Scheduler.class).to(QueryScheduler.class);
+            b.bind(EngineContext.class).to(DefaultEngineContext.class);
         });
     }
 
@@ -140,6 +146,22 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
     public void close() {
         if (searchService != null) {
             searchService.close();
+        }
+    }
+
+    private SqlOperatorTable aggregateOperatorTables() {
+        // TODO: re-wire once operatorTable() is added back to AnalyticsSearchBackendPlugin
+        return SqlOperatorTables.of();
+    }
+
+    /**
+     * Default implementation of {@link EngineContext}.
+     */
+    record DefaultEngineContext(ClusterService clusterService, SqlOperatorTable operatorTable) implements EngineContext {
+
+        @Override
+        public SchemaPlus getSchema() {
+            return OpenSearchSchemaBuilder.buildSchema(clusterService.state());
         }
     }
 }
