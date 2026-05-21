@@ -830,6 +830,31 @@ fn collect_reads(rel: &substrait::proto::Rel, out: &mut Vec<substrait::proto::Re
 /// Used by `execute_with_context` to null-fill columns a shard omits: the schema is handed to
 /// `schema_coerce::append_missing_nullable`, then the table is re-registered so the substrait
 /// consumer can bind every base_schema column by name (see `ensure_schema_compatibility`).
+/// Flattened field names of the `base_schema` of the NamedTable read matching `table_name`,
+/// without converting to Arrow (no SessionState). Cheap pre-check so a shard whose inferred
+/// schema already covers every base_schema column can skip the SessionState-backed conversion
+/// in [`expected_scan_schema`]. Returns `None` when there's no matching read or no base_schema.
+pub(crate) fn base_schema_field_names(plan: &substrait::proto::Plan, table_name: &str) -> Option<Vec<String>> {
+    use substrait::proto::read_rel::ReadType;
+
+    let mut reads = Vec::new();
+    for plan_rel in &plan.relations {
+        if let Some(rel) = root_rel(plan_rel) {
+            collect_reads(&rel, &mut reads);
+        }
+    }
+    for read in &reads {
+        let Some(ReadType::NamedTable(nt)) = read.read_type.as_ref() else {
+            continue;
+        };
+        if nt.names.last().map(String::as_str) != Some(table_name) {
+            continue;
+        }
+        return read.base_schema.as_ref().map(|s| s.names.clone());
+    }
+    None
+}
+
 pub(crate) fn expected_scan_schema(
     plan: &substrait::proto::Plan,
     table_name: &str,

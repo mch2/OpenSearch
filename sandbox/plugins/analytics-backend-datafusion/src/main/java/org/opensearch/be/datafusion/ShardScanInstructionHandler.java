@@ -64,7 +64,10 @@ public class ShardScanInstructionHandler implements FragmentInstructionHandler<S
                 runtimePtr,
                 context.getTableName(),
                 contextId,
-                segment.address()
+                segment.address(),
+                // Plan bytes let native register the table with the union base_schema up front
+                // (null-filling columns this shard omits for index-pattern / alias scans).
+                context.getFragmentBytes()
             );
             return new DataFusionSessionState(sessionCtxHandle);
         }

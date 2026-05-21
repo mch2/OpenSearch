@@ -34,28 +34,6 @@ use crate::executor::DedicatedExecutor;
 use crate::api::DataFusionRuntime;
 use crate::session_context::SessionContextHandle;
 
-/// Re-registers the default ListingTable under `table_name` with `schema`, replacing the
-/// schema inferred at session-setup time. Used to widen the registered schema to the plan's
-/// union base_schema for index-pattern / alias scans, so columns this shard's parquet omits
-/// resolve (and null-fill) instead of failing the substrait consumer's by-name binding.
-fn reregister_table_with_schema(
-    ctx: &SessionContext,
-    table_name: &str,
-    table_path: &ListingTableUrl,
-    schema: datafusion::arrow::datatypes::SchemaRef,
-) -> Result<(), DataFusionError> {
-    let listing_options = ListingOptions::new(Arc::new(ParquetFormat::new()))
-        .with_file_extension(".parquet")
-        .with_collect_stat(true);
-    let table_config = ListingTableConfig::new(table_path.clone())
-        .with_listing_options(listing_options)
-        .with_schema(schema);
-    let provider = Arc::new(ListingTable::try_new(table_config)?);
-    ctx.deregister_table(table_name)?;
-    ctx.register_table(table_name, provider)?;
-    Ok(())
-}
-
 /// Execute a vanilla parquet query: substrait plan → DataFusion → CrossRtStream.
 /// File access goes through DataFusion's registered object store.
 ///
@@ -222,40 +200,10 @@ pub async fn execute_with_context(
             DataFusionError::Execution(format!("Failed to decode Substrait: {}", e))
         })?;
 
-        // Index-pattern / alias scans: the coordinator plans against the union of all backing
-        // indices' fields, but this shard's parquet files may declare only a subset. Reconcile
-        // the registered table schema against the plan's base_schema and re-register so the
-        // substrait consumer can bind every referenced column by name; DataFusion's parquet
-        // SchemaAdapter null-fills the columns this shard omits. No-op when the shard already
-        // covers every column (the common single-index case).
-        //
-        // The appended columns must carry the SAME Arrow types a real parquet-read column of that
-        // base type would: parquet emits view types (Utf8View/BinaryView) under force_view_types,
-        // then `coerce_inferred_schema` narrows the Substrait-incompatible ones. Skipping this
-        // leaves a null-filled `alias` as Utf8 while present shards emit Utf8View — the substrait
-        // consumer tolerates that (logically equal) but the coordinator reduce sink's strict
-        // schema check rejects it.
-        if let Some(expected) = crate::api::expected_scan_schema(&substrait_plan, &handle.table_name) {
-            let force_view = handle
-                .ctx
-                .copied_config()
-                .options()
-                .execution
-                .parquet
-                .schema_force_view_types;
-            let expected = if force_view {
-                datafusion::datasource::file_format::parquet::transform_schema_to_view(&expected)
-            } else {
-                expected
-            };
-            let expected = crate::schema_coerce::coerce_inferred_schema(Arc::new(expected));
-            if let Some(augmented) =
-                crate::schema_coerce::append_missing_nullable(&handle.registered_schema, &expected)
-            {
-                reregister_table_with_schema(&handle.ctx, &handle.table_name, &handle.table_path, augmented)?;
-            }
-        }
-
+        // The table was already registered with the plan's union base_schema at session-creation
+        // time (see session_context::widen_schema_to_plan_base), so the Substrait consumer can
+        // bind every referenced column by name and DataFusion null-fills the columns this shard
+        // omits. No schema reconciliation needed here.
         let logical_plan = from_substrait_plan(&handle.ctx.state(), &substrait_plan).await?;
         log_debug!("DataFusion logical plan:\n{}", logical_plan.display_indent());
         let dataframe = handle.ctx.execute_logical_plan(logical_plan).await?;

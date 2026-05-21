@@ -63,6 +63,53 @@ pub struct IndexedExecutionConfig {
     pub delegated_predicate_count: i32,
 }
 
+/// Widens `inferred` to the plan's union `base_schema` (for index-pattern / alias scans) so the
+/// table can be registered once with the schema the Substrait consumer binds against. Returns
+/// `inferred` unchanged when there's no plan, no matching `base_schema`, or this shard already
+/// covers every base_schema column — the common single-index case, which pays no conversion cost.
+fn widen_schema_to_plan_base(
+    ctx: &SessionContext,
+    plan_bytes: &[u8],
+    table_name: &str,
+    inferred: &arrow::datatypes::SchemaRef,
+) -> arrow::datatypes::SchemaRef {
+    use prost::Message;
+
+    if plan_bytes.is_empty() {
+        return Arc::clone(inferred);
+    }
+    let Ok(plan) = substrait::proto::Plan::decode(plan_bytes) else {
+        return Arc::clone(inferred);
+    };
+    // Cheap gate: compare base_schema field names against the inferred schema without building a
+    // SessionState. If the shard already has every column, there's nothing to widen.
+    match crate::api::base_schema_field_names(&plan, table_name) {
+        None => return Arc::clone(inferred),
+        Some(names) => {
+            let have: std::collections::HashSet<&str> =
+                inferred.fields().iter().map(|f| f.name().as_str()).collect();
+            if names.iter().all(|n| have.contains(n.as_str())) {
+                return Arc::clone(inferred);
+            }
+        }
+    }
+    // A base_schema column is absent from this shard. Build the union Arrow schema and append the
+    // missing columns. They must carry the SAME Arrow types a real parquet read would emit (view
+    // types under force_view_types, then coerced), or the coordinator reduce sink's strict schema
+    // check rejects a null-filled Utf8 against present shards' Utf8View.
+    let Some(expected) = crate::api::expected_scan_schema(&plan, table_name) else {
+        return Arc::clone(inferred);
+    };
+    let force_view = ctx.copied_config().options().execution.parquet.schema_force_view_types;
+    let expected = if force_view {
+        datafusion::datasource::file_format::parquet::transform_schema_to_view(&expected)
+    } else {
+        expected
+    };
+    let expected = crate::schema_coerce::coerce_inferred_schema(Arc::new(expected));
+    crate::schema_coerce::append_missing_nullable(inferred, &expected).unwrap_or_else(|| Arc::clone(inferred))
+}
+
 /// Creates a SessionContext with per-query RuntimeEnv and registers the default
 /// ListingTable provider for parquet scans.
 pub async unsafe fn create_session_context(
@@ -71,6 +118,7 @@ pub async unsafe fn create_session_context(
     table_name: &str,
     context_id: i64,
     query_config: DatafusionQueryConfig,
+    plan_bytes: &[u8],
 ) -> Result<i64, DataFusionError> {
     let runtime = &*(runtime_ptr as *const DataFusionRuntime);
     let shard_view = &*(shard_view_ptr as *const ShardView);
@@ -155,6 +203,14 @@ pub async unsafe fn create_session_context(
     // schema to forms the Substrait consumer can bind against. See crate::schema_coerce.
     let resolved_schema = crate::schema_coerce::coerce_inferred_schema(resolved_schema);
 
+    // Index-pattern / alias scans: the coordinator plans against the union of all backing
+    // indices' fields; this shard's parquet may declare only a subset. Widen the registered
+    // schema to the plan's base_schema here, so the table is registered ONCE with the schema the
+    // Substrait consumer binds against — DataFusion's parquet SchemaAdapter then null-fills the
+    // columns this shard omits. No-op for the common single-index case (registers the inferred
+    // schema unchanged), so there is no execute-time re-registration.
+    let resolved_schema = widen_schema_to_plan_base(&ctx, plan_bytes, table_name, &resolved_schema);
+
     let table_config = ListingTableConfig::new(shard_view.table_path.clone())
         .with_listing_options(listing_options)
         .with_schema(Arc::clone(&resolved_schema));
@@ -219,8 +275,9 @@ pub async unsafe fn create_session_context_indexed(
     delegated_predicate_count: i32,
     query_config: DatafusionQueryConfig,
 ) -> Result<i64, DataFusionError> {
-    // Create base session context (same as non-indexed path)
-    let ptr = create_session_context(runtime_ptr, shard_view_ptr, table_name, context_id, query_config).await?;
+    // Create base session context (same as non-indexed path). The indexed path doesn't widen to
+    // a union base_schema (it has no multi-index null-fill), so pass no plan bytes.
+    let ptr = create_session_context(runtime_ptr, shard_view_ptr, table_name, context_id, query_config, &[]).await?;
 
     // Augment with indexed config and UDF registration
     let handle = &mut *(ptr as *mut SessionContextHandle);
