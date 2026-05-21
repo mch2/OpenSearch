@@ -17,8 +17,11 @@ import org.opensearch.analytics.exec.action.FragmentExecutionArrowResponse;
 import org.opensearch.analytics.exec.action.FragmentExecutionRequest;
 import org.opensearch.analytics.exec.stage.AbstractStageExecution;
 import org.opensearch.analytics.exec.stage.DataProducer;
+import org.opensearch.analytics.exec.stage.StageExecution;
 import org.opensearch.analytics.exec.stage.StageTask;
 import org.opensearch.analytics.exec.stage.StageTaskId;
+import org.opensearch.analytics.exec.stage.StageTaskState;
+import org.opensearch.analytics.exec.task.TaskRunner;
 import org.opensearch.analytics.planner.dag.ExecutionTarget;
 import org.opensearch.analytics.planner.dag.ShardExecutionTarget;
 import org.opensearch.analytics.planner.dag.Stage;
@@ -28,6 +31,8 @@ import org.opensearch.core.action.ActionListener;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BiFunction;
 import java.util.function.Function;
 
 /**
@@ -67,6 +72,44 @@ public class ShardFragmentStageExecution extends AbstractStageExecution implemen
             tasks.add(new ShardStageTask(new StageTaskId(getStageId(), i), resolved.get(i)));
         }
         return tasks;
+    }
+
+    /**
+     * Incremental dispatch: emit only {@code maxConcurrentOutboundShards} tasks up front,
+     * then dispatch the next one each time an in-flight task terminates. Bounds the depth
+     * of {@link QueryContext#outboundShardThrottle()}'s internal queue to the dispatch
+     * window — without this override, the eager default would enqueue {@code N - permits}
+     * runnables behind the semaphore on large alias fan-outs.
+     *
+     * <p>The runAfter wrapping is per-slot: the scheduler-built listener runs first (drives
+     * terminal state), then this wrapper advances the slot. This assumes a task's terminal is
+     * final. {@link #retargetForRetry} is a no-op today; once it is wired, a retry re-dispatched
+     * through the bare scheduler listener would slip outside this accounting — the failed task's
+     * terminal advances the window while the retry runs unslotted, and the retry's own terminal
+     * never re-advances — so the window logic must be revisited then.
+     */
+    @Override
+    public void dispatchTasks(BiFunction<StageExecution, StageTask, ActionListener<Void>> handleFor) {
+        @SuppressWarnings("unchecked")
+        TaskRunner<StageTask> runner = (TaskRunner<StageTask>) taskRunner();
+        List<StageTask> tasks = tasks();
+        AtomicInteger nextIndex = new AtomicInteger(0);
+        Runnable dispatchOne = new Runnable() {
+            @Override
+            public void run() {
+                if (getState().isTerminal()) return;
+                int idx = nextIndex.getAndIncrement();
+                if (idx >= tasks.size()) return;
+                StageTask task = tasks.get(idx);
+                task.transitionTo(StageTaskState.RUNNING);
+                ActionListener<Void> wrapped = ActionListener.runAfter(handleFor.apply(ShardFragmentStageExecution.this, task), this);
+                runner.run(task, wrapped);
+            }
+        };
+        int initialWindow = Math.min(tasks.size(), config.maxConcurrentOutboundShards());
+        for (int i = 0; i < initialWindow; i++) {
+            dispatchOne.run();
+        }
     }
 
     // TODO: override retargetForRetry for replica failover — needs TargetResolver.alternateReplica

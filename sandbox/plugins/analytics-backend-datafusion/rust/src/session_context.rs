@@ -43,6 +43,10 @@ pub struct SessionContextHandle {
     pub writer_generations: Arc<Vec<i64>>,
     pub query_context: QueryTrackingContext,
     pub table_name: String,
+    /// Schema the default ListingTable was registered with (coerced inferred parquet schema).
+    /// Retained so `execute_with_context` can reconcile it against the plan's union base_schema
+    /// and null-fill columns this shard's files omit (index-pattern / alias scans).
+    pub(crate) registered_schema: arrow::datatypes::SchemaRef,
     /// When set, indicates this session uses the indexed execution path with filter delegation.
     pub indexed_config: Option<IndexedExecutionConfig>,
     /// Per-query tuning knobs (batch size, partitions, filter strategies, etc.)
@@ -153,7 +157,7 @@ pub async unsafe fn create_session_context(
 
     let table_config = ListingTableConfig::new(shard_view.table_path.clone())
         .with_listing_options(listing_options)
-        .with_schema(resolved_schema);
+        .with_schema(Arc::clone(&resolved_schema));
 
     let provider = Arc::new(ListingTable::try_new(table_config).map_err(|e| {
         error!(
@@ -184,6 +188,7 @@ pub async unsafe fn create_session_context(
         writer_generations: shard_view.writer_generations.clone(),
         query_context,
         table_name: table_name.to_string(),
+        registered_schema: resolved_schema,
         indexed_config: None,
         query_config,
         aggregate_mode: crate::agg_mode::Mode::Default,
@@ -316,6 +321,7 @@ mod tests {
             writer_generations: Arc::new(vec![]),
             query_context,
             table_name: "t".to_string(),
+            registered_schema: Arc::clone(&schema),
             indexed_config: None,
             query_config: crate::datafusion_query_config::DatafusionQueryConfig::test_default(),
             aggregate_mode: Mode::Default,

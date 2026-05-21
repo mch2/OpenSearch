@@ -14,6 +14,7 @@ import org.opensearch.analytics.exec.action.FragmentExecutionRequest;
 import org.opensearch.analytics.exec.stage.StageExecution;
 import org.opensearch.analytics.exec.stage.StageExecutionBuilder;
 import org.opensearch.analytics.exec.stage.StageExecutionFactory;
+import org.opensearch.analytics.planner.RelNodeUtils;
 import org.opensearch.analytics.planner.dag.ShardExecutionTarget;
 import org.opensearch.analytics.planner.dag.Stage;
 import org.opensearch.analytics.planner.dag.StagePlan;
@@ -50,10 +51,14 @@ public final class ShardFragmentStageExecutionFactory implements StageExecutionF
         List<FragmentExecutionRequest.PlanAlternative> planAlternatives = buildPlanAlternatives(stage);
         final String queryId = config.queryId();
         final int stageId = stage.getStageId();
+        // Capture the bare table name the user wrote (alias or concrete) so the data-node side
+        // registers its table provider under the same name the Substrait NamedScan references.
+        final String logicalTableName = RelNodeUtils.findTableName(stage.getFragment());
         Function<ShardExecutionTarget, FragmentExecutionRequest> requestBuilder = target -> new FragmentExecutionRequest(
             queryId,
             stageId,
             target.shardId(),
+            logicalTableName,
             planAlternatives
         );
         // Execution pulls the resolver off `stage` and calls resolve() lazily at start().

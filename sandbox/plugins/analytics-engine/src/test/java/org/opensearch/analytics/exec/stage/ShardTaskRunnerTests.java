@@ -87,6 +87,7 @@ public class ShardTaskRunnerTests extends OpenSearchTestCase {
         QueryContext config = mock(QueryContext.class);
         when(config.maxConcurrentShardRequests()).thenReturn(5);
         when(config.parentTask()).thenReturn(mock(AnalyticsQueryTask.class));
+        when(config.outboundShardThrottle()).thenReturn(new PendingExecutions(50));
 
         AnalyticsSearchTransportService transport = mock(AnalyticsSearchTransportService.class);
         doAnswer(inv -> {

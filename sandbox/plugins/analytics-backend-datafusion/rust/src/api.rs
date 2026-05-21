@@ -822,6 +822,56 @@ fn collect_reads(rel: &substrait::proto::Rel, out: &mut Vec<substrait::proto::Re
     }
 }
 
+/// Extracts the schema the coordinator planned a scan against — the `base_schema` of the
+/// `NamedTable` ReadRel whose last name matches `table_name`. This is the union row type for
+/// an index-pattern / alias scan; a given shard's parquet files may declare only a subset of
+/// it. Returns `None` when the plan has no matching named-table read or no base_schema.
+///
+/// Used by `execute_with_context` to null-fill columns a shard omits: the schema is handed to
+/// `schema_coerce::append_missing_nullable`, then the table is re-registered so the substrait
+/// consumer can bind every base_schema column by name (see `ensure_schema_compatibility`).
+pub(crate) fn expected_scan_schema(
+    plan: &substrait::proto::Plan,
+    table_name: &str,
+) -> Option<arrow::datatypes::Schema> {
+    use datafusion_substrait::extensions::Extensions;
+    use datafusion_substrait::logical_plan::consumer::{from_substrait_named_struct, DefaultSubstraitConsumer};
+    use substrait::proto::read_rel::ReadType;
+
+    let mut reads = Vec::new();
+    for plan_rel in &plan.relations {
+        if let Some(rel) = root_rel(plan_rel) {
+            collect_reads(&rel, &mut reads);
+        }
+    }
+    if reads.is_empty() {
+        return None;
+    }
+
+    // Throwaway session purely to convert the substrait NamedStruct into an Arrow schema; no
+    // UDFs or data needed since we only read the declared field names + types.
+    let state = SessionStateBuilder::new()
+        .with_config(SessionConfig::new())
+        .with_default_features()
+        .build();
+    let extensions = Extensions::default();
+    let consumer = DefaultSubstraitConsumer::new(&extensions, &state);
+
+    for read in &reads {
+        let Some(ReadType::NamedTable(nt)) = read.read_type.as_ref() else {
+            continue;
+        };
+        let name = nt.names.last().cloned().unwrap_or_default();
+        if name != table_name {
+            continue;
+        }
+        let base_schema = read.base_schema.as_ref()?;
+        let df_schema = from_substrait_named_struct(&consumer, base_schema).ok()?;
+        return Some(df_schema.as_arrow().clone());
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // Coordinator-reduce local execution API
 //

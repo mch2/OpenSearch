@@ -114,4 +114,49 @@ public class PlanAlternativeSerializationTests extends OpenSearchTestCase {
         StreamInput in = out.bytes().streamInput();
         return new FragmentExecutionRequest.PlanAlternative(in);
     }
+
+    /**
+     * The request carries the {@code logicalTableName} — alias or concrete index name from the
+     * query plan — separately from the {@code ShardId}, so the data-node side registers the
+     * DataFusion table provider under the name the Substrait NamedScan references rather than
+     * the physical shard's index name (which differ for alias queries).
+     */
+    public void testRequestRoundTripPreservesLogicalTableName() throws IOException {
+        org.opensearch.core.index.shard.ShardId shardId = new org.opensearch.core.index.shard.ShardId("bank_a", "uuid", 0);
+        FragmentExecutionRequest original = new FragmentExecutionRequest(
+            "q-1",
+            7,
+            shardId,
+            "bank_all",
+            List.of(new FragmentExecutionRequest.PlanAlternative("datafusion", new byte[] { 1 }, List.of(new ShardScanInstructionNode())))
+        );
+
+        BytesStreamOutput out = new BytesStreamOutput();
+        original.writeTo(out);
+        FragmentExecutionRequest deserialized = new FragmentExecutionRequest(out.bytes().streamInput());
+
+        assertEquals("bank_all", deserialized.getLogicalTableName());
+        assertEquals("bank_a", deserialized.getShardId().getIndexName());
+    }
+
+    /**
+     * Backward-compat: legacy callers that construct the request without a logical name still
+     * round-trip; the field surfaces as null and the data-node side falls back to the shard's
+     * index name.
+     */
+    public void testRequestRoundTripWithoutLogicalTableNameFallsBackToNull() throws IOException {
+        org.opensearch.core.index.shard.ShardId shardId = new org.opensearch.core.index.shard.ShardId("bank", "uuid", 0);
+        FragmentExecutionRequest original = new FragmentExecutionRequest(
+            "q-1",
+            0,
+            shardId,
+            List.of(new FragmentExecutionRequest.PlanAlternative("datafusion", new byte[] { 1 }, List.of(new ShardScanInstructionNode())))
+        );
+
+        BytesStreamOutput out = new BytesStreamOutput();
+        original.writeTo(out);
+        FragmentExecutionRequest deserialized = new FragmentExecutionRequest(out.bytes().streamInput());
+
+        assertNull(deserialized.getLogicalTableName());
+    }
 }

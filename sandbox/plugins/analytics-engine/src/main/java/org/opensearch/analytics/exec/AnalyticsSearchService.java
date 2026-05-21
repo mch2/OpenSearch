@@ -277,7 +277,12 @@ public class AnalyticsSearchService implements AutoCloseable {
         IndexShard shard,
         Task task
     ) {
-        ShardScanExecutionContext ctx = new ShardScanExecutionContext(request.getShardId().getIndexName(), task, reader);
+        // Prefer the logical table name (alias or concrete name from the planner's Substrait
+        // plan) so the backend's NamedScan resolves against the matching registered provider.
+        // Legacy requests without a logical name fall back to the shard's concrete index name —
+        // identical to prior behavior.
+        String tableName = request.getLogicalTableName() != null ? request.getLogicalTableName() : request.getShardId().getIndexName();
+        ShardScanExecutionContext ctx = new ShardScanExecutionContext(tableName, task, reader);
         ctx.setFragmentBytes(plan.getFragmentBytes());
         ctx.setAllocator(allocator);
         ctx.setMapperService(shard.mapperService());
