@@ -121,49 +121,6 @@ public class ShardFragmentStageExecutionTests extends OpenSearchTestCase {
     }
 
     /**
-     * Incremental dispatch contract: initial batch == window size; each per-task terminal
-     * advances the slot by exactly one; after the stage transitions to a terminal state
-     * (here, cancel), subsequent task terminals do NOT advance. Verified by swapping in a
-     * recording runner that captures each {@code runner.run} call without ever firing the
-     * transport, so the window bound is observable directly.
-     */
-    public void testDispatchTasksEmitsInitialWindowAndAdvancesOnTerminal() {
-        int totalTasks = 12;
-        int window = 5;
-
-        java.util.List<StageTask> dispatched = new java.util.concurrent.CopyOnWriteArrayList<>();
-        java.util.List<ActionListener<Void>> wrappedListeners = new java.util.concurrent.CopyOnWriteArrayList<>();
-
-        ShardFragmentStageExecution exec = newRecordingExecution(totalTasks, window, dispatched, wrappedListeners);
-        exec.start();
-        assertEquals(StageExecution.State.RUNNING, exec.getState());
-
-        java.util.function.BiFunction<StageExecution, StageTask, ActionListener<Void>> noopFactory = (s, t) -> new ActionListener<>() {
-            @Override
-            public void onResponse(Void v) {}
-
-            @Override
-            public void onFailure(Exception e) {}
-        };
-
-        exec.dispatchTasks(noopFactory);
-        assertEquals("initial dispatch caps at window", window, dispatched.size());
-
-        wrappedListeners.get(0).onResponse(null);
-        assertEquals("terminal advances slot by exactly one", window + 1, dispatched.size());
-
-        wrappedListeners.get(1).onResponse(null);
-        assertEquals(window + 2, dispatched.size());
-
-        exec.cancel("test");
-        assertEquals(StageExecution.State.CANCELLED, exec.getState());
-
-        int beforeCancelTerminal = dispatched.size();
-        wrappedListeners.get(2).onResponse(null);
-        assertEquals("post-cancel terminal must not dispatch", beforeCancelTerminal, dispatched.size());
-    }
-
-    /**
      * Verifies that on the happy path, batches are fed into the sink normally.
      */
     public void testArrowResponseFedToSinkOnHappyPath() {
@@ -274,51 +231,6 @@ public class ShardFragmentStageExecutionTests extends OpenSearchTestCase {
         return stage;
     }
 
-    /**
-     * Builds a {@link ShardFragmentStageExecution} whose runner is swapped for a recorder
-     * — every {@code runner.run} call is captured (no transport, no throttle). The dispatch
-     * window is plumbed via {@code config.maxConcurrentOutboundShards()}.
-     */
-    private ShardFragmentStageExecution newRecordingExecution(
-        int totalTasks,
-        int window,
-        java.util.List<StageTask> dispatchedOut,
-        java.util.List<ActionListener<Void>> wrappedListenersOut
-    ) {
-        Stage stage = mockStageWithTargets(totalTasks);
-        QueryContext config = mock(QueryContext.class);
-        when(config.parentTask()).thenReturn(mock(AnalyticsQueryTask.class));
-        when(config.maxConcurrentShardRequests()).thenReturn(5);
-        when(config.bufferAllocator()).thenReturn(allocator);
-        when(config.outboundShardThrottle()).thenReturn(new org.opensearch.analytics.exec.PendingExecutions(window));
-        when(config.maxConcurrentOutboundShards()).thenReturn(window);
-        ClusterService cs = mockClusterService();
-        AnalyticsSearchTransportService dispatcher = mock(AnalyticsSearchTransportService.class);
-        Function<ShardExecutionTarget, FragmentExecutionRequest> requestBuilder = t -> new FragmentExecutionRequest(
-            "test-query",
-            0,
-            t.shardId(),
-            List.of(new FragmentExecutionRequest.PlanAlternative("test-backend", new byte[0], List.of()))
-        );
-
-        ShardFragmentStageExecution exec = new ShardFragmentStageExecution(
-            stage,
-            config,
-            new CapturingSink(),
-            cs,
-            requestBuilder,
-            dispatcher
-        );
-        // `runner` is package-protected on AbstractStageExecution; this test is in the same
-        // package, so we can swap it directly. Bypasses ShardTaskRunner so the test asserts
-        // the override's dispatch window without the throttle in the loop.
-        exec.runner = (task, listener) -> {
-            dispatchedOut.add(task);
-            wrappedListenersOut.add(listener);
-        };
-        return exec;
-    }
-
     /** Builds a stage execution with N tasks; dispatcher is a no-op stub since the test invokes onTaskTerminal directly. */
     private ShardFragmentStageExecution buildExecutionWithTargets(CapturingSink sink, int n) {
         Stage stage = mockStageWithTargets(n);
@@ -339,8 +251,6 @@ public class ShardFragmentStageExecutionTests extends OpenSearchTestCase {
         when(config.parentTask()).thenReturn(mock(AnalyticsQueryTask.class));
         when(config.maxConcurrentShardRequests()).thenReturn(5);
         when(config.bufferAllocator()).thenReturn(allocator);
-        when(config.outboundShardThrottle()).thenReturn(new org.opensearch.analytics.exec.PendingExecutions(50));
-        when(config.maxConcurrentOutboundShards()).thenReturn(50);
         return config;
     }
 

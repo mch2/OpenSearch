@@ -20,8 +20,6 @@ import org.opensearch.analytics.planner.rel.OpenSearchValues;
 import org.opensearch.analytics.spi.ExchangeSinkProvider;
 import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
 import org.opensearch.cluster.service.ClusterService;
-import org.opensearch.common.settings.Settings;
-import org.opensearch.common.util.concurrent.ThreadContext;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -38,16 +36,6 @@ import java.util.UUID;
 public class DAGBuilder {
 
     private DAGBuilder() {}
-
-    /**
-     * Convenience overload that resolves index expressions with a default
-     * {@link IndexNameExpressionResolver}. Intended for tests and callers without an injected
-     * resolver; production must use {@link #build(RelNode, CapabilityRegistry, ClusterService,
-     * IndexNameExpressionResolver)} so security-plugin index filtering is honored.
-     */
-    public static QueryDAG build(RelNode cboOutput, CapabilityRegistry registry, ClusterService clusterService) {
-        return build(cboOutput, registry, clusterService, new IndexNameExpressionResolver(new ThreadContext(Settings.EMPTY)));
-    }
 
     public static QueryDAG build(
         RelNode cboOutput,

@@ -64,14 +64,11 @@ public interface StageExecution {
 
     /**
      * Dispatch the stage's tasks. Default implementation iterates {@link #tasks()} eagerly
-     * — one {@code runner.run} call per task up front. Override to dispatch incrementally
-     * (e.g. shard fan-outs that want to keep the runner's outbound-throttle queue empty by
-     * only enqueueing the next task once a slot has freed via the listener's terminal
-     * callback).
+     * — one {@code runner.run} call per task up front. Stages may override to dispatch with a
+     * different cadence.
      *
-     * <p>{@code handleForFactory} is the scheduler's per-task listener builder (the same
-     * one that carries retry / terminal logic). Stages override dispatch cadence; the
-     * scheduler still owns the listener it hands them.
+     * <p>{@code handleForFactory} is the scheduler's per-task listener builder (the same one
+     * that carries retry / terminal logic); the scheduler owns the listener it hands them.
      */
     default void dispatchTasks(java.util.function.BiFunction<StageExecution, StageTask, ActionListener<Void>> handleForFactory) {
         @SuppressWarnings("unchecked")

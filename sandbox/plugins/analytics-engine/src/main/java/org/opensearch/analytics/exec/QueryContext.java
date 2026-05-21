@@ -30,12 +30,6 @@ public class QueryContext {
     // TODO: make configurable via cluster setting (like search.max_concurrent_shard_requests)
     private static final int DEFAULT_MAX_CONCURRENT_SHARD_REQUESTS = 5;
 
-    /**
-     * Per-query cap on total in-flight outbound shard requests across all nodes. Composes with
-     * the per-node {@link #maxConcurrentShardRequests} throttle — a dispatch acquires both.
-     */
-    private static final int DEFAULT_MAX_CONCURRENT_OUTBOUND_SHARDS = 50;
-
     private final QueryDAG dag;
     private final Executor searchExecutor;
     private final AnalyticsQueryTask parentTask;
@@ -43,8 +37,6 @@ public class QueryContext {
     private final List<AnalyticsOperationListener> operationListeners;
     private final BufferAllocator allocator;
     private final boolean ownsAllocator;
-    /** Per-query total outbound-shard throttle. See {@link #DEFAULT_MAX_CONCURRENT_OUTBOUND_SHARDS}. */
-    private final PendingExecutions outboundShardThrottle;
     private volatile ExecutorService localTaskExecutor;
     private boolean closed;  // guarded by `this`
 
@@ -75,26 +67,6 @@ public class QueryContext {
         this.operationListeners = operationListeners;
         this.allocator = allocator;
         this.ownsAllocator = ownsAllocator;
-        this.outboundShardThrottle = new PendingExecutions(DEFAULT_MAX_CONCURRENT_OUTBOUND_SHARDS);
-    }
-
-    /**
-     * Per-query total outbound-shard throttle. Acquire before each shard dispatch, release on
-     * terminal (success or failure). Composes with the per-node {@code maxConcurrentShardRequests}
-     * throttle: a dispatch holds both simultaneously.
-     */
-    public PendingExecutions outboundShardThrottle() {
-        return outboundShardThrottle;
-    }
-
-    /**
-     * Permit count for {@link #outboundShardThrottle()} — also the dispatch window the shard
-     * stage uses to size its initial batch when dispatching incrementally. Kept in sync with
-     * the throttle by construction; exposed as a method so stages don't have to reach through
-     * {@link PendingExecutions} internals.
-     */
-    public int maxConcurrentOutboundShards() {
-        return DEFAULT_MAX_CONCURRENT_OUTBOUND_SHARDS;
     }
 
     public QueryDAG dag() {

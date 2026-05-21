@@ -49,24 +49,10 @@ public final class ShardTaskRunner implements TaskRunner<ShardStageTask> {
 
     @Override
     public void run(ShardStageTask task, ActionListener<Void> listener) {
-        // Two-layer throttle: query-wide cap on total in-flight outbound shard requests, then
-        // per-node cap. The query-wide tryRun queues tasks beyond the cap; when a permit frees
-        // (via the runAfter wrapper below firing on terminal), the next queued task fires.
-        // Per-node tryRun lives inside dispatchFragmentStreaming and gates the actual send.
-        PendingExecutions queryWide = config.outboundShardThrottle();
-        ActionListener<Void> releaseQueryWideOnTerminal = ActionListener.runAfter(listener, queryWide::finishAndRunNext);
-        queryWide.tryRun(() -> {
-            ShardExecutionTarget target = (ShardExecutionTarget) task.target();
-            FragmentExecutionRequest request = requestBuilder.apply(target);
-            PendingExecutions perNode = pendingFor(target);
-            transport.dispatchFragmentStreaming(
-                request,
-                target.node(),
-                stage.responseListenerFor(releaseQueryWideOnTerminal),
-                config.parentTask(),
-                perNode
-            );
-        });
+        ShardExecutionTarget target = (ShardExecutionTarget) task.target();
+        FragmentExecutionRequest request = requestBuilder.apply(target);
+        PendingExecutions pending = pendingFor(target);
+        transport.dispatchFragmentStreaming(request, target.node(), stage.responseListenerFor(listener), config.parentTask(), pending);
     }
 
     private PendingExecutions pendingFor(ShardExecutionTarget target) {
