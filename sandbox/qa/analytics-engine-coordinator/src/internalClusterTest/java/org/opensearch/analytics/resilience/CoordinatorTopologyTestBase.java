@@ -86,11 +86,17 @@ public abstract class CoordinatorTopologyTestBase extends OpenSearchIntegTestCas
 
     @Override
     protected Settings nodeSettings(int nodeOrdinal) {
-        return Settings.builder()
+        Settings.Builder b = Settings.builder()
             .put(super.nodeSettings(nodeOrdinal))
             .put(FeatureFlags.PLUGGABLE_DATAFORMAT_EXPERIMENTAL_FLAG, true)
-            .put(FeatureFlags.STREAM_TRANSPORT, true)
-            .build();
+            .put(FeatureFlags.STREAM_TRANSPORT, true);
+        // -Dhighcard.search.size=N pins the SEARCH pool size so we can sweep contention vs. a real bug.
+        String searchSize = System.getProperty("highcard.search.size");
+        if (searchSize != null) {
+            b.put("thread_pool.search.size", Integer.parseInt(searchSize))
+                .put("thread_pool.search.queue_size", 1000);
+        }
+        return b.build();
     }
 
     /**

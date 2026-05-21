@@ -8,6 +8,8 @@
 
 package org.opensearch.analytics.exec.stage.coordinator;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.backend.ExchangeSource;
 import org.opensearch.analytics.exec.QueryContext;
 import org.opensearch.analytics.exec.stage.AbstractStageExecution;
@@ -31,6 +33,8 @@ import java.util.List;
  */
 public final class ReduceStageExecution extends AbstractStageExecution implements SinkProvidingStageExecution {
 
+    private static final Logger logger = LogManager.getLogger(ReduceStageExecution.class);
+
     private final ReducingExchangeSink backendSink;
     private final ExchangeSink downstream;
 
@@ -38,7 +42,7 @@ public final class ReduceStageExecution extends AbstractStageExecution implement
         super(stage, config.queryId(), config.operationListeners(), config.parentTask());
         this.backendSink = backendSink;
         this.downstream = downstream;
-        this.runner = new LocalTaskRunner(config.searchExecutor());
+        this.runner = new LocalTaskRunner(config.reduceExecutor());
     }
 
     @Override
@@ -48,6 +52,7 @@ public final class ReduceStageExecution extends AbstractStageExecution implement
 
     @Override
     public void closeChildInput(int childStageId) {
+        logger.warn("[reduce-lifecycle] closeChildInput stageId={} on thread=[{}]", childStageId, Thread.currentThread().getName());
         if (backendSink instanceof MultiInputExchangeSink multi) {
             multi.sinkForChild(childStageId).close();
         }

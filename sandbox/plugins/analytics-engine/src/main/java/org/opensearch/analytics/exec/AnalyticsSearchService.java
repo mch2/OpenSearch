@@ -126,19 +126,27 @@ public class AnalyticsSearchService implements AutoCloseable {
         StreamingFragmentResponseHandler responseHandler,
         Executor executor
     ) {
+        final String sid = request.getShardId() + " stage=" + request.getStageId();
         try {
             executor.execute(() -> {
+                LOGGER.warn("[shard-handoff] producer START shard={} thread=[{}]", sid, Thread.currentThread().getName());
+                long batches = 0;
                 try (FragmentResources ctx = executeFragmentStreaming(request, shard, task)) {
                     Iterator<EngineResultBatch> it = ctx.stream().iterator();
                     while (it.hasNext()) {
                         responseHandler.onBatch(it.next());
+                        batches++;
                     }
+                    LOGGER.warn("[shard-handoff] producer drained shard={} batches={} — calling onComplete()", sid, batches);
                     responseHandler.onComplete();
+                    LOGGER.warn("[shard-handoff] producer onComplete() RETURNED shard={} batches={}", sid, batches);
                 } catch (Exception e) {
+                    LOGGER.warn("[shard-handoff] producer FAILED shard={} batches={} err={}", sid, batches, e.toString());
                     responseHandler.onFailure(e);
                 }
             });
         } catch (Exception e) {
+            LOGGER.warn("[shard-handoff] producer submit REJECTED shard={} err={}", sid, e.toString());
             responseHandler.onFailure(e);
         }
     }

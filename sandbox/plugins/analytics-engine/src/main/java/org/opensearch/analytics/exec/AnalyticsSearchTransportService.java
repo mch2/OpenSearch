@@ -8,6 +8,8 @@
 
 package org.opensearch.analytics.exec;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.backend.EngineResultBatch;
 import org.opensearch.analytics.exec.action.FragmentExecutionAction;
 import org.opensearch.analytics.exec.action.FragmentExecutionArrowResponse;
@@ -48,6 +50,8 @@ import java.io.IOException;
  */
 @Singleton
 public class AnalyticsSearchTransportService {
+    private static final Logger logger = LogManager.getLogger(AnalyticsSearchTransportService.class);
+
     private final StreamTransportService transportService;
     private final ClusterService clusterService;
 
@@ -86,6 +90,11 @@ public class AnalyticsSearchTransportService {
             AdmissionControlActionType.SEARCH,
             FragmentExecutionRequest::new,
             (request, channel, task) -> {
+                logger.warn(
+                    "[shard-handoff] HANDLER invoked (data-node received request) shard={} thread=[{}]",
+                    request.getShardId(),
+                    Thread.currentThread().getName()
+                );
                 IndexShard shard = indicesService.indexServiceSafe(request.getShardId().getIndex()).getShard(request.getShardId().id());
                 searchService.executeFragmentStreamingAsync(
                     request,
@@ -148,19 +157,30 @@ public class AnalyticsSearchTransportService {
 
             @Override
             public void handleStreamResponse(StreamTransportResponse<FragmentExecutionArrowResponse> stream) {
+                logger.warn(
+                    "[shard-handoff] consumer handleStreamResponse START node={} thread=[{}]",
+                    targetNode.getId(),
+                    Thread.currentThread().getName()
+                );
+                long frames = 0;
                 try {
                     FragmentExecutionArrowResponse current;
                     FragmentExecutionArrowResponse last = null;
                     while ((current = stream.nextResponse()) != null) {
+                        frames++;
                         if (last != null) {
                             listener.onStreamResponse(last, false);
                         }
                         last = current;
                     }
                     if (last != null) {
+                        logger.warn("[shard-handoff] consumer stream ended frames={} — firing isLast=true", frames);
                         listener.onStreamResponse(last, true);
+                    } else {
+                        logger.warn("[shard-handoff] consumer stream ended with ZERO frames (last==null) — isLast NEVER fired!", frames);
                     }
                 } catch (Exception e) {
+                    logger.warn("[shard-handoff] consumer handleStreamResponse threw after frames={} err={}", frames, e.toString());
                     listener.onFailure(e);
                 } finally {
                     try {
@@ -172,6 +192,7 @@ public class AnalyticsSearchTransportService {
 
             @Override
             public void handleResponse(FragmentExecutionArrowResponse response) {
+                logger.warn("[shard-handoff] consumer handleResponse (non-stream) node={} — firing isLast=true", targetNode.getId());
                 try {
                     listener.onStreamResponse(response, true);
                 } finally {
@@ -181,6 +202,7 @@ public class AnalyticsSearchTransportService {
 
             @Override
             public void handleException(TransportException e) {
+                logger.warn("[shard-handoff] consumer handleException node={} err={}", targetNode.getId(), e.toString());
                 try {
                     listener.onFailure(e);
                 } finally {
@@ -190,10 +212,21 @@ public class AnalyticsSearchTransportService {
         };
 
         TransportRequestOptions options = TransportRequestOptions.builder().withType(TransportRequestOptions.Type.STREAM).build();
+        logger.warn(
+            "[shard-handoff] dispatchFragmentStreaming calling tryRun node={} thread=[{}]",
+            targetNode.getId(),
+            Thread.currentThread().getName()
+        );
         pending.tryRun(() -> {
             try {
+                logger.warn(
+                    "[shard-handoff] tryRun BODY running (permit acquired) node={} thread=[{}] — sending request",
+                    targetNode.getId(),
+                    Thread.currentThread().getName()
+                );
                 Transport.Connection connection = getConnection(null, targetNode.getId());
                 transportService.sendChildRequest(connection, FragmentExecutionAction.NAME, request, parentTask, options, handler);
+                logger.warn("[shard-handoff] sendChildRequest RETURNED node={}", targetNode.getId());
             } catch (Exception e) {
                 try {
                     listener.onFailure(e);

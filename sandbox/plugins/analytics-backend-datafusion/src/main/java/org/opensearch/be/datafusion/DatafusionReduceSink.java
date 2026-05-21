@@ -134,6 +134,7 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
         }
         this.outStream = outStreamLocal;
         this.sendersByChildStageId = senders;
+        logger.warn("[reduce-lifecycle] sink constructed; registered child inputs (need EOF on each)={}", senders.keySet());
         // Drain is not started here — it runs inline on the owning reduce stage's
         // reduce() caller thread. No separate drain executor.
     }
@@ -163,7 +164,8 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
                 "No registered partition for childStageId=" + childStageId + "; known ids=" + sendersByChildStageId.keySet()
             );
         }
-        return new ChildSink(sender, childSchemas.get(childStageId));
+        logger.warn("[reduce-lifecycle] sinkForChild id={} (known={})", childStageId, sendersByChildStageId.keySet());
+        return new ChildSink(childStageId, sender, childSchemas.get(childStageId));
     }
 
     /**
@@ -260,11 +262,13 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
      * its specific input partition. Idempotent — duplicate close() calls are no-ops.
      */
     private final class ChildSink implements ExchangeSink {
+        private final int childStageId;
         private final DatafusionPartitionSender sender;
         private final Schema declaredSchema;
         private volatile boolean childClosed;
 
-        ChildSink(DatafusionPartitionSender sender, Schema declaredSchema) {
+        ChildSink(int childStageId, DatafusionPartitionSender sender, Schema declaredSchema) {
+            this.childStageId = childStageId;
             this.sender = sender;
             this.declaredSchema = declaredSchema;
         }
@@ -277,13 +281,15 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
         @Override
         public void close() {
             if (childClosed) {
+                logger.warn("[reduce-lifecycle] child={} close() on already-closed wrapper (no-op)", childStageId);
                 return;
             }
             childClosed = true;
             try {
                 sender.close();
+                logger.warn("[reduce-lifecycle] child={} EOF — sender.close() returned", childStageId);
             } catch (Throwable t) {
-                logger.warn("[ReduceSink] error closing child sender", t);
+                logger.warn("[reduce-lifecycle] child={} error closing child sender", childStageId, t);
             }
         }
     }
@@ -368,6 +374,11 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
         assert before == SinkState.READY : "reduce called more than once (state=" + before + ")";
         Exception failure = null;
         try {
+            logger.warn(
+                "[reduce-lifecycle] drain start on thread=[{}] — blocks until EOF on inputs={}",
+                Thread.currentThread().getName(),
+                sendersByChildStageId.keySet()
+            );
             drainOutputIntoDownstream(outStream);
         } catch (Exception e) {
             failure = e;

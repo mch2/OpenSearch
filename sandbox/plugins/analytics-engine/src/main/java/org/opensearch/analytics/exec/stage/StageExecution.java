@@ -8,6 +8,8 @@
 
 package org.opensearch.analytics.exec.stage;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.exec.task.TaskRunner;
 import org.opensearch.common.Nullable;
 
@@ -24,6 +26,8 @@ import java.util.function.Consumer;
  * @opensearch.internal
  */
 public interface StageExecution {
+
+    Logger STAGE_LIFECYCLE_LOG = LogManager.getLogger(StageExecution.class);
 
     int getStageId();
 
@@ -139,6 +143,7 @@ public interface StageExecution {
         for (StageExecution child : children) {
             int childId = child.getStageId();
             child.addStateListener((from, to) -> {
+                STAGE_LIFECYCLE_LOG.warn("[reduce-lifecycle] child stage={} transition {}->{}", childId, from, to);
                 switch (to) {
                     case RUNNING -> {
                         if (eager && eagerScheduled.compareAndSet(0, 1)) {

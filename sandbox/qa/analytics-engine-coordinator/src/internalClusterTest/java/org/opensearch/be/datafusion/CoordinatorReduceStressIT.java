@@ -462,6 +462,102 @@ public class CoordinatorReduceStressIT extends OpenSearchTestCase {
     }
 
     /**
+     * REPRO — concurrency flood. Sweeps {@code -Dhighcard.concurrency},
+     * {@code -Dhighcard.batches}, {@code -Dhighcard.rows} to reproduce the
+     * unbounded native-task-spawn problem PR #21632 addresses: N concurrent
+     * reduces each fan out to target_partitions (num_cpus) tasks on the shared
+     * 2-thread CPU executor (unbounded queue). Measures completions / failures /
+     * wall time rather than asserting totals — a flood manifests as OOM, native
+     * pool-exhausted errors, or timeout.
+     */
+    public void testReduceFloodRepro() throws Exception {
+        final int concurrency = Integer.getInteger("highcard.concurrency", 8);
+        final int batchesPerSink = Integer.getInteger("highcard.batches", 10);
+        final int rowsPerBatch = Integer.getInteger("highcard.rows", 1_000);
+        final long timeoutSec = Integer.getInteger("highcard.timeout", 120);
+
+        Schema inputSchema = new Schema(List.of(new Field("x", FieldType.nullable(new ArrowType.Int(64, true)), null)));
+        byte[] substrait = buildSumSubstrait();
+
+        // -Dhighcard.warmup=true runs one full sink single-threaded first, so the Arrow
+        // C-Data JNI library is loaded before the concurrent burst. If this clears the
+        // cliff, the hang is the lazy JNI loader, not native execution.
+        if (Boolean.getBoolean("highcard.warmup")) {
+            runOneSink("q-flood-warmup", inputSchema, substrait, 1, 1_000);
+        }
+
+        ExecutorService exec = Executors.newFixedThreadPool(concurrency);
+        ConcurrentHashMap<Integer, Throwable> failures = new ConcurrentHashMap<>();
+        AtomicLong completed = new AtomicLong();
+        long t0 = System.nanoTime();
+        try {
+            CountDownLatch start = new CountDownLatch(1);
+            Future<?>[] futs = new Future<?>[concurrency];
+            for (int i = 0; i < concurrency; i++) {
+                final int idx = i;
+                futs[i] = exec.submit(() -> {
+                    try {
+                        start.await();
+                        CapturingSink downstream = new CapturingSink();
+                        ExchangeSinkContext ctx = new ExchangeSinkContext(
+                            "q-flood-" + idx,
+                            0,
+                            0L,
+                            substrait,
+                            alloc,
+                            List.of(new ExchangeSinkContext.ChildInput(0, buildPassthroughSubstrait(INPUT_ID))),
+                            downstream
+                        );
+                        DatafusionReduceSink sink = new DatafusionReduceSink(ctx, runtimeHandle);
+                        PlainActionFuture<Void> drainDone = PlainActionFuture.newFuture();
+                        Thread.ofVirtual().start(() -> sink.reduce(drainDone));
+                        try {
+                            for (int b = 0; b < batchesPerSink; b++) {
+                                sink.feed(makeConstantBatch(alloc, inputSchema, rowsPerBatch, 7L));
+                            }
+                            sink.sinkForChild(0).close();
+                            drainDone.actionGet(timeoutSec, TimeUnit.SECONDS);
+                        } finally {
+                            sink.close();
+                        }
+                        completed.incrementAndGet();
+                    } catch (Throwable t) {
+                        failures.put(idx, t);
+                    }
+                    return null;
+                });
+            }
+            start.countDown();
+            long deadline = System.currentTimeMillis() + timeoutSec * 1000 + 30_000;
+            for (Future<?> f : futs) {
+                long remaining = Math.max(1L, deadline - System.currentTimeMillis());
+                try {
+                    f.get(remaining, TimeUnit.MILLISECONDS);
+                } catch (Exception e) {
+                    // recorded per-task; keep collecting
+                }
+            }
+        } finally {
+            exec.shutdownNow();
+            exec.awaitTermination(5, TimeUnit.SECONDS);
+        }
+        long elapsedMs = (System.nanoTime() - t0) / 1_000_000L;
+        logger.warn(
+            "[flood-repro] concurrency={} batches={} rows={} → completed={} failed={} wall={}ms",
+            concurrency,
+            batchesPerSink,
+            rowsPerBatch,
+            completed.get(),
+            failures.size(),
+            elapsedMs
+        );
+        for (var e : failures.entrySet()) {
+            logger.warn("[flood-repro] sink #{} failed: {}", e.getKey(), String.valueOf(e.getValue()));
+        }
+        assertEquals("[flood-repro] all sinks must complete; failures=" + failures.size(), concurrency, (int) completed.get());
+    }
+
+    /**
      * R4 — 8 concurrent independent reduce sinks, each consuming a 10-batch
      * stub. All complete with their correct totals.
      */

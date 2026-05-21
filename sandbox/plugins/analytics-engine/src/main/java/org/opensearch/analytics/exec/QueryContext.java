@@ -32,6 +32,7 @@ public class QueryContext {
 
     private final QueryDAG dag;
     private final Executor searchExecutor;
+    private final Executor reduceExecutor;
     private final AnalyticsQueryTask parentTask;
     private final int maxConcurrentShardRequests;
     private final List<AnalyticsOperationListener> operationListeners;
@@ -43,17 +44,19 @@ public class QueryContext {
     public QueryContext(
         QueryDAG dag,
         Executor searchExecutor,
+        Executor reduceExecutor,
         AnalyticsQueryTask parentTask,
         BufferAllocator allocator,
         boolean ownsAllocator
     ) {
-        this(dag, searchExecutor, parentTask, DEFAULT_MAX_CONCURRENT_SHARD_REQUESTS, List.of(), allocator, ownsAllocator);
+        this(dag, searchExecutor, reduceExecutor, parentTask, DEFAULT_MAX_CONCURRENT_SHARD_REQUESTS, List.of(), allocator, ownsAllocator);
     }
 
     /** Full-parameter constructor. Private; tests use {@link #forTest} factories. */
     private QueryContext(
         QueryDAG dag,
         Executor searchExecutor,
+        Executor reduceExecutor,
         AnalyticsQueryTask parentTask,
         int maxConcurrentShardRequests,
         List<AnalyticsOperationListener> operationListeners,
@@ -62,6 +65,7 @@ public class QueryContext {
     ) {
         this.dag = dag;
         this.searchExecutor = searchExecutor;
+        this.reduceExecutor = reduceExecutor;
         this.parentTask = parentTask;
         this.maxConcurrentShardRequests = maxConcurrentShardRequests;
         this.operationListeners = operationListeners;
@@ -75,6 +79,16 @@ public class QueryContext {
 
     public Executor searchExecutor() {
         return searchExecutor;
+    }
+
+    /**
+     * Dedicated executor for the coordinator reduce drain. Distinct from {@link #searchExecutor()}
+     * on purpose: the reduce drain blocks for the query's duration waiting on shard input, so it
+     * must not share a pool with the shard-fragment producers it depends on — otherwise a blocked
+     * reduce can starve its own producer and deadlock the pool.
+     */
+    public Executor reduceExecutor() {
+        return reduceExecutor;
     }
 
     public AnalyticsQueryTask parentTask() {
@@ -151,6 +165,7 @@ public class QueryContext {
         BufferAllocator testAllocator = TEST_ROOT.newChildAllocator("test-" + dag.queryId(), 0, Long.MAX_VALUE);
         return new QueryContext(
             dag,
+            Runnable::run,
             Runnable::run,
             parentTask,
             DEFAULT_MAX_CONCURRENT_SHARD_REQUESTS,

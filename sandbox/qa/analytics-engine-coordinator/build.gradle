@@ -154,6 +154,8 @@ internalClusterTest {
   systemProperty 'io.netty.tryUnsafe', 'true'
   systemProperty 'io.netty.tryReflectionSetAccessible', 'true'
   systemProperty 'native.lib.path', project(':sandbox:libs:dataformat-native').ext.nativeLibPath.absolutePath
+  // Forward -Dhighcard.* knobs (e.g. highcard.search.size) to the forked test JVM.
+  System.properties.each { k, v -> if (k.startsWith('highcard.')) systemProperty(k, v) }
   dependsOn ':sandbox:libs:dataformat-native:buildRustLibrary'
   jvmArgs += ["--add-opens", "java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED"]
 }

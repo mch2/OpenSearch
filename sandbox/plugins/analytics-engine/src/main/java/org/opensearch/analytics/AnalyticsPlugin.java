@@ -31,6 +31,9 @@ import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.inject.Module;
 import org.opensearch.common.inject.TypeLiteral;
 import org.opensearch.common.settings.Setting;
+import org.opensearch.common.settings.Settings;
+import org.opensearch.common.unit.TimeValue;
+import org.opensearch.common.util.concurrent.OpenSearchExecutors;
 import org.opensearch.core.action.ActionResponse;
 import org.opensearch.core.common.io.stream.NamedWriteableRegistry;
 import org.opensearch.core.xcontent.NamedXContentRegistry;
@@ -42,6 +45,8 @@ import org.opensearch.plugins.Plugin;
 import org.opensearch.plugins.PluginComponentRegistry;
 import org.opensearch.repositories.RepositoriesService;
 import org.opensearch.script.ScriptService;
+import org.opensearch.threadpool.ExecutorBuilder;
+import org.opensearch.threadpool.ScalingExecutorBuilder;
 import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.client.Client;
 import org.opensearch.watcher.ResourceWatcherService;
@@ -62,6 +67,15 @@ import java.util.function.Supplier;
 public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionPlugin {
 
     private static final Logger logger = LogManager.getLogger(AnalyticsPlugin.class);
+
+    /**
+     * Dedicated pool for the coordinator reduce drain. The drain blocks for the whole query
+     * waiting on shard input, so it must not share the SEARCH pool with the shard-fragment
+     * producers it depends on — co-locating them lets a blocked reduce starve its own producer
+     * and deadlock the pool. Scaling (not fixed) because the work is blocking/IO-bound: it grows
+     * with concurrent queries and shrinks when idle.
+     */
+    public static final String REDUCE_THREAD_POOL = "analytics_reduce";
 
     public static final Setting<Long> COORDINATOR_BUFFER_LIMIT = Setting.longSetting(
         "analytics.coordinator.buffer_limit",
@@ -141,6 +155,15 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
     @Override
     public List<Setting<?>> getSettings() {
         return List.of(COORDINATOR_BUFFER_LIMIT);
+    }
+
+    @Override
+    public List<ExecutorBuilder<?>> getExecutorBuilders(Settings settings) {
+        int processors = OpenSearchExecutors.allocatedProcessors(settings);
+        // core 1, max scales with processors (min 8) — generous because each reduce thread
+        // blocks for the query duration; capped so a query flood can't spawn unbounded threads.
+        int max = Math.max(8, 4 * processors);
+        return List.of(new ScalingExecutorBuilder(REDUCE_THREAD_POOL, 1, max, TimeValue.timeValueMinutes(5)));
     }
 
     @Override
