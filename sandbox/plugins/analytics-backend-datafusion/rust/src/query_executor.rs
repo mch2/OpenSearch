@@ -200,10 +200,7 @@ pub async fn execute_with_context(
             DataFusionError::Execution(format!("Failed to decode Substrait: {}", e))
         })?;
 
-        // The table was already registered with the plan's union base_schema at session-creation
-        // time (see session_context::widen_schema_to_plan_base), so the Substrait consumer can
-        // bind every referenced column by name and DataFusion null-fills the columns this shard
-        // omits. No schema reconciliation needed here.
+        // Union base_schema was applied at registration (session_context::widen_schema_to_plan_base).
         let logical_plan = from_substrait_plan(&handle.ctx.state(), &substrait_plan).await?;
         log_debug!("DataFusion logical plan:\n{}", logical_plan.display_indent());
         let dataframe = handle.ctx.execute_logical_plan(logical_plan).await?;

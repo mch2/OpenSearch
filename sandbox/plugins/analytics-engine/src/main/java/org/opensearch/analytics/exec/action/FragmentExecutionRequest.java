@@ -39,31 +39,12 @@ public class FragmentExecutionRequest extends ActionRequest {
     private final String queryId;
     private final int stageId;
     private final ShardId shardId;
-    /**
-     * Logical table name as it appears in the planner's Substrait fragment — the user-typed
-     * alias or concrete index name. The data node registers its DataFusion table provider under
-     * this name so the embedded NamedScan resolves cleanly. Null for legacy callers; the
-     * receiver then falls back to {@link ShardId#getIndexName()} (the concrete shard's index),
-     * preserving prior behavior for single-index queries that never went through alias resolution.
-     */
-    private final String logicalTableName;
     private final List<PlanAlternative> planAlternatives;
 
     public FragmentExecutionRequest(String queryId, int stageId, ShardId shardId, List<PlanAlternative> planAlternatives) {
-        this(queryId, stageId, shardId, null, planAlternatives);
-    }
-
-    public FragmentExecutionRequest(
-        String queryId,
-        int stageId,
-        ShardId shardId,
-        String logicalTableName,
-        List<PlanAlternative> planAlternatives
-    ) {
         this.queryId = queryId;
         this.stageId = stageId;
         this.shardId = shardId;
-        this.logicalTableName = logicalTableName;
         this.planAlternatives = planAlternatives;
     }
 
@@ -72,7 +53,6 @@ public class FragmentExecutionRequest extends ActionRequest {
         this.queryId = in.readString();
         this.stageId = in.readInt();
         this.shardId = new ShardId(in);
-        this.logicalTableName = in.readOptionalString();
         int numAlternatives = in.readVInt();
         this.planAlternatives = new ArrayList<>(numAlternatives);
         for (int i = 0; i < numAlternatives; i++) {
@@ -86,7 +66,6 @@ public class FragmentExecutionRequest extends ActionRequest {
         out.writeString(queryId);
         out.writeInt(stageId);
         shardId.writeTo(out);
-        out.writeOptionalString(logicalTableName);
         out.writeVInt(planAlternatives.size());
         for (PlanAlternative alt : planAlternatives) {
             alt.writeTo(out);
@@ -103,11 +82,6 @@ public class FragmentExecutionRequest extends ActionRequest {
 
     public ShardId getShardId() {
         return shardId;
-    }
-
-    /** See {@link #logicalTableName}. Null when the request was built by a legacy code path. */
-    public String getLogicalTableName() {
-        return logicalTableName;
     }
 
     public List<PlanAlternative> getPlanAlternatives() {

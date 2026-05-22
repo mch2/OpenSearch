@@ -181,6 +181,8 @@ public final class IndexResolution {
 
     @SuppressWarnings("unchecked")
     private static void validateSchemaCompatibility(String aliasName, List<IndexMetadata> backing) {
+        // Walks only top-level "properties" — a conflict on a nested object's leaf (e.g. a.b long
+        // vs keyword) is not caught here and is left to the data node's by-name binding check.
         // field name → (declared type, first index that declared it)
         record Decl(String type, String sourceIndex) {
         }

@@ -116,18 +116,16 @@ public class PlanAlternativeSerializationTests extends OpenSearchTestCase {
     }
 
     /**
-     * The request carries the {@code logicalTableName} — alias or concrete index name from the
-     * query plan — separately from the {@code ShardId}, so the data-node side registers the
-     * DataFusion table provider under the name the Substrait NamedScan references rather than
-     * the physical shard's index name (which differ for alias queries).
+     * Whole-request round-trip. The registration table name is no longer carried on the request —
+     * the data node derives it from the Substrait fragment's NamedTable — so the wire form is just
+     * {queryId, stageId, shardId, planAlternatives}.
      */
-    public void testRequestRoundTripPreservesLogicalTableName() throws IOException {
+    public void testRequestRoundTrip() throws IOException {
         org.opensearch.core.index.shard.ShardId shardId = new org.opensearch.core.index.shard.ShardId("bank_a", "uuid", 0);
         FragmentExecutionRequest original = new FragmentExecutionRequest(
             "q-1",
             7,
             shardId,
-            "bank_all",
             List.of(new FragmentExecutionRequest.PlanAlternative("datafusion", new byte[] { 1 }, List.of(new ShardScanInstructionNode())))
         );
 
@@ -135,28 +133,9 @@ public class PlanAlternativeSerializationTests extends OpenSearchTestCase {
         original.writeTo(out);
         FragmentExecutionRequest deserialized = new FragmentExecutionRequest(out.bytes().streamInput());
 
-        assertEquals("bank_all", deserialized.getLogicalTableName());
+        assertEquals("q-1", deserialized.getQueryId());
+        assertEquals(7, deserialized.getStageId());
         assertEquals("bank_a", deserialized.getShardId().getIndexName());
-    }
-
-    /**
-     * Backward-compat: legacy callers that construct the request without a logical name still
-     * round-trip; the field surfaces as null and the data-node side falls back to the shard's
-     * index name.
-     */
-    public void testRequestRoundTripWithoutLogicalTableNameFallsBackToNull() throws IOException {
-        org.opensearch.core.index.shard.ShardId shardId = new org.opensearch.core.index.shard.ShardId("bank", "uuid", 0);
-        FragmentExecutionRequest original = new FragmentExecutionRequest(
-            "q-1",
-            0,
-            shardId,
-            List.of(new FragmentExecutionRequest.PlanAlternative("datafusion", new byte[] { 1 }, List.of(new ShardScanInstructionNode())))
-        );
-
-        BytesStreamOutput out = new BytesStreamOutput();
-        original.writeTo(out);
-        FragmentExecutionRequest deserialized = new FragmentExecutionRequest(out.bytes().streamInput());
-
-        assertNull(deserialized.getLogicalTableName());
+        assertEquals(1, deserialized.getPlanAlternatives().size());
     }
 }

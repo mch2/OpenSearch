@@ -161,7 +161,7 @@ pub async fn execute_indexed_query(
     let resolved_schema = crate::schema_coerce::coerce_inferred_schema(resolved_schema);
     let table_config = datafusion::datasource::listing::ListingTableConfig::new(shard_view.table_path.clone())
         .with_listing_options(listing_options)
-        .with_schema(Arc::clone(&resolved_schema));
+        .with_schema(resolved_schema);
     let provider = Arc::new(datafusion::datasource::listing::ListingTable::try_new(table_config)?);
     ctx.register_table(&table_name, provider)?;
 
@@ -173,7 +173,6 @@ pub async fn execute_indexed_query(
         writer_generations: shard_view.writer_generations.clone(),
         query_context: crate::query_tracker::QueryTrackingContext::new(0, runtime.runtime_env.memory_pool.clone()),
         table_name: table_name.clone(),
-        registered_schema: resolved_schema,
         indexed_config: None, // derive classification from tree
         query_config: Arc::unwrap_or_clone(query_config),
         aggregate_mode: crate::agg_mode::Mode::Default,

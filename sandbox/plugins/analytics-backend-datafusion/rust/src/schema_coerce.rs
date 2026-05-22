@@ -157,20 +157,13 @@ fn rewrite_data_type(dt: &DataType) -> DataType {
     }
 }
 
-/// Appends to `registered` any field from `expected` whose name is not already present,
-/// as a nullable column. Returns `Some(augmented)` when at least one column was added,
-/// `None` when `registered` already covers every `expected` field (so the caller can skip
-/// re-registering the table).
+/// Appends to `registered` any `expected` field whose name is absent, as a nullable column.
+/// `Some(augmented)` if anything was added, `None` if `registered` already covers `expected`.
 ///
-/// Used when a shard's parquet files omit columns the coordinator's plan references — an
-/// index-pattern or alias scan whose backing indices declare different field sets, where the
-/// scan's row type is the union across all of them. The substrait consumer binds the
-/// NamedScan's `base_schema` to the table provider BY NAME (datafusion-substrait
-/// `ensure_schema_compatibility` iterates the base fields and looks each up by name), so the
-/// registered schema only needs to *contain* every expected column — order is irrelevant and
-/// present columns keep their inferred (coerced) types. The appended columns are forced
-/// nullable (the shard has no data for them); DataFusion's parquet `SchemaAdapter` null-fills
-/// them at read time.
+/// The Substrait consumer binds `base_schema` to the provider BY NAME, so the registered schema
+/// only needs to *contain* every expected column — order is irrelevant and present columns keep
+/// their inferred (coerced) types. Appended columns are forced nullable; DataFusion's parquet
+/// `SchemaAdapter` null-fills them at read time.
 pub fn append_missing_nullable(registered: &Schema, expected: &Schema) -> Option<SchemaRef> {
     let mut added: Vec<Field> = Vec::new();
     for ef in expected.fields() {

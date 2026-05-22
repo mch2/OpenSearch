@@ -43,10 +43,6 @@ pub struct SessionContextHandle {
     pub writer_generations: Arc<Vec<i64>>,
     pub query_context: QueryTrackingContext,
     pub table_name: String,
-    /// Schema the default ListingTable was registered with (coerced inferred parquet schema).
-    /// Retained so `execute_with_context` can reconcile it against the plan's union base_schema
-    /// and null-fill columns this shard's files omit (index-pattern / alias scans).
-    pub(crate) registered_schema: arrow::datatypes::SchemaRef,
     /// When set, indicates this session uses the indexed execution path with filter delegation.
     pub indexed_config: Option<IndexedExecutionConfig>,
     /// Per-query tuning knobs (batch size, partitions, filter strategies, etc.)
@@ -63,27 +59,40 @@ pub struct IndexedExecutionConfig {
     pub delegated_predicate_count: i32,
 }
 
+/// Builds a DataFusion `TableReference` from a Substrait `NamedTable`'s `names` the same way the
+/// Substrait consumer does — by element count, never by re-parsing a joined string. This keeps the
+/// registered reference identical to what the consumer binds against, so a dotted index name
+/// (e.g. `logs-2024.01.01`) round-trips instead of being mis-split into catalog/schema/table.
+fn table_ref_from_names(names: &[String]) -> datafusion::common::TableReference {
+    use datafusion::common::TableReference;
+    match names {
+        [t] => TableReference::bare(t.clone()),
+        [s, t] => TableReference::partial(s.clone(), t.clone()),
+        [c, s, t] => TableReference::full(c.clone(), s.clone(), t.clone()),
+        _ => TableReference::bare(names.last().cloned().unwrap_or_default()),
+    }
+}
+
 /// Widens `inferred` to the plan's union `base_schema` (for index-pattern / alias scans) so the
 /// table can be registered once with the schema the Substrait consumer binds against. Returns
 /// `inferred` unchanged when there's no plan, no matching `base_schema`, or this shard already
 /// covers every base_schema column — the common single-index case, which pays no conversion cost.
 fn widen_schema_to_plan_base(
     ctx: &SessionContext,
-    plan_bytes: &[u8],
+    plan: Option<&substrait::proto::Plan>,
     table_name: &str,
     inferred: &arrow::datatypes::SchemaRef,
 ) -> arrow::datatypes::SchemaRef {
-    use prost::Message;
-
-    if plan_bytes.is_empty() {
-        return Arc::clone(inferred);
-    }
-    let Ok(plan) = substrait::proto::Plan::decode(plan_bytes) else {
+    let Some(plan) = plan else {
         return Arc::clone(inferred);
     };
     // Cheap gate: compare base_schema field names against the inferred schema without building a
     // SessionState. If the shard already has every column, there's nothing to widen.
-    match crate::api::base_schema_field_names(&plan, table_name) {
+    // Assumes a flat schema — the analytics schema flattens nested objects to top-level dotted
+    // scalar columns (OpenSearchSchemaBuilder.addLeafFields), so base_schema's flattened names map
+    // 1:1 to top-level Arrow field names. If real Struct/List columns are ever introduced, compare
+    // against top-level base_schema fields instead, or this gate may mis-detect "missing" leaves.
+    match crate::api::base_schema_field_names(plan, table_name) {
         None => return Arc::clone(inferred),
         Some(names) => {
             let have: std::collections::HashSet<&str> =
@@ -97,7 +106,7 @@ fn widen_schema_to_plan_base(
     // missing columns. They must carry the SAME Arrow types a real parquet read would emit (view
     // types under force_view_types, then coerced), or the coordinator reduce sink's strict schema
     // check rejects a null-filled Utf8 against present shards' Utf8View.
-    let Some(expected) = crate::api::expected_scan_schema(&plan, table_name) else {
+    let Some(expected) = crate::api::expected_scan_schema(plan, table_name) else {
         return Arc::clone(inferred);
     };
     let force_view = ctx.copied_config().options().execution.parquet.schema_force_view_types;
@@ -203,17 +212,34 @@ pub async unsafe fn create_session_context(
     // schema to forms the Substrait consumer can bind against. See crate::schema_coerce.
     let resolved_schema = crate::schema_coerce::coerce_inferred_schema(resolved_schema);
 
+    // The table name and reference come from the plan's NamedTable (when a plan is supplied), so
+    // registration matches the Substrait consumer's by-name binding exactly — including dotted
+    // index names that a `&str`-parsed TableReference would mis-split. Falls back to the passed
+    // name for the indexed / no-plan path.
+    let plan = if plan_bytes.is_empty() {
+        None
+    } else {
+        prost::Message::decode(plan_bytes).ok()
+    };
+    let (table_ref, base_match_name) = match plan.as_ref().and_then(crate::api::first_named_table_names) {
+        Some(names) if !names.is_empty() => {
+            let name = names.last().cloned().unwrap_or_else(|| table_name.to_string());
+            (table_ref_from_names(&names), name)
+        }
+        _ => (datafusion::common::TableReference::bare(table_name.to_string()), table_name.to_string()),
+    };
+
     // Index-pattern / alias scans: the coordinator plans against the union of all backing
     // indices' fields; this shard's parquet may declare only a subset. Widen the registered
     // schema to the plan's base_schema here, so the table is registered ONCE with the schema the
     // Substrait consumer binds against — DataFusion's parquet SchemaAdapter then null-fills the
     // columns this shard omits. No-op for the common single-index case (registers the inferred
     // schema unchanged), so there is no execute-time re-registration.
-    let resolved_schema = widen_schema_to_plan_base(&ctx, plan_bytes, table_name, &resolved_schema);
+    let resolved_schema = widen_schema_to_plan_base(&ctx, plan.as_ref(), &base_match_name, &resolved_schema);
 
     let table_config = ListingTableConfig::new(shard_view.table_path.clone())
         .with_listing_options(listing_options)
-        .with_schema(Arc::clone(&resolved_schema));
+        .with_schema(resolved_schema);
 
     let provider = Arc::new(ListingTable::try_new(table_config).map_err(|e| {
         error!(
@@ -223,7 +249,7 @@ pub async unsafe fn create_session_context(
         e
     })?);
 
-    ctx.register_table(table_name, provider).map_err(|e| {
+    ctx.register_table(table_ref, provider).map_err(|e| {
         error!(
             "create_session_context: failed to register table '{}': {}",
             table_name, e
@@ -244,7 +270,6 @@ pub async unsafe fn create_session_context(
         writer_generations: shard_view.writer_generations.clone(),
         query_context,
         table_name: table_name.to_string(),
-        registered_schema: resolved_schema,
         indexed_config: None,
         query_config,
         aggregate_mode: crate::agg_mode::Mode::Default,
@@ -327,6 +352,23 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    #[test]
+    fn table_ref_from_names_keeps_dotted_index_as_single_identifier() {
+        use datafusion::common::TableReference;
+        // A dotted index name (e.g. logs-2024.01.01) arrives as ONE Substrait name element and must
+        // become a bare reference — NOT be split into catalog/schema/table the way a &str-parsed
+        // TableReference would. That string-parse split is the dotted-name registration bug.
+        assert_eq!(
+            table_ref_from_names(&["logs-2024.01.01".to_string()]),
+            TableReference::bare("logs-2024.01.01")
+        );
+        // Multi-element names map by position, matching how the Substrait consumer builds the ref.
+        assert_eq!(
+            table_ref_from_names(&["s".to_string(), "t".to_string()]),
+            TableReference::partial("s", "t")
+        );
+    }
+
     use arrow_array::{Int64Array, RecordBatch};
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use datafusion::datasource::MemTable;
@@ -378,7 +420,6 @@ mod tests {
             writer_generations: Arc::new(vec![]),
             query_context,
             table_name: "t".to_string(),
-            registered_schema: Arc::clone(&schema),
             indexed_config: None,
             query_config: crate::datafusion_query_config::DatafusionQueryConfig::test_default(),
             aggregate_mode: Mode::Default,

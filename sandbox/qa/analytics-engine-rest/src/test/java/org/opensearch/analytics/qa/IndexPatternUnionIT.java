@@ -102,6 +102,23 @@ public class IndexPatternUnionIT extends AnalyticsRestTestCase {
     }
 
 
+    /**
+     * A dotted index name (date-based, e.g. {@code logs-2024.01.01}) must register and bind
+     * end-to-end. The data node builds its DataFusion table reference from the Substrait
+     * NamedTable's name parts, so the dotted name stays a single identifier rather than being
+     * split into catalog/schema/table (which a {@code &str}-parsed reference would do → scan miss).
+     */
+    public void testDottedIndexNameRegistersAndScans() throws IOException {
+        String dotted = "logs-2024.01.01";
+        createParquetIndex(dotted, "{\"properties\":{\"v\":{\"type\":\"long\"}}}");
+        bulk(dotted, "{\"v\":1}\n{\"v\":2}\n");
+        Map<String, Object> body = executePpl("source=" + dotted + " | stats count() as c");
+        @SuppressWarnings("unchecked")
+        List<List<Object>> rows = (List<List<Object>>) body.get("rows");
+        assertEquals("single count row", 1, rows.size());
+        assertEquals("dotted index must scan its 2 rows", 2L, ((Number) rows.get(0).get(0)).longValue());
+    }
+
     /** Fan-out sanity: the alias spans both indices, so 2 + 1 = 3 rows. */
     public void testAliasFansOutAcrossDifferingIndices() throws IOException {
         ensureProvisioned();
