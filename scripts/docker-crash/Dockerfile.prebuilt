@@ -1,0 +1,13 @@
+# Lightweight runtime image: uses a pre-built OpenSearch tar + plugins.
+# No compilation inside the container — just extract, install plugins, and run.
+FROM eclipse-temurin:25-jdk
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      curl procps \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd -m -u 1001 opensearch && mkdir -p /opt/opensearch && chown opensearch:opensearch /opt/opensearch
+USER opensearch
+
+WORKDIR /opt/opensearch
+ENTRYPOINT ["/workspace/scripts/docker-crash/entrypoint-prebuilt.sh"]

@@ -77,6 +77,14 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
         Setting.Property.Dynamic
     );
 
+    public static final Setting<Long> MAX_RESULT_ROWS = Setting.longSetting(
+        "analytics.coordinator.max_result_rows",
+        1_000_000L,
+        1L,
+        Setting.Property.NodeScope,
+        Setting.Property.Dynamic
+    );
+
     /**
      * Creates a new analytics engine hub plugin.
      */
@@ -146,7 +154,7 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
 
     @Override
     public List<Setting<?>> getSettings() {
-        return List.of(COORDINATOR_BUFFER_LIMIT);
+        return List.of(COORDINATOR_BUFFER_LIMIT, MAX_RESULT_ROWS);
     }
 
     @Override

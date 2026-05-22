@@ -130,16 +130,10 @@ impl MemoryPool for DynamicLimitPool {
         // triggers spill), consult jemalloc as ground truth. If actual process
         // memory is below the override threshold, the pool's "full" state is
         // from stale phantoms or accounting drift — allow the grow.
-        //
-        // This gives already-executing operators a higher effective limit,
-        // preventing unnecessary spills when phantoms from finished queries
-        // haven't been released yet.
         let limit = dynamic_limit.load(Ordering::Acquire);
         let used = self.used.load(Ordering::Relaxed);
-        // Only attempt override if the allocation is plausible (won't overflow).
         if used.checked_add(additional).is_some() {
             if crate::memory_guard::should_override(limit, crate::memory_guard::OverrideContext::Operator) {
-                // jemalloc confirms headroom — allow the grow
                 let _ = self.used.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |u| {
                     u.checked_add(additional)
                 });
@@ -147,9 +141,7 @@ impl MemoryPool for DynamicLimitPool {
             }
         }
 
-        // Both pool and jemalloc confirm pressure — reject (operator will spill)
         self.tripped_count.fetch_add(1, Ordering::Relaxed);
-        let used = self.used.load(Ordering::Relaxed);
         Err(crate::native_error::pool_limit_error(
             additional,
             reservation.consumer().name(),

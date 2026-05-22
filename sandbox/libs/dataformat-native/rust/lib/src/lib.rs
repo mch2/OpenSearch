@@ -36,7 +36,7 @@
 /// via cluster settings at runtime. Dev/test builds (cargo build without --release)
 /// do not include profiling support.
 #[export_name = "malloc_conf"]
-pub static MALLOC_CONF: &[u8] = b"dirty_decay_ms:30000,muzzy_decay_ms:30000,lg_tcache_max:16\0";
+pub static MALLOC_CONF: &[u8] = b"dirty_decay_ms:30000,muzzy_decay_ms:30000,lg_tcache_max:16,prof:true,prof_active:false,lg_prof_sample:17\0";
 
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;

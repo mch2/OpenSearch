@@ -21,6 +21,7 @@ import org.opensearch.analytics.planner.dag.Stage;
 import org.opensearch.analytics.planner.dag.StageExecutionType;
 import org.opensearch.analytics.spi.DataConsumer;
 import org.opensearch.analytics.spi.ExchangeSink;
+import org.opensearch.analytics.AnalyticsPlugin;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.inject.Inject;
 
@@ -50,6 +51,7 @@ public class StageExecutionBuilder {
     private static final Logger logger = LogManager.getLogger(StageExecutionBuilder.class);
 
     private final Map<StageExecutionType, StageExecutionFactory> factories;
+    private volatile long maxResultRows;
 
     /**
      * Guice-injected constructor. Registers default factories for every value
@@ -58,6 +60,8 @@ public class StageExecutionBuilder {
     @Inject
     public StageExecutionBuilder(ClusterService clusterService, AnalyticsSearchTransportService dispatcher) {
         this.factories = new HashMap<>();
+        this.maxResultRows = AnalyticsPlugin.MAX_RESULT_ROWS.get(clusterService.getSettings());
+        clusterService.getClusterSettings().addSettingsUpdateConsumer(AnalyticsPlugin.MAX_RESULT_ROWS, v -> this.maxResultRows = v);
         registerFactory(StageExecutionType.SHARD_FRAGMENT, new ShardFragmentStageExecutionFactory(clusterService, dispatcher));
         registerFactory(StageExecutionType.COORDINATOR_REDUCE, new ReduceStageExecutionFactory());
         registerFactory(StageExecutionType.LOCAL_PASSTHROUGH, (stage, sink, config) -> new PassThroughStageExecution(stage, config, sink));
@@ -82,7 +86,7 @@ public class StageExecutionBuilder {
      */
     public StageExecution buildRootExecution(Stage rootStage, QueryContext config) {
         // TODO: Update to read directly from back-end provided ExchangeSource when the root stage has a fragment
-        StageExecution rootExec = buildStageExecution(rootStage, new RowProducingSink(), config);
+        StageExecution rootExec = buildStageExecution(rootStage, new RowProducingSink(maxResultRows), config);
         if ((rootExec instanceof DataProducer) == false) {
             throw new IllegalStateException(
                 "Root execution "

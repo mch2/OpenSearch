@@ -278,6 +278,21 @@ fn acquire_budget_inner(
 }
 
 
+/// Adaptive budget for coordinator-reduce sessions. Uses a fixed row-byte
+/// estimate (reduce consumes pre-aggregated Arrow batches, not raw parquet)
+/// and applies the same halving logic as the shard path.
+pub fn acquire_budget_inner_for_reduce(
+    pool: &Arc<dyn MemoryPool>,
+    configured_target_partitions: usize,
+    configured_batch_size: usize,
+) -> Result<QueryMemoryBudget, DataFusionError> {
+    // Reduce input is partially-aggregated Arrow batches. Estimate ~200 bytes/row
+    // (group keys + accumulators) with ~6 columns equivalent.
+    let avg_row_bytes: usize = 200;
+    let num_columns: usize = 6;
+    acquire_budget_inner(pool, avg_row_bytes, num_columns, configured_target_partitions, configured_batch_size)
+}
+
 /// Compute the untracked byte envelope for given parameters.
 fn compute_untracked_bytes(
     target_partitions: usize,

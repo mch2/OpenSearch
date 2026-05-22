@@ -367,11 +367,24 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
         }
         assert before == SinkState.READY : "reduce called more than once (state=" + before + ")";
         Exception failure = null;
+        long poolBefore = NativeBridge.getMemoryPoolUsage(runtimeHandle.get());
+        long rssBefore = getProcessRssBytes();
         try {
             drainOutputIntoDownstream(outStream);
         } catch (Exception e) {
             failure = e;
         } finally {
+            long poolAfter = NativeBridge.getMemoryPoolUsage(runtimeHandle.get());
+            long rssAfter = getProcessRssBytes();
+            logger.warn(
+                "[reduce-memory] taskId={} pool_before={}MB pool_after={}MB rss_before={}MB rss_after={}MB untracked_delta={}MB",
+                ctx.taskId(),
+                poolBefore / (1024 * 1024),
+                poolAfter / (1024 * 1024),
+                rssBefore / (1024 * 1024),
+                rssAfter / (1024 * 1024),
+                (rssAfter - rssBefore - (poolAfter - poolBefore)) / (1024 * 1024)
+            );
             state.set(SinkState.DONE);
             try {
                 Exception closeFailure = closeImpl();
@@ -392,5 +405,15 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
     /** Returns the cumulative number of batches fed into any native sender. For Tests */
     long feedCount() {
         return feedCount.get();
+    }
+
+    private static long getProcessRssBytes() {
+        try {
+            String statm = java.nio.file.Files.readString(java.nio.file.Path.of("/proc/self/statm"));
+            long rssPages = Long.parseLong(statm.split("\\s+")[1]);
+            return rssPages * 4096L;
+        } catch (Exception e) {
+            return -1;
+        }
     }
 }
