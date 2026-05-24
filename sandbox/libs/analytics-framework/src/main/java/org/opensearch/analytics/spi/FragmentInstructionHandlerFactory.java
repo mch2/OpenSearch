@@ -25,8 +25,8 @@ public interface FragmentInstructionHandlerFactory {
 
     // ── Coordinator-side: create instruction nodes ──
 
-    /** Creates a shard scan instruction node. */
-    Optional<InstructionNode> createShardScanNode();
+    /** Creates a shard scan instruction node with the logical table name for multi-index support. */
+    Optional<InstructionNode> createShardScanNode(String logicalTableName);
 
     /** Creates a filter delegation instruction node with the given delegation metadata. */
     Optional<InstructionNode> createFilterDelegationNode(
@@ -36,7 +36,11 @@ public interface FragmentInstructionHandlerFactory {
     );
 
     /** Creates a shard scan with delegation instruction node — combines scan setup with delegation config. */
-    Optional<InstructionNode> createShardScanWithDelegationNode(FilterTreeShape treeShape, int delegatedPredicateCount);
+    Optional<InstructionNode> createShardScanWithDelegationNode(
+        FilterTreeShape treeShape,
+        int delegatedPredicateCount,
+        String logicalTableName
+    );
 
     /** Creates a partial aggregate instruction node. */
     Optional<InstructionNode> createPartialAggregateNode();

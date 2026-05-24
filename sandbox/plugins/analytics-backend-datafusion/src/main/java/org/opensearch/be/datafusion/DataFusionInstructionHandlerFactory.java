@@ -39,8 +39,8 @@ public class DataFusionInstructionHandlerFactory implements FragmentInstructionH
     // ── Coordinator: create instruction nodes ──
 
     @Override
-    public Optional<InstructionNode> createShardScanNode() {
-        return Optional.of(new ShardScanInstructionNode());
+    public Optional<InstructionNode> createShardScanNode(String logicalTableName) {
+        return Optional.of(new ShardScanInstructionNode(logicalTableName));
     }
 
     @Override
@@ -53,8 +53,12 @@ public class DataFusionInstructionHandlerFactory implements FragmentInstructionH
     }
 
     @Override
-    public Optional<InstructionNode> createShardScanWithDelegationNode(FilterTreeShape treeShape, int delegatedPredicateCount) {
-        return Optional.of(new ShardScanWithDelegationInstructionNode(treeShape, delegatedPredicateCount));
+    public Optional<InstructionNode> createShardScanWithDelegationNode(
+        FilterTreeShape treeShape,
+        int delegatedPredicateCount,
+        String logicalTableName
+    ) {
+        return Optional.of(new ShardScanWithDelegationInstructionNode(treeShape, delegatedPredicateCount, logicalTableName));
     }
 
     @Override

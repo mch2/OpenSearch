@@ -165,7 +165,7 @@ public class DatafusionSearchExecEngineTests extends OpenSearchTestCase {
             tableName,
             0L,
             configSegment.address(),
-            substrait
+            new byte[0]
         );
         arena.close();
         dfContext.setSessionContextHandle(sessionCtxHandle);

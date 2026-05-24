@@ -334,6 +334,8 @@ public final class NativeBridge {
                 ValueLayout.JAVA_LONG,
                 ValueLayout.JAVA_INT,
                 ValueLayout.JAVA_INT,
+                ValueLayout.JAVA_LONG,
+                ValueLayout.ADDRESS,
                 ValueLayout.JAVA_LONG
             )
         );
@@ -918,7 +920,10 @@ public final class NativeBridge {
      * Creates a SessionContext with the default ListingTable registered.
      * Returns a tracked handle consumed by {@link #executeWithContextAsync}.
      *
+     * @param tableName the logical table name (alias/pattern) to register the table under
      * @param queryConfigPtr pointer to a WireDatafusionQueryConfig struct, or 0 for fallback defaults
+     * @param planBytes Substrait plan bytes — used to widen the registered schema for multi-index
+     *                  queries (null-filling columns this shard omits). Empty = skip widening.
      */
     public static SessionContextHandle createSessionContext(
         long readerPtr,
@@ -932,8 +937,6 @@ public final class NativeBridge {
         NativeHandle.validatePointer(runtimePtr, "runtime");
         try (var call = new NativeCall()) {
             var table = call.str(tableName);
-            // Pass a NULL pointer with length 0 when there are no plan bytes; native guards on
-            // length before dereferencing (df_create_session_context), so widening is skipped.
             boolean hasPlan = planBytes != null && planBytes.length > 0;
             MemorySegment planSegment = hasPlan ? call.bytes(planBytes) : MemorySegment.NULL;
             long planLen = hasPlan ? planBytes.length : 0L;
@@ -957,7 +960,9 @@ public final class NativeBridge {
      * Registers the delegated_predicate UDF and stores treeShape + delegatedPredicateCount
      * on the Rust handle for use during execution.
      *
+     * @param tableName the logical table name (alias/pattern) to register the table under
      * @param queryConfigPtr pointer to a WireDatafusionQueryConfig struct, or 0 for fallback defaults
+     * @param planBytes Substrait plan bytes for multi-index schema widening (empty = skip)
      */
     public static SessionContextHandle createSessionContextForIndexedExecution(
         long readerPtr,
@@ -966,12 +971,16 @@ public final class NativeBridge {
         long contextId,
         int treeShapeOrdinal,
         int delegatedPredicateCount,
-        long queryConfigPtr
+        long queryConfigPtr,
+        byte[] planBytes
     ) {
         NativeHandle.validatePointer(readerPtr, "reader");
         NativeHandle.validatePointer(runtimePtr, "runtime");
         try (NativeCall call = new NativeCall()) {
             NativeCall.Str table = call.str(tableName);
+            boolean hasPlan = planBytes != null && planBytes.length > 0;
+            MemorySegment planSegment = hasPlan ? call.bytes(planBytes) : MemorySegment.NULL;
+            long planLen = hasPlan ? planBytes.length : 0L;
             long ptr = call.invoke(
                 CREATE_SESSION_CONTEXT_INDEXED,
                 readerPtr,
@@ -981,7 +990,9 @@ public final class NativeBridge {
                 contextId,
                 treeShapeOrdinal,
                 delegatedPredicateCount,
-                queryConfigPtr
+                queryConfigPtr,
+                planSegment,
+                planLen
             );
             return new SessionContextHandle(ptr);
         }

@@ -52,7 +52,7 @@ public class PlanAlternativeSerializationTests extends OpenSearchTestCase {
             new DelegatedExpression(2, "lucene", new byte[] { 30, 40 })
         );
         DelegationDescriptor descriptor = new DelegationDescriptor(FilterTreeShape.CONJUNCTIVE, 2, expressions);
-        ShardScanWithDelegationInstructionNode delegationNode = new ShardScanWithDelegationInstructionNode(FilterTreeShape.CONJUNCTIVE, 2);
+        ShardScanWithDelegationInstructionNode delegationNode = new ShardScanWithDelegationInstructionNode(FilterTreeShape.CONJUNCTIVE, 2, "test_table");
         List<InstructionNode> instructions = List.of(delegationNode);
         FragmentExecutionRequest.PlanAlternative original = new FragmentExecutionRequest.PlanAlternative(
             "datafusion",
@@ -83,7 +83,7 @@ public class PlanAlternativeSerializationTests extends OpenSearchTestCase {
 
     public void testRoundTripWithAllTypes() throws IOException {
         List<InstructionNode> instructions = List.of(
-            new ShardScanWithDelegationInstructionNode(FilterTreeShape.INTERLEAVED_BOOLEAN_EXPRESSION, 1),
+            new ShardScanWithDelegationInstructionNode(FilterTreeShape.INTERLEAVED_BOOLEAN_EXPRESSION, 1, "test_table"),
             new PartialAggregateInstructionNode(),
             new FinalAggregateInstructionNode()
         );

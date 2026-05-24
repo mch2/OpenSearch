@@ -769,14 +769,14 @@ fn coerce_unsupported_timestamp_precision(
     arrow::datatypes::Schema::new_with_metadata(fields, schema.metadata().clone())
 }
 
-fn root_rel(root: &substrait::proto::PlanRel) -> Option<substrait::proto::Rel> {
+pub(crate) fn root_rel(root: &substrait::proto::PlanRel) -> Option<substrait::proto::Rel> {
     match root.rel_type.as_ref()? {
         substrait::proto::plan_rel::RelType::Rel(r) => Some(r.clone()),
         substrait::proto::plan_rel::RelType::Root(rr) => rr.input.as_ref().cloned(),
     }
 }
 
-fn collect_reads(rel: &substrait::proto::Rel, out: &mut Vec<substrait::proto::ReadRel>) {
+pub(crate) fn collect_reads(rel: &substrait::proto::Rel, out: &mut Vec<substrait::proto::ReadRel>) {
     use substrait::proto::rel::RelType;
     match rel.rel_type.as_ref() {
         Some(RelType::Read(r)) => out.push((**r).clone()),
@@ -833,66 +833,6 @@ fn collect_plan_reads(plan: &substrait::proto::Plan) -> Vec<substrait::proto::Re
     reads
 }
 
-/// Multi-part name of the first `NamedTable` read — the table this shard fragment scans. Returned
-/// as the Substrait `names` vector (catalog/schema/table parts) so callers can build a
-/// `TableReference` the same way the Substrait consumer does, rather than re-parsing a joined
-/// string (which would mis-split a dotted index name like `logs-2024.01.01`).
-pub(crate) fn first_named_table_names(plan: &substrait::proto::Plan) -> Option<Vec<String>> {
-    use substrait::proto::read_rel::ReadType;
-    for read in collect_plan_reads(plan) {
-        if let Some(ReadType::NamedTable(nt)) = read.read_type {
-            return Some(nt.names);
-        }
-    }
-    None
-}
-
-/// The `base_schema` (Substrait `NamedStruct`) of the first `NamedTable` read whose last name
-/// matches `table_name` — the union row type the coordinator planned the scan against. `None`
-/// when the plan has no matching named-table read or it carries no base_schema.
-fn base_schema_for_table(plan: &substrait::proto::Plan, table_name: &str) -> Option<substrait::proto::NamedStruct> {
-    use substrait::proto::read_rel::ReadType;
-
-    for read in collect_plan_reads(plan) {
-        let Some(ReadType::NamedTable(nt)) = read.read_type.as_ref() else {
-            continue;
-        };
-        if nt.names.last().map(String::as_str) != Some(table_name) {
-            continue;
-        }
-        return read.base_schema.clone();
-    }
-    None
-}
-
-/// Flattened base_schema field names without converting to Arrow (no SessionState). Cheap
-/// pre-check: a shard whose inferred schema already covers every base_schema column can skip the
-/// SessionState-backed conversion in [`expected_scan_schema`].
-pub(crate) fn base_schema_field_names(plan: &substrait::proto::Plan, table_name: &str) -> Option<Vec<String>> {
-    base_schema_for_table(plan, table_name).map(|s| s.names)
-}
-
-/// The matching NamedTable's `base_schema` as an Arrow schema. Used at session creation to widen
-/// the registered table to the plan's union schema (see `session_context::widen_schema_to_plan_base`).
-pub(crate) fn expected_scan_schema(
-    plan: &substrait::proto::Plan,
-    table_name: &str,
-) -> Option<arrow::datatypes::Schema> {
-    use datafusion_substrait::extensions::Extensions;
-    use datafusion_substrait::logical_plan::consumer::{from_substrait_named_struct, DefaultSubstraitConsumer};
-
-    let base_schema = base_schema_for_table(plan, table_name)?;
-    // Throwaway session purely to convert the NamedStruct into an Arrow schema; no UDFs or data
-    // needed since we only read the declared field names + types.
-    let state = SessionStateBuilder::new()
-        .with_config(SessionConfig::new())
-        .with_default_features()
-        .build();
-    let extensions = Extensions::default();
-    let consumer = DefaultSubstraitConsumer::new(&extensions, &state);
-    let df_schema = from_substrait_named_struct(&consumer, &base_schema).ok()?;
-    Some(df_schema.as_arrow().clone())
-}
 
 // ---------------------------------------------------------------------------
 // Coordinator-reduce local execution API

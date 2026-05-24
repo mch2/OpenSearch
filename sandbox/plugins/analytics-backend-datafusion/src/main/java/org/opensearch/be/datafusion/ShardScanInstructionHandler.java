@@ -54,19 +54,25 @@ public class ShardScanInstructionHandler implements FragmentInstructionHandler<S
         long readerPtr = dfReader.getReaderHandle().getPointer();
         long runtimePtr = dataFusionService.getNativeRuntime().get();
         long contextId = context.getTask() != null ? context.getTask().getId() : 0L;
+        String tableName = node.getLogicalTableName() != null ? node.getLogicalTableName() : context.getTableName();
 
         WireConfigSnapshot snapshot = plugin.getDatafusionSettings().getSnapshot();
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment segment = arena.allocate(WireConfigSnapshot.BYTE_SIZE);
             snapshot.writeTo(segment);
+            // Plan bytes enable schema widening for multi-index queries: Rust extracts the
+            // base_schema from the Substrait plan and appends missing columns as nullable,
+            // so DataFusion's SchemaAdapter null-fills them at parquet read time.
+            // TODO: Replace plan-bytes-based widening with an explicit Arrow IPC union schema
+            // passed from Java once OpenSearchSchemaBuilder and CoreDataFieldPlugin are
+            // consolidated into a shared type registry (single source of truth for
+            // OpenSearch type → Arrow type mapping).
             SessionContextHandle sessionCtxHandle = NativeBridge.createSessionContext(
                 readerPtr,
                 runtimePtr,
-                context.getTableName(),
+                tableName,
                 contextId,
                 segment.address(),
-                // Plan bytes let native register the table with the union base_schema up front
-                // (null-filling columns this shard omits for index-pattern / alias scans).
                 context.getFragmentBytes()
             );
             return new DataFusionSessionState(sessionCtxHandle);
