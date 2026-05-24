@@ -12,7 +12,7 @@ import org.opensearch.analytics.backend.ShardScanExecutionContext;
 import org.opensearch.analytics.spi.BackendExecutionContext;
 import org.opensearch.analytics.spi.CommonExecutionContext;
 import org.opensearch.analytics.spi.FragmentInstructionHandler;
-import org.opensearch.analytics.spi.ShardScanInstructionNode;
+import org.opensearch.analytics.spi.MultiIndexShardScanInstructionNode;
 import org.opensearch.be.datafusion.nativelib.NativeBridge;
 import org.opensearch.be.datafusion.nativelib.SessionContextHandle;
 import org.opensearch.index.engine.dataformat.DataFormatRegistry;
@@ -21,20 +21,24 @@ import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 
 /**
- * Handles ShardScan instruction: creates a SessionContext via FFM and registers
- * the default ListingTable provider for parquet scans.
+ * Multi-index variant of {@link ShardScanInstructionHandler}. Registers the table under the
+ * logical name (alias/pattern) and passes plan bytes so Rust can widen the schema for columns
+ * this shard doesn't have.
+ *
+ * <p>TODO: Replace plan-bytes-based widening with an explicit Arrow IPC union schema once
+ * OpenSearchSchemaBuilder and CoreDataFieldPlugin are consolidated into a shared type registry.
  */
-public class ShardScanInstructionHandler implements FragmentInstructionHandler<ShardScanInstructionNode> {
+public class MultiIndexShardScanInstructionHandler implements FragmentInstructionHandler<MultiIndexShardScanInstructionNode> {
 
     private final DataFusionPlugin plugin;
 
-    ShardScanInstructionHandler(DataFusionPlugin plugin) {
+    MultiIndexShardScanInstructionHandler(DataFusionPlugin plugin) {
         this.plugin = plugin;
     }
 
     @Override
     public BackendExecutionContext apply(
-        ShardScanInstructionNode node,
+        MultiIndexShardScanInstructionNode node,
         CommonExecutionContext commonContext,
         BackendExecutionContext backendContext
     ) {
@@ -59,12 +63,13 @@ public class ShardScanInstructionHandler implements FragmentInstructionHandler<S
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment segment = arena.allocate(WireConfigSnapshot.BYTE_SIZE);
             snapshot.writeTo(segment);
-            SessionContextHandle sessionCtxHandle = NativeBridge.createSessionContext(
+            SessionContextHandle sessionCtxHandle = NativeBridge.createMultiIndexSessionContext(
                 readerPtr,
                 runtimePtr,
-                context.getTableName(),
+                node.getLogicalTableName(),
                 contextId,
-                segment.address()
+                segment.address(),
+                context.getFragmentBytes()
             );
             return new DataFusionSessionState(sessionCtxHandle);
         }

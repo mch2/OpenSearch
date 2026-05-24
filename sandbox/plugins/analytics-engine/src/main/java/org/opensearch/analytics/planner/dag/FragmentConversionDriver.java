@@ -128,7 +128,7 @@ public class FragmentConversionDriver {
         RelNode leaf = findLeaf(plan.resolvedFragment());
 
         if (leaf instanceof OpenSearchTableScan scan) {
-            String logicalTableName = scan.getTable().getQualifiedName().getLast();
+            String logicalTableName = scan.isMultiIndex() ? scan.getTable().getQualifiedName().getLast() : null;
             List<DelegatedExpression> delegated = delegationBytes.getResult();
             if (!delegated.isEmpty()) {
                 factory.createShardScanWithDelegationNode(treeShape, delegated.size(), logicalTableName)

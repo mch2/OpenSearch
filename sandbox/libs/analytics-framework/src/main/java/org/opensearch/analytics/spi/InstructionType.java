@@ -31,6 +31,10 @@ public enum InstructionType {
      * {@code supportedDelegations(DelegationType.FILTER)}.
      */
     SETUP_SHARD_SCAN_WITH_DELEGATION,
+    /** Multi-index scan — registers under logical name, widens schema from plan's base_schema. */
+    SETUP_MULTI_INDEX_SHARD_SCAN,
+    /** Multi-index scan with filter delegation — combines widening with indexed execution. */
+    SETUP_MULTI_INDEX_SHARD_SCAN_WITH_DELEGATION,
     /** Partial aggregate mode — disable combine optimizer, cut plan to partial-only. */
     SETUP_PARTIAL_AGGREGATE,
     /** Final aggregate for coordinator reduce — ExchangeSink path, final-only agg. */
@@ -41,6 +45,8 @@ public enum InstructionType {
         return switch (this) {
             case SETUP_SHARD_SCAN -> new ShardScanInstructionNode(in);
             case SETUP_SHARD_SCAN_WITH_DELEGATION -> new ShardScanWithDelegationInstructionNode(in);
+            case SETUP_MULTI_INDEX_SHARD_SCAN -> new MultiIndexShardScanInstructionNode(in);
+            case SETUP_MULTI_INDEX_SHARD_SCAN_WITH_DELEGATION -> new MultiIndexShardScanWithDelegationInstructionNode(in);
             case SETUP_PARTIAL_AGGREGATE -> new PartialAggregateInstructionNode(in);
             case SETUP_FINAL_AGGREGATE -> new FinalAggregateInstructionNode(in);
         };

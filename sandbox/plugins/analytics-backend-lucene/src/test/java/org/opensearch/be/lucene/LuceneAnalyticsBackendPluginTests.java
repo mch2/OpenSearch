@@ -301,8 +301,8 @@ public class LuceneAnalyticsBackendPluginTests extends OpenSearchTestCase {
         public FragmentInstructionHandlerFactory getInstructionHandlerFactory() {
             return new FragmentInstructionHandlerFactory() {
                 @Override
-                public Optional<InstructionNode> createShardScanNode(String logicalTableName) {
-                    return Optional.of(new ShardScanInstructionNode(logicalTableName));
+                public Optional<InstructionNode> createShardScanNode(String logName) {
+                    return Optional.of(new ShardScanInstructionNode(logName));
                 }
 
                 @Override
@@ -315,12 +315,8 @@ public class LuceneAnalyticsBackendPluginTests extends OpenSearchTestCase {
                 }
 
                 @Override
-                public Optional<InstructionNode> createShardScanWithDelegationNode(
-                    FilterTreeShape treeShape,
-                    int delegatedPredicateCount,
-                    String logicalTableName
-                ) {
-                    return Optional.of(new ShardScanWithDelegationInstructionNode(treeShape, delegatedPredicateCount, logicalTableName));
+                public Optional<InstructionNode> createShardScanWithDelegationNode(FilterTreeShape treeShape, int delegatedPredicateCount, String logName) {
+                    return Optional.of(new ShardScanWithDelegationInstructionNode(treeShape, delegatedPredicateCount, logName));
                 }
 
                 @Override

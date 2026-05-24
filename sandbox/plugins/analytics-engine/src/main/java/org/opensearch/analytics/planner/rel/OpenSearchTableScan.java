@@ -30,6 +30,7 @@ public class OpenSearchTableScan extends TableScan implements OpenSearchRelNode 
 
     private final List<String> viableBackends;
     private final List<FieldStorageInfo> outputFieldStorage;
+    private final boolean multiIndex;
 
     public OpenSearchTableScan(
         RelOptCluster cluster,
@@ -38,9 +39,21 @@ public class OpenSearchTableScan extends TableScan implements OpenSearchRelNode 
         List<String> viableBackends,
         List<FieldStorageInfo> outputFieldStorage
     ) {
+        this(cluster, traitSet, table, viableBackends, outputFieldStorage, false);
+    }
+
+    public OpenSearchTableScan(
+        RelOptCluster cluster,
+        RelTraitSet traitSet,
+        RelOptTable table,
+        List<String> viableBackends,
+        List<FieldStorageInfo> outputFieldStorage,
+        boolean multiIndex
+    ) {
         super(cluster, traitSet, List.of(), table);
         this.viableBackends = viableBackends;
         this.outputFieldStorage = outputFieldStorage;
+        this.multiIndex = multiIndex;
     }
 
     /**
@@ -64,12 +77,24 @@ public class OpenSearchTableScan extends TableScan implements OpenSearchRelNode 
         int shardCount,
         OpenSearchDistributionTraitDef distTraitDef
     ) {
+        return create(cluster, table, viableBackends, outputFieldStorage, shardCount, distTraitDef, false);
+    }
+
+    public static OpenSearchTableScan create(
+        RelOptCluster cluster,
+        RelOptTable table,
+        List<String> viableBackends,
+        List<FieldStorageInfo> outputFieldStorage,
+        int shardCount,
+        OpenSearchDistributionTraitDef distTraitDef,
+        boolean multiIndex
+    ) {
         int tableId = table.getQualifiedName().hashCode();
         OpenSearchDistribution distribution = shardCount == 1
             ? distTraitDef.shardSingleton(tableId, shardCount)
             : distTraitDef.shardRandom(tableId, shardCount);
         RelTraitSet traitSet = RelTraitSet.createEmpty().plus(OpenSearchConvention.INSTANCE).plus(distribution);
-        return new OpenSearchTableScan(cluster, traitSet, table, viableBackends, outputFieldStorage);
+        return new OpenSearchTableScan(cluster, traitSet, table, viableBackends, outputFieldStorage, multiIndex);
     }
 
     @Override
@@ -82,9 +107,13 @@ public class OpenSearchTableScan extends TableScan implements OpenSearchRelNode 
         return outputFieldStorage;
     }
 
+    public boolean isMultiIndex() {
+        return multiIndex;
+    }
+
     @Override
     public RelNode copy(RelTraitSet traitSet, List<RelNode> inputs) {
-        return new OpenSearchTableScan(getCluster(), traitSet, getTable(), viableBackends, outputFieldStorage);
+        return new OpenSearchTableScan(getCluster(), traitSet, getTable(), viableBackends, outputFieldStorage, multiIndex);
     }
 
     @Override
@@ -99,7 +128,7 @@ public class OpenSearchTableScan extends TableScan implements OpenSearchRelNode 
 
     @Override
     public RelNode copyResolved(String backend, List<RelNode> children, List<OperatorAnnotation> resolvedAnnotations) {
-        return new OpenSearchTableScan(getCluster(), getTraitSet(), getTable(), List.of(backend), outputFieldStorage);
+        return new OpenSearchTableScan(getCluster(), getTraitSet(), getTable(), List.of(backend), outputFieldStorage, multiIndex);
     }
 
     @Override

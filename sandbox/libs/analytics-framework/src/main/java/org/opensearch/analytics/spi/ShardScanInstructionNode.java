@@ -17,25 +17,14 @@ import java.io.IOException;
  * Instruction node for base shard scan setup — reader acquisition, SessionContext creation,
  * default table provider registration.
  *
- * <p>Carries the logical table name (alias/pattern the coordinator planned against) so the
- * data node registers the table under the correct name for Substrait plan binding.
- *
  * @opensearch.internal
  */
 public class ShardScanInstructionNode implements InstructionNode {
 
-    private final String logicalTableName;
-
-    public ShardScanInstructionNode() {
-        this((String) null);
-    }
-
-    public ShardScanInstructionNode(String logicalTableName) {
-        this.logicalTableName = logicalTableName;
-    }
+    public ShardScanInstructionNode() {}
 
     public ShardScanInstructionNode(StreamInput in) throws IOException {
-        this.logicalTableName = in.readOptionalString();
+        // No fields to read
     }
 
     @Override
@@ -45,10 +34,6 @@ public class ShardScanInstructionNode implements InstructionNode {
 
     @Override
     public void writeTo(StreamOutput out) throws IOException {
-        out.writeOptionalString(logicalTableName);
-    }
-
-    public String getLogicalTableName() {
-        return logicalTableName;
+        // No fields to write
     }
 }

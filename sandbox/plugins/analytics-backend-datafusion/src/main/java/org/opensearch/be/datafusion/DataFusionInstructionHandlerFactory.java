@@ -15,6 +15,8 @@ import org.opensearch.analytics.spi.FinalAggregateInstructionNode;
 import org.opensearch.analytics.spi.FragmentInstructionHandler;
 import org.opensearch.analytics.spi.FragmentInstructionHandlerFactory;
 import org.opensearch.analytics.spi.InstructionNode;
+import org.opensearch.analytics.spi.MultiIndexShardScanInstructionNode;
+import org.opensearch.analytics.spi.MultiIndexShardScanWithDelegationInstructionNode;
 import org.opensearch.analytics.spi.PartialAggregateInstructionNode;
 import org.opensearch.analytics.spi.ShardScanInstructionNode;
 import org.opensearch.analytics.spi.ShardScanWithDelegationInstructionNode;
@@ -39,8 +41,13 @@ public class DataFusionInstructionHandlerFactory implements FragmentInstructionH
     // ── Coordinator: create instruction nodes ──
 
     @Override
-    public Optional<InstructionNode> createShardScanNode(String logicalTableName) {
-        return Optional.of(new ShardScanInstructionNode(logicalTableName));
+    public Optional<InstructionNode> createShardScanNode() {
+        return Optional.of(new ShardScanInstructionNode());
+    }
+
+    @Override
+    public Optional<InstructionNode> createMultiIndexShardScanNode(String logicalTableName) {
+        return Optional.of(new MultiIndexShardScanInstructionNode(logicalTableName));
     }
 
     @Override
@@ -53,12 +60,17 @@ public class DataFusionInstructionHandlerFactory implements FragmentInstructionH
     }
 
     @Override
-    public Optional<InstructionNode> createShardScanWithDelegationNode(
+    public Optional<InstructionNode> createShardScanWithDelegationNode(FilterTreeShape treeShape, int delegatedPredicateCount) {
+        return Optional.of(new ShardScanWithDelegationInstructionNode(treeShape, delegatedPredicateCount));
+    }
+
+    @Override
+    public Optional<InstructionNode> createMultiIndexShardScanWithDelegationNode(
         FilterTreeShape treeShape,
         int delegatedPredicateCount,
         String logicalTableName
     ) {
-        return Optional.of(new ShardScanWithDelegationInstructionNode(treeShape, delegatedPredicateCount, logicalTableName));
+        return Optional.of(new MultiIndexShardScanWithDelegationInstructionNode(treeShape, delegatedPredicateCount, logicalTableName));
     }
 
     @Override
@@ -76,6 +88,12 @@ public class DataFusionInstructionHandlerFactory implements FragmentInstructionH
     @SuppressWarnings("unchecked")
     @Override
     public FragmentInstructionHandler<?> createHandler(InstructionNode node) {
+        if (node instanceof MultiIndexShardScanWithDelegationInstructionNode) {
+            return new MultiIndexShardScanWithDelegationHandler(plugin);
+        }
+        if (node instanceof MultiIndexShardScanInstructionNode) {
+            return new MultiIndexShardScanInstructionHandler(plugin);
+        }
         if (node instanceof ShardScanWithDelegationInstructionNode) {
             return new ShardScanWithDelegationHandler(plugin);
         }

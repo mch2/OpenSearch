@@ -170,11 +170,7 @@ abstract class MockBackend implements AnalyticsSearchBackendPlugin {
             }
 
             @Override
-            public Optional<InstructionNode> createShardScanWithDelegationNode(
-                FilterTreeShape treeShape,
-                int delegatedPredicateCount,
-                String logicalTableName
-            ) {
+            public Optional<InstructionNode> createShardScanWithDelegationNode(FilterTreeShape treeShape, int delegatedPredicateCount, String logicalTableName) {
                 return Optional.of(new ShardScanWithDelegationInstructionNode(treeShape, delegatedPredicateCount, logicalTableName));
             }
 

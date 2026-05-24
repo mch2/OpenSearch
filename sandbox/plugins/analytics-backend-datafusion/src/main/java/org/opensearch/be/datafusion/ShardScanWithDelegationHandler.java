@@ -57,7 +57,6 @@ public class ShardScanWithDelegationHandler implements FragmentInstructionHandle
         long readerPtr = dfReader.getReaderHandle().getPointer();
         long runtimePtr = dataFusionService.getNativeRuntime().get();
         long contextId = context.getTask() != null ? context.getTask().getId() : 0L;
-        String tableName = node.getLogicalTableName() != null ? node.getLogicalTableName() : context.getTableName();
         FilterTreeShape treeShape = node.getTreeShape();
         int delegatedPredicateCount = node.getDelegatedPredicateCount();
 
@@ -65,22 +64,14 @@ public class ShardScanWithDelegationHandler implements FragmentInstructionHandle
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment segment = arena.allocate(WireConfigSnapshot.BYTE_SIZE);
             snapshot.writeTo(segment);
-            // Plan bytes enable schema widening for multi-index queries: Rust extracts the
-            // base_schema from the Substrait plan and appends missing columns as nullable,
-            // so DataFusion's SchemaAdapter null-fills them at parquet read time.
-            // TODO: Replace plan-bytes-based widening with an explicit Arrow IPC union schema
-            // passed from Java once OpenSearchSchemaBuilder and CoreDataFieldPlugin are
-            // consolidated into a shared type registry (single source of truth for
-            // OpenSearch type → Arrow type mapping).
             SessionContextHandle sessionCtxHandle = NativeBridge.createSessionContextForIndexedExecution(
                 readerPtr,
                 runtimePtr,
-                tableName,
+                context.getTableName(),
                 contextId,
                 treeShape.ordinal(),
                 delegatedPredicateCount,
-                segment.address(),
-                context.getFragmentBytes()
+                segment.address()
             );
             return new DataFusionSessionState(sessionCtxHandle);
         }
