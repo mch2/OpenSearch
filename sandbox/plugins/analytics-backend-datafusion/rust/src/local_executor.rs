@@ -180,13 +180,20 @@ impl LocalSession {
         log_debug!("DataFusion logical plan (reduce):\n{}", logical_plan.display_indent());
         let dataframe = self.ctx.execute_logical_plan(logical_plan).await?;
         let physical_plan = dataframe.create_physical_plan().await?;
+        log::error!(
+            "prepare_final_plan: BEFORE stripping:\n{}",
+            displayable(physical_plan.as_ref()).indent(true)
+        );
         let target_schema = crate::schema_coerce::coerce_inferred_schema(physical_plan.schema());
         let physical_plan = crate::relabel_exec::wrap_if_relabel_needed(physical_plan, target_schema)?;
-        log_debug!("DataFusion physical plan (reduce):\n{}", displayable(physical_plan.as_ref()).indent(true));
         let stripped = crate::agg_mode::apply_aggregate_mode(
             physical_plan,
             crate::agg_mode::Mode::Final,
         )?;
+        log::error!(
+            "prepare_final_plan: AFTER stripping to Final:\n{}",
+            displayable(stripped.as_ref()).indent(true)
+        );
         self.prepared_plan = Some(stripped);
         Ok(())
     }

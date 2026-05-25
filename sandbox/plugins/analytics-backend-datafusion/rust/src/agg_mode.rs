@@ -49,6 +49,11 @@ pub(crate) fn apply_aggregate_mode(
 }
 
 /// Walks the plan tree and strips the half that doesn't match `target`.
+///
+/// Handles `Single`/`SinglePartitioned` aggregates (produced when `target_partitions=1`)
+/// by rewriting their mode to the requested target. Substrait doesn't encode aggregate
+/// modes, so DataFusion reconstructs them as `Single` — we force them to the correct
+/// distributed mode here.
 fn force_aggregate_mode(
     plan: Arc<dyn ExecutionPlan>,
     target: AggregateMode,
@@ -63,6 +68,22 @@ fn force_aggregate_mode(
                 .collect::<Result<_>>()?;
             return plan.with_new_children(new_children);
         }
+
+        // Single/SinglePartitioned: Substrait doesn't encode mode, so DataFusion
+        // reconstructs the aggregate as Single when target_partitions=1. Rewrite to
+        // the requested mode so partial emits intermediate state and final merges it.
+        if matches!(agg.mode(), AggregateMode::Single | AggregateMode::SinglePartitioned) {
+            let rewritten = AggregateExec::try_new(
+                target,
+                agg.group_expr().clone(),
+                agg.aggr_expr().to_vec(),
+                agg.filter_expr().to_vec(),
+                agg.input().clone(),
+                agg.input_schema(),
+            )?;
+            return Ok(Arc::new(rewritten));
+        }
+
         // Mode mismatch — strip this node
         match target {
             AggregateMode::Partial => {
