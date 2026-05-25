@@ -163,13 +163,14 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
 
         final long planStartNanos = profile ? System.nanoTime() : 0;
         RelNode plan = PlannerImpl.createPlan(logicalFragment, new PlannerContext(capabilityRegistry, clusterService.state(), indexNameExpressionResolver, false));
+        logger.info("[DefaultPlanExecutor] CBO output plan:\n{}", org.apache.calcite.plan.RelOptUtil.toString(plan));
         final String fullPlan = profile ? org.apache.calcite.plan.RelOptUtil.toString(plan) : null;
         QueryDAG dag = DAGBuilder.build(plan, capabilityRegistry, clusterService, indexNameExpressionResolver);
         PlanForker.forkAll(dag, capabilityRegistry);
         BackendPlanAdapter.adaptAll(dag, capabilityRegistry);
         FragmentConversionDriver.convertAll(dag, capabilityRegistry);
         final long planningTimeMs = profile ? java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - planStartNanos) : 0;
-        logger.debug("[DefaultPlanExecutor] QueryDAG:\n{}", dag);
+        logger.info("[DefaultPlanExecutor] QueryDAG:\n{}", dag);
 
         final AnalyticsQueryTask queryTask = (AnalyticsQueryTask) taskManager.register(
             "transport",

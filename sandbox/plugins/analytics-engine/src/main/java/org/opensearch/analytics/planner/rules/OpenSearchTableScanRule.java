@@ -100,13 +100,18 @@ public class OpenSearchTableScanRule extends RelOptRule {
 
         RelOptTable indexNameTable = new IndexNameTable(scan.getTable(), tableName);
 
+        int totalShards = resolution.totalShardCount();
+        org.apache.logging.log4j.LogManager.getLogger(OpenSearchTableScanRule.class).info(
+            "[OpenSearchTableScanRule] table={}, concreteIndices={}, totalShardCount={}",
+            tableName, resolution.concreteIndexNames(), totalShards
+        );
         call.transformTo(
             OpenSearchTableScan.create(
                 scan.getCluster(),
                 indexNameTable,
                 viableBackends,
                 fieldStorage,
-                resolution.totalShardCount(),
+                totalShards,
                 context.getDistributionTraitDef()
             )
         );

@@ -100,6 +100,14 @@ public class OpenSearchAggregateSplitRule extends RelOptRule {
             if (isPercentileApprox(aggCall)) {
                 return true;
             }
+            // COUNT(DISTINCT x) cannot be split into PARTIAL/FINAL because per-shard distinct
+            // counts are not additive (overlapping values across shards would be double-counted).
+            // Keep it above the exchange so the coordinator runs it on all gathered data.
+            // TODO: implement two-phase exact distinct (emit distinct values from shards, count
+            // at coordinator) or route through APPROX_COUNT_DISTINCT with HLL sketches.
+            if (aggCall.isDistinct()) {
+                return true;
+            }
         }
         int groupCount = aggregate.getGroupSet().cardinality();
         if (aggregate.getGroupSet().equals(ImmutableBitSet.range(groupCount))) {
