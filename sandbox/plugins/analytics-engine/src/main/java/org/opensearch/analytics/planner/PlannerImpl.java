@@ -30,6 +30,7 @@ import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.planner.rel.OpenSearchDistributionTraitDef;
 import org.opensearch.analytics.planner.rules.OpenSearchAggregateReduceRule;
 import org.opensearch.analytics.planner.rules.OpenSearchAggregateRule;
+import org.opensearch.analytics.planner.rules.OpenSearchAggregateShardBucketRule;
 import org.opensearch.analytics.planner.rules.OpenSearchAggregateSplitRule;
 import org.opensearch.analytics.planner.rules.OpenSearchDistributionDeriveRule;
 import org.opensearch.analytics.planner.rules.OpenSearchFilterRule;
@@ -101,6 +102,8 @@ public class PlannerImpl {
         // a single BooleanQuery / Weight without polluting ScalarFunction with AND.
         // Revisit once those are designed. The rule would also strip performance peers from
         // AnnotatedPredicates under OR/NOT (Lucene call buys nothing in those positions).
+        modifiedRelNode = executionHints(modifiedRelNode, context, listener);
+        LOGGER.info("After execution-hints:\n{}", RelOptUtil.toString(modifiedRelNode));
         modifiedRelNode = cbo(modifiedRelNode, rawRelNode, context, listener);
         LOGGER.info("After CBO:\n{}", RelOptUtil.toString(modifiedRelNode));
 
@@ -267,6 +270,24 @@ public class PlannerImpl {
             return volcanoPlanner.findBestExp();
         } finally {
             if (listener != null) listener.endPhase("cbo");
+        }
+    }
+
+    /** Phase 1d: annotates pre-CBO RelNodes with execution-shape hints (currently {@link OpenSearchAggregateShardBucketRule}). */
+    private static RelNode executionHints(RelNode input, PlannerContext context, RuleProfilingListener listener) {
+        HepProgramBuilder builder = new HepProgramBuilder();
+        builder.addMatchOrder(HepMatchOrder.TOP_DOWN);
+        builder.addRuleInstance(new OpenSearchAggregateShardBucketRule(context));
+        HepPlanner planner = new HepPlanner(builder.build());
+        if (listener != null) {
+            planner.addListener(listener);
+            listener.beginPhase("execution-hints");
+        }
+        try {
+            planner.setRoot(input);
+            return planner.findBestExp();
+        } finally {
+            if (listener != null) listener.endPhase("execution-hints");
         }
     }
 }

@@ -19,5 +19,7 @@ public enum AggregateMode {
     /** Final aggregation at coordinator (merges partial states). */
     FINAL,
     /** Single-shard — no split needed, full aggregation in one pass. */
-    SINGLE
+    SINGLE,
+    /** Shard-local merge for engine-native-merge aggregates (e.g. APPROX_COUNT_DISTINCT) — coord runs state-merge over the shipped intermediate state. */
+    SHARD_MERGE
 }
