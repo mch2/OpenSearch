@@ -15,17 +15,22 @@ import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.AggregateCall;
 import org.apache.calcite.rel.core.Project;
 import org.apache.calcite.rel.type.RelDataType;
+import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.rex.RexLiteral;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.sql.type.SqlTypeFamily;
+import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.calcite.util.ImmutableBitSet;
 import org.opensearch.analytics.planner.PlannerContext;
 import org.opensearch.analytics.planner.RelNodeUtils;
 import org.opensearch.analytics.planner.rel.AggregateMode;
 import org.opensearch.analytics.planner.rel.OpenSearchAggregate;
 import org.opensearch.analytics.planner.rel.OpenSearchConvention;
+import org.opensearch.analytics.planner.rel.OpenSearchSort;
+import org.opensearch.analytics.planner.rel.ShardBucketHint;
 import org.opensearch.analytics.spi.AggregateFunction;
 
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -147,7 +152,9 @@ public class OpenSearchAggregateSplitRule extends RelOptRule {
             aggregate.getAggCallList(),
             AggregateMode.SINGLE,
             aggregate.getViableBackends(),
-            aggregate.getCallAnnotations()
+            aggregate.getCallAnnotations(),
+            Map.of(),
+            aggregate.getShardBucketHint()
         );
 
         if (shouldSkipPartialFinalSplit(aggregate)) {
@@ -176,8 +183,13 @@ public class OpenSearchAggregateSplitRule extends RelOptRule {
             aggregate.getViableBackends(),
             aggregate.getCallAnnotations()
         );
+
+        // Shard-bucket oversampling: when a ShardBucketHint is present, replaces partial with
+        // a shard-local FINAL+Sort+Limit so each shard ships at most shardSize buckets.
+        RelNode partialOrShardSort = maybeInsertShardSort(aggregate, child, partial, partialAggCalls);
+
         RelTraitSet finalTraits = partial.getTraitSet().replace(context.getDistributionTraitDef().coordSingleton());
-        RelNode gathered = convert(partial, finalTraits);
+        RelNode gathered = convert(partialOrShardSort, finalTraits);
         Map<Integer, List<RexLiteral>> finalExtraLiterals = captureLiteralArgsForFinal(aggregate.getAggCallList(), child);
 
         OpenSearchAggregate finalAggregate = new OpenSearchAggregate(
@@ -195,6 +207,74 @@ public class OpenSearchAggregateSplitRule extends RelOptRule {
 
         call.getPlanner().ensureRegistered(singleOnSingleton, aggregate);
         call.transformTo(finalAggregate);
+    }
+
+    /**
+     * If {@code aggregate} carries a {@link ShardBucketHint}, replaces {@code partial} with a
+     * shard-local merge aggregate plus a {@code localTopK} {@link OpenSearchSort}.
+     *
+     * <p>Mode is FINAL for additive aggregates (SUM/MIN/MAX/COUNT/AVG/...): shard emits per-group
+     * scalars, coord FINAL re-aggregates. Mode is SHARD_MERGE when any aggCall is engine-native
+     * merge (e.g. APPROX_COUNT_DISTINCT): shard emits intermediate state (Binary HLL sketch),
+     * coord runs state-merge via {@link org.opensearch.analytics.planner.dag.DistributedAggregateRewriter};
+     * the Sort sortExprs use {@link AggregateFunction#finalizeOperator} (e.g. {@code hll_estimate(state)}).
+     *
+     * <p>Returns {@code partial} unchanged when no hint is present.
+     */
+    private static RelNode maybeInsertShardSort(
+        OpenSearchAggregate aggregate,
+        RelNode child,
+        OpenSearchAggregate partial,
+        List<AggregateCall> partialAggCalls
+    ) {
+        ShardBucketHint hint = aggregate.getShardBucketHint();
+        if (hint == null) {
+            return partial;
+        }
+        boolean anyEngineNativeMerge = hasEngineNativeMergeAggCall(aggregate.getAggCallList());
+        AggregateMode shardMode = anyEngineNativeMerge ? AggregateMode.SHARD_MERGE : AggregateMode.FINAL;
+        OpenSearchAggregate shardLocalAgg = new OpenSearchAggregate(
+            aggregate.getCluster(),
+            partial.getTraitSet(),
+            child,
+            aggregate.getGroupSet(),
+            aggregate.getGroupSets(),
+            partialAggCalls,
+            shardMode,
+            aggregate.getViableBackends(),
+            aggregate.getCallAnnotations()
+        );
+        RexBuilder rexBuilder = aggregate.getCluster().getRexBuilder();
+        RelDataType intType = aggregate.getCluster().getTypeFactory().createSqlType(SqlTypeName.INTEGER);
+        RexNode shardFetch = rexBuilder.makeExactLiteral(BigDecimal.valueOf(hint.shardSize()), intType);
+        return new OpenSearchSort(
+            shardLocalAgg.getCluster(),
+            shardLocalAgg.getTraitSet(),
+            shardLocalAgg,
+            hint.collation(),
+            null,
+            shardFetch,
+            shardLocalAgg.getViableBackends(),
+            /* localTopK */ true,
+            hint.sortExprs()
+        );
+    }
+
+    /** True when any aggCall is engine-native merge (intermediate state shape != final scalar shape, e.g. HLL Binary sketch for {@code APPROX_COUNT_DISTINCT}). */
+    private static boolean hasEngineNativeMergeAggCall(List<AggregateCall> aggCalls) {
+        for (AggregateCall call : aggCalls) {
+            if (isEngineNativeMerge(call)) return true;
+        }
+        return false;
+    }
+
+    private static boolean isEngineNativeMerge(AggregateCall call) {
+        AggregateFunction fn = AggregateFunction.fromSqlAggFunction(call.getAggregation());
+        if (fn == null) return false;
+        if (fn.getType() != AggregateFunction.Type.APPROXIMATE) return false;
+        List<AggregateFunction.IntermediateField> fields = fn.intermediateFields();
+        if (fields == null || fields.size() != 1) return false;
+        return fields.get(0).reducer() == fn;
     }
 
     /**

@@ -143,6 +143,7 @@ public abstract class BasePlannerRulesTests extends OpenSearchTestCase {
         IndexMetadata indexMetadata = mock(IndexMetadata.class);
         when(indexMetadata.getIndex()).thenReturn(new Index("test_index", "uuid"));
         when(indexMetadata.getNumberOfShards()).thenReturn(shardCount);
+        when(indexMetadata.getSettings()).thenReturn(Settings.EMPTY);
         when(metadata.index("test_index")).thenReturn(indexMetadata);
         when(clusterState.metadata()).thenReturn(metadata);
 
@@ -181,6 +182,22 @@ public abstract class BasePlannerRulesTests extends OpenSearchTestCase {
         Map<String, Map<String, Object>> fieldMappings,
         List<AnalyticsSearchBackendPlugin> backends
     ) {
+        return buildContextPerIndex(primaryFormat, shardCountByIndex, Map.of(), fieldMappings, backends);
+    }
+
+    /**
+     * Per-index context with extra index-scoped settings overrides per index. Each entry in
+     * {@code extraSettingsByIndex} is layered on top of the default composite-format
+     * settings for that index.
+     */
+    @SuppressWarnings("unchecked")
+    protected PlannerContext buildContextPerIndex(
+        String primaryFormat,
+        Map<String, Integer> shardCountByIndex,
+        Map<String, Settings> extraSettingsByIndex,
+        Map<String, Map<String, Object>> fieldMappings,
+        List<AnalyticsSearchBackendPlugin> backends
+    ) {
         Map<String, Object> mappingSource = Map.of("properties", fieldMappings);
 
         Metadata metadata = mock(Metadata.class);
@@ -196,12 +213,14 @@ public abstract class BasePlannerRulesTests extends OpenSearchTestCase {
 
             IndexMetadata indexMetadata = mock(IndexMetadata.class);
             when(indexMetadata.getIndex()).thenReturn(new Index(indexName, indexName + "-uuid"));
-            when(indexMetadata.getSettings()).thenReturn(
-                Settings.builder()
-                    .put("index.composite.primary_data_format", primaryFormat)
-                    .putList("index.composite.secondary_data_formats", "lucene")
-                    .build()
-            );
+            Settings.Builder settingsBuilder = Settings.builder()
+                .put("index.composite.primary_data_format", primaryFormat)
+                .putList("index.composite.secondary_data_formats", "lucene");
+            Settings extra = extraSettingsByIndex.get(indexName);
+            if (extra != null) {
+                settingsBuilder.put(extra);
+            }
+            when(indexMetadata.getSettings()).thenReturn(settingsBuilder.build());
             when(indexMetadata.mapping()).thenReturn(mappingMetadata);
             when(indexMetadata.getNumberOfShards()).thenReturn(shardCount);
 

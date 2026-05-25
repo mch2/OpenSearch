@@ -71,7 +71,8 @@ public class RelNodeUtils {
                 aggregate.getMode(),
                 aggregate.getViableBackends(),
                 aggregate.getCallAnnotations(),
-                aggregate.getFinalExtraLiteralArgs()
+                aggregate.getFinalExtraLiteralArgs(),
+                aggregate.getShardBucketHint()
             );
         } else if (node instanceof OpenSearchSort sort) {
             return new OpenSearchSort(
@@ -81,7 +82,9 @@ public class RelNodeUtils {
                 sort.getCollation(),
                 sort.offset,
                 sort.fetch,
-                sort.getViableBackends()
+                sort.getViableBackends(),
+                sort.isLocalTopK(),
+                sort.getSortExprs()
             );
         } else if (node instanceof OpenSearchProject project) {
             return new OpenSearchProject(

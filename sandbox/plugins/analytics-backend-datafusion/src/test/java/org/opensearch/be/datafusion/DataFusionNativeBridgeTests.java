@@ -8,6 +8,8 @@
 
 package org.opensearch.be.datafusion;
 
+import com.carrotsearch.randomizedtesting.annotations.ThreadLeakScope;
+
 import org.opensearch.analytics.backend.jni.NativeHandle;
 import org.opensearch.be.datafusion.nativelib.NativeBridge;
 import org.opensearch.be.datafusion.nativelib.ReaderHandle;
@@ -27,7 +29,12 @@ import java.util.concurrent.CompletableFuture;
 /**
  * Smoke test for the DataFusion JNI bridge.
  * Verifies native library loading, runtime creation, and reader lifecycle.
+ *
+ * <p>The Tokio runtime initialised here is shared across the test JVM and intentionally
+ * outlives this suite (see {@code initTokioRuntimeManager} note below) — disable
+ * thread-leak detection at the suite scope.
  */
+@ThreadLeakScope(ThreadLeakScope.Scope.NONE)
 public class DataFusionNativeBridgeTests extends OpenSearchTestCase {
 
     // Note: initTokioRuntimeManager uses OnceLock and can only be initialized once per JVM.

@@ -902,6 +902,20 @@ scalar_functions:
         nullability: DECLARED_OUTPUT
         return: string
 
+  - name: "hll_estimate"
+    description: >-
+      Cardinality estimate from a serialized HyperLogLog sketch. Input is the
+      16384-byte register array produced by DataFusion's `approx_distinct` UDAF;
+      output is the same Int64 cardinality the UDAF's evaluate() would return
+      for that sketch. Used as the finalize expression for engine-native-merge
+      aggregates (DC) by the analytics-engine shard-bucket-oversampling rule's
+      expression-based shard sort key.
+    impls:
+      - args:
+          - { name: state, value: "binary" }
+        nullability: DECLARED_OUTPUT
+        return: i64
+
   - name: "crc32"
     description: "Return the CRC-32 checksum of the input string as a non-negative integer."
     impls:

@@ -40,6 +40,7 @@ import org.apache.calcite.util.Optionality;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.planner.rel.OpenSearchStageInputScan;
+import org.opensearch.analytics.spi.AggregateFunction;
 import org.opensearch.analytics.spi.DelegatedPredicateFunction;
 import org.opensearch.analytics.spi.DelegationPossibleFunction;
 import org.opensearch.analytics.spi.FragmentConvertor;
@@ -203,6 +204,7 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
         FunctionMappings.s(ToStringFunctionAdapter.TOSTRING, "tostring"),
         FunctionMappings.s(SqlLibraryOperators.MD5, "md5"),
         FunctionMappings.s(SqlLibraryOperators.SHA1, "sha1"),
+        FunctionMappings.s(AggregateFunction.APPROX_COUNT_DISTINCT.finalizeOperator().orElseThrow(), "hll_estimate"),
         FunctionMappings.s(SqlLibraryOperators.CRC32, "crc32"),
         FunctionMappings.s(Sha2FunctionAdapter.DIGEST, "digest"),
         FunctionMappings.s(Sha2FunctionAdapter.ENCODE, "encode"),
@@ -462,6 +464,11 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
         // LOCAL_*_OP stubs so isthmus's AggregateFunctionConverter binds them by
         // operator identity through ADDITIONAL_AGGREGATE_SIGS.
         preprocessed = PplAggregateCallRewriter.rewrite(preprocessed);
+        // Rewrite OpenSearchSort with expression-based collation (the shard-bucket
+        // oversampling rule's localTopK Sort over engine-native-merge / decomposed
+        // aggregates) into a Project(drop) → Sort → Project(lift) chain so the
+        // isthmus visitor emits standard substrait constructs.
+        preprocessed = OpenSearchSortExpressionRewriter.rewrite(preprocessed);
         RelRoot root = RelRoot.of(preprocessed, SqlKind.SELECT);
         SubstraitRelVisitor visitor = createVisitor(preprocessed);
         Rel substraitRel;
@@ -506,6 +513,7 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
         // Same rationale as convertToSubstrait — issue #5420.
         preprocessed = DatetimeOutputCastRewriter.rewrite(preprocessed);
         preprocessed = PplAggregateCallRewriter.rewrite(preprocessed);
+        preprocessed = OpenSearchSortExpressionRewriter.rewrite(preprocessed);
         SubstraitRelVisitor visitor = createVisitor(preprocessed);
         return visitor.apply(preprocessed);
     }

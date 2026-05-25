@@ -34,6 +34,10 @@ import java.util.List;
 public class OpenSearchSort extends Sort implements OpenSearchRelNode {
 
     private final List<String> viableBackends;
+    /** Shard-local top-K — per-partition sort+limit; bypasses the gather-first gate in {@link #computeSelfCost}. */
+    private final boolean localTopK;
+    /** Per-collation-field RexNodes; lifted into a Project below the Sort by the convertor. {@code null} for plain field-index collation. */
+    private final List<RexNode> sortExprs;
 
     public OpenSearchSort(
         RelOptCluster cluster,
@@ -44,8 +48,51 @@ public class OpenSearchSort extends Sort implements OpenSearchRelNode {
         RexNode fetch,
         List<String> viableBackends
     ) {
+        this(cluster, traitSet, input, collation, offset, fetch, viableBackends, false, null);
+    }
+
+    public OpenSearchSort(
+        RelOptCluster cluster,
+        RelTraitSet traitSet,
+        RelNode input,
+        RelCollation collation,
+        RexNode offset,
+        RexNode fetch,
+        List<String> viableBackends,
+        boolean localTopK,
+        List<RexNode> sortExprs
+    ) {
         super(cluster, traitSet, input, collation, offset, fetch);
         this.viableBackends = viableBackends;
+        this.localTopK = localTopK;
+        if (sortExprs != null && sortExprs.size() != collation.getFieldCollations().size()) {
+            throw new IllegalArgumentException(
+                "sortExprs arity ["
+                    + sortExprs.size()
+                    + "] must match collation field count ["
+                    + collation.getFieldCollations().size()
+                    + "]"
+            );
+        }
+        this.sortExprs = sortExprs == null ? null : List.copyOf(sortExprs);
+    }
+
+    /** True when this Sort is a shard-local top-K — see {@link #localTopK}. */
+    public boolean isLocalTopK() {
+        return localTopK;
+    }
+
+    /**
+     * Returns the per-field expression-based sort keys, parallel to {@link #getCollation()}'s
+     * {@code FieldCollation}s. {@code null} when collation is plain field-index collation.
+     */
+    public List<RexNode> getSortExprs() {
+        return sortExprs;
+    }
+
+    /** True when this Sort carries expression-based sort keys (see {@link #sortExprs}). */
+    public boolean hasExpressionCollation() {
+        return sortExprs != null && !sortExprs.isEmpty();
     }
 
     @Override
@@ -65,37 +112,25 @@ public class OpenSearchSort extends Sort implements OpenSearchRelNode {
 
     @Override
     public Sort copy(RelTraitSet traitSet, RelNode input, RelCollation collation, RexNode offset, RexNode fetch) {
-        return new OpenSearchSort(getCluster(), traitSet, input, collation, offset, fetch, viableBackends);
+        return new OpenSearchSort(getCluster(), traitSet, input, collation, offset, fetch, viableBackends, localTopK, sortExprs);
     }
 
-    /**
-     * Treat our Sort as a concrete physical operator, not a Calcite collation enforcer.
-     *
-     * <p>Calcite's default classifies a Sort with collation as an enforcer — Volcano then
-     * registers it into a {@code required=true} subset that's never marked delivered. That
-     * confuses the gather-rule path, which looks for delivered subsets when converting an
-     * inner Sort's RelSet to SINGLETON. We don't use Calcite's collation-trait enforcement,
-     * so mark the Sort delivered like any other operator.
-     */
+    /** Concrete physical operator, not a collation enforcer — Volcano otherwise registers an undelivered required-subset that breaks the gather-rule path. */
     @Override
     public boolean isEnforcer() {
         return false;
     }
 
     /**
-     * A collated Sort needs globally-ordered input. Our {@link OpenSearchExchangeReducer}
-     * is a concat gather (not a merge exchange), so per-partition sort + ER produces
-     * partition-locally ordered rows concatenated in arrival order — wrong. Returning
-     * infinite cost unless the input is EXECUTION(SINGLETON) forces Volcano to pick the
-     * {@link org.opensearch.analytics.planner.rules.OpenSearchSortSplitRule} alternative
-     * (ER below the Sort, Sort sees a fully-gathered input).
-     *
-     * <p>Pure LIMIT Sort (empty collation) — nothing to order, partition-local fetch is
-     * correct. Skip the gate.
+     * A collated Sort needs globally-ordered input — our {@link OpenSearchExchangeReducer} is a concat gather (not merge exchange),
+     * so we require SINGLETON input. Pure-LIMIT (empty collation) and {@link #localTopK} Sorts skip the gate (partition-local fetch / top-K is correct).
      */
     @Override
     public RelOptCost computeSelfCost(RelOptPlanner planner, RelMetadataQuery mq) {
         if (getCollation().getFieldCollations().isEmpty()) {
+            return planner.getCostFactory().makeTinyCost();
+        }
+        if (localTopK) {
             return planner.getCostFactory().makeTinyCost();
         }
         for (RelNode input : getInputs()) {
@@ -115,12 +150,27 @@ public class OpenSearchSort extends Sort implements OpenSearchRelNode {
 
     @Override
     public RelWriter explainTerms(RelWriter pw) {
-        return super.explainTerms(pw).item("viableBackends", viableBackends);
+        RelWriter base = super.explainTerms(pw).item("viableBackends", viableBackends);
+        if (sortExprs != null) {
+            // In the digest so Volcano doesn't equivalence-class hinted vs un-hinted Sorts.
+            base = base.item("sortExprs", sortExprs);
+        }
+        return base;
     }
 
     @Override
     public RelNode copyResolved(String backend, List<RelNode> children, List<OperatorAnnotation> resolvedAnnotations) {
-        return new OpenSearchSort(getCluster(), getTraitSet(), children.getFirst(), getCollation(), offset, fetch, List.of(backend));
+        return new OpenSearchSort(
+            getCluster(),
+            getTraitSet(),
+            children.getFirst(),
+            getCollation(),
+            offset,
+            fetch,
+            List.of(backend),
+            localTopK,
+            sortExprs
+        );
     }
 
     @Override
