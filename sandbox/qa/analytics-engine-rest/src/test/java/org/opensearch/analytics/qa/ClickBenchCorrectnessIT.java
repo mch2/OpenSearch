@@ -87,7 +87,7 @@ public class ClickBenchCorrectnessIT extends AnalyticsRestTestCase {
     private Map<Integer, Object> runAllQueries(List<Integer> queryNumbers) throws IOException {
         Map<Integer, Object> results = new LinkedHashMap<>();
         for (int q : queryNumbers) {
-            String pplFile = "datasets/" + ClickBenchTestHelper.DATASET.datasetName + "/ppl/q" + q + ".ppl";
+            String pplFile = "datasets/" + ClickBenchTestHelper.DATASET.name + "/ppl/q" + q + ".ppl";
             String ppl;
             try (var is = getClass().getClassLoader().getResourceAsStream(pplFile)) {
                 if (is == null) continue;
@@ -116,6 +116,12 @@ public class ClickBenchCorrectnessIT extends AnalyticsRestTestCase {
         try (var is = getClass().getClassLoader().getResourceAsStream("datasets/clickbench/mapping.json")) {
             mapping = new String(is.readAllBytes());
         }
+        // Inject parquet settings and override shard count (same approach as DatasetProvisioner)
+        mapping = mapping.replace("\"number_of_shards\"",
+            "\"index.pluggable.dataformat.enabled\": true, "
+            + "\"index.pluggable.dataformat\": \"composite\", "
+            + "\"index.composite.primary_data_format\": \"parquet\", "
+            + "\"number_of_shards\"");
         mapping = mapping.replaceFirst("\"number_of_shards\":\\s*\\d+", "\"number_of_shards\": " + shards);
 
         Request create = new Request("PUT", "/" + INDEX_NAME);
@@ -135,7 +141,17 @@ public class ClickBenchCorrectnessIT extends AnalyticsRestTestCase {
         );
         Response bulkResponse = client().performRequest(bulkRequest);
         Map<String, Object> bulkResult = assertOkAndParse(bulkResponse, "bulk ingest");
-        assertEquals("bulk had errors", false, bulkResult.get("errors"));
+        if (Boolean.TRUE.equals(bulkResult.get("errors"))) {
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> items = (List<Map<String, Object>>) bulkResult.get("items");
+            for (Map<String, Object> item : items) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> index = (Map<String, Object>) item.get("index");
+                if (index != null && index.containsKey("error")) {
+                    throw new AssertionError("Bulk ingest error: " + index.get("error"));
+                }
+            }
+        }
 
         // Flush to parquet
         client().performRequest(new Request("POST", "/" + INDEX_NAME + "/_flush?force=true"));
