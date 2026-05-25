@@ -96,12 +96,12 @@ public class StatsEndpointRefactorPropertyTests {
                 );
             }
             return rt;
-        }), taskMonitorStats(), taskMonitorStats(), taskMonitorStats(), taskMonitorStats()).as((io, cpu, qe, sn, fp, ss) -> {
+        }), taskMonitorStats(), taskMonitorStats(), taskMonitorStats(), taskMonitorStats()).as((io, cpu, cr, qe, sn, ps) -> {
             Map<String, TaskMonitorStats> monitors = new LinkedHashMap<>();
+            monitors.put("coordinator_reduce", cr);
             monitors.put("query_execution", qe);
             monitors.put("stream_next", sn);
-            monitors.put("fetch_phase", fp);
-            monitors.put("segment_stats", ss);
+            monitors.put("plan_setup", ps);
             return new NativeExecutorsStats(io, cpu, monitors);
         });
     }
@@ -110,12 +110,12 @@ public class StatsEndpointRefactorPropertyTests {
     @Provide
     Arbitrary<NativeExecutorsStats> nativeExecutorsStatsCpuAbsent() {
         return Combinators.combine(runtimeMetrics(), taskMonitorStats(), taskMonitorStats(), taskMonitorStats(), taskMonitorStats())
-            .as((io, qe, sn, fp, ss) -> {
+            .as((io, cr, qe, sn, ps) -> {
                 Map<String, TaskMonitorStats> monitors = new LinkedHashMap<>();
+                monitors.put("coordinator_reduce", cr);
                 monitors.put("query_execution", qe);
                 monitors.put("stream_next", sn);
-                monitors.put("fetch_phase", fp);
-                monitors.put("segment_stats", ss);
+                monitors.put("plan_setup", ps);
                 return new NativeExecutorsStats(io, null, monitors);
             });
     }
@@ -124,8 +124,20 @@ public class StatsEndpointRefactorPropertyTests {
     @Provide
     Arbitrary<DataFusionStats> dataFusionStats() {
         return Arbitraries.oneOf(
-            nativeExecutorsStatsCpuPresent().map(DataFusionStats::new),
-            nativeExecutorsStatsCpuAbsent().map(DataFusionStats::new)
+            nativeExecutorsStatsCpuPresent().map(
+                n -> new DataFusionStats(
+                    n,
+                    new PartitionGateStats("datanode_gate", 12, 0, 0, 0),
+                    new PartitionGateStats("coordinator_gate", 12, 0, 0, 0)
+                )
+            ),
+            nativeExecutorsStatsCpuAbsent().map(
+                n -> new DataFusionStats(
+                    n,
+                    new PartitionGateStats("datanode_gate", 12, 0, 0, 0),
+                    new PartitionGateStats("coordinator_gate", 12, 0, 0, 0)
+                )
+            )
         );
     }
 

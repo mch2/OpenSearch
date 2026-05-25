@@ -77,21 +77,23 @@ pub(crate) fn coerce_slot(
             ),
         },
         CoerceMode::Int64 => match observed {
-            Int8 | Int16 | Int32 | Int64 | UInt8 | UInt16 | UInt32 | UInt64 | Float32 | Float64
-            | Decimal128(_, _) | Decimal256(_, _) => Ok(Int64),
+            Int8 | Int16 | Int32 | Int64 | UInt8 | UInt16 | UInt32 | UInt64 | Float32 | Float64 => {
+                Ok(Int64)
+            }
             other => {
                 plan_err!("{udf_name}: arg {slot_index} expected integer or float, got {other:?}")
             }
         },
         CoerceMode::Float64 => match observed {
-            Int8 | Int16 | Int32 | Int64 | UInt8 | UInt16 | UInt32 | UInt64 | Float32 | Float64
-            | Decimal128(_, _) | Decimal256(_, _) => Ok(Float64),
+            Int8 | Int16 | Int32 | Int64 | UInt8 | UInt16 | UInt32 | UInt64 | Float32 | Float64 => {
+                Ok(Float64)
+            }
             other => {
                 plan_err!("{udf_name}: arg {slot_index} expected integer or float, got {other:?}")
             }
         },
         CoerceMode::Utf8 => match observed {
-            Utf8 | LargeUtf8 | Utf8View => Ok(Utf8),
+            Utf8 | LargeUtf8 | Utf8View => Ok(observed.clone()),
             other => plan_err!("{udf_name}: arg {slot_index} expected string, got {other:?}"),
         },
     }
@@ -119,16 +121,19 @@ pub(crate) fn coerce_args(
 }
 
 pub mod convert_tz;
+pub mod conversion;
 pub mod crc32;
 pub mod date_format;
 pub mod extract;
 pub mod from_unixtime;
+pub mod item;
 pub mod json_append;
 pub mod json_array_length;
 pub(crate) mod json_common;
 pub mod json_delete;
 pub mod json_extend;
 pub mod json_extract;
+pub mod json_extract_all;
 pub mod json_keys;
 pub mod json_set;
 pub mod makedate;
@@ -138,6 +143,7 @@ pub mod mvappend;
 pub mod mvfind;
 pub mod mvzip;
 pub(crate) mod mysql_format;
+pub mod parse;
 pub mod range_bucket;
 pub mod rex_extract;
 pub mod rex_extract_multi;
@@ -147,8 +153,6 @@ pub mod span_bucket;
 pub mod str_to_date;
 pub mod strftime;
 pub mod time_format;
-pub mod tonumber;
-pub mod tostring;
 pub mod width_bucket;
 
 // Dev note: if a freshly added UDF here fails at runtime with
@@ -160,15 +164,18 @@ pub mod width_bucket;
 // and restart the OpenSearch JVM (the loaded dylib is JVM-cached).
 pub fn register_all(ctx: &SessionContext) {
     convert_tz::register_all(ctx);
+    conversion::register_all(ctx);
     crc32::register_all(ctx);
     date_format::register_all(ctx);
     extract::register_all(ctx);
     from_unixtime::register_all(ctx);
+    item::register_all(ctx);
     json_append::register_all(ctx);
     json_array_length::register_all(ctx);
     json_delete::register_all(ctx);
     json_extend::register_all(ctx);
     json_extract::register_all(ctx);
+    json_extract_all::register_all(ctx);
     json_keys::register_all(ctx);
     json_set::register_all(ctx);
     makedate::register_all(ctx);
@@ -177,6 +184,7 @@ pub fn register_all(ctx: &SessionContext) {
     mvappend::register_all(ctx);
     mvfind::register_all(ctx);
     mvzip::register_all(ctx);
+    parse::register_all(ctx);
     range_bucket::register_all(ctx);
     rex_extract::register_all(ctx);
     rex_extract_multi::register_all(ctx);
@@ -186,11 +194,9 @@ pub fn register_all(ctx: &SessionContext) {
     str_to_date::register_all(ctx);
     strftime::register_all(ctx);
     time_format::register_all(ctx);
-    tonumber::register_all(ctx);
-    tostring::register_all(ctx);
     width_bucket::register_all(ctx);
     log::info!(
-        "OpenSearch UDF register_all: convert_tz, crc32, date_format, extract, from_unixtime, json_append, json_array_length, json_delete, json_extend, json_extract, json_keys, json_set, makedate, maketime, minspan_bucket, mvappend, mvfind, mvzip, range_bucket, rex_extract, rex_extract_multi, rex_offset, sha1, span_bucket, str_to_date, strftime, time_format, tonumber, tostring, width_bucket registered"
+        "OpenSearch UDF register_all: convert_tz, conversion(numeric_conversion: num/auto/memk/rmcomma/rmunit/dur2sec/mstime, time_conversion: ctime/mktime), crc32, date_format, extract, from_unixtime, item, json_append, json_array_length, json_delete, json_extend, json_extract, json_extract_all, json_keys, json_set, makedate, maketime, minspan_bucket, mvappend, mvfind, mvzip, parse, range_bucket, rex_extract, rex_extract_multi, rex_offset, sha1, span_bucket, str_to_date, strftime, time_format, width_bucket registered"
     );
 }
 
@@ -283,17 +289,6 @@ mod tests {
         assert!(err.to_string().contains("expected integer or float"));
     }
 
-    #[test]
-    fn int64_accepts_decimal_types() {
-        // PPL emits Decimal128(p,s) literals (e.g. `span=2.5` becomes
-        // Decimal128(2, 1)). The Int64 coerce-mode must accept and canonicalize.
-        for observed in [DataType::Decimal128(2, 1), DataType::Decimal256(10, 3)] {
-            let result = coerce_slot("i", 0, &observed, CoerceMode::Int64).unwrap();
-            assert_eq!(result, DataType::Int64);
-        }
-    }
-
-
     // ── Float64 ────────────────────────────────────────────────────────────
     #[test]
     fn float64_accepts_every_number() {
@@ -315,22 +310,12 @@ mod tests {
         assert!(err.to_string().contains("expected integer or float"));
     }
 
-    #[test]
-    fn float64_accepts_decimal_types() {
-        // Decimal128 flows in for fractional literals like `span=2.5`.
-        for observed in [DataType::Decimal128(2, 1), DataType::Decimal256(10, 3)] {
-            let result = coerce_slot("f", 0, &observed, CoerceMode::Float64).unwrap();
-            assert_eq!(result, DataType::Float64);
-        }
-    }
-
-
     // ── Utf8 ───────────────────────────────────────────────────────────────
     #[test]
-    fn utf8_accepts_every_string_variant() {
+    fn utf8_passes_string_variant_through_unchanged() {
         for observed in [DataType::Utf8, DataType::LargeUtf8, DataType::Utf8View] {
             let result = coerce_slot("s", 0, &observed, CoerceMode::Utf8).unwrap();
-            assert_eq!(result, DataType::Utf8);
+            assert_eq!(result, observed, "CoerceMode::Utf8 should pass the variant through");
         }
     }
 

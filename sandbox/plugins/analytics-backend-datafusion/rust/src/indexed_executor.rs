@@ -114,6 +114,9 @@ pub async fn execute_indexed_query(
                 .with_file_metadata_cache(Some(
                     runtime.runtime_env.cache_manager.get_file_metadata_cache(),
                 ))
+                .with_metadata_cache_limit(
+                    runtime.runtime_env.cache_manager.get_metadata_cache_limit(),
+                )
                 .with_files_statistics_cache(
                     runtime.runtime_env.cache_manager.get_file_statistic_cache(),
                 ),
@@ -146,7 +149,9 @@ pub async fn execute_indexed_query(
         .build();
     let ctx = SessionContext::new_with_state(state);
     ctx.register_udf(create_index_filter_udf());
+    ctx.register_udf(crate::indexed_table::substrait_to_tree::create_delegation_possible_udf());
     crate::udf::register_all(&ctx);
+    crate::udaf::register_all(&ctx);
 
     // Register default ListingTable so substrait consumer can resolve the table
     let listing_options = datafusion::datasource::listing::ListingOptions::new(
@@ -168,15 +173,25 @@ pub async fn execute_indexed_query(
         ctx,
         table_path: shard_view.table_path.clone(),
         object_metas: shard_view.object_metas.clone(),
+        writer_generations: shard_view.writer_generations.clone(),
         query_context: crate::query_tracker::QueryTrackingContext::new(0, runtime.runtime_env.memory_pool.clone()),
         table_name: table_name.clone(),
         indexed_config: None, // derive classification from tree
         query_config: Arc::unwrap_or_clone(query_config),
         aggregate_mode: crate::agg_mode::Mode::Default,
         prepared_plan: None,
+        phantom_reservation: None,
     };
     let ptr = Box::into_raw(Box::new(handle)) as i64;
-    unsafe { execute_indexed_with_context(ptr, substrait_bytes, cpu_executor).await }
+
+    // NOTE: gate acquired on CPU here — acceptable for this deprecated benchmark-only path.
+    // Production uses df_execute_with_context which acquires the gate on IO for backpressure.
+    let partition_weight = num_partitions.max(1) as u32;
+    let gate = cpu_executor.concurrency_gate().clone();
+    let max_p = gate.max_permits();
+    let permit = gate.acquire_many(partition_weight.min(max_p)).await;
+
+    unsafe { execute_indexed_with_context(ptr, substrait_bytes, cpu_executor, permit).await }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────
@@ -191,6 +206,10 @@ fn collect_predicate_exprs(tree: &BoolNode, out: &mut Vec<Arc<dyn PhysicalExpr>>
         }
         BoolNode::Not(inner) => collect_predicate_exprs(inner, out),
         BoolNode::Collector { .. } => {}
+        // Performance-delegated leaves contribute their original expression to the
+        // PruningPredicate cache exactly like a plain Predicate — DF prunes pages
+        // using the original expr; only the per-RG decision differs.
+        BoolNode::DelegationPossible { original_expr, .. } => out.push(Arc::clone(original_expr)),
         BoolNode::Predicate(expr) => out.push(Arc::clone(expr)),
     }
 }
@@ -413,12 +432,19 @@ pub async unsafe fn execute_indexed_with_context(
     session_ctx_ptr: i64,
     substrait_bytes: Vec<u8>,
     cpu_executor: DedicatedExecutor,
+    permit: tokio::sync::OwnedSemaphorePermit,
 ) -> Result<i64, DataFusionError> {
     let handle = *Box::from_raw(session_ctx_ptr as *mut crate::session_context::SessionContextHandle);
+
+    // Permit was acquired by the caller (ffm.rs) on the IO runtime before
+    // spawning on the CPU runtime, so the Java search thread blocks at the
+    // gate when it is full — creating backpressure at the Java threadpool level.
+
     let classification_override = handle.indexed_config.map(|config| {
+        // FilterTreeShape: 1 = CONJUNCTIVE → SingleCollector, 2 = INTERLEAVED → Tree.
         match (config.tree_shape, config.delegated_predicate_count) {
-            (1, 1) => FilterClass::SingleCollector,
-            (1, _) | (2, _) => FilterClass::Tree,
+            (1, _) => FilterClass::SingleCollector,
+            (2, _) => FilterClass::Tree,
             _ => FilterClass::None,
         }
     });
@@ -429,6 +455,7 @@ pub async unsafe fn execute_indexed_with_context(
     let table_name = handle.table_name;
     let table_path = handle.table_path;
     let object_metas = handle.object_metas;
+    let writer_generations = handle.writer_generations;
     let query_context = handle.query_context;
 
     // SessionContext already has RuntimeEnv, caches, memory pool, UDF from create_session_context_indexed.
@@ -436,12 +463,24 @@ pub async unsafe fn execute_indexed_with_context(
     // with IndexedTableProvider after plan decoding.
     ctx.deregister_table(&table_name)?;
 
-    let state = ctx.state();
-    let store = state.runtime_env().object_store(&table_path)?;
+    let store = ctx
+        .state()
+        .runtime_env()
+        .object_store(&table_path)?;
 
-    let (segments, schema) = build_segments(&state, Arc::clone(&store), object_metas.as_ref())
-        .await
-        .map_err(DataFusionError::Execution)?;
+    let state = ctx.state();
+    let metadata_cache = state.runtime_env().cache_manager.get_file_metadata_cache();
+
+    let (segments, schema) = build_segments(
+        &state,
+        Arc::clone(&store),
+        object_metas.as_ref(),
+        writer_generations.as_ref(),
+        metadata_cache,
+    )
+    .await
+    .map_err(DataFusionError::Execution)?;
+    let schema = crate::schema_coerce::coerce_inferred_schema(schema);
     for (i, seg) in segments.iter().enumerate() {
     }
 
@@ -458,7 +497,7 @@ pub async unsafe fn execute_indexed_with_context(
     let extraction = match filter_expr {
         None => None,
         Some(ref expr) => Some(
-            expr_to_bool_tree(expr, &schema)
+            expr_to_bool_tree(expr, &schema, &state)
                 .map_err(|e| DataFusionError::Execution(format!("expr_to_bool_tree: {}", e)))?,
         ),
     };
@@ -510,14 +549,35 @@ pub async unsafe fn execute_indexed_with_context(
                     "classify_filter returned SingleCollector but extraction is None".into(),
                 )
             })?;
-            let annotation_id = single_collector_id(&extraction.tree).ok_or_else(|| {
-                DataFusionError::Internal(
-                    "SingleCollector classified but leaf extraction failed".into(),
-                )
-            })?;
-            let provider =
-                Arc::new(create_provider(annotation_id).map_err(|e| DataFusionError::External(e.into()))?);
             let schema_for_pruner = schema.clone();
+
+            // Correctness-delegated provider (eager). `None` when the query has only
+            // performance-delegated leaves and no Collector at all.
+            let correctness_provider: Option<Arc<ProviderHandle>> =
+                match single_collector_id(&extraction.tree) {
+                    Some(annotation_id) => Some(Arc::new(
+                        create_provider(annotation_id)
+                            .map_err(|e| DataFusionError::External(e.into()))?,
+                    )),
+                    None => None,
+                };
+
+            // Performance-delegated provider locks (lazy). Built ONCE per query,
+            // shared across all per-(segment×chunk) closures via Arc::clone — so
+            // multiple DataFusion threads racing to populate the same Lucene
+            // Weight do so once per (query × annotation_id), not per chunk.
+            // Drop releases the Lucene Weight via `releaseProvider`.
+            let performance_provider_locks: Arc<
+                std::collections::HashMap<i32, Arc<std::sync::OnceLock<ProviderHandle>>>,
+            > = {
+                let leaves = extraction.tree.delegation_possible_leaves();
+                let mut map = std::collections::HashMap::with_capacity(leaves.len());
+                for (annotation_id, _expr) in &leaves {
+                    map.entry(*annotation_id)
+                        .or_insert_with(|| Arc::new(std::sync::OnceLock::new()));
+                }
+                Arc::new(map)
+            };
 
             // Extract the residual (non-Collector children of top-level
             // AND) as a BoolNode and convert to PhysicalExpr. Used for:
@@ -525,10 +585,11 @@ pub async unsafe fn execute_indexed_with_context(
             //   - Parquet `with_predicate` pushdown in row-granular mode.
             //   - `on_batch_mask` refinement in block-granular mode.
             //
-            // SingleCollector is always AND(Collector, residual...) so
-            // the residual has zero Collectors — no Literal(true)
-            // substitution needed (unlike bool_tree_to_pruning_expr
-            // which handles arbitrary trees).
+            // SingleCollector is AND(Collector?, DelegationPossible*, residual*) so
+            // the residual has zero Collectors — no Literal(true) substitution
+            // needed (unlike bool_tree_to_pruning_expr which handles arbitrary
+            // trees). DelegationPossible leaves contribute their original_expr
+            // to the residual so DF gets to evaluate them natively.
             let residual_bool = extract_single_collector_residual(&extraction.tree);
             let residual_expr = residual_bool
                 .as_ref()
@@ -540,35 +601,44 @@ pub async unsafe fn execute_indexed_with_context(
             let call_strategy = query_config.single_collector_strategy;
             Arc::new(
                 move |segment: &SegmentFileInfo, chunk, stream_metrics: &StreamMetrics| {
-                    let collector = FfmSegmentCollector::create(
-                        provider.key(),
-                        segment.segment_ord,
-                        chunk.doc_min,
-                        chunk.doc_max,
-                    )
-                        .map_err(|e| {
-                            format!(
-                                "FfmSegmentCollector::create(provider={}, seg={}, doc_range=[{},{})): {}",
+                    let collector_opt: Option<Arc<dyn RowGroupDocsCollector>> = match &correctness_provider {
+                        Some(provider) => {
+                            let collector = FfmSegmentCollector::create(
                                 provider.key(),
-                                segment.segment_ord,
+                                segment.writer_generation,
                                 chunk.doc_min,
                                 chunk.doc_max,
-                                e
                             )
-                        })?;
+                            .map_err(|e| {
+                                format!(
+                                    "FfmSegmentCollector::create(provider={}, writer_generation={}, doc_range=[{},{})): {}",
+                                    provider.key(),
+                                    segment.writer_generation,
+                                    chunk.doc_min,
+                                    chunk.doc_max,
+                                    e
+                                )
+                            })?;
+                            Some(Arc::new(collector) as Arc<dyn RowGroupDocsCollector>)
+                        }
+                        None => None,
+                    };
                     let pruner = Arc::new(PagePruner::new(
                         &schema_for_pruner,
                         Arc::clone(&segment.metadata),
                     ));
                     let eval: Arc<dyn RowGroupBitsetSource> =
                         Arc::new(SingleCollectorEvaluator::new(
-                            Arc::new(collector) as Arc<dyn RowGroupDocsCollector>,
+                            collector_opt,
                             pruner,
                             residual_pruning_predicate.clone(),
                             residual_expr.clone(),
                             Some(PagePruneMetrics::from_stream_metrics(stream_metrics)),
                             stream_metrics.ffm_collector_calls.clone(),
                             call_strategy,
+                            Arc::clone(&performance_provider_locks),
+                            segment.writer_generation,
+                            Arc::new(crate::indexed_table::eval::single_collector::FfmDelegatedBackendCollectorFactory),
                         ));
                     Ok(eval)
                 },
@@ -627,7 +697,7 @@ pub async unsafe fn execute_indexed_with_context(
                     for (idx, provider) in providers.iter().enumerate() {
                         let collector = FfmSegmentCollector::create(
                             provider.key(),
-                            segment.segment_ord,
+                            segment.writer_generation,
                             chunk.doc_min,
                             chunk.doc_max,
                         )
@@ -639,7 +709,7 @@ pub async unsafe fn execute_indexed_with_context(
                     }
 
                     let resolved = tree.resolve(&per_leaf).map_err(|e| {
-                        format!("tree.resolve for segment {}: {}", segment.segment_ord, e)
+                        format!("tree.resolve for segment gen={}: {}", segment.writer_generation, e)
                     })?;
                     let resolved = Arc::new(resolved);
 
@@ -695,13 +765,26 @@ pub async unsafe fn execute_indexed_with_context(
     log_debug!("DataFusion logical plan:\n{}", logical_plan.display_indent());
     let dataframe = ctx.execute_logical_plan(logical_plan).await?;
     let physical_plan = dataframe.create_physical_plan().await?;
+    // Retag bit-compatible Int↔UInt output mismatches to match the substrait-declared
+    // types. The target is schema_coerce::coerce_inferred_schema(physical_schema) — same
+    // narrowing the partition-stream registration uses, so consumer-side StreamingTable
+    // and producer-side batches agree by construction (see crate::relabel_exec).
+    let target_schema = crate::schema_coerce::coerce_inferred_schema(physical_plan.schema());
+    let physical_plan = crate::relabel_exec::wrap_if_relabel_needed(physical_plan, target_schema)?;
     log_debug!("DataFusion physical plan:\n{}", displayable(physical_plan.as_ref()).indent(true));
     let df_stream = execute_stream(physical_plan, ctx.task_ctx())
         .map_err(|e| DataFusionError::Execution(format!("execute_stream: {}", e)))?;
 
-    let cross_rt_stream = CrossRtStream::new_with_df_error_stream(df_stream, cpu_executor);
+    let (cross_rt_stream, abort_handle) =
+        CrossRtStream::new_with_df_error_stream_cancellable(df_stream, cpu_executor);
+
+    let context_id = query_context.context_id();
+    if let Some(h) = abort_handle {
+        crate::query_tracker::set_abort_handle(context_id, h);
+    }
+
     let schema = cross_rt_stream.schema();
     let wrapped = RecordBatchStreamAdapter::new(schema, cross_rt_stream);
-    let stream_handle = crate::api::QueryStreamHandle::with_session_context(wrapped, query_context, ctx);
+    let stream_handle = crate::api::QueryStreamHandle::with_session_context(wrapped, query_context, ctx, Some(permit));
     Ok(Box::into_raw(Box::new(stream_handle)) as i64)
 }

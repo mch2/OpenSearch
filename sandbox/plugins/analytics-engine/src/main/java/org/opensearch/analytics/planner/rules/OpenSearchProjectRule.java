@@ -85,9 +85,10 @@ public class OpenSearchProjectRule extends RelOptRule {
             : childViableBackends;
 
         // Window functions (RexOver): PPL `eventstats` / `appendcol` emit window calls inline
-        // on the projection. Narrow viable backends to those whose WindowCapability declares
-        // every required function. PARTITION BY is rejected up front — no shuffle exchange
-        // exists today.
+        // on the projection; PPL `dedup` lowers to ROW_NUMBER OVER (PARTITION BY ...). Narrow
+        // viable backends to those whose WindowCapability declares every required function.
+        // PARTITION BY is rejected for aggregate-as-window functions (no shuffle exchange
+        // available yet) but allowed for ROW_NUMBER since its partition is local.
         Set<WindowFunction> requiredWindowFns = collectWindowFunctions(project.getProjects());
         if (!requiredWindowFns.isEmpty()) {
             viableBackends = narrowByWindowCapability(viableBackends, requiredWindowFns);
@@ -284,19 +285,21 @@ public class OpenSearchProjectRule extends RelOptRule {
     }
 
     /** Walks project expressions and collects the {@link WindowFunction}s used by any {@link RexOver}.
-     *  PARTITION BY is rejected — no shuffle exchange exists today. Unrecognized window SqlKinds
-     *  (LAG, LEAD, NTILE, etc.) also fail here. */
+     *  Unrecognized window SqlKinds (LAG, LEAD, NTILE, etc.) fail here.
+     *
+     *  <p>PARTITION BY and ORDER BY are both accepted — {@code OpenSearchProject}'s cost gate
+     *  already forces SINGLETON input on any RexOver-bearing project, so all rows in a partition
+     *  arrive on the coordinator regardless of whether partition keys span shards. The
+     *  coordinator's WindowAggExec then computes the window correctly per partition / per frame.
+     *  Covers ROW_NUMBER OVER PARTITION BY (PPL dedup), SUM/AVG/COUNT/MIN/MAX OVER PARTITION BY
+     *  (PPL eventstats by ...), and the empty-OVER aggregate-as-window forms. HASH-shuffle is a
+     *  future strict improvement, not a correctness prerequisite. */
     private static Set<WindowFunction> collectWindowFunctions(List<? extends RexNode> exprs) {
         Set<WindowFunction> fns = new LinkedHashSet<>();
         for (RexNode expr : exprs) {
             expr.accept(new org.apache.calcite.rex.RexShuttle() {
                 @Override
                 public RexNode visitOver(RexOver over) {
-                    if (!over.getWindow().partitionKeys.isEmpty()) {
-                        throw new IllegalStateException(
-                            "Window OVER (PARTITION BY ...) is not supported — no shuffle exchange available yet"
-                        );
-                    }
                     WindowFunction fn = WindowFunction.fromSqlKind(over.getAggOperator().getKind());
                     if (fn == null) {
                         throw new IllegalStateException("Window function [" + over.getAggOperator().getName() + "] is not supported");

@@ -97,13 +97,17 @@ public class DataFusionStatsPropertyTests {
                 );
             }
             return rt;
-        }), taskMonitorStats(), taskMonitorStats(), taskMonitorStats(), taskMonitorStats()).as((io, cpu, qe, sn, fp, ss) -> {
+        }), taskMonitorStats(), taskMonitorStats(), taskMonitorStats(), taskMonitorStats()).as((io, cpu, cr, qe, sn, ps) -> {
             Map<String, TaskMonitorStats> monitors = new LinkedHashMap<>();
+            monitors.put("coordinator_reduce", cr);
             monitors.put("query_execution", qe);
             monitors.put("stream_next", sn);
-            monitors.put("fetch_phase", fp);
-            monitors.put("segment_stats", ss);
-            return new DataFusionStats(new NativeExecutorsStats(io, cpu, monitors));
+            monitors.put("plan_setup", ps);
+            return new DataFusionStats(
+                new NativeExecutorsStats(io, cpu, monitors),
+                new PartitionGateStats("datanode_gate", 12, 0, 0, 0),
+                new PartitionGateStats("coordinator_gate", 12, 0, 0, 0)
+            );
         });
     }
 
@@ -111,19 +115,23 @@ public class DataFusionStatsPropertyTests {
     @Provide
     Arbitrary<DataFusionStats> dataFusionStatsCpuAbsent() {
         return Combinators.combine(runtimeMetrics(), taskMonitorStats(), taskMonitorStats(), taskMonitorStats(), taskMonitorStats())
-            .as((io, qe, sn, fp, ss) -> {
+            .as((io, cr, qe, sn, ps) -> {
                 Map<String, TaskMonitorStats> monitors = new LinkedHashMap<>();
+                monitors.put("coordinator_reduce", cr);
                 monitors.put("query_execution", qe);
                 monitors.put("stream_next", sn);
-                monitors.put("fetch_phase", fp);
-                monitors.put("segment_stats", ss);
-                return new DataFusionStats(new NativeExecutorsStats(io, null, monitors));
+                monitors.put("plan_setup", ps);
+                return new DataFusionStats(
+                    new NativeExecutorsStats(io, null, monitors),
+                    new PartitionGateStats("datanode_gate", 12, 0, 0, 0),
+                    new PartitionGateStats("coordinator_gate", 12, 0, 0, 0)
+                );
             });
     }
 
     @Provide
     Arbitrary<DataFusionStats> dataFusionStatsNullExecutors() {
-        return Arbitraries.just(new DataFusionStats((NativeExecutorsStats) null));
+        return Arbitraries.just(new DataFusionStats(null, null, null));
     }
 
     // ---- Property 1: Writeable round-trip preserves all field values ----

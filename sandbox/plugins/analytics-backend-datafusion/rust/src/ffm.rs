@@ -11,9 +11,33 @@
 use std::slice;
 use std::str;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use log::warn;
 use native_bridge_common::ffm_safe;
 use parking_lot::RwLock;
+
+/// Only log block_on durations exceeding this threshold.
+const BLOCK_ON_LOG_THRESHOLD: Duration = Duration::from_millis(1);
+
+/// Times a block_on call and logs a warning if it exceeds the threshold.
+#[inline(always)]
+fn timed_block_on<F: std::future::Future>(
+    runtime: &tokio::runtime::Runtime,
+    op_name: &str,
+    future: F,
+) -> F::Output {
+    let start = Instant::now();
+    let result = runtime.block_on(future);
+    let elapsed = start.elapsed();
+    if elapsed > BLOCK_ON_LOG_THRESHOLD {
+        warn!(
+            "[blocked-thread] block_on({}) held Java thread for {:?}",
+            op_name, elapsed
+        );
+    }
+    result
+}
 
 use crate::api;
 use crate::api::DataFusionRuntime;
@@ -46,9 +70,9 @@ fn get_rt_manager() -> Result<Arc<RuntimeManager>, String> {
 }
 
 #[no_mangle]
-pub extern "C" fn df_init_runtime_manager(cpu_threads: i32) {
+pub extern "C" fn df_init_runtime_manager(cpu_threads: i32, datanode_multiplier: f64, coordinator_multiplier: f64) {
     let mut guard = TOKIO_RUNTIME_MANAGER.write();
-    *guard = Some(Arc::new(RuntimeManager::new(cpu_threads as usize)));
+    *guard = Some(Arc::new(RuntimeManager::new(cpu_threads as usize, datanode_multiplier, coordinator_multiplier)));
 }
 
 #[no_mangle]
@@ -68,6 +92,7 @@ pub unsafe extern "C" fn df_create_global_runtime(
     spill_dir_len: i64,
     spill_limit: i64,
 ) -> i64 {
+    crate::memory_guard::set_pool_limit_for_guard(memory_pool_limit);
     let spill_dir = str_from_raw(spill_dir_ptr, spill_dir_len)
         .map_err(|e| format!("df_create_global_runtime: {}", e))?;
     api::create_global_runtime(memory_pool_limit, cache_manager_ptr, spill_dir, spill_limit)
@@ -103,6 +128,17 @@ pub unsafe extern "C" fn df_get_memory_pool_limit(runtime_ptr: i64) -> i64 {
     Ok(api::get_memory_pool_limit(runtime_ptr))
 }
 
+/// Returns memory pool stats (usage + tripped count) in a single call.
+/// Writes [usage_bytes, tripped_count] to the output buffer.
+/// Java: MethodHandle(JAVA_LONG, ADDRESS → void)
+#[no_mangle]
+pub unsafe extern "C" fn df_get_memory_pool_stats(runtime_ptr: i64, out_ptr: *mut i64) {
+    if runtime_ptr == 0 || out_ptr.is_null() {
+        return;
+    }
+    api::get_memory_pool_stats(runtime_ptr, out_ptr);
+}
+
 /// Sets the memory pool limit at runtime. Takes effect for new allocations only.
 /// Java: MethodHandle(JAVA_LONG, JAVA_LONG → JAVA_LONG)
 #[ffm_safe]
@@ -111,8 +147,26 @@ pub unsafe extern "C" fn df_set_memory_pool_limit(runtime_ptr: i64, new_limit: i
     if runtime_ptr == 0 {
         return Err("null runtime pointer".to_string());
     }
+    crate::memory_guard::set_pool_limit_for_guard(new_limit);
     api::set_memory_pool_limit(runtime_ptr, new_limit)?;
     Ok(0)
+}
+
+#[no_mangle]
+pub extern "C" fn df_set_min_target_partitions(value: i64) {
+    api::set_min_target_partitions(value);
+}
+
+/// Sets memory guard thresholds. Values are thresholds multiplied by 1000
+/// (e.g., 700 = 0.70, 850 = 0.85, 950 = 0.95).
+#[no_mangle]
+pub extern "C" fn df_set_memory_guard_thresholds(admission_throttle_x1000: i64, admission_reject_x1000: i64, execution_spill_x1000: i64, execution_critical_x1000: i64) {
+    crate::memory_guard::set_thresholds(crate::memory_guard::MemoryThresholds {
+        admission_throttle: admission_throttle_x1000 as f64 / 1000.0,
+        admission_reject: admission_reject_x1000 as f64 / 1000.0,
+        execution_spill: execution_spill_x1000 as f64 / 1000.0,
+        execution_critical: execution_critical_x1000 as f64 / 1000.0,
+    });
 }
 
 #[ffm_safe]
@@ -122,12 +176,14 @@ pub unsafe extern "C" fn df_create_reader(
     table_path_len: i64,
     files_ptr: *const *const u8,
     files_len_ptr: *const i64,
+    writer_generations_ptr: *const i64,
     files_count: i64,
     store_ptr: i64,
 ) -> i64 {
     let table_path = str_from_raw(table_path_ptr, table_path_len)
         .map_err(|e| format!("df_create_reader: {}", e))?;
     let mut filenames = Vec::with_capacity(files_count as usize);
+    let mut writer_generations = Vec::with_capacity(files_count as usize);
     for i in 0..files_count as usize {
         let ptr = *files_ptr.add(i);
         let len = *files_len_ptr.add(i);
@@ -136,9 +192,10 @@ pub unsafe extern "C" fn df_create_reader(
                 .map_err(|e| format!("df_create_reader: {}", e))?
                 .to_string(),
         );
+        writer_generations.push(*writer_generations_ptr.add(i));
     }
     let mgr = get_rt_manager()?;
-    api::create_reader(table_path, filenames, &mgr, store_ptr).map_err(|e| e.to_string())
+    api::create_reader(table_path, filenames, writer_generations, &mgr, store_ptr).map_err(|e| e.to_string())
 }
 
 #[no_mangle]
@@ -165,16 +222,43 @@ pub unsafe extern "C" fn df_execute_query(
     let plan_bytes = slice::from_raw_parts(plan_ptr, plan_len as usize);
     let query_config =
         crate::datafusion_query_config::DatafusionQueryConfig::from_ffm_ptr(query_config_ptr);
-    mgr.io_runtime
-        .block_on(api::execute_query(
-            shard_view_ptr,
-            table_name,
-            plan_bytes,
-            runtime_ptr,
-            &mgr,
-            context_id,
-            query_config,
-        ))
+    // Copy the plan bytes so the spawned future can own them (`cpu_executor.spawn`
+    // requires `'static`). The `shard_view_ptr`, `runtime_ptr` are raw pointers
+    // held live by the caller for the duration of the FFM downcall — safe to
+    // capture by value (they are `Copy`).
+    let plan_vec = plan_bytes.to_vec();
+    let table_name_owned = table_name.to_string();
+    let mgr_for_inner = Arc::clone(&mgr);
+    let mgr_for_spawn = Arc::clone(&mgr);
+
+    // Wrap plan setup in `cpu_executor.spawn` so DataFusion operators that
+    // eagerly spawn in their `execute()` method (RepartitionExec,
+    // CoalescePartitionsExec, AggregateExec, ...) inherit the CPU executor
+    // instead of the IO runtime. Without this wrap those operator drain tasks
+    // land on IO workers at plan-setup time and the IO runtime ends up doing
+    // all the work. The IO runtime still drives the outer `timed_block_on`
+    // (bridging the synchronous FFM call to the async spawn handle); only
+    // the plan construction and stream wrapping hop to CPU.
+    timed_block_on(&mgr.io_runtime, "execute_query", async move {
+        let inner_fut = crate::task_monitors::query_execution_monitor().instrument(async move {
+            api::execute_query(
+                shard_view_ptr,
+                &table_name_owned,
+                &plan_vec,
+                runtime_ptr,
+                &mgr_for_inner,
+                context_id,
+                query_config,
+            )
+            .await
+        });
+        match mgr_for_spawn.cpu_executor().spawn(inner_fut).await {
+            Ok(inner) => inner,
+            Err(e) => Err(datafusion::error::DataFusionError::Execution(format!(
+                "df_execute_query: CPU spawn failed: {e:?}"
+            ))),
+        }
+    })
         .map_err(|e| e.to_string())
 }
 
@@ -188,8 +272,7 @@ pub unsafe extern "C" fn df_stream_get_schema(stream_ptr: i64) -> i64 {
 #[no_mangle]
 pub unsafe extern "C" fn df_stream_next(stream_ptr: i64) -> i64 {
     let mgr = get_rt_manager()?;
-    mgr.io_runtime
-        .block_on(api::stream_next(stream_ptr))
+    timed_block_on(&mgr.io_runtime, "stream_next", crate::task_monitors::stream_next_monitor().instrument(api::stream_next(stream_ptr)))
         .map_err(|e| e.to_string())
 }
 
@@ -201,6 +284,47 @@ pub unsafe extern "C" fn df_stream_close(stream_ptr: i64) {
 #[no_mangle]
 pub extern "C" fn df_cancel_query(context_id: i64) {
     api::cancel_query(context_id);
+}
+
+// ---------------------------------------------------------------------------
+// Per-query registry top-N snapshot
+//
+// One FFM call: Java allocates a buffer sized for `N` entries, Rust selects
+// the heaviest live queries by `current_bytes` (bounded min-heap of size N)
+// and writes them back-to-back. See `query_tracker::WireQueryMetric` for the
+// wire layout.
+// ---------------------------------------------------------------------------
+
+/// Copies up to `cap_entries` of the heaviest live queries (by
+/// `current_bytes` desc) as `WireQueryMetric`s into the caller-provided buffer.
+/// Returns the number of entries actually written.
+///
+/// Order of entries within the buffer is unspecified. Completed and zero-byte
+/// trackers are filtered out.
+///
+/// Safety: `out_ptr` must be non-null, 8-byte aligned, and point to storage
+/// for at least `cap_entries * size_of::<WireQueryMetric>()` bytes.
+#[ffm_safe]
+#[no_mangle]
+pub unsafe extern "C" fn df_query_registry_top_n_by_current(
+    out_ptr: *mut u8,
+    cap_entries: i64,
+) -> i64 {
+    use crate::query_tracker::{snapshot_top_n_by_current, WireQueryMetric};
+
+    if cap_entries < 0 {
+        return Err(format!("negative capacity: {cap_entries}"));
+    }
+    if cap_entries == 0 {
+        return Ok(0);
+    }
+    if out_ptr.is_null() {
+        return Err("null snapshot buffer".to_string());
+    }
+    let out: &mut [WireQueryMetric] =
+        slice::from_raw_parts_mut(out_ptr as *mut WireQueryMetric, cap_entries as usize);
+    let written = snapshot_top_n_by_current(out);
+    Ok(written as i64)
 }
 
 #[ffm_safe]
@@ -223,9 +347,24 @@ pub unsafe extern "C" fn df_sql_to_substrait(
         str_from_raw(sql_ptr, sql_len).map_err(|e| format!("df_sql_to_substrait: sql: {}", e))?;
     let bytes = api::sql_to_substrait(shard_view_ptr, table_name, sql, runtime_ptr, &mgr)
         .map_err(|e| e.to_string())?;
+    write_out_buffer(&bytes, out_ptr, out_cap, out_len, "substrait plan")?;
+    Ok(0)
+}
+
+/// Copies `bytes` into a caller-allocated `(out_ptr, out_cap)` buffer and writes
+/// the byte count through `out_len` (when non-null). Returns `Err` when the
+/// buffer is too small — the caller can re-allocate and retry.
+unsafe fn write_out_buffer(
+    bytes: &[u8],
+    out_ptr: *mut u8,
+    out_cap: i64,
+    out_len: *mut i64,
+    label: &str,
+) -> Result<(), String> {
     if bytes.len() > out_cap as usize {
         return Err(format!(
-            "substrait plan size {} exceeds buffer capacity {}",
+            "{} size {} exceeds buffer capacity {}",
+            label,
             bytes.len(),
             out_cap
         ));
@@ -234,7 +373,7 @@ pub unsafe extern "C" fn df_sql_to_substrait(
     if !out_len.is_null() {
         *out_len = bytes.len() as i64;
     }
-    Ok(0)
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -273,19 +412,30 @@ pub unsafe extern "C" fn df_destroy_custom_cache_manager(ptr: i64) {
     }
 }
 
+/// Registers a streaming partition input on the session. Schema is derived by
+/// lowering the producer-side substrait `partial_plan_bytes`; the resulting
+/// IPC-encoded schema is written into the caller-allocated `out_ptr/out_cap`
+/// buffer with the byte count written through `out_len`. Returns the sender
+/// pointer (negated error pointer on failure).
 #[ffm_safe]
 #[no_mangle]
 pub unsafe extern "C" fn df_register_partition_stream(
     session_ptr: i64,
     input_id_ptr: *const u8,
     input_id_len: i64,
-    schema_ipc_ptr: *const u8,
-    schema_ipc_len: i64,
+    partial_plan_ptr: *const u8,
+    partial_plan_len: i64,
+    out_ptr: *mut u8,
+    out_cap: i64,
+    out_len: *mut i64,
 ) -> i64 {
     let input_id = str_from_raw(input_id_ptr, input_id_len)
         .map_err(|e| format!("df_register_partition_stream: input_id: {}", e))?;
-    let schema_ipc = slice::from_raw_parts(schema_ipc_ptr, schema_ipc_len as usize);
-    api::register_partition_stream(session_ptr, input_id, schema_ipc).map_err(|e| e.to_string())
+    let partial_plan = slice::from_raw_parts(partial_plan_ptr, partial_plan_len as usize);
+    let (sender_ptr, schema_ipc) =
+        api::register_partition_stream(session_ptr, input_id, partial_plan).map_err(|e| e.to_string())?;
+    write_out_buffer(&schema_ipc, out_ptr, out_cap, out_len, "register_partition_stream schema IPC")?;
+    Ok(sender_ptr)
 }
 
 #[ffm_safe]
@@ -294,6 +444,7 @@ pub unsafe extern "C" fn df_execute_local_plan(
     session_ptr: i64,
     substrait_ptr: *const u8,
     substrait_len: i64,
+    context_id: i64,
 ) -> i64 {
     let mgr = get_rt_manager()?;
     // Copy substrait bytes into an owned Vec so the spawned future can move them
@@ -308,10 +459,19 @@ pub unsafe extern "C" fn df_execute_local_plan(
     // instead of the IO runtime. Without this, operator hash work runs on IO workers.
     // The IO runtime still drives the outer block_on (bridging the synchronous FFI
     // call to the async spawn handle).
-    mgr.io_runtime
-        .block_on(async move {
+    timed_block_on(&mgr.io_runtime, "execute_local_plan", crate::task_monitors::coordinator_reduce_monitor().instrument(async move {
+            // Acquire coordinator gate on IO runtime BEFORE spawning on CPU.
+            // This blocks the Java search thread when the gate is full.
+            let coord_gate = mgr_for_spawn.coordinator_gate().clone();
+            let partition_weight = (num_cpus::get() as u32).max(1);
+            let permit = coord_gate.acquire_many(partition_weight.min(coord_gate.max_permits())).await;
+
+
             let inner_fut = async move {
-                unsafe { api::execute_local_plan(session_ptr, &bytes_vec, &mgr_for_inner, 0).await }
+                unsafe {
+                    api::execute_local_plan(session_ptr, &bytes_vec, &mgr_for_inner, context_id, Some(permit))
+                        .await
+                }
             };
             match mgr_for_spawn.cpu_executor().spawn(inner_fut).await {
                 Ok(inner_result) => inner_result,
@@ -319,7 +479,7 @@ pub unsafe extern "C" fn df_execute_local_plan(
                     "execute_local_plan: CPU spawn failed: {e:?}"
                 ))),
             }
-        })
+        }))
         .map_err(|e| e.to_string())
 }
 
@@ -352,15 +512,18 @@ pub unsafe extern "C" fn df_register_memtable(
     session_ptr: i64,
     input_id_ptr: *const u8,
     input_id_len: i64,
-    schema_ipc_ptr: *const u8,
-    schema_ipc_len: i64,
+    partial_plan_ptr: *const u8,
+    partial_plan_len: i64,
     array_ptrs: *const i64,
     schema_ptrs: *const i64,
     n_batches: i64,
+    out_ptr: *mut u8,
+    out_cap: i64,
+    out_len: *mut i64,
 ) -> i64 {
     let input_id = str_from_raw(input_id_ptr, input_id_len)
         .map_err(|e| format!("df_register_memtable: input_id: {}", e))?;
-    let schema_ipc = slice::from_raw_parts(schema_ipc_ptr, schema_ipc_len as usize);
+    let partial_plan = slice::from_raw_parts(partial_plan_ptr, partial_plan_len as usize);
     let n = n_batches as usize;
     let array_slice: &[i64] = if n == 0 {
         &[]
@@ -372,9 +535,11 @@ pub unsafe extern "C" fn df_register_memtable(
     } else {
         slice::from_raw_parts(schema_ptrs, n)
     };
-    api::register_memtable(session_ptr, input_id, schema_ipc, array_slice, schema_slice)
-        .map(|_| 0)
-        .map_err(|e| e.to_string())
+    let schema_ipc =
+        api::register_memtable(session_ptr, input_id, partial_plan, array_slice, schema_slice)
+            .map_err(|e| e.to_string())?;
+    write_out_buffer(&schema_ipc, out_ptr, out_cap, out_len, "register_memtable schema IPC")?;
+    Ok(0)
 }
 
 #[ffm_safe]
@@ -462,8 +627,11 @@ pub unsafe extern "C" fn df_cache_manager_add_files(
         );
     }
 
-    manager
-        .add_files(&file_paths)
+    let rt_manager = get_rt_manager()
+        .map_err(|e| format!("df_cache_manager_add_files: {}", e))?;
+    let rt_handle = rt_manager.io_runtime.handle();
+
+    manager.add_files(&file_paths, rt_handle)
         .map_err(|e| format!("df_cache_manager_add_files: {}", e))?;
     Ok(0)
 }
@@ -488,12 +656,14 @@ pub unsafe extern "C" fn df_create_session_context(
         crate::datafusion_query_config::DatafusionQueryConfig::from_ffm_ptr(query_config_ptr);
     let mgr = get_rt_manager()?;
     mgr.io_runtime
-        .block_on(crate::session_context::create_session_context(
-            runtime_ptr,
-            shard_view_ptr,
-            table_name,
-            context_id,
-            query_config,
+        .block_on(crate::task_monitors::plan_setup_monitor().instrument(
+            crate::session_context::create_session_context(
+                runtime_ptr,
+                shard_view_ptr,
+                table_name,
+                context_id,
+                query_config,
+            )
         ))
         .map_err(|e| e.to_string())
 }
@@ -516,8 +686,10 @@ pub unsafe extern "C" fn df_create_session_context_indexed(
         crate::datafusion_query_config::DatafusionQueryConfig::from_ffm_ptr(query_config_ptr);
     let mgr = get_rt_manager()?;
     mgr.io_runtime
-        .block_on(crate::session_context::create_session_context_indexed(
-            runtime_ptr, shard_view_ptr, table_name, context_id, tree_shape, delegated_predicate_count, query_config,
+        .block_on(crate::task_monitors::plan_setup_monitor().instrument(
+            crate::session_context::create_session_context_indexed(
+                runtime_ptr, shard_view_ptr, table_name, context_id, tree_shape, delegated_predicate_count, query_config,
+            )
         ))
         .map_err(|e| e.to_string())
 }
@@ -673,42 +845,92 @@ pub unsafe extern "C" fn df_execute_with_context(
     let mgr = get_rt_manager()?;
     let plan_bytes = slice::from_raw_parts(plan_ptr, plan_len as usize);
     let cpu_executor = mgr.cpu_executor();
+    // See `df_execute_query` for the rationale behind wrapping the inner
+    // async work in `cpu_executor.spawn`. In short: DataFusion operators
+    // (RepartitionExec, CoalescePartitionsExec, AggregateExec) eagerly
+    // spawn in `execute()`. Without this wrap those spawns inherit the IO
+    // runtime and do all the work there, leaving the CPU runtime idle.
+    let plan_vec = plan_bytes.to_vec();
+    let cpu_for_cross = cpu_executor.clone();
+    let mgr_for_spawn = Arc::clone(&mgr);
+
     // Route based on whether the session was configured for indexed execution
     if session_handle.indexed_config.is_some() {
+        // Extract target_partitions BEFORE boxing into raw pointer (session_handle is consumed).
+        let partition_weight = session_handle.query_config.target_partitions.max(1) as u32;
         // TODO: refactor execute_indexed_with_context to take SessionContextHandle directly
-        // (like execute_with_context) instead of i64 raw pointer — avoids this re-boxing.
         let ptr = Box::into_raw(Box::new(session_handle)) as i64;
         mgr.io_runtime
-            .block_on(crate::indexed_executor::execute_indexed_with_context(
-                ptr,
-                plan_bytes.to_vec(),
-                cpu_executor,
-            ))
+            .block_on(async move {
+                // Acquire datanode gate on IO runtime BEFORE spawning on CPU.
+                // This blocks the IO thread (and thus the Java search thread),
+                // creating backpressure at the Java threadpool level when the gate is full.
+                let gate = mgr_for_spawn.cpu_executor().concurrency_gate().clone();
+                let max_p = gate.max_permits();
+                let permit = gate.acquire_many(partition_weight.min(max_p)).await;
+
+                let inner_fut = crate::task_monitors::query_execution_monitor().instrument(async move {
+                    crate::indexed_executor::execute_indexed_with_context(
+                        ptr,
+                        plan_vec,
+                        cpu_for_cross,
+                        permit,
+                    ).await
+                });
+                match mgr_for_spawn.cpu_executor().spawn(inner_fut).await {
+                    Ok(inner) => inner,
+                    Err(e) => Err(datafusion::error::DataFusionError::Execution(format!(
+                        "df_execute_with_context: CPU spawn failed: {e:?}"
+                    ))),
+                }
+            })
             .map_err(|e| e.to_string())
     } else {
+        // Extract target_partitions before moving session_handle into the closure.
+        let partition_weight = session_handle.query_config.target_partitions.max(1) as u32;
         mgr.io_runtime
-            .block_on(crate::query_executor::execute_with_context(
-                session_handle,
-                plan_bytes,
-                cpu_executor,
-            ))
+            .block_on(async move {
+                // Acquire datanode gate on IO runtime BEFORE spawning on CPU.
+                // This blocks the IO thread (and thus the Java search thread),
+                // creating backpressure at the Java threadpool level when the gate is full.
+                let gate = mgr_for_spawn.cpu_executor().concurrency_gate().clone();
+                let max_p = gate.max_permits();
+                let permit = gate.acquire_many(partition_weight.min(max_p)).await;
+
+                let inner_fut = crate::task_monitors::query_execution_monitor().instrument(async move {
+                    crate::query_executor::execute_with_context(
+                        session_handle,
+                        &plan_vec,
+                        cpu_for_cross,
+                        permit,
+                    )
+                    .await
+                });
+                match mgr_for_spawn.cpu_executor().spawn(inner_fut).await {
+                    Ok(inner) => inner,
+                    Err(e) => Err(datafusion::error::DataFusionError::Execution(format!(
+                        "df_execute_with_context: CPU spawn failed: {e:?}"
+                    ))),
+                }
+            })
             .map_err(|e| e.to_string())
     }
 }
+
 
 // ---- Stats collection ----
 
 /// Collects all native executor metrics into a caller-provided byte buffer.
 ///
-/// The buffer must have capacity for at least `size_of::<DfStatsBuffer>()` bytes (224).
+/// The buffer must have capacity for at least `size_of::<DfStatsBuffer>()` bytes (344).
 /// Returns 0 on success.
 #[ffm_safe]
 #[no_mangle]
 pub unsafe extern "C" fn df_stats(out_ptr: *mut u8, out_cap: i64) -> i64 {
-    use crate::stats::{layout, pack_runtime_metrics, pack_task_monitor, DfStatsBuffer, RuntimeMetricsRepr};
+    use crate::stats::{layout, pack_runtime_metrics, pack_task_monitor, pack_partition_gate, DfStatsBuffer, RuntimeMetricsRepr};
     use crate::task_monitors::{
-        query_execution_monitor, stream_next_monitor,
-        fetch_phase_monitor, segment_stats_monitor,
+        coordinator_reduce_monitor, query_execution_monitor,
+        stream_next_monitor, plan_setup_monitor,
     };
 
     if out_cap < 0 || (out_cap as usize) < layout::BUFFER_BYTE_SIZE {
@@ -737,10 +959,12 @@ pub unsafe extern "C" fn df_stats(out_ptr: *mut u8, out_cap: i64) -> i64 {
     let buf = DfStatsBuffer {
         io_runtime,
         cpu_runtime,
+        coordinator_reduce: pack_task_monitor(coordinator_reduce_monitor()),
         query_execution: pack_task_monitor(query_execution_monitor()),
         stream_next: pack_task_monitor(stream_next_monitor()),
-        fetch_phase: pack_task_monitor(fetch_phase_monitor()),
-        segment_stats: pack_task_monitor(segment_stats_monitor()),
+        plan_setup: pack_task_monitor(plan_setup_monitor()),
+        datanode_gate: pack_partition_gate(mgr.cpu_executor.concurrency_gate()),
+        coordinator_gate: pack_partition_gate(mgr.coordinator_gate()),
     };
 
     // Copy struct bytes to caller buffer
@@ -778,7 +1002,9 @@ pub unsafe extern "C" fn df_prepare_partial_plan(
     let bytes = slice::from_raw_parts(bytes_ptr, bytes_len);
     let mgr = get_rt_manager()?;
     mgr.io_runtime
-        .block_on(crate::session_context::prepare_partial_plan(handle, bytes))
+        .block_on(crate::task_monitors::plan_setup_monitor().instrument(
+            crate::session_context::prepare_partial_plan(handle, bytes)
+        ))
         .map_err(|e| e.to_string())?;
     Ok(0)
 }
@@ -805,7 +1031,9 @@ pub unsafe extern "C" fn df_prepare_final_plan(
     let bytes = slice::from_raw_parts(bytes_ptr, bytes_len);
     let mgr = get_rt_manager()?;
     mgr.io_runtime
-        .block_on(session.prepare_final_plan(bytes))
+        .block_on(crate::task_monitors::plan_setup_monitor().instrument(
+            session.prepare_final_plan(bytes)
+        ))
         .map_err(|e| e.to_string())?;
     Ok(0)
 }
@@ -820,21 +1048,19 @@ pub unsafe extern "C" fn df_prepare_final_plan(
 /// with a plan already prepared via `df_prepare_final_plan`.
 #[ffm_safe]
 #[no_mangle]
-pub unsafe extern "C" fn df_execute_local_prepared_plan(session_ptr: i64) -> i64 {
-    let session = &*(session_ptr as *const crate::local_executor::LocalSession);
+pub unsafe extern "C" fn df_execute_local_prepared_plan(
+    session_ptr: i64,
+    context_id: i64,
+) -> i64 {
     let mgr = get_rt_manager()?;
-    // DataFusion's execute_stream is sync, but kicks off RepartitionExec / stream
-    // channels that require a Tokio reactor. Enter the IO runtime's context so those
-    // operators can register with the reactor.
-    let _guard = mgr.io_runtime.enter();
-    let df_stream = session.execute_prepared().map_err(|e| e.to_string())?;
-    let cross_rt_stream =
-        crate::cross_rt_stream::CrossRtStream::new_with_df_error_stream(df_stream, mgr.cpu_executor());
-    let wrapped = datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
-        cross_rt_stream.schema(),
-        cross_rt_stream,
+    // Acquire coordinator concurrency gate before executing the prepared plan.
+    // Gate is acquired on the IO runtime (block_on) so the Java search thread
+    // blocks here when the gate is full — creating backpressure at the threadpool level.
+    let partition_weight = (num_cpus::get() as u32).max(1);
+    let coord_gate = mgr.coordinator_gate().clone();
+    let permit = mgr.io_runtime.block_on(
+        coord_gate.acquire_many(partition_weight.min(coord_gate.max_permits()))
     );
-    let query_context = crate::query_tracker::QueryTrackingContext::new(0, session.memory_pool());
-    let handle = crate::api::QueryStreamHandle::new(wrapped, query_context);
-    Ok(Box::into_raw(Box::new(handle)) as i64)
+
+    api::execute_local_prepared_plan(session_ptr, &mgr, context_id, Some(permit)).map_err(|e| e.to_string())
 }

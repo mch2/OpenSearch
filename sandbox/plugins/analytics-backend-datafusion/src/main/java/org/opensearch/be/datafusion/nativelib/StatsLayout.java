@@ -8,6 +8,7 @@
 
 package org.opensearch.be.datafusion.nativelib;
 
+import org.opensearch.be.datafusion.stats.PartitionGateStats;
 import org.opensearch.be.datafusion.stats.RuntimeMetrics;
 import org.opensearch.be.datafusion.stats.TaskMonitorStats;
 
@@ -22,7 +23,7 @@ import java.lang.invoke.VarHandle;
  * Defines the {@code MemoryLayout.structLayout} mirroring the Rust {@code DfStatsBuffer}
  * and provides {@link VarHandle} accessors for each field via layout path navigation.
  *
- * <p>The layout contains 6 named groups (2 runtime × 9 fields + 4 task monitor × 3 fields = 30 longs = 240 bytes).
+ * <p>The layout contains 8 named groups (2 runtime × 9 fields + 4 task monitor × 3 fields + 2 partition gate × 4 fields = 38 longs = 304 bytes).
  */
 public final class StatsLayout {
 
@@ -42,19 +43,27 @@ public final class StatsLayout {
         "total_scheduled_duration_ms",
         "total_idle_duration_ms" };
 
+    private static final String[] PARTITION_GATE_FIELDS = {
+        "max_permits",
+        "active_permits",
+        "total_wait_duration_ms",
+        "total_batches_started" };
+
     /** The struct layout mirroring Rust's {@code DfStatsBuffer}. */
     public static final StructLayout LAYOUT = MemoryLayout.structLayout(
         runtimeGroup("io_runtime"),
         runtimeGroup("cpu_runtime"),
+        taskMonitorGroup("coordinator_reduce"),
         taskMonitorGroup("query_execution"),
         taskMonitorGroup("stream_next"),
-        taskMonitorGroup("fetch_phase"),
-        taskMonitorGroup("segment_stats")
+        taskMonitorGroup("plan_setup"),
+        partitionGateGroup("datanode_gate"),
+        partitionGateGroup("coordinator_gate")
     );
 
     static {
-        if (LAYOUT.byteSize() != 30 * Long.BYTES) {
-            throw new AssertionError("StatsLayout size mismatch: expected " + (30 * Long.BYTES) + " but got " + LAYOUT.byteSize());
+        if (LAYOUT.byteSize() != 38 * Long.BYTES) {
+            throw new AssertionError("StatsLayout size mismatch: expected " + (38 * Long.BYTES) + " but got " + LAYOUT.byteSize());
         }
     }
 
@@ -80,6 +89,11 @@ public final class StatsLayout {
     private static final VarHandle CPU_SPAWNED_TASKS_COUNT = handle("cpu_runtime", "spawned_tasks_count");
     private static final VarHandle CPU_TOTAL_LOCAL_QUEUE_DEPTH = handle("cpu_runtime", "total_local_queue_depth");
 
+    // ---- VarHandles for coordinator_reduce fields ----
+    private static final VarHandle CR_TOTAL_POLL_DURATION_MS = handle("coordinator_reduce", "total_poll_duration_ms");
+    private static final VarHandle CR_TOTAL_SCHEDULED_DURATION_MS = handle("coordinator_reduce", "total_scheduled_duration_ms");
+    private static final VarHandle CR_TOTAL_IDLE_DURATION_MS = handle("coordinator_reduce", "total_idle_duration_ms");
+
     // ---- VarHandles for query_execution fields ----
     private static final VarHandle QE_TOTAL_POLL_DURATION_MS = handle("query_execution", "total_poll_duration_ms");
     private static final VarHandle QE_TOTAL_SCHEDULED_DURATION_MS = handle("query_execution", "total_scheduled_duration_ms");
@@ -90,15 +104,22 @@ public final class StatsLayout {
     private static final VarHandle SN_TOTAL_SCHEDULED_DURATION_MS = handle("stream_next", "total_scheduled_duration_ms");
     private static final VarHandle SN_TOTAL_IDLE_DURATION_MS = handle("stream_next", "total_idle_duration_ms");
 
-    // ---- VarHandles for fetch_phase fields ----
-    private static final VarHandle FP_TOTAL_POLL_DURATION_MS = handle("fetch_phase", "total_poll_duration_ms");
-    private static final VarHandle FP_TOTAL_SCHEDULED_DURATION_MS = handle("fetch_phase", "total_scheduled_duration_ms");
-    private static final VarHandle FP_TOTAL_IDLE_DURATION_MS = handle("fetch_phase", "total_idle_duration_ms");
+    // ---- VarHandles for plan_setup fields ----
+    private static final VarHandle PS_TOTAL_POLL_DURATION_MS = handle("plan_setup", "total_poll_duration_ms");
+    private static final VarHandle PS_TOTAL_SCHEDULED_DURATION_MS = handle("plan_setup", "total_scheduled_duration_ms");
+    private static final VarHandle PS_TOTAL_IDLE_DURATION_MS = handle("plan_setup", "total_idle_duration_ms");
 
-    // ---- VarHandles for segment_stats fields ----
-    private static final VarHandle SS_TOTAL_POLL_DURATION_MS = handle("segment_stats", "total_poll_duration_ms");
-    private static final VarHandle SS_TOTAL_SCHEDULED_DURATION_MS = handle("segment_stats", "total_scheduled_duration_ms");
-    private static final VarHandle SS_TOTAL_IDLE_DURATION_MS = handle("segment_stats", "total_idle_duration_ms");
+    // ---- VarHandles for datanode_gate fields ----
+    private static final VarHandle DG_MAX_PERMITS = handle("datanode_gate", "max_permits");
+    private static final VarHandle DG_ACTIVE_PERMITS = handle("datanode_gate", "active_permits");
+    private static final VarHandle DG_TOTAL_WAIT_DURATION_MS = handle("datanode_gate", "total_wait_duration_ms");
+    private static final VarHandle DG_TOTAL_BATCHES_STARTED = handle("datanode_gate", "total_batches_started");
+
+    // ---- VarHandles for coordinator_gate fields ----
+    private static final VarHandle CG_MAX_PERMITS = handle("coordinator_gate", "max_permits");
+    private static final VarHandle CG_ACTIVE_PERMITS = handle("coordinator_gate", "active_permits");
+    private static final VarHandle CG_TOTAL_WAIT_DURATION_MS = handle("coordinator_gate", "total_wait_duration_ms");
+    private static final VarHandle CG_TOTAL_BATCHES_STARTED = handle("coordinator_gate", "total_batches_started");
 
     private StatsLayout() {}
 
@@ -140,12 +161,30 @@ public final class StatsLayout {
      * Read a task monitor group (3 fields) from the segment.
      *
      * @param seg   the memory segment containing the DfStatsBuffer
-     * @param group "query_execution", "stream_next", "fetch_phase", or "segment_stats"
+     * @param group one of the OperationType keys
      * @return a populated TaskMonitorStats instance
      */
     public static TaskMonitorStats readTaskMonitor(MemorySegment seg, String group) {
         VarHandle[] handles = taskMonitorHandles(group);
         return new TaskMonitorStats((long) handles[0].get(seg, 0L), (long) handles[1].get(seg, 0L), (long) handles[2].get(seg, 0L));
+    }
+
+    /**
+     * Read a partition gate group (4 fields) from the segment.
+     *
+     * @param seg   the memory segment containing the DfStatsBuffer
+     * @param group "datanode_gate" or "coordinator_gate"
+     * @return a populated PartitionGateStats instance
+     */
+    public static PartitionGateStats readPartitionGate(MemorySegment seg, String group) {
+        VarHandle[] handles = partitionGateHandles(group);
+        return new PartitionGateStats(
+            group,
+            (long) handles[0].get(seg, 0L),
+            (long) handles[1].get(seg, 0L),
+            (long) handles[2].get(seg, 0L),
+            (long) handles[3].get(seg, 0L)
+        );
     }
 
     // ---- Private helpers ----
@@ -169,6 +208,15 @@ public final class StatsLayout {
             ValueLayout.JAVA_LONG.withName("total_poll_duration_ms"),
             ValueLayout.JAVA_LONG.withName("total_scheduled_duration_ms"),
             ValueLayout.JAVA_LONG.withName("total_idle_duration_ms")
+        ).withName(name);
+    }
+
+    private static StructLayout partitionGateGroup(String name) {
+        return MemoryLayout.structLayout(
+            ValueLayout.JAVA_LONG.withName("max_permits"),
+            ValueLayout.JAVA_LONG.withName("active_permits"),
+            ValueLayout.JAVA_LONG.withName("total_wait_duration_ms"),
+            ValueLayout.JAVA_LONG.withName("total_batches_started")
         ).withName(name);
     }
 
@@ -204,17 +252,33 @@ public final class StatsLayout {
 
     private static VarHandle[] taskMonitorHandles(String group) {
         return switch (group) {
+            case "coordinator_reduce" -> new VarHandle[] {
+                CR_TOTAL_POLL_DURATION_MS,
+                CR_TOTAL_SCHEDULED_DURATION_MS,
+                CR_TOTAL_IDLE_DURATION_MS };
             case "query_execution" -> new VarHandle[] {
                 QE_TOTAL_POLL_DURATION_MS,
                 QE_TOTAL_SCHEDULED_DURATION_MS,
                 QE_TOTAL_IDLE_DURATION_MS };
             case "stream_next" -> new VarHandle[] { SN_TOTAL_POLL_DURATION_MS, SN_TOTAL_SCHEDULED_DURATION_MS, SN_TOTAL_IDLE_DURATION_MS };
-            case "fetch_phase" -> new VarHandle[] { FP_TOTAL_POLL_DURATION_MS, FP_TOTAL_SCHEDULED_DURATION_MS, FP_TOTAL_IDLE_DURATION_MS };
-            case "segment_stats" -> new VarHandle[] {
-                SS_TOTAL_POLL_DURATION_MS,
-                SS_TOTAL_SCHEDULED_DURATION_MS,
-                SS_TOTAL_IDLE_DURATION_MS };
+            case "plan_setup" -> new VarHandle[] { PS_TOTAL_POLL_DURATION_MS, PS_TOTAL_SCHEDULED_DURATION_MS, PS_TOTAL_IDLE_DURATION_MS };
             default -> throw new IllegalArgumentException("Unknown task monitor group: " + group);
+        };
+    }
+
+    private static VarHandle[] partitionGateHandles(String group) {
+        return switch (group) {
+            case "datanode_gate" -> new VarHandle[] {
+                DG_MAX_PERMITS,
+                DG_ACTIVE_PERMITS,
+                DG_TOTAL_WAIT_DURATION_MS,
+                DG_TOTAL_BATCHES_STARTED };
+            case "coordinator_gate" -> new VarHandle[] {
+                CG_MAX_PERMITS,
+                CG_ACTIVE_PERMITS,
+                CG_TOTAL_WAIT_DURATION_MS,
+                CG_TOTAL_BATCHES_STARTED };
+            default -> throw new IllegalArgumentException("Unknown partition gate group: " + group);
         };
     }
 }

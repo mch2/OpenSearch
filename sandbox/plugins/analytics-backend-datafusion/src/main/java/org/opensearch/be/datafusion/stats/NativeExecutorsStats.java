@@ -24,21 +24,21 @@ import java.util.Objects;
  * (Tokio runtime metrics + per-operation task monitors).
  *
  * <p>Contains an IO {@link RuntimeMetrics} (always present), an optional CPU
- * {@link RuntimeMetrics}, and 4 {@link TaskMonitorStats} for the operation types:
- * query_execution, stream_next, fetch_phase, segment_stats.
+ * {@link RuntimeMetrics}, and 3 {@link TaskMonitorStats} for the operation types:
+ * query_execution, stream_next, fetch_phase.
  */
 public class NativeExecutorsStats implements Writeable, ToXContentFragment {
 
     /** Operation types in documented order. */
     public enum OperationType {
+        /** Coordinator-side local plan execution (reduce phase). */
+        COORDINATOR_REDUCE("coordinator_reduce"),
         /** Query execution operation. */
         QUERY_EXECUTION("query_execution"),
         /** Stream next (pagination) operation. */
         STREAM_NEXT("stream_next"),
-        /** Fetch phase operation. */
-        FETCH_PHASE("fetch_phase"),
-        /** Segment-level statistics collection operation. */
-        SEGMENT_STATS("segment_stats");
+        /** Plan setup: session context creation + plan preparation. */
+        PLAN_SETUP("plan_setup");
 
         private final String key;
 

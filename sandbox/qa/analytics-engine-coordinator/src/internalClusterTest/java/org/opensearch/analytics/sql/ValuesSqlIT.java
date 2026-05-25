@@ -13,6 +13,7 @@ import org.opensearch.action.admin.indices.create.CreateIndexResponse;
 import org.opensearch.analytics.AnalyticsPlugin;
 import org.opensearch.analytics.exec.DefaultPlanExecutor;
 import org.opensearch.arrow.flight.transport.FlightStreamPlugin;
+import org.opensearch.arrow.allocator.ArrowBasePlugin;
 import org.opensearch.be.datafusion.DataFusionPlugin;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.service.ClusterService;
@@ -46,12 +47,13 @@ public class ValuesSqlIT extends OpenSearchIntegTestCase {
 
     @Override
     protected Collection<Class<? extends Plugin>> nodePlugins() {
-        return List.of(FlightStreamPlugin.class, CompositeDataFormatPlugin.class, MockCommitterEnginePlugin.class);
+        return List.of(ArrowBasePlugin.class, CompositeDataFormatPlugin.class, MockCommitterEnginePlugin.class);
     }
 
     @Override
     protected Collection<PluginInfo> additionalNodePlugins() {
         return List.of(
+            classpathPlugin(FlightStreamPlugin.class, List.of(ArrowBasePlugin.class.getName())),
             classpathPlugin(AnalyticsPlugin.class, Collections.emptyList()),
             classpathPlugin(ParquetDataFormatPlugin.class, Collections.emptyList()),
             classpathPlugin(DataFusionPlugin.class, List.of(AnalyticsPlugin.class.getName()))
@@ -84,7 +86,7 @@ public class ValuesSqlIT extends OpenSearchIntegTestCase {
     /**
      * Source-less {@code SELECT 1 + 1, 'x'} — Calcite lowers this to a single-row
      * {@code LogicalValues}. With no shard scan in the fragment, DAGBuilder picks
-     * {@code LOCAL_COMPUTE}; LocalComputeStageScheduler hands the Substrait plan to
+     * {@code LOCAL_COMPUTE}; LocalComputeStageExecutionFactory hands the Substrait plan to
      * DataFusion's local session with no childInputs. Exercises the pure
      * coordinator-only execution path.
      */
@@ -162,8 +164,7 @@ public class ValuesSqlIT extends OpenSearchIntegTestCase {
      * {@code (2, total_size_of_GET_rows)}.
      *
      * <p>1-shard only for now — the multi-shard PARTIAL→FINAL path hits a separate
-     * Int32/Int64 width drift in {@code DatafusionReduceSink.coerceToDeclaredSchema}
-     * that's being fixed in another change.
+     * Int32/Int64 width drift in the reduce sink that's being fixed in another change.
      */
     public void testLiteralWithAggregateAndFilter_1shard() {
         createAndSeedHttpLogsIndex(1);

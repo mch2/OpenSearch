@@ -8,7 +8,6 @@
 
 package org.opensearch.be.lucene;
 
-import org.apache.lucene.index.DirectoryReader;
 import org.opensearch.be.lucene.index.LuceneCommitter;
 import org.opensearch.be.lucene.index.LuceneCommitterFactory;
 import org.opensearch.be.lucene.index.LuceneDeleteExecutionEngine;
@@ -16,7 +15,9 @@ import org.opensearch.be.lucene.index.LuceneIndexingExecutionEngine;
 import org.opensearch.common.annotation.ExperimentalApi;
 import org.opensearch.index.IndexSettings;
 import org.opensearch.index.engine.dataformat.DataFormat;
+import org.opensearch.index.engine.dataformat.DataFormatDescriptor;
 import org.opensearch.index.engine.dataformat.DataFormatPlugin;
+import org.opensearch.index.engine.dataformat.DataFormatRegistry;
 import org.opensearch.index.engine.dataformat.DeleteExecutionEngine;
 import org.opensearch.index.engine.dataformat.IndexingEngineConfig;
 import org.opensearch.index.engine.dataformat.IndexingExecutionEngine;
@@ -24,13 +25,16 @@ import org.opensearch.index.engine.dataformat.ReaderManagerConfig;
 import org.opensearch.index.engine.exec.EngineReaderManager;
 import org.opensearch.index.engine.exec.commit.Committer;
 import org.opensearch.index.engine.exec.commit.CommitterFactory;
+import org.opensearch.index.store.checksum.LuceneChecksumHandler;
 import org.opensearch.plugins.EnginePlugin;
 import org.opensearch.plugins.Plugin;
 import org.opensearch.plugins.SearchBackEndPlugin;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.function.Supplier;
 
 /**
  * Plugin providing Lucene as a data format, search back-end, and committer
@@ -47,7 +51,7 @@ import java.util.Optional;
  * @opensearch.experimental
  */
 @ExperimentalApi
-public class LucenePlugin extends Plugin implements DataFormatPlugin, SearchBackEndPlugin<DirectoryReader>, EnginePlugin {
+public class LucenePlugin extends Plugin implements DataFormatPlugin, SearchBackEndPlugin<LuceneReader>, EnginePlugin {
 
     private static final LuceneDataFormat DATA_FORMAT = new LuceneDataFormat();
 
@@ -87,6 +91,14 @@ public class LucenePlugin extends Plugin implements DataFormatPlugin, SearchBack
         );
     }
 
+    @Override
+    public Map<String, Supplier<DataFormatDescriptor>> getFormatDescriptors(
+        IndexSettings indexSettings,
+        DataFormatRegistry dataFormatRegistry
+    ) {
+        return Map.of(DATA_FORMAT.name(), () -> new DataFormatDescriptor(DATA_FORMAT.name(), new LuceneChecksumHandler()));
+    }
+
     // --- SearchBackEndPlugin ---
 
     /** {@inheritDoc} Returns {@code "lucene"}. */
@@ -110,7 +122,7 @@ public class LucenePlugin extends Plugin implements DataFormatPlugin, SearchBack
      * @throws IOException if reader creation fails
      */
     @Override
-    public EngineReaderManager<DirectoryReader> createReaderManager(ReaderManagerConfig settings) throws IOException {
+    public EngineReaderManager<LuceneReader> createReaderManager(ReaderManagerConfig settings) throws IOException {
         return LuceneSearchBackEnd.createReaderManager(settings);
     }
 

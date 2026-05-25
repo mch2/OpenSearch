@@ -12,10 +12,14 @@ import org.apache.calcite.sql.SqlKind;
 
 /**
  * Window functions a backend may support. Covers aggregate-as-window
- * (SUM/AVG/COUNT/MIN/MAX over a frame) — these are what PPL {@code eventstats} lowers
- * to. PARTITION BY is not currently supported by the planner. Ranking functions
- * (ROW_NUMBER / RANK / DENSE_RANK) are not yet reachable on this route since
- * {@code streamstats} (which lowers to them) isn't wired here.
+ * (SUM/AVG/COUNT/MIN/MAX over a frame, what PPL {@code eventstats} lowers to)
+ * plus ROW_NUMBER, used by PPL {@code dedup} (ROW_NUMBER OVER PARTITION BY … &lt;= N)
+ * and emitted by PPL {@code streamstats … by …} as the helper sequence column
+ * {@code __row_number_for_streamstats__}.
+ *
+ * <p>PARTITION BY is allowed: {@code OpenSearchProject}'s cost gate forces SINGLETON
+ * input on any RexOver-bearing project, so the coordinator's {@code WindowAggExec}
+ * sees the full partition regardless of how partition keys span shards.
  *
  * @opensearch.internal
  */
@@ -24,7 +28,8 @@ public enum WindowFunction {
     AVG(SqlKind.AVG),
     COUNT(SqlKind.COUNT),
     MIN(SqlKind.MIN),
-    MAX(SqlKind.MAX);
+    MAX(SqlKind.MAX),
+    ROW_NUMBER(SqlKind.ROW_NUMBER);
 
     private final SqlKind sqlKind;
 
