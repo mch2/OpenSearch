@@ -12,11 +12,17 @@ import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.sql.SqlAggFunction;
+import org.apache.calcite.sql.SqlFunction;
+import org.apache.calcite.sql.SqlFunctionCategory;
 import org.apache.calcite.sql.SqlKind;
+import org.apache.calcite.sql.SqlOperator;
 import org.apache.calcite.sql.fun.SqlStdOperatorTable;
+import org.apache.calcite.sql.type.OperandTypes;
+import org.apache.calcite.sql.type.ReturnTypes;
 import org.apache.calcite.sql.type.SqlTypeName;
 
 import java.util.List;
+import java.util.Optional;
 
 /**
  * Aggregate functions that a backend may support, categorized by {@link Type}.
@@ -33,27 +39,34 @@ public enum AggregateFunction {
     MIN(Type.SIMPLE, SqlKind.MIN),
     MAX(Type.SIMPLE, SqlKind.MAX),
     COUNT(Type.SIMPLE, SqlKind.COUNT, fields(IF("count", new ArrowType.Int(64, true), SUM))),
-    // AVG's distributed decomposition (AVG(x) → CAST(SUM(x) / COUNT(x))) is handled by
-    // OpenSearchAggregateReduceRule during HEP marking, not by the enum + resolver.
-    // No intermediateFields needed here — the rule emits primitive SUM/COUNT calls and
-    // a Project wrapper before the resolver sees the plan.
+    // AVG: decomposed into SUM/COUNT by OpenSearchAggregateReduceRule before this enum is consulted.
     AVG(Type.SIMPLE, SqlKind.AVG),
 
-    // Statistical — fixed-size state, multi-pass or running stats. Handled by
-    // OpenSearchAggregateReduceRule (once FUNCTIONS_TO_REDUCE is extended to include them)
-    // — no intermediateFields here either.
+    // Statistical — fixed-size state; decomposed by OpenSearchAggregateReduceRule.
     STDDEV_POP(Type.STATISTICAL, SqlKind.STDDEV_POP),
     STDDEV_SAMP(Type.STATISTICAL, SqlKind.STDDEV_SAMP),
     VAR_POP(Type.STATISTICAL, SqlKind.VAR_POP),
     VAR_SAMP(Type.STATISTICAL, SqlKind.VAR_SAMP),
 
-    // State-expanding — state grows with input rows per key
+    // State-expanding — state grows with input rows per key.
     PERCENTILE_CONT(Type.STATE_EXPANDING, SqlKind.PERCENTILE_CONT),
     PERCENTILE_DISC(Type.STATE_EXPANDING, SqlKind.PERCENTILE_DISC),
     COLLECT(Type.STATE_EXPANDING, SqlKind.COLLECT),
     LISTAGG(Type.STATE_EXPANDING, SqlKind.LISTAGG),
 
-    APPROX_COUNT_DISTINCT(Type.APPROXIMATE, SqlKind.OTHER, fields(IF("sketch", new ArrowType.Binary(), null))),
+    APPROX_COUNT_DISTINCT(
+        Type.APPROXIMATE,
+        SqlKind.OTHER,
+        fields(IF("sketch", new ArrowType.Binary(), null)),
+        new SqlFunction(
+            "hll_estimate",
+            SqlKind.OTHER_FUNCTION,
+            ReturnTypes.BIGINT_NULLABLE,
+            null,
+            OperandTypes.BINARY,
+            SqlFunctionCategory.USER_DEFINED_FUNCTION
+        )
+    ),
     TAKE(Type.STATE_EXPANDING, SqlKind.OTHER, fields(IF("take_state", IntermediateTypeResolver.passThroughArg0(), null))),
     FIRST(Type.STATE_EXPANDING, SqlKind.OTHER, fields(IF("first_state", IntermediateTypeResolver.passThroughArg0(), null))),
     LAST(Type.STATE_EXPANDING, SqlKind.OTHER, fields(IF("last_state", IntermediateTypeResolver.passThroughArg0(), null))),
@@ -138,15 +151,21 @@ public enum AggregateFunction {
     private final Type type;
     private final SqlKind sqlKind;
     private final List<IntermediateField> intermediateFields;
+    private final SqlOperator finalizeOperator;
 
     AggregateFunction(Type type, SqlKind sqlKind) {
-        this(type, sqlKind, null);
+        this(type, sqlKind, null, null);
     }
 
     AggregateFunction(Type type, SqlKind sqlKind, List<IntermediateField> intermediateFields) {
+        this(type, sqlKind, intermediateFields, null);
+    }
+
+    AggregateFunction(Type type, SqlKind sqlKind, List<IntermediateField> intermediateFields, SqlOperator finalizeOperator) {
         this.type = type;
         this.sqlKind = sqlKind;
         this.intermediateFields = intermediateFields;
+        this.finalizeOperator = finalizeOperator;
     }
 
     public Type getType() {
@@ -167,6 +186,16 @@ public enum AggregateFunction {
 
     public boolean hasDecomposition() {
         return intermediateFields != null;
+    }
+
+    /**
+     * Scalar operator that finalizes intermediate state into the user-facing scalar, or
+     * {@link Optional#empty()} for pass-through aggregates (SUM/MIN/MAX/COUNT). Engine-native
+     * merges (e.g. {@link #APPROX_COUNT_DISTINCT} → {@code hll_estimate}) declare an operator;
+     * callers wrap it as {@code op(state)} for use as a sort key in {@code OpenSearchSort.sortExprs}.
+     */
+    public Optional<SqlOperator> finalizeOperator() {
+        return Optional.ofNullable(finalizeOperator);
     }
 
     /** Maps a Calcite SqlKind to an AggregateFunction, or null if not recognized. Skips OTHER. */

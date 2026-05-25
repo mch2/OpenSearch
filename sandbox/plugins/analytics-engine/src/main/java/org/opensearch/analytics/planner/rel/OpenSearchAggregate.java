@@ -59,6 +59,8 @@ public class OpenSearchAggregate extends Aggregate implements OpenSearchRelNode 
      * constant columns below FINAL, since the StageInputScan only carries the state.
      */
     private final Map<Integer, List<RexLiteral>> finalExtraLiteralArgs;
+    /** Pre-CBO hint on an Aggregate(SINGLE); {@code OpenSearchAggregateSplitRule} consumes it at split time. {@code null} on PARTIAL/FINAL/SHARD_MERGE. */
+    private final ShardBucketHint shardBucketHint;
 
     public OpenSearchAggregate(
         RelOptCluster cluster,
@@ -71,7 +73,7 @@ public class OpenSearchAggregate extends Aggregate implements OpenSearchRelNode 
         List<String> viableBackends,
         Map<Integer, AggregateCallAnnotation> callAnnotations
     ) {
-        this(cluster, traitSet, input, groupSet, groupSets, aggCalls, mode, viableBackends, callAnnotations, Map.of());
+        this(cluster, traitSet, input, groupSet, groupSets, aggCalls, mode, viableBackends, callAnnotations, Map.of(), null);
     }
 
     public OpenSearchAggregate(
@@ -86,11 +88,28 @@ public class OpenSearchAggregate extends Aggregate implements OpenSearchRelNode 
         Map<Integer, AggregateCallAnnotation> callAnnotations,
         Map<Integer, List<RexLiteral>> finalExtraLiteralArgs
     ) {
+        this(cluster, traitSet, input, groupSet, groupSets, aggCalls, mode, viableBackends, callAnnotations, finalExtraLiteralArgs, null);
+    }
+
+    public OpenSearchAggregate(
+        RelOptCluster cluster,
+        RelTraitSet traitSet,
+        RelNode input,
+        ImmutableBitSet groupSet,
+        List<ImmutableBitSet> groupSets,
+        List<AggregateCall> aggCalls,
+        AggregateMode mode,
+        List<String> viableBackends,
+        Map<Integer, AggregateCallAnnotation> callAnnotations,
+        Map<Integer, List<RexLiteral>> finalExtraLiteralArgs,
+        ShardBucketHint shardBucketHint
+    ) {
         super(cluster, traitSet, List.of(), input, groupSet, groupSets, aggCalls);
         this.mode = mode;
         this.viableBackends = viableBackends;
         this.callAnnotations = Map.copyOf(callAnnotations);
         this.finalExtraLiteralArgs = Map.copyOf(finalExtraLiteralArgs);
+        this.shardBucketHint = shardBucketHint;
     }
 
     public AggregateMode getMode() {
@@ -104,6 +123,31 @@ public class OpenSearchAggregate extends Aggregate implements OpenSearchRelNode 
 
     public Map<Integer, List<RexLiteral>> getFinalExtraLiteralArgs() {
         return finalExtraLiteralArgs;
+    }
+
+    /** Pre-CBO shard-side {@code Sort+Limit} hint, or {@code null} when none was attached. */
+    public ShardBucketHint getShardBucketHint() {
+        return shardBucketHint;
+    }
+
+    /**
+     * Returns a copy of this Aggregate with the given shard-bucket hint. Used by the
+     * execution-hints phase to mark a SINGLE aggregate for shard-side truncation at split time.
+     */
+    public OpenSearchAggregate withShardBucketHint(ShardBucketHint hint) {
+        return new OpenSearchAggregate(
+            getCluster(),
+            getTraitSet(),
+            getInput(),
+            getGroupSet(),
+            getGroupSets(),
+            getAggCallList(),
+            mode,
+            viableBackends,
+            callAnnotations,
+            finalExtraLiteralArgs,
+            hint
+        );
     }
 
     @Override
@@ -157,7 +201,8 @@ public class OpenSearchAggregate extends Aggregate implements OpenSearchRelNode 
             mode,
             viableBackends,
             callAnnotations,
-            finalExtraLiteralArgs
+            finalExtraLiteralArgs,
+            shardBucketHint
         );
     }
 
@@ -185,7 +230,11 @@ public class OpenSearchAggregate extends Aggregate implements OpenSearchRelNode 
 
     @Override
     public RelWriter explainTerms(RelWriter pw) {
-        return super.explainTerms(pw).item("mode", mode).item("viableBackends", viableBackends);
+        RelWriter writer = super.explainTerms(pw).item("mode", mode).item("viableBackends", viableBackends);
+        if (shardBucketHint != null) {
+            writer = writer.item("shardBucketHint", shardBucketHint);
+        }
+        return writer;
     }
 
     @Override
@@ -225,7 +274,8 @@ public class OpenSearchAggregate extends Aggregate implements OpenSearchRelNode 
             mode,
             List.of(backend),
             rebuilt,
-            finalExtraLiteralArgs
+            finalExtraLiteralArgs,
+            shardBucketHint
         );
     }
 

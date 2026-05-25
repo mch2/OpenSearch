@@ -38,6 +38,7 @@ public class RuleProfilingListenerTests extends BasePlannerRulesTests {
         "pushdown-rules",
         "aggregate-decompose",
         "marking",
+        "execution-hints",
         "cbo"
     );
 
