@@ -317,8 +317,6 @@ public final class NativeBridge {
                 ValueLayout.ADDRESS,
                 ValueLayout.JAVA_LONG,
                 ValueLayout.JAVA_LONG,
-                ValueLayout.JAVA_LONG,
-                ValueLayout.ADDRESS,
                 ValueLayout.JAVA_LONG
             )
         );
@@ -334,8 +332,6 @@ public final class NativeBridge {
                 ValueLayout.JAVA_LONG,
                 ValueLayout.JAVA_INT,
                 ValueLayout.JAVA_INT,
-                ValueLayout.JAVA_LONG,
-                ValueLayout.ADDRESS,
                 ValueLayout.JAVA_LONG
             )
         );
@@ -931,15 +927,11 @@ public final class NativeBridge {
         String tableName,
         long contextId,
         long queryConfigPtr,
-        byte[] planBytes
     ) {
         NativeHandle.validatePointer(readerPtr, "reader");
         NativeHandle.validatePointer(runtimePtr, "runtime");
         try (var call = new NativeCall()) {
             var table = call.str(tableName);
-            boolean hasPlan = planBytes != null && planBytes.length > 0;
-            MemorySegment planSegment = hasPlan ? call.bytes(planBytes) : MemorySegment.NULL;
-            long planLen = hasPlan ? planBytes.length : 0L;
             long ptr = call.invoke(
                 CREATE_SESSION_CONTEXT,
                 readerPtr,
@@ -948,8 +940,6 @@ public final class NativeBridge {
                 table.len(),
                 contextId,
                 queryConfigPtr,
-                planSegment,
-                planLen
             );
             return new SessionContextHandle(ptr);
         }
@@ -972,15 +962,11 @@ public final class NativeBridge {
         int treeShapeOrdinal,
         int delegatedPredicateCount,
         long queryConfigPtr,
-        byte[] planBytes
     ) {
         NativeHandle.validatePointer(readerPtr, "reader");
         NativeHandle.validatePointer(runtimePtr, "runtime");
         try (NativeCall call = new NativeCall()) {
             NativeCall.Str table = call.str(tableName);
-            boolean hasPlan = planBytes != null && planBytes.length > 0;
-            MemorySegment planSegment = hasPlan ? call.bytes(planBytes) : MemorySegment.NULL;
-            long planLen = hasPlan ? planBytes.length : 0L;
             long ptr = call.invoke(
                 CREATE_SESSION_CONTEXT_INDEXED,
                 readerPtr,
@@ -991,8 +977,6 @@ public final class NativeBridge {
                 treeShapeOrdinal,
                 delegatedPredicateCount,
                 queryConfigPtr,
-                planSegment,
-                planLen
             );
             return new SessionContextHandle(ptr);
         }

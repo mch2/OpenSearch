@@ -200,8 +200,12 @@ pub async fn execute_with_context(
             DataFusionError::Execution(format!("Failed to decode Substrait: {}", e))
         })?;
 
-        // Union schema widening was applied at table registration (session_context::widen_to_union_schema).
-        let logical_plan = from_substrait_plan(&handle.ctx.state(), &substrait_plan).await?;
+        // Use the widening consumer: for multi-index queries, it re-registers the ListingTable
+        // with the widened schema so ParquetExec null-fills missing columns at read time.
+        let extensions = datafusion_substrait::extensions::Extensions::try_from(&substrait_plan.extensions)?;
+        let state = handle.ctx.state();
+        let consumer = crate::widening_consumer::WideningSubstraitConsumer::new(&extensions, &state);
+        let logical_plan = datafusion_substrait::logical_plan::consumer::from_substrait_plan_with_consumer(&consumer, &substrait_plan).await?;
         log_debug!("DataFusion logical plan:\n{}", logical_plan.display_indent());
         let dataframe = handle.ctx.execute_logical_plan(logical_plan).await?;
         let physical_plan = dataframe.create_physical_plan().await?;

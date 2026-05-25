@@ -80,7 +80,6 @@ public class ShardScanWithDelegationHandler implements FragmentInstructionHandle
                 treeShape.ordinal(),
                 delegatedPredicateCount,
                 segment.address(),
-                context.getFragmentBytes()
             );
             return new DataFusionSessionState(sessionCtxHandle);
         }

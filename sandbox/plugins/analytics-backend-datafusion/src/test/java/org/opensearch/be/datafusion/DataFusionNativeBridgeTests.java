@@ -104,8 +104,7 @@ public class DataFusionNativeBridgeTests extends OpenSearchTestCase {
             runtimeHandle.get(),
             "test_table",
             0L,
-            queryConfigPtr,
-            new byte[0]
+            queryConfigPtr
         );
         arena.close();
         assertTrue("SessionContext pointer should be non-zero", sessionCtx.getPointer() != 0);

@@ -769,14 +769,14 @@ fn coerce_unsupported_timestamp_precision(
     arrow::datatypes::Schema::new_with_metadata(fields, schema.metadata().clone())
 }
 
-pub(crate) fn root_rel(root: &substrait::proto::PlanRel) -> Option<substrait::proto::Rel> {
+fn root_rel(root: &substrait::proto::PlanRel) -> Option<substrait::proto::Rel> {
     match root.rel_type.as_ref()? {
         substrait::proto::plan_rel::RelType::Rel(r) => Some(r.clone()),
         substrait::proto::plan_rel::RelType::Root(rr) => rr.input.as_ref().cloned(),
     }
 }
 
-pub(crate) fn collect_reads(rel: &substrait::proto::Rel, out: &mut Vec<substrait::proto::ReadRel>) {
+fn collect_reads(rel: &substrait::proto::Rel, out: &mut Vec<substrait::proto::ReadRel>) {
     use substrait::proto::rel::RelType;
     match rel.rel_type.as_ref() {
         Some(RelType::Read(r)) => out.push((**r).clone()),

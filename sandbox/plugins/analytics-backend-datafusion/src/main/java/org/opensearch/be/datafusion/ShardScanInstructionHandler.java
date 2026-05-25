@@ -73,7 +73,6 @@ public class ShardScanInstructionHandler implements FragmentInstructionHandler<S
                 tableName,
                 contextId,
                 segment.address(),
-                context.getFragmentBytes()
             );
             return new DataFusionSessionState(sessionCtxHandle);
         }
