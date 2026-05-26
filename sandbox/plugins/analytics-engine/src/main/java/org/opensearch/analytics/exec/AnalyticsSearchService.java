@@ -137,7 +137,7 @@ public class AnalyticsSearchService implements AutoCloseable {
             // The DataFusion backend uses its CustomCacheManager which already has the file
             // metadata cached keyed by path. The shard's data directory gives the base path;
             // the backend lists segment .parquet files under it.
-            boolean matches = backend.canMatch(null, filterBytes);
+            boolean matches = backend.canMatch(shard, filterBytes);
             return matches ? AnalyticsCanMatchResponse.YES : AnalyticsCanMatchResponse.NO;
         } catch (Exception e) {
             LOGGER.warn("can-match evaluation failed for shard [{}], conservatively returning true", shard.shardId(), e);

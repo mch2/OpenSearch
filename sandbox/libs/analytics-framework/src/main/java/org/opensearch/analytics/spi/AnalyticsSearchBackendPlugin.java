@@ -108,11 +108,11 @@ public interface AnalyticsSearchBackendPlugin {
      *
      * <p>Default: returns {@code true} (conservative — never filters out shards).
      *
-     * @param ctx         the common execution context (Reader, MapperService, IndexSettings)
-     * @param filterBytes serialized filter predicate
+     * @param shard       the target shard (data directory, settings, etc.)
+     * @param filterBytes serialized filter predicate list (see CanMatchFilter#listToBytes)
      * @return true if the shard can possibly contain matching data
      */
-    default boolean canMatch(CommonExecutionContext ctx, byte[] filterBytes) {
+    default boolean canMatch(org.opensearch.index.shard.IndexShard shard, byte[] filterBytes) {
         return true;
     }
 

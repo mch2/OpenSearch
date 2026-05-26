@@ -77,6 +77,11 @@ public class AnalyticsSearchTransportService {
         registerCanMatchHandler(this.transportService, indicesService, searchService);
     }
 
+    /** Underlying stream transport service. Used by {@link org.opensearch.analytics.exec.canmatch.CanMatchPreFilterPhase}. */
+    public StreamTransportService streamTransportService() {
+        return transportService;
+    }
+
     private static void registerStreamingFragmentHandler(
         StreamTransportService transportService,
         AnalyticsSearchService searchService,

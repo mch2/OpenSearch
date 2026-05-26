@@ -419,28 +419,67 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
     }
 
     @Override
-    public boolean canMatch(CommonExecutionContext ctx, byte[] filterBytes) {
-        // DataFusion owns the shard-view (file layout). The CustomCacheManager has metadata
-        // cached by file path. The flow:
-        //
-        // 1. Resolve segment file paths from ctx (shard directory + segment listing)
-        // TODO: ctx is currently null from the transport handler. Wire shard path through
-        // CommonExecutionContext so we can list .parquet files.
-        //
-        // 2. Deserialize the CanMatchFilter from filterBytes:
-        // CanMatchFilter filter = CanMatchFilter.fromBytes(filterBytes);
-        // String column = filter.getColumnName();
-        // long min = filter.getMinValue();
-        // long max = filter.getMaxValue();
-        //
-        // 3. For each .parquet file in the shard:
-        // long result = NativeBridge.canMatch(filePath, column, min, max);
-        // if (result == 1 || result == -1) return true; // can match or unknown
-        //
-        // 4. All files returned 0: return false (shard cannot match)
-        //
-        // For now: conservative (always match) until ctx provides file paths.
+    public boolean canMatch(org.opensearch.index.shard.IndexShard shard, byte[] filterBytes) {
+        // Decode the wire-format list of CanMatchFilter (column + range) and walk the
+        // shard's parquet segment files. A filter eliminates the shard only when EVERY
+        // file proves the predicate cannot overlap any row group. AND across filters.
+        if (filterBytes == null || filterBytes.length == 0 || shard == null) {
+            return true;
+        }
+        final java.util.List<org.opensearch.analytics.exec.canmatch.CanMatchFilter> filters;
+        try {
+            filters = org.opensearch.analytics.exec.canmatch.CanMatchFilter.listFromBytes(filterBytes);
+        } catch (java.io.IOException e) {
+            // Malformed filter bytes — fail open.
+            return true;
+        }
+        if (filters.isEmpty()) {
+            return true;
+        }
+        java.util.List<java.nio.file.Path> parquetFiles;
+        try {
+            parquetFiles = listShardParquetFiles(shard);
+        } catch (java.io.IOException e) {
+            return true; // listing failed — fail open
+        }
+        if (parquetFiles.isEmpty()) {
+            // No parquet files yet (e.g. empty / unflushed shard) — conservative.
+            return true;
+        }
+        for (org.opensearch.analytics.exec.canmatch.CanMatchFilter filter : filters) {
+            boolean anyFileCanMatch = false;
+            for (java.nio.file.Path file : parquetFiles) {
+                long result = org.opensearch.be.datafusion.nativelib.NativeBridge.canMatch(
+                    file.toString(),
+                    filter.getColumnName(),
+                    filter.getMinValue(),
+                    filter.getMaxValue()
+                );
+                // 1 = can match, -1 = unknown (treat as can match), 0 = cannot match
+                if (result != 0L) {
+                    anyFileCanMatch = true;
+                    break;
+                }
+            }
+            if (anyFileCanMatch == false) {
+                // This filter eliminated every file for the shard — short-circuit.
+                return false;
+            }
+        }
         return true;
+    }
+
+    /** Walks the shard's data path and returns every {@code .parquet} file found under it. */
+    private java.util.List<java.nio.file.Path> listShardParquetFiles(org.opensearch.index.shard.IndexShard shard) throws java.io.IOException {
+        java.nio.file.Path base = shard.shardPath().getDataPath();
+        if (java.nio.file.Files.exists(base) == false) {
+            return java.util.List.of();
+        }
+        java.util.List<java.nio.file.Path> out = new java.util.ArrayList<>();
+        try (java.util.stream.Stream<java.nio.file.Path> walk = java.nio.file.Files.walk(base)) {
+            walk.filter(p -> p.getFileName().toString().endsWith(".parquet")).forEach(out::add);
+        }
+        return out;
     }
 
     @Override

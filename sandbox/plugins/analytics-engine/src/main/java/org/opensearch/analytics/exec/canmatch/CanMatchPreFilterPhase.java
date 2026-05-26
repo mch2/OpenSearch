@@ -8,10 +8,19 @@
 
 package org.opensearch.analytics.exec.canmatch;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.planner.dag.ExecutionTarget;
+import org.opensearch.analytics.planner.dag.ShardExecutionTarget;
 import org.opensearch.core.action.ActionListener;
+import org.opensearch.core.common.io.stream.StreamInput;
+import org.opensearch.core.transport.TransportResponse;
+import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.StreamTransportService;
+import org.opensearch.transport.TransportException;
+import org.opensearch.transport.TransportResponseHandler;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -25,27 +34,25 @@ import java.util.concurrent.atomic.AtomicInteger;
  * Called from {@code ShardFragmentStageExecution.materializeTasks()} BEFORE
  * building the task list. Only targets with canMatch=true become StageTask entries.
  *
- * <h2>Flow</h2>
- * <pre>
- * materializeTasks():
- *   List allTargets = targetResolver.resolve(clusterState);
+ * <h2>Semantics</h2>
+ * <ul>
+ *   <li>Empty target list → empty result; no dispatch.</li>
+ *   <li>Empty/null filterBytes → all targets pass; no dispatch (no extractable predicate).</li>
+ *   <li>Per-target response with {@code canMatch=true} → keep; {@code canMatch=false} → drop.</li>
+ *   <li>Per-target transport exception → fail-open (keep the target); the worst case is
+ *       a wasted scan, never an incorrect result.</li>
+ * </ul>
  *
- *   // NEW: can-match filter
- *   canMatchPreFilter.filter(allTargets, filterBytes, ActionListener.wrap(
- *       matchingTargets -> {
- *           // build tasks only for matching targets
- *           for (target : matchingTargets) { tasks.add(new ShardStageTask(...)); }
- *       },
- *       error -> {
- *           // on failure: fall back to all targets (conservative)
- *           for (target : allTargets) { tasks.add(new ShardStageTask(...)); }
- *       }
- *   ));
- * </pre>
+ * <h2>Concurrency</h2>
+ * All targets are dispatched in parallel; the listener is invoked exactly once,
+ * after every target has either responded or failed. The internal {@code matching}
+ * list is synchronized for the additions.
  *
  * @opensearch.internal
  */
 public class CanMatchPreFilterPhase {
+
+    private static final Logger logger = LogManager.getLogger(CanMatchPreFilterPhase.class);
 
     private final StreamTransportService transportService;
 
@@ -55,13 +62,13 @@ public class CanMatchPreFilterPhase {
 
     /**
      * Dispatches can-match requests to all targets in parallel.
-     * Returns the filtered list of targets where canMatch=true.
      *
-     * @param targets     all resolved shard targets
-     * @param filterBytes serialized filter predicate
-     * @param listener    receives filtered targets (only those that can match)
+     * @param targets     all resolved shard targets (must be {@link ShardExecutionTarget}s)
+     * @param filterBytes serialized filter predicate; empty/null skips dispatch
+     * @param backendId   backend identifier ({@code "datafusion"} / {@code "lucene"}); routed to the data-node SPI
+     * @param listener    receives the filtered targets (only those that can match)
      */
-    public void filter(List<ExecutionTarget> targets, byte[] filterBytes, ActionListener<List> listener) {
+    public void filter(List<ExecutionTarget> targets, byte[] filterBytes, String backendId, ActionListener<List<ExecutionTarget>> listener) {
         if (targets.isEmpty() || filterBytes == null || filterBytes.length == 0) {
             listener.onResponse(targets);
             return;
@@ -71,26 +78,82 @@ public class CanMatchPreFilterPhase {
         AtomicInteger pending = new AtomicInteger(targets.size());
 
         for (ExecutionTarget target : targets) {
-            // TODO: extract ShardId and DiscoveryNode from target
-            // ShardId shardId = target.shardId();
-            // DiscoveryNode node = target.node();
-            //
-            // AnalyticsCanMatchRequest request = new AnalyticsCanMatchRequest(shardId, filterBytes);
-            // transportService.sendRequest(node, AnalyticsCanMatchAction.NAME, request, handler);
-            //
-            // handler.onResponse: if (response.canMatch()) synchronized { matching.add(target); }
-            // if (pending.decrementAndGet() == 0) listener.onResponse(matching);
-            //
-            // handler.onFailure: synchronized { matching.add(target); } // conservative: include on error
-            // if (pending.decrementAndGet() == 0) listener.onResponse(matching);
+            if (!(target instanceof ShardExecutionTarget shardTarget)) {
+                // Non-shard targets aren't subject to can-match — keep them.
+                addAndMaybeComplete(matching, target, pending, targets, listener);
+                continue;
+            }
 
-            // Placeholder: include all targets until wired
+            AnalyticsCanMatchRequest request = new AnalyticsCanMatchRequest(shardTarget.shardId(), filterBytes, backendId);
+            transportService.sendRequest(
+                shardTarget.node(),
+                AnalyticsCanMatchAction.NAME,
+                request,
+                new TransportResponseHandler<AnalyticsCanMatchResponse>() {
+                    @Override
+                    public AnalyticsCanMatchResponse read(StreamInput in) throws IOException {
+                        return new AnalyticsCanMatchResponse(in);
+                    }
+
+                    @Override
+                    public void handleResponse(AnalyticsCanMatchResponse response) {
+                        if (response.canMatch()) {
+                            addAndMaybeComplete(matching, target, pending, targets, listener);
+                        } else {
+                            maybeComplete(matching, pending, targets, listener);
+                        }
+                    }
+
+                    @Override
+                    public void handleException(TransportException exp) {
+                        // Fail-open: a transport-level failure shouldn't drop a shard we
+                        // can't disprove a match for. Worst case: a wasted scan.
+                        logger.debug("can-match dispatch failed for {} — failing open", shardTarget.shardId(), exp);
+                        addAndMaybeComplete(matching, target, pending, targets, listener);
+                    }
+
+                    @Override
+                    public String executor() {
+                        return ThreadPool.Names.SAME;
+                    }
+                }
+            );
+        }
+    }
+
+    private static <T extends TransportResponse> void addAndMaybeComplete(
+        List<ExecutionTarget> matching,
+        ExecutionTarget target,
+        AtomicInteger pending,
+        List<ExecutionTarget> originalTargets,
+        ActionListener<List<ExecutionTarget>> listener
+    ) {
+        synchronized (matching) {
+            matching.add(target);
+        }
+        maybeComplete(matching, pending, originalTargets, listener);
+    }
+
+    private static void maybeComplete(
+        List<ExecutionTarget> matching,
+        AtomicInteger pending,
+        List<ExecutionTarget> originalTargets,
+        ActionListener<List<ExecutionTarget>> listener
+    ) {
+        if (pending.decrementAndGet() == 0) {
+            // Defensive copy under the lock for predictable iteration order downstream.
+            List<ExecutionTarget> snapshot;
             synchronized (matching) {
-                matching.add(target);
+                snapshot = new ArrayList<>(matching);
             }
-            if (pending.decrementAndGet() == 0) {
-                listener.onResponse(matching);
+            // Preserve the original ordering: filter the input list against the matching set.
+            List<ExecutionTarget> ordered = new ArrayList<>(snapshot.size());
+            for (ExecutionTarget t : originalTargets) {
+                if (snapshot.contains(t)) {
+                    ordered.add(t);
+                }
             }
+            listener.onResponse(ordered);
         }
     }
 }

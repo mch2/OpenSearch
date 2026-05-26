@@ -8,15 +8,23 @@
 
 package org.opensearch.analytics.exec.canmatch;
 
+import org.opensearch.common.io.stream.BytesStreamOutput;
+import org.opensearch.core.common.bytes.BytesArray;
 import org.opensearch.core.common.io.stream.StreamInput;
 import org.opensearch.core.common.io.stream.StreamOutput;
 import org.opensearch.core.common.io.stream.Writeable;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Serializable filter predicate for can-match evaluation. Represents a simple
  * range check on a single column: {@code column IN [minValue, maxValue]}.
+ *
+ * <p>Wire format for a single filter: {@code string column, long min, long max}.
+ * Wire format for a list (see {@link #listToBytes} / {@link #listFromBytes}):
+ * {@code vInt count, repeated single-filter bytes}.
  *
  * <p>This is intentionally simple — covers the most impactful can-match cases
  * (time-range queries, numeric range filters). Complex predicates (AND/OR trees,
@@ -59,26 +67,32 @@ public class CanMatchFilter implements Writeable {
         return maxValue;
     }
 
-    /**
-     * Serialize to bytes for transport.
-     */
-    public byte[] toBytes() throws IOException {
-        try (var out = new org.opensearch.common.io.stream.BytesStreamOutput()) {
-            writeTo(out);
-            return out.bytes().toBytesRef().bytes;
+    /** Serializes a list of filters to a single byte buffer. Empty list → zero-length byte[]. */
+    public static byte[] listToBytes(List<CanMatchFilter> filters) throws IOException {
+        if (filters == null || filters.isEmpty()) {
+            return new byte[0];
+        }
+        try (BytesStreamOutput out = new BytesStreamOutput()) {
+            out.writeVInt(filters.size());
+            for (CanMatchFilter f : filters) {
+                f.writeTo(out);
+            }
+            return java.util.Arrays.copyOf(out.bytes().toBytesRef().bytes, out.bytes().length());
         }
     }
 
-    /**
-     * Deserialize from bytes.
-     */
-    public static CanMatchFilter fromBytes(byte[] bytes) throws IOException {
-        try (var in = new org.opensearch.common.io.stream.BytesStreamOutput()) {
-            // Use StreamInput from bytes
+    /** Deserializes a list previously produced by {@link #listToBytes}. Zero-length input → empty list. */
+    public static List<CanMatchFilter> listFromBytes(byte[] bytes) throws IOException {
+        if (bytes == null || bytes.length == 0) {
+            return List.of();
         }
-        var ref = new org.opensearch.core.common.bytes.BytesArray(bytes);
-        try (var in = ref.streamInput()) {
-            return new CanMatchFilter(in);
+        try (StreamInput in = new BytesArray(bytes).streamInput()) {
+            int count = in.readVInt();
+            List<CanMatchFilter> filters = new ArrayList<>(count);
+            for (int i = 0; i < count; i++) {
+                filters.add(new CanMatchFilter(in));
+            }
+            return filters;
         }
     }
 }
