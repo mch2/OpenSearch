@@ -42,5 +42,15 @@ public enum StageExecutionType {
      * literal-row sources ({@code LogicalValues}) and any future leaf operator
      * whose data lives on the coordinator rather than on a shard.
      */
-    LOCAL_COMPUTE
+    LOCAL_COMPUTE,
+    /**
+     * Coordinator-side pre-filter phase: resolves shard targets, dispatches a
+     * lightweight per-shard can-match probe in parallel, publishes the surviving
+     * target list as stage metadata. Consumed by a parent {@link #SHARD_FRAGMENT}
+     * stage via {@code consumeChildMetadata} — that's how the shard stage knows
+     * which subset of targets to actually scan.
+     *
+     * <p>No data flow (no ExchangeSink, no row batches); metadata only.
+     */
+    LOCAL_CANMATCH
 }

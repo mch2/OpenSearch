@@ -65,13 +65,33 @@ public class Stage {
         ExchangeSinkProvider exchangeSinkProvider,
         TargetResolver targetResolver
     ) {
+        this(stageId, fragment, childStages, exchangeInfo, exchangeSinkProvider, targetResolver, null);
+    }
+
+    /**
+     * Constructor with explicit {@code executionTypeOverride}. Used by the can-match
+     * pre-filter stage where the natural inference (targetResolver != null →
+     * SHARD_FRAGMENT) would mis-classify a coordinator-side metadata-only stage.
+     * When {@code null}, falls back to {@link #setStageExecutionType}.
+     */
+    public Stage(
+        int stageId,
+        RelNode fragment,
+        List<Stage> childStages,
+        ExchangeInfo exchangeInfo,
+        ExchangeSinkProvider exchangeSinkProvider,
+        TargetResolver targetResolver,
+        @Nullable StageExecutionType executionTypeOverride
+    ) {
         this.stageId = stageId;
         this.fragment = fragment;
         this.childStages = List.copyOf(childStages);
         this.exchangeInfo = exchangeInfo;
         this.exchangeSinkProvider = exchangeSinkProvider;
         this.targetResolver = targetResolver;
-        this.executionType = setStageExecutionType(exchangeSinkProvider, targetResolver, fragment);
+        this.executionType = executionTypeOverride != null
+            ? executionTypeOverride
+            : setStageExecutionType(exchangeSinkProvider, targetResolver, fragment);
         this.planAlternatives = List.of();
         // Capture predicates now while the plan still carries them in a recognizable
         // (OpenSearchFilter / Filter) shape. Empty list for stages with no extractable

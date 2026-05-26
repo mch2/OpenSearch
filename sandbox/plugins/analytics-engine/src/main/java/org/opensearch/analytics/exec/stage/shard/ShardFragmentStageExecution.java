@@ -9,16 +9,12 @@
 package org.opensearch.analytics.exec.stage.shard;
 
 import org.apache.arrow.vector.VectorSchemaRoot;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.backend.ExchangeSource;
 import org.opensearch.analytics.exec.AnalyticsSearchTransportService;
 import org.opensearch.analytics.exec.QueryContext;
 import org.opensearch.analytics.exec.StreamingResponseListener;
 import org.opensearch.analytics.exec.action.FragmentExecutionArrowResponse;
 import org.opensearch.analytics.exec.action.FragmentExecutionRequest;
-import org.opensearch.analytics.exec.canmatch.CanMatchFilter;
-import org.opensearch.analytics.exec.canmatch.CanMatchPreFilterPhase;
 import org.opensearch.analytics.exec.stage.AbstractStageExecution;
 import org.opensearch.analytics.exec.stage.DataProducer;
 import org.opensearch.analytics.exec.stage.StageTask;
@@ -28,10 +24,8 @@ import org.opensearch.analytics.planner.dag.ShardExecutionTarget;
 import org.opensearch.analytics.planner.dag.Stage;
 import org.opensearch.analytics.spi.ExchangeSink;
 import org.opensearch.cluster.service.ClusterService;
-import org.opensearch.common.unit.TimeValue;
 import org.opensearch.core.action.ActionListener;
 
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Function;
@@ -44,13 +38,6 @@ import java.util.function.Function;
  * @opensearch.internal
  */
 public class ShardFragmentStageExecution extends AbstractStageExecution implements DataProducer {
-
-    private static final Logger LOGGER = LogManager.getLogger(ShardFragmentStageExecution.class);
-
-    /** Bound on the synchronous wait for the can-match dispatch. Conservative — long enough
-     *  to absorb a slow per-shard response, short enough that a stuck data node doesn't park
-     *  the whole stage forever. On timeout we fail-open (return all targets). */
-    private static final TimeValue CAN_MATCH_TIMEOUT = TimeValue.timeValueSeconds(30);
 
     private final QueryContext config;
     private final ExchangeSink outputSink;
@@ -74,75 +61,42 @@ public class ShardFragmentStageExecution extends AbstractStageExecution implemen
     }
 
     /**
-     * Synchronous path is unused now ({@link #materializeTasksAsync} drives the lifecycle),
-     * but the abstract template still requires the method. Implements the no-canMatch path
-     * — direct target resolution + task build — kept for unit tests that exercise the base
-     * template via mocks.
+     * Resolved targets, possibly pre-filtered by a {@code CanMatchStage} child. Read in
+     * {@link #materializeTasks()}. When a CanMatchStage child publishes a non-null manifest
+     * (the survivors), this captures it; otherwise we resolve fresh from the target resolver.
      */
-    @Override
-    protected List<StageTask> materializeTasks() {
-        return buildTasks(stage.getTargetResolver().resolve(clusterService.state(), null));
-    }
+    private volatile List<ExecutionTarget> targetsFromCanMatch = null;
 
     /**
-     * Async materialise: resolve targets, dispatch can-match concurrently to each target,
-     * publish only the surviving subset.
+     * Child-cascade hook: when the CanMatchStage child completes, the framework hands us
+     * the published metadata before scheduling. We grab the surviving target list and
+     * stash it for {@link #materializeTasks()} to consume.
      *
-     * <p>Failure modes (timeout, transport error, no extractable filters, unknown backend)
-     * fall back to the full target list — pruning is best-effort and must never produce
-     * incorrect results.
-     *
-     * <p>TODO(canmatch-as-stage): lift can-match into its own coordinator-side stage that
-     * produces a target manifest consumed via {@code TargetResolver.resolve(state, manifest)}.
-     * Wins: stage-level metrics + lifecycle (start/end, cancel cascade, retry); composes
-     * naturally with future pre-filter phases (bloom, partition pruning); separates "what
-     * shards exist" from "what shards can match" inside this class. Defer until either a
-     * second pre-filter phase lands, can-match metrics become load-bearing, or
-     * cancellation correctness needs to abort in-flight dispatch deterministically. The
-     * {@code TargetResolver.resolve(state, manifest)} signature already accepts a manifest
-     * argument — it's half-built for this.
+     * <p>{@code metadataByChildStageId} may contain entries from multiple children; we accept
+     * the first one shaped like {@code List<ExecutionTarget>}. Only CanMatchStage publishes
+     * that shape today.
      */
     @Override
-    protected void materializeTasksAsync(ActionListener<List<StageTask>> listener) {
-        final List<ExecutionTarget> resolved;
-        try {
-            resolved = stage.getTargetResolver().resolve(clusterService.state(), null);
-        } catch (Exception e) {
-            listener.onFailure(e);
-            return;
-        }
-        if (resolved.isEmpty()) {
-            listener.onResponse(List.of());
-            return;
-        }
-        List<CanMatchFilter> filters = stage.getCanMatchFilters();
-        String backendId = resolveBackendId();
-        if (filters == null || filters.isEmpty() || backendId == null) {
-            listener.onResponse(buildTasks(resolved));
-            return;
-        }
-        final byte[] filterBytes;
-        try {
-            filterBytes = CanMatchFilter.listToBytes(filters);
-        } catch (IOException e) {
-            LOGGER.warn("can-match filter serialization failed; skipping prune", e);
-            listener.onResponse(buildTasks(resolved));
-            return;
-        }
-        CanMatchPreFilterPhase phase = new CanMatchPreFilterPhase(dispatcher.streamTransportService());
-        phase.filter(resolved, filterBytes, backendId, new ActionListener<List<ExecutionTarget>>() {
-            @Override
-            public void onResponse(List<ExecutionTarget> matching) {
-                LOGGER.debug("can-match pruned {} → {} targets", resolved.size(), matching.size());
-                listener.onResponse(buildTasks(matching));
+    public void consumeChildMetadata(java.util.Map<Integer, Object> metadataByChildStageId) {
+        for (Object payload : metadataByChildStageId.values()) {
+            if (payload instanceof List<?> list) {
+                @SuppressWarnings("unchecked")
+                List<ExecutionTarget> typed = (List<ExecutionTarget>) list;
+                targetsFromCanMatch = typed;
+                return;
             }
+        }
+    }
 
-            @Override
-            public void onFailure(Exception e) {
-                LOGGER.warn("can-match dispatch failed; falling back to all targets", e);
-                listener.onResponse(buildTasks(resolved));
-            }
-        });
+    @Override
+    protected List<StageTask> materializeTasks() {
+        List<ExecutionTarget> targets = targetsFromCanMatch;
+        if (targets == null) {
+            // No CanMatchStage child (or it wasn't inserted because no extractable filters
+            // existed). Resolve from cluster state directly.
+            targets = stage.getTargetResolver().resolve(clusterService.state(), null);
+        }
+        return buildTasks(targets);
     }
 
     private List<StageTask> buildTasks(List<ExecutionTarget> targets) {
@@ -151,49 +105,6 @@ public class ShardFragmentStageExecution extends AbstractStageExecution implemen
             tasks.add(new ShardStageTask(new StageTaskId(getStageId(), i), targets.get(i)));
         }
         return tasks;
-    }
-
-    /**
-     * Sync convenience used by {@code ShardFragmentStageExecutionCanMatchTests}; identical
-     * semantics to the async path but blocks on a future. Kept for unit-test coverage of
-     * every short-circuit branch.
-     */
-    static List<ExecutionTarget> applyCanMatchFilter(
-        List<ExecutionTarget> targets,
-        List<CanMatchFilter> filters,
-        String backendId,
-        CanMatchPreFilterPhase phase,
-        TimeValue timeout
-    ) {
-        if (targets.isEmpty() || filters == null || filters.isEmpty() || backendId == null) {
-            return targets;
-        }
-        byte[] filterBytes;
-        try {
-            filterBytes = CanMatchFilter.listToBytes(filters);
-        } catch (IOException e) {
-            LOGGER.warn("can-match filter serialization failed; skipping prune", e);
-            return targets;
-        }
-        org.opensearch.action.support.PlainActionFuture<List<ExecutionTarget>> future = new org.opensearch.action.support.PlainActionFuture<>();
-        try {
-            phase.filter(targets, filterBytes, backendId, future);
-            List<ExecutionTarget> matching = future.actionGet(timeout);
-            LOGGER.debug("can-match pruned {} → {} targets", targets.size(), matching.size());
-            return matching;
-        } catch (Exception e) {
-            LOGGER.warn("can-match dispatch failed; falling back to all targets", e);
-            return targets;
-        }
-    }
-
-    /** Pulls the backend id off the first plan alternative; {@code null} when none present. */
-    private String resolveBackendId() {
-        List<org.opensearch.analytics.planner.dag.StagePlan> plans = stage.getPlanAlternatives();
-        if (plans == null || plans.isEmpty()) {
-            return null;
-        }
-        return plans.get(0).backendId();
     }
 
     // TODO: override retargetForRetry for replica failover — needs TargetResolver.alternateReplica

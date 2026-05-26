@@ -136,10 +136,23 @@ public class DAGBuilder {
             List<String> reduceViable = CapabilityResolutionUtils.filterByReduceCapability(registry, reducer.getViableBackends());
             childSinkProvider = registry.getBackend(reduceViable.getFirst()).getExchangeSinkProvider();
         }
+        // For shard stages with extractable can-match filters, slip a coordinator-side
+        // CanMatchStage between this shard stage and its grandchildren. The CanMatchStage
+        // resolves targets, runs the pre-filter dispatch, and publishes the surviving
+        // target subset as metadata — the shard stage's consumeChildMetadata captures it
+        // and uses it to build the StageTask list, scanning only matching shards.
+        List<Stage> shardChildStages = grandchildren;
+        if (targetResolver != null) {
+            Stage canMatchStage = maybeBuildCanMatchStage(counter, childFragment, targetResolver);
+            if (canMatchStage != null) {
+                shardChildStages = new ArrayList<>(grandchildren);
+                shardChildStages.add(canMatchStage);
+            }
+        }
         // ExchangeInfo comes from the reducer — the reducer is the exchange and carries
         // the distribution intent set by whichever rule introduced it.
         parentChildStages.add(
-            new Stage(childStageId, childFragment, grandchildren, reducer.getExchangeInfo(), childSinkProvider, targetResolver)
+            new Stage(childStageId, childFragment, shardChildStages, reducer.getExchangeInfo(), childSinkProvider, targetResolver)
         );
 
         // Replace the reducer's input with a StageInputScan placeholder.
@@ -158,6 +171,36 @@ public class DAGBuilder {
             stageInput,
             reducer.getViableBackends(),
             reducer.getExchangeInfo()
+        );
+    }
+
+    /**
+     * Builds a synthetic {@link Stage} for the can-match pre-filter when the shard
+     * fragment has extractable range predicates. The stage shares the parent's
+     * target resolver (it dispatches the can-match probe to every shard candidate)
+     * but carries no fragment and produces no data — its sole output is the surviving
+     * target manifest, published via {@code CanMatchStage.publishedMetadata}.
+     *
+     * <p>Returns {@code null} when the fragment has no extractable predicates, so
+     * the parent stage skips inserting the pre-filter entirely.
+     */
+    @org.opensearch.common.Nullable
+    private static Stage maybeBuildCanMatchStage(int[] counter, RelNode shardFragment, TargetResolver targetResolver) {
+        if (shardFragment == null) return null;
+        // Extract once here so we can short-circuit before allocating a stage id.
+        // The parent Stage constructor also extracts (idempotent) — see Stage.canMatchFilters.
+        if (org.opensearch.analytics.exec.canmatch.CanMatchFilterExtractor.extract(shardFragment).isEmpty()) {
+            return null;
+        }
+        int id = counter[0]++;
+        return new Stage(
+            id,
+            shardFragment,    // share so getCanMatchFilters() returns the same set as the parent
+            List.of(),
+            null,
+            null,
+            targetResolver,
+            StageExecutionType.LOCAL_CANMATCH
         );
     }
 }
