@@ -95,17 +95,17 @@ public interface StageExecution {
     // ── Cross-stage metadata channel ──────────────────────────────────────
 
     /**
-     * Control-plane payload (broadcast bytes, per-shard stats) handed to the parent via
-     * {@link #consumeChildMetadata} before the parent is scheduled. Distinct from data flow
-     * through the pre-wired {@code ExchangeSink}. Default null (nothing published).
+     * Control-plane payload (per-shard stats, target manifests, etc.) handed to the parent
+     * via {@link #consumeChildMetadata} before the parent is scheduled. Distinct from data
+     * flow through the pre-wired {@code ExchangeSink}. Default null (nothing published).
      */
     @Nullable
-    default Object publishedMetadata() {
+    default StageMetadata publishedMetadata() {
         return null;
     }
 
     /** Invoked by the cascade right before parent dispatch. Empty map when no children published. */
-    default void consumeChildMetadata(Map<Integer, Object> metadataByChildStageId) {}
+    default void consumeChildMetadata(Map<Integer, StageMetadata> metadataByChildStageId) {}
 
     /**
      * Default {@code false}: parent scheduled on all-children-SUCCEEDED. {@code true} (eager):
@@ -166,9 +166,9 @@ public interface StageExecution {
                     case SUCCEEDED -> {
                         closeChildInput(childId);  // per-input EOF; no-op when not multi-input
                         if (pending.decrementAndGet() == 0) {
-                            Map<Integer, Object> metadata = new HashMap<>();
+                            Map<Integer, StageMetadata> metadata = new HashMap<>();
                             for (StageExecution c : children) {
-                                Object payload = c.publishedMetadata();
+                                StageMetadata payload = c.publishedMetadata();
                                 if (payload != null) {
                                     metadata.put(c.getStageId(), payload);
                                 }

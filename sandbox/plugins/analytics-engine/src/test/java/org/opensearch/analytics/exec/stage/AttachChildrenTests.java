@@ -53,7 +53,7 @@ public class AttachChildrenTests extends OpenSearchTestCase {
         FakeChild childB = new FakeChild(8, "stats-from-B");
         FakeChild childC = new FakeChild(9, null);  // publishes nothing
 
-        AtomicReference<Map<Integer, Object>> consumed = new AtomicReference<>();
+        AtomicReference<Map<Integer, StageMetadata>> consumed = new AtomicReference<>();
         // Capture metadata at the moment the cascade hands it off — i.e., before scheduling.
         org.mockito.Mockito.doAnswer(inv -> {
             consumed.set(new HashMap<>(inv.getArgument(0)));
@@ -64,8 +64,8 @@ public class AttachChildrenTests extends OpenSearchTestCase {
         Consumer<StageExecution> scheduler = stage -> {
             // Verify the metadata handoff happened BEFORE this scheduler runs.
             assertNotNull("metadata should be handed off before scheduling", consumed.get());
-            assertEquals("broadcast-bytes-A", consumed.get().get(7));
-            assertEquals("stats-from-B", consumed.get().get(8));
+            assertEquals("broadcast-bytes-A", ((FakeMetadata) consumed.get().get(7)).tag());
+            assertEquals("stats-from-B", ((FakeMetadata) consumed.get().get(8)).tag());
             assertFalse("null-publishing child must not appear in map", consumed.get().containsKey(9));
             scheduled.set(stage);
         };
@@ -215,9 +215,12 @@ public class AttachChildrenTests extends OpenSearchTestCase {
      * records the {@code cancel(reason)} that the sibling-sweep test asserts against. Mutable
      * {@link #fakeState} is queried by the cascade's parent-listener via {@link #getState()}.
      */
+    /** Test-only {@link StageMetadata} for cascade tests — carries an arbitrary tag string. */
+    private record FakeMetadata(String tag) implements StageMetadata {}
+
     private static final class FakeChild implements StageExecution {
         private final int stageId;
-        private final Object metadata;
+        private final String metadata;
         private final List<StageStateListener> listeners = new ArrayList<>();
         State fakeState = State.RUNNING;
         Exception failure;
@@ -227,7 +230,7 @@ public class AttachChildrenTests extends OpenSearchTestCase {
             this(stageId, null);
         }
 
-        FakeChild(int stageId, Object metadata) {
+        FakeChild(int stageId, String metadata) {
             this.stageId = stageId;
             this.metadata = metadata;
         }
@@ -285,8 +288,8 @@ public class AttachChildrenTests extends OpenSearchTestCase {
         public void onTaskTerminal(StageTask task, Exception cause) {}
 
         @Override
-        public Object publishedMetadata() {
-            return metadata;
+        public StageMetadata publishedMetadata() {
+            return metadata == null ? null : new FakeMetadata(metadata);
         }
     }
 

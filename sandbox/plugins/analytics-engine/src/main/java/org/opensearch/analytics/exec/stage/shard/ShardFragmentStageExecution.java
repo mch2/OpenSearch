@@ -16,7 +16,9 @@ import org.opensearch.analytics.exec.StreamingResponseListener;
 import org.opensearch.analytics.exec.action.FragmentExecutionArrowResponse;
 import org.opensearch.analytics.exec.action.FragmentExecutionRequest;
 import org.opensearch.analytics.exec.stage.AbstractStageExecution;
+import org.opensearch.analytics.exec.stage.CanMatchManifest;
 import org.opensearch.analytics.exec.stage.DataProducer;
+import org.opensearch.analytics.exec.stage.StageMetadata;
 import org.opensearch.analytics.exec.stage.StageTask;
 import org.opensearch.analytics.exec.stage.StageTaskId;
 import org.opensearch.analytics.planner.dag.ExecutionTarget;
@@ -28,6 +30,7 @@ import org.opensearch.core.action.ActionListener;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Function;
 
 /**
@@ -77,12 +80,10 @@ public class ShardFragmentStageExecution extends AbstractStageExecution implemen
      * that shape today.
      */
     @Override
-    public void consumeChildMetadata(java.util.Map<Integer, Object> metadataByChildStageId) {
-        for (Object payload : metadataByChildStageId.values()) {
-            if (payload instanceof List<?> list) {
-                @SuppressWarnings("unchecked")
-                List<ExecutionTarget> typed = (List<ExecutionTarget>) list;
-                targetsFromCanMatch = typed;
+    public void consumeChildMetadata(Map<Integer, StageMetadata> metadataByChildStageId) {
+        for (StageMetadata payload : metadataByChildStageId.values()) {
+            if (payload instanceof CanMatchManifest manifest) {
+                targetsFromCanMatch = manifest.matchingTargets();
                 return;
             }
         }

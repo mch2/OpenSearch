@@ -15,6 +15,8 @@ import org.opensearch.analytics.exec.QueryContext;
 import org.opensearch.analytics.exec.canmatch.CanMatchFilter;
 import org.opensearch.analytics.exec.canmatch.CanMatchPreFilterPhase;
 import org.opensearch.analytics.exec.stage.AbstractStageExecution;
+import org.opensearch.analytics.exec.stage.CanMatchManifest;
+import org.opensearch.analytics.exec.stage.StageMetadata;
 import org.opensearch.analytics.exec.stage.StageTask;
 import org.opensearch.analytics.exec.stage.StageTaskId;
 import org.opensearch.analytics.exec.stage.coordinator.LocalStageTask;
@@ -80,8 +82,9 @@ public final class CanMatchStage extends AbstractStageExecution {
     }
 
     @Override
-    public Object publishedMetadata() {
-        return publishedTargets;
+    public StageMetadata publishedMetadata() {
+        List<ExecutionTarget> t = publishedTargets;
+        return t == null ? null : new CanMatchManifest(t);
     }
 
     @Override
