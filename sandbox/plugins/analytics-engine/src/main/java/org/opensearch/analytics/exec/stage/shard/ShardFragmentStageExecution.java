@@ -73,40 +73,80 @@ public class ShardFragmentStageExecution extends AbstractStageExecution implemen
         this.runner = new ShardTaskRunner(this, config, dispatcher, requestBuilder);
     }
 
+    /**
+     * Synchronous path is unused now ({@link #materializeTasksAsync} drives the lifecycle),
+     * but the abstract template still requires the method. Implements the no-canMatch path
+     * — direct target resolution + task build — kept for unit tests that exercise the base
+     * template via mocks.
+     */
     @Override
     protected List<StageTask> materializeTasks() {
-        List<ExecutionTarget> resolved = stage.getTargetResolver().resolve(clusterService.state(), null);
-        // Can-match pre-filter: eliminate shards that provably cannot match
-        resolved = applyCanMatchFilter(resolved);
-        // Empty list → base short-circuits to SUCCEEDED (nothing to dispatch).
-        List<StageTask> tasks = new ArrayList<>(resolved.size());
-        for (int i = 0; i < resolved.size(); i++) {
-            tasks.add(new ShardStageTask(new StageTaskId(getStageId(), i), resolved.get(i)));
+        return buildTasks(stage.getTargetResolver().resolve(clusterService.state(), null));
+    }
+
+    /**
+     * Async materialise: resolve targets, dispatch can-match concurrently to each target,
+     * publish only the surviving subset.
+     *
+     * <p>Failure modes (timeout, transport error, no extractable filters, unknown backend)
+     * fall back to the full target list — pruning is best-effort and must never produce
+     * incorrect results.
+     */
+    @Override
+    protected void materializeTasksAsync(ActionListener<List<StageTask>> listener) {
+        final List<ExecutionTarget> resolved;
+        try {
+            resolved = stage.getTargetResolver().resolve(clusterService.state(), null);
+        } catch (Exception e) {
+            listener.onFailure(e);
+            return;
+        }
+        if (resolved.isEmpty()) {
+            listener.onResponse(List.of());
+            return;
+        }
+        List<CanMatchFilter> filters = stage.getCanMatchFilters();
+        String backendId = resolveBackendId();
+        if (filters == null || filters.isEmpty() || backendId == null) {
+            listener.onResponse(buildTasks(resolved));
+            return;
+        }
+        final byte[] filterBytes;
+        try {
+            filterBytes = CanMatchFilter.listToBytes(filters);
+        } catch (IOException e) {
+            LOGGER.warn("can-match filter serialization failed; skipping prune", e);
+            listener.onResponse(buildTasks(resolved));
+            return;
+        }
+        CanMatchPreFilterPhase phase = new CanMatchPreFilterPhase(dispatcher.streamTransportService());
+        phase.filter(resolved, filterBytes, backendId, new ActionListener<List<ExecutionTarget>>() {
+            @Override
+            public void onResponse(List<ExecutionTarget> matching) {
+                LOGGER.debug("can-match pruned {} → {} targets", resolved.size(), matching.size());
+                listener.onResponse(buildTasks(matching));
+            }
+
+            @Override
+            public void onFailure(Exception e) {
+                LOGGER.warn("can-match dispatch failed; falling back to all targets", e);
+                listener.onResponse(buildTasks(resolved));
+            }
+        });
+    }
+
+    private List<StageTask> buildTasks(List<ExecutionTarget> targets) {
+        List<StageTask> tasks = new ArrayList<>(targets.size());
+        for (int i = 0; i < targets.size(); i++) {
+            tasks.add(new ShardStageTask(new StageTaskId(getStageId(), i), targets.get(i)));
         }
         return tasks;
     }
 
     /**
-     * Applies the can-match pre-filter to eliminate targets that provably cannot
-     * match the query's range predicates based on Parquet row-group statistics.
-     *
-     * <p>Blocks for up to {@link #CAN_MATCH_TIMEOUT} waiting for the parallel dispatch.
-     * Any failure (timeout, exception, no extractable filters) falls back to the full
-     * target list — pruning is best-effort and must never produce incorrect results.
-     */
-    private List<ExecutionTarget> applyCanMatchFilter(List<ExecutionTarget> targets) {
-        if (targets.isEmpty()) {
-            return targets;
-        }
-        List<CanMatchFilter> filters = stage.getCanMatchFilters();
-        String backendId = resolveBackendId();
-        return applyCanMatchFilter(targets, filters, backendId, new CanMatchPreFilterPhase(dispatcher.streamTransportService()), CAN_MATCH_TIMEOUT);
-    }
-
-    /**
-     * Glue for can-match pruning. Extracted from {@link #applyCanMatchFilter(List)} so unit
-     * tests can drive every branch (no filters, no backend, serialization failure, phase
-     * failure, happy path) without standing up a {@link Stage} or transport service.
+     * Sync convenience used by {@code ShardFragmentStageExecutionCanMatchTests}; identical
+     * semantics to the async path but blocks on a future. Kept for unit-test coverage of
+     * every short-circuit branch.
      */
     static List<ExecutionTarget> applyCanMatchFilter(
         List<ExecutionTarget> targets,
