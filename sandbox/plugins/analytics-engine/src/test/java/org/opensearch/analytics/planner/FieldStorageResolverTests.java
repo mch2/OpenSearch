@@ -54,6 +54,63 @@ public class FieldStorageResolverTests extends OpenSearchTestCase {
         assertTrue("expected 'no storage' error, got: " + ex.getMessage(), ex.getMessage().contains("has no storage in any format"));
     }
 
+    public void testMetadataFieldIdIsResolvable() {
+        FieldStorageResolver resolver = newResolver("parquet", Map.of("name", Map.of("type", "text")));
+
+        FieldStorageInfo info = resolver.resolve(List.of("_id")).get(0);
+
+        assertEquals("_id", info.getFieldName());
+        assertEquals("binary", info.getMappingType());
+        assertEquals(List.of("parquet"), info.getDocValueFormats());
+        assertEquals(List.of(), info.getIndexFormats());
+        assertFalse(info.isDerived());
+    }
+
+    public void testMetadataFieldRoutingIsResolvable() {
+        FieldStorageResolver resolver = newResolver("parquet", Map.of("name", Map.of("type", "text")));
+
+        FieldStorageInfo info = resolver.resolve(List.of("_routing")).get(0);
+
+        assertEquals("_routing", info.getFieldName());
+        assertEquals("keyword", info.getMappingType());
+        assertEquals(List.of("parquet"), info.getDocValueFormats());
+        assertEquals(List.of(), info.getIndexFormats());
+        assertFalse(info.isDerived());
+    }
+
+    public void testMetadataFieldsCoexistWithUserFields() {
+        FieldStorageResolver resolver = newResolver("parquet", Map.of("title", Map.of("type", "keyword")));
+
+        List<FieldStorageInfo> infos = resolver.resolve(List.of("title", "_id", "_routing"));
+
+        assertEquals(3, infos.size());
+        assertEquals("title", infos.get(0).getFieldName());
+        assertEquals("_id", infos.get(1).getFieldName());
+        assertEquals("_routing", infos.get(2).getFieldName());
+    }
+
+    public void testAliasFieldResolvesToTargetStorage() {
+        FieldStorageResolver resolver = newResolver("parquet", Map.of(
+            "timestamp", Map.of("type", "date"),
+            "@timestamp", Map.of("type", "alias", "path", "timestamp")
+        ));
+
+        FieldStorageInfo info = resolver.resolve(List.of("@timestamp")).get(0);
+
+        assertEquals("timestamp", info.getFieldName());
+        assertEquals("date", info.getMappingType());
+        assertEquals(List.of("parquet"), info.getDocValueFormats());
+    }
+
+    public void testAliasMapIsPopulated() {
+        FieldStorageResolver resolver = newResolver("parquet", Map.of(
+            "timestamp", Map.of("type", "date"),
+            "@timestamp", Map.of("type", "alias", "path", "timestamp")
+        ));
+
+        assertEquals(Map.of("@timestamp", "timestamp"), resolver.getAliasMap());
+    }
+
     private static FieldStorageResolver newResolver(String primaryFormat, Map<String, Map<String, Object>> fieldMappings) {
         Map<String, Object> mappingSource = Map.of("properties", fieldMappings);
 

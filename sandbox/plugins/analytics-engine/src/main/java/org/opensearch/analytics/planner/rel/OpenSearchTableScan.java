@@ -8,6 +8,7 @@
 
 package org.opensearch.analytics.planner.rel;
 
+import org.apache.calcite.plan.RelOptAbstractTable;
 import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelOptPlanner;
 import org.apache.calcite.plan.RelOptTable;
@@ -17,6 +18,9 @@ import org.apache.calcite.rel.RelWriter;
 import org.apache.calcite.rel.core.TableScan;
 import org.apache.calcite.rel.logical.LogicalTableScan;
 import org.apache.calcite.rel.metadata.RelMetadataQuery;
+import org.apache.calcite.rel.type.RelDataType;
+import org.apache.calcite.rel.type.RelDataTypeFactory;
+import org.apache.calcite.rel.type.RelDataTypeField;
 import org.opensearch.analytics.spi.FieldStorageInfo;
 
 import java.util.List;
@@ -104,6 +108,63 @@ public class OpenSearchTableScan extends TableScan implements OpenSearchRelNode 
 
     @Override
     public RelNode stripAnnotations(List<RelNode> strippedChildren) {
-        return LogicalTableScan.create(getCluster(), getTable(), List.of());
+        RelOptTable table = getTable();
+        List<RelDataTypeField> fields = table.getRowType().getFieldList();
+
+        // Detect alias columns: row type name differs from FieldStorageInfo physical name.
+        // For aliases, the storage info points to the target column (which also exists in
+        // the row type under its own name). Build a physical-only scan + wrapping Project
+        // that re-adds alias columns as references to their targets.
+        boolean hasAliases = false;
+        for (int i = 0; i < fields.size() && i < outputFieldStorage.size(); i++) {
+            if (!fields.get(i).getName().equals(outputFieldStorage.get(i).getFieldName())) {
+                hasAliases = true;
+                break;
+            }
+        }
+
+        if (!hasAliases) {
+            return LogicalTableScan.create(getCluster(), table, List.of());
+        }
+
+        // Build physical-only row type (no aliases) for the scan.
+        RelDataTypeFactory tf = getCluster().getTypeFactory();
+        RelDataTypeFactory.Builder scanBuilder = tf.builder();
+        for (int i = 0; i < fields.size() && i < outputFieldStorage.size(); i++) {
+            if (!fields.get(i).getName().equals(outputFieldStorage.get(i).getFieldName())) {
+                continue;
+            }
+            scanBuilder.add(fields.get(i).getName(), fields.get(i).getType());
+        }
+        RelDataType physicalType = scanBuilder.build();
+        RelOptTable physicalTable = new RelOptAbstractTable(
+            table.getRelOptSchema(), table.getQualifiedName().getLast(), physicalType) {};
+        RelNode scan = LogicalTableScan.create(getCluster(), physicalTable, List.of());
+
+        // Build a Project above the scan that outputs ALL columns in the original order:
+        // physical columns as pass-through, alias columns as references to their targets.
+        org.apache.calcite.rex.RexBuilder rb = getCluster().getRexBuilder();
+        List<org.apache.calcite.rex.RexNode> projects = new java.util.ArrayList<>(fields.size());
+        List<String> names = new java.util.ArrayList<>(fields.size());
+        for (int i = 0; i < fields.size() && i < outputFieldStorage.size(); i++) {
+            String colName = fields.get(i).getName();
+            String physicalName = outputFieldStorage.get(i).getFieldName();
+            names.add(colName);
+            if (colName.equals(physicalName)) {
+                // Physical column — find its index in the physical scan.
+                int physIdx = physicalType.getField(physicalName, true, false).getIndex();
+                projects.add(rb.makeInputRef(physicalType.getFieldList().get(physIdx).getType(), physIdx));
+            } else {
+                // Alias column — reference the target in the physical scan.
+                RelDataTypeField targetField = physicalType.getField(physicalName, true, false);
+                if (targetField != null) {
+                    projects.add(rb.makeInputRef(targetField.getType(), targetField.getIndex()));
+                } else {
+                    projects.add(rb.makeInputRef(fields.get(i).getType(), 0));
+                }
+            }
+        }
+        return org.apache.calcite.rel.logical.LogicalProject.create(
+            scan, List.of(), projects, names, java.util.Set.of());
     }
 }

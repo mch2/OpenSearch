@@ -167,9 +167,37 @@ public class OpenSearchSchemaBuilder {
             public RelDataType getRowType(RelDataTypeFactory typeFactory) {
                 RelDataTypeFactory.Builder builder = typeFactory.builder();
                 addLeafFields(builder, typeFactory, properties, "");
+                // TODO: re-enable once _id BinaryView/Binary type mismatch at the
+                // coordinator reduce StageInputScan is resolved. Currently causes
+                // "Field '_id' has different type (Binary) than table schema (BinaryView)"
+                // on every query regardless of whether _id is projected.
+                // appendMetadataFields(builder, typeFactory);
                 return builder.build();
             }
         };
+    }
+
+    /**
+     * Appends system metadata fields that exist in parquet storage but are not declared
+     * in user index mappings. These are per-document fields written by the parquet data
+     * format plugin ({@code MetadataFieldPlugin}) and should be queryable via PPL/SQL.
+     *
+     * <p>The set of fields here mirrors what {@code MetadataFieldPlugin.getParquetFields()}
+     * registers as parquet-resident columns. Types match the Arrow types declared by each
+     * field's {@code getArrowType()} → Calcite equivalent:
+     * <ul>
+     *   <li>{@code _id} — Binary in parquet → VARBINARY. Content is always valid UTF-8
+     *       (doc IDs are base64/UUID). Implicit coercion handles
+     *       {@code WHERE _id = 'abc'} (VARCHAR literal vs VARBINARY column).</li>
+     *   <li>{@code _routing} — Utf8 in parquet → VARCHAR.</li>
+     * </ul>
+     *
+     * <p>Adding a metadata field here requires a corresponding entry in
+     * {@code MetadataFieldPlugin} so the parquet writer materializes the column.
+     */
+    private static void appendMetadataFields(RelDataTypeFactory.Builder builder, RelDataTypeFactory typeFactory) {
+        builder.add("_id", DocumentIdType.nullable());
+        builder.add("_routing", typeFactory.createTypeWithNullability(typeFactory.createSqlType(SqlTypeName.VARCHAR), true));
     }
 
     @SuppressWarnings("unchecked")
@@ -179,31 +207,83 @@ public class OpenSearchSchemaBuilder {
         Map<String, Object> properties,
         String pathPrefix
     ) {
+        addLeafFields(builder, typeFactory, properties, pathPrefix, properties);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void addLeafFields(
+        RelDataTypeFactory.Builder builder,
+        RelDataTypeFactory typeFactory,
+        Map<String, Object> properties,
+        String pathPrefix,
+        Map<String, Object> rootProperties
+    ) {
         for (Map.Entry<String, Object> fieldEntry : properties.entrySet()) {
             String fieldName = pathPrefix.isEmpty() ? fieldEntry.getKey() : pathPrefix + "." + fieldEntry.getKey();
             Map<String, Object> fieldProps = (Map<String, Object>) fieldEntry.getValue();
             String fieldType = (String) fieldProps.get("type");
-            // Object types: implicit when "properties" is present without "type", or explicit "type: object".
-            // Recurse into sub-properties so dotted leaf paths ("city.location.latitude") appear as flat columns.
             if (fieldType == null || "object".equals(fieldType)) {
                 Map<String, Object> nested = (Map<String, Object>) fieldProps.get("properties");
                 if (nested != null) {
-                    addLeafFields(builder, typeFactory, nested, fieldName);
+                    addLeafFields(builder, typeFactory, nested, fieldName, rootProperties);
                 }
                 continue;
             }
-            // Nested type (array-of-sub-docs) is a different beast — deferred.
             if ("nested".equals(fieldType)) {
+                continue;
+            }
+            if ("alias".equals(fieldType)) {
+                RelDataType aliasType = resolveAliasType((String) fieldProps.get("path"), rootProperties, typeFactory);
+                if (aliasType != null) {
+                    builder.add(fieldName, aliasType);
+                }
                 continue;
             }
             RelDataType columnType = buildLeafType(fieldType, typeFactory);
             if (columnType == null) {
-                // Unsupported (geo_point/shape/completion/…) or unknown plugin type. Drop the
-                // column; a query referencing it surfaces a Calcite "column not found" via the
-                // validator rather than a planning-time IllegalArgumentException.
                 continue;
             }
             builder.add(fieldName, columnType);
         }
+    }
+
+    /**
+     * Resolves an alias field's target type by walking the root properties map along
+     * the dotted path. Returns {@code null} (alias dropped) when:
+     * <ul>
+     *   <li>path is null or empty (malformed mapping)</li>
+     *   <li>target field doesn't exist</li>
+     *   <li>target resolves to an unsupported type</li>
+     *   <li>target is itself an alias (chain) — resolved transitively up to depth 5</li>
+     * </ul>
+     */
+    @SuppressWarnings("unchecked")
+    private static RelDataType resolveAliasType(String path, Map<String, Object> rootProperties, RelDataTypeFactory typeFactory) {
+        if (path == null || path.isEmpty()) {
+            return null;
+        }
+        Map<String, Object> current = rootProperties;
+        String[] segments = path.split("\\.");
+        for (int i = 0; i < segments.length; i++) {
+            Object entry = current.get(segments[i]);
+            if (!(entry instanceof Map)) {
+                return null;
+            }
+            Map<String, Object> fieldProps = (Map<String, Object>) entry;
+            if (i < segments.length - 1) {
+                Object nested = fieldProps.get("properties");
+                if (!(nested instanceof Map)) {
+                    return null;
+                }
+                current = (Map<String, Object>) nested;
+            } else {
+                String targetType = (String) fieldProps.get("type");
+                if ("alias".equals(targetType)) {
+                    return resolveAliasType((String) fieldProps.get("path"), rootProperties, typeFactory);
+                }
+                return buildLeafType(targetType, typeFactory);
+            }
+        }
+        return null;
     }
 }

@@ -48,6 +48,7 @@ public class OpenSearchSchemaBuilderTests extends OpenSearchTestCase {
         assertNotNull("Table test_index should exist in schema", table);
 
         RelDataType rowType = table.getRowType(new org.apache.calcite.jdbc.JavaTypeFactoryImpl());
+        
         assertEquals(3, rowType.getFieldCount());
 
         assertFieldType(rowType, "name", SqlTypeName.VARCHAR);
@@ -126,7 +127,7 @@ public class OpenSearchSchemaBuilderTests extends OpenSearchTestCase {
         assertNotNull(table);
 
         RelDataType rowType = table.getRowType(new org.apache.calcite.jdbc.JavaTypeFactoryImpl());
-        assertEquals("Should only have 'name' field, skipping object/nested", 1, rowType.getFieldCount());
+        assertEquals("Should only have .name. field, skipping object/nested", 1, rowType.getFieldCount());
         assertFieldType(rowType, "name", SqlTypeName.VARCHAR);
     }
 
@@ -343,6 +344,70 @@ public class OpenSearchSchemaBuilderTests extends OpenSearchTestCase {
         assertFieldType(rowType, "name", SqlTypeName.VARCHAR);
         assertNull("Multi-field 'raw' is not currently surfaced as a column", rowType.getField("name.raw", true, false));
         assertNull("Multi-field 'loc' is not currently surfaced as a column", rowType.getField("name.loc", true, false));
+    }
+
+    /**
+     * Metadata fields (_id, _routing) are appended to every table's row type even when
+     * the user mapping doesn't declare them. They're parquet-resident system columns
+     * written by MetadataFieldPlugin.
+     */
+    public void DISABLED_testMetadataFieldsAppendedToRowType() throws Exception {
+        ClusterState clusterState = buildClusterState(Map.of("meta_idx", Map.of("title", "keyword")));
+
+        SchemaPlus schema = OpenSearchSchemaBuilder.buildSchema(clusterState);
+        Table table = schema.getTable("meta_idx");
+        assertNotNull(table);
+
+        RelDataType rowType = table.getRowType(new org.apache.calcite.jdbc.JavaTypeFactoryImpl());
+        assertFieldType(rowType, "_id", SqlTypeName.VARBINARY);
+        assertFieldType(rowType, "_routing", SqlTypeName.VARCHAR);
+        assertFieldType(rowType, "title", SqlTypeName.VARCHAR);
+    }
+
+    /**
+     * Metadata fields don't collide with user fields of the same name.
+     * Edge case: a user mapping declares a field named "_id" (unusual but legal).
+     * The user field takes precedence since it's added first in addLeafFields;
+     * appendMetadataFields won't overwrite because Calcite's builder appends.
+     * Both end up in the row type — Calcite permits duplicate names but the first
+     * encountered wins in field lookup.
+     */
+    public void DISABLED_testUserFieldNamedIdTakesPrecedence() throws Exception {
+        ClusterState clusterState = buildClusterState(Map.of("collision_idx", Map.of("_id", "keyword", "name", "text")));
+
+        SchemaPlus schema = OpenSearchSchemaBuilder.buildSchema(clusterState);
+        Table table = schema.getTable("collision_idx");
+        assertNotNull(table);
+
+        RelDataType rowType = table.getRowType(new org.apache.calcite.jdbc.JavaTypeFactoryImpl());
+        // First _id field is the user-declared VARCHAR (keyword), not the system VARBINARY.
+        RelDataTypeField idField = rowType.getField("_id", true, false);
+        assertNotNull(idField);
+        assertEquals(SqlTypeName.VARCHAR, idField.getType().getSqlTypeName());
+    }
+
+    /**
+     * Alias fields are NOT added to the schema — the SQL/PPL frontend handles them
+     * via AliasFieldsWrappable (wrapping Project above the scan). The schema builder
+     * drops them so the scan row type only contains physical columns.
+     */
+    public void testAliasFieldsNotAddedToSchema() throws Exception {
+        String mapping = "{\"properties\":{"
+            + "\"timestamp\":{\"type\":\"date\"},"
+            + "\"@timestamp\":{\"type\":\"alias\",\"path\":\"timestamp\"},"
+            + "\"message\":{\"type\":\"keyword\"}"
+            + "}}";
+        ClusterState clusterState = buildClusterStateRaw("alias_idx", mapping);
+
+        SchemaPlus schema = OpenSearchSchemaBuilder.buildSchema(clusterState);
+        Table table = schema.getTable("alias_idx");
+        assertNotNull(table);
+
+        RelDataType rowType = table.getRowType(new org.apache.calcite.jdbc.JavaTypeFactoryImpl());
+        assertFieldType(rowType, "timestamp", SqlTypeName.TIMESTAMP);
+        assertFieldType(rowType, "message", SqlTypeName.VARCHAR);
+        assertNull("Alias @timestamp should NOT be in the scan row type",
+            rowType.getField("@timestamp", true, false));
     }
 
     /**

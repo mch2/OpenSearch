@@ -41,6 +41,7 @@ public class FieldStorageResolver {
     private static final String LUCENE_FORMAT = "lucene";
 
     private final Map<String, FieldStorageInfo> fieldStorage;
+    private final Map<String, String> aliasToTarget;
 
     /**
      * Test constructor — explicit per-field storage, bypasses IndexMetadata inference.
@@ -52,6 +53,7 @@ public class FieldStorageResolver {
      */
     FieldStorageResolver(Map<String, FieldStorageInfo> fieldStorage) {
         this.fieldStorage = new HashMap<>(fieldStorage);
+        this.aliasToTarget = Map.of();
     }
 
     @SuppressWarnings("unchecked")
@@ -72,7 +74,25 @@ public class FieldStorageResolver {
         }
 
         this.fieldStorage = new HashMap<>();
+        this.aliasToTarget = new HashMap<>();
         populateFromProperties(properties, "", primaryFormat, luceneAvailable);
+        populateMetadataFields(primaryFormat);
+    }
+
+    /**
+     * Registers system metadata fields that the parquet data format plugin materializes
+     * for every document but are not declared in the user mapping's {@code properties}.
+     * The set mirrors {@code MetadataFieldPlugin.getParquetFields()}.
+     */
+    private void populateMetadataFields(String primaryFormat) {
+        fieldStorage.put("_id", new FieldStorageInfo(
+            "_id", "binary", FieldType.fromMappingType("binary"),
+            List.of(primaryFormat), List.of(), List.of(), false
+        ));
+        fieldStorage.put("_routing", new FieldStorageInfo(
+            "_routing", "keyword", FieldType.fromMappingType("keyword"),
+            List.of(primaryFormat), List.of(), List.of(), false
+        ));
     }
 
     @SuppressWarnings("unchecked")
@@ -82,8 +102,6 @@ public class FieldStorageResolver {
             Map<String, Object> fieldProps = (Map<String, Object>) entry.getValue();
             String fieldType = (String) fieldProps.get("type");
             if (fieldType == null) {
-                // Implicit "object" type — OpenSearch infers it from presence of "properties".
-                // Recurse into the sub-mapping; object fields themselves have no storage.
                 Map<String, Object> nested = (Map<String, Object>) fieldProps.get("properties");
                 if (nested != null) {
                     populateFromProperties(nested, fieldName, primaryFormat, luceneAvailable);
@@ -91,21 +109,39 @@ public class FieldStorageResolver {
                 }
                 throw new IllegalStateException("Field [" + fieldName + "] has no type in mapping");
             }
+            if ("alias".equals(fieldType)) {
+                String targetPath = (String) fieldProps.get("path");
+                if (targetPath != null) {
+                    aliasToTarget.put(fieldName, targetPath);
+                }
+                continue;
+            }
             this.fieldStorage.put(fieldName, resolveField(fieldName, fieldType, fieldProps, primaryFormat, luceneAvailable));
         }
     }
 
-    /** Resolves storage info for the requested fields in order. */
+    /** Resolves storage info for the requested fields in order. Alias fields resolve to their target's storage. */
     public List<FieldStorageInfo> resolve(List<String> fieldNames) {
         List<FieldStorageInfo> result = new ArrayList<>(fieldNames.size());
         for (String fieldName : fieldNames) {
             FieldStorageInfo info = fieldStorage.get(fieldName);
+            if (info == null) {
+                String target = aliasToTarget.get(fieldName);
+                if (target != null) {
+                    info = fieldStorage.get(target);
+                }
+            }
             if (info == null) {
                 throw new IllegalStateException("Field [" + fieldName + "] not found in field storage for index");
             }
             result.add(info);
         }
         return result;
+    }
+
+    /** Returns the alias→target map. Used by plan rewrites to redirect alias column references. */
+    public Map<String, String> getAliasMap() {
+        return aliasToTarget;
     }
 
     private static FieldStorageInfo resolveField(

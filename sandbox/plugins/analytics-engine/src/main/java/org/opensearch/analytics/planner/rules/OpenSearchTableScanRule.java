@@ -24,6 +24,7 @@ import org.opensearch.cluster.metadata.IndexMetadata;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Converts {@link TableScan} → {@link OpenSearchTableScan}.
@@ -59,9 +60,11 @@ public class OpenSearchTableScanRule extends RelOptRule {
         CapabilityRegistry registry = context.getCapabilityRegistry();
         FieldStorageResolver fieldStorageResolver = registry.resolveFieldStorage(indexMetadata);
 
-        // TODO : This expects the FrontEnds to attach the row type with all fields.
-        // TODO : How will they attach if we perform the index resolution
-        List<String> fieldNames = scan.getRowType().getFieldList().stream().map(RelDataTypeField::getName).toList();
+        Map<String, String> aliasMap = fieldStorageResolver.getAliasMap();
+        List<String> fieldNames = scan.getRowType().getFieldList().stream()
+            .map(RelDataTypeField::getName)
+            .map(name -> aliasMap.getOrDefault(name, name))
+            .toList();
         List<FieldStorageInfo> fieldStorage = fieldStorageResolver.resolve(fieldNames);
 
         // Viable backends: must be able to read ALL requested fields
@@ -106,14 +109,6 @@ public class OpenSearchTableScanRule extends RelOptRule {
         );
     }
 
-    /**
-     * Wraps a {@link RelOptTable} with just the bare index name as the qualified name.
-     * Isthmus reads {@code getQualifiedName()} when creating {@code NamedScan} — this ensures
-     * the Substrait plan contains only the index name, not the Calcite catalog prefix.
-     *
-     * <p>TODO: Move table name stripping to the SQL/PPL plugin before dispatching the RelNode
-     * to the analytics engine, so the scan rule always receives bare index names.
-     */
     private static class IndexNameTable extends RelOptAbstractTable {
         IndexNameTable(RelOptTable delegate, String indexName) {
             super(delegate.getRelOptSchema(), indexName, delegate.getRowType());
