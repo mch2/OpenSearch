@@ -573,6 +573,15 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
             // SystemLimit + LogicalSort with offset/fetch lower to a Substrait Fetch rel.
             // Used by the implicit query-size limit at the top of every analytics-engine plan
             // and by user-level `head N` clauses; both arrive here when attached above a Union.
+            //
+            // Calcite LogicalSort with BOTH collation AND fetch is split by isthmus into
+            // Fetch(Sort(child)). A flat swap of Fetch.input would drop the inner Sort entirely,
+            // shipping unsorted rows past the Limit. Drill through to the Sort and replace its
+            // input instead.
+            if (fetch.getInput() instanceof Sort innerSort) {
+                Rel rewiredSort = Sort.builder().from(innerSort).input(newInput).build();
+                return Fetch.builder().from(fetch).input(rewiredSort).build();
+            }
             return Fetch.builder().from(fetch).input(newInput).build();
         }
         throw new UnsupportedOperationException(

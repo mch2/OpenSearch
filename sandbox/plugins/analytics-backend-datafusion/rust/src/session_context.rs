@@ -26,6 +26,7 @@ use datafusion::{
     prelude::*,
 };
 use log::error;
+use native_bridge_common::log_info;
 use object_store::ObjectMeta;
 
 use crate::api::{DataFusionRuntime, ShardView};
@@ -357,15 +358,15 @@ pub async fn prepare_partial_plan(
     let logical_plan = from_substrait_plan(&handle.ctx.state(), &plan).await?;
     let dataframe = handle.ctx.execute_logical_plan(logical_plan).await?;
     let physical_plan = dataframe.create_physical_plan().await?;
-    error!(
-        "prepare_partial_plan: BEFORE stripping:\n{}",
+    log_info!(
+        "[shard] prepare_partial_plan: BEFORE stripping:\n{}",
         datafusion::physical_plan::displayable(physical_plan.as_ref()).indent(true)
     );
     let target_schema = crate::schema_coerce::coerce_inferred_schema(physical_plan.schema());
     let physical_plan = crate::relabel_exec::wrap_if_relabel_needed(physical_plan, target_schema)?;
     let stripped = crate::agg_mode::apply_aggregate_mode(physical_plan, crate::agg_mode::Mode::Partial)?;
-    error!(
-        "prepare_partial_plan: AFTER stripping to Partial:\n{}",
+    log_info!(
+        "[shard] prepare_partial_plan: AFTER stripping to Partial:\n{}",
         datafusion::physical_plan::displayable(stripped.as_ref()).indent(true)
     );
     handle.prepared_plan = Some(stripped);

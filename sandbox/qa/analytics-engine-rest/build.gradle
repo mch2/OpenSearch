@@ -75,6 +75,10 @@ def configureAnalyticsCluster = { cluster ->
 
     // analytics-engine requires the streaming transport — fragment dispatch is streaming-only.
     cluster.systemProperty 'opensearch.experimental.feature.transport.stream.enabled', 'true'
+
+    // Enable DEBUG-level logging for the Rust→Java logger bridge so log_debug! plan
+    // dumps from query_executor / prepare_final_plan reach OpenSearch logs.
+    cluster.setting 'logger.org.opensearch.nativebridge.spi.RustLoggerBridge', 'DEBUG'
 }
 
 // ── Default integTest cluster ────────────────────────────────────────────────

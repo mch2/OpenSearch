@@ -38,7 +38,7 @@ use datafusion::execution::{SendableRecordBatchStream, SessionStateBuilder};
 use datafusion::physical_plan::displayable;
 use datafusion::physical_plan::streaming::PartitionStream;
 use datafusion::prelude::{SessionConfig, SessionContext};
-use native_bridge_common::log_debug;
+use native_bridge_common::{log_debug, log_info};
 use datafusion_substrait::logical_plan::consumer::from_substrait_plan;
 use prost::Message;
 use substrait::proto::Plan;
@@ -192,6 +192,45 @@ impl LocalSession {
             .map_err(|e| DataFusionError::Execution(format!("execute_substrait: {}", e)))
     }
 
+    /// Decodes the Substrait bytes and emits the logical + physical plans as INFO
+    /// logs through the Java RustLoggerBridge.
+    ///
+    /// Call this from the IO runtime before `execute_substrait` is dispatched to
+    /// the CPU executor. The CPU executor's worker threads are not pre-attached
+    /// to the JVM, so any FFM upcall (including a log) from inside that spawn
+    /// permanently attaches the worker — tripping the test framework's thread-leak
+    /// check (see PR #21646's second commit). The IO runtime is driven by the
+    /// already-attached Java search thread, so logging here is safe.
+    ///
+    /// Errors during decoding or planning are swallowed — this is a debug aid,
+    /// not part of the execution contract.
+    pub async fn log_substrait_plan(&self, bytes: &[u8]) {
+        let plan = match Plan::decode(bytes) {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let logical_plan = match from_substrait_plan(&self.ctx.state(), &plan).await {
+            Ok(lp) => lp,
+            Err(_) => return,
+        };
+        log_info!(
+            "[reduce] execute_substrait: logical plan:\n{}",
+            logical_plan.display_indent()
+        );
+        let dataframe = match self.ctx.execute_logical_plan(logical_plan).await {
+            Ok(df) => df,
+            Err(_) => return,
+        };
+        let physical_plan = match dataframe.create_physical_plan().await {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        log_info!(
+            "[reduce] execute_substrait: physical plan:\n{}",
+            displayable(physical_plan.as_ref()).indent(true)
+        );
+    }
+
     /// Returns the memory pool the session's `RuntimeEnv` was built with.
     ///
     /// Used by the bridge layer to seed a per-query tracking context so
@@ -217,11 +256,11 @@ impl LocalSession {
             ))
         })?;
         let logical_plan = from_substrait_plan(&self.ctx.state(), &plan).await?;
-        log_debug!("DataFusion logical plan (reduce):\n{}", logical_plan.display_indent());
+        log_info!("[reduce] prepare_final_plan: logical plan:\n{}", logical_plan.display_indent());
         let dataframe = self.ctx.execute_logical_plan(logical_plan).await?;
         let physical_plan = dataframe.create_physical_plan().await?;
-        log::error!(
-            "prepare_final_plan: BEFORE stripping:\n{}",
+        log_info!(
+            "[reduce] prepare_final_plan: BEFORE stripping:\n{}",
             displayable(physical_plan.as_ref()).indent(true)
         );
         let target_schema = crate::schema_coerce::coerce_inferred_schema(physical_plan.schema());
@@ -230,8 +269,8 @@ impl LocalSession {
             physical_plan,
             crate::agg_mode::Mode::Final,
         )?;
-        log::error!(
-            "prepare_final_plan: AFTER stripping to Final:\n{}",
+        log_info!(
+            "[reduce] prepare_final_plan: AFTER stripping to Final:\n{}",
             displayable(stripped.as_ref()).indent(true)
         );
         self.prepared_plan = Some(stripped);

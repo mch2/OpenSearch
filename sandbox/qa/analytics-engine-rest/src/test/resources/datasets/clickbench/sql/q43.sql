@@ -1,0 +1,1 @@
+SELECT DATE_FORMAT(EventTime, '%Y-%m-%d %H:00:00') AS M, COUNT(*) AS PageViews FROM clickbench WHERE CounterID = 62 AND EventDate >= '2013-07-01 00:00:00' AND EventDate <= '2013-07-15 00:00:00' AND IsRefresh = 0 AND DontCountHits = 0 GROUP BY M ORDER BY M LIMIT 10 OFFSET 1000

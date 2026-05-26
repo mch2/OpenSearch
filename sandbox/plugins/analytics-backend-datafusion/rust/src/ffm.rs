@@ -466,6 +466,14 @@ pub unsafe extern "C" fn df_execute_local_plan(
             let partition_weight = (num_cpus::get() as u32).max(1);
             let permit = coord_gate.acquire_many(partition_weight.min(coord_gate.max_permits())).await;
 
+            // Log the reduce-stage logical + physical plan on the IO runtime
+            // (Java thread), before dispatching execution to the CPU executor.
+            // See LocalSession::log_substrait_plan for why logging here vs.
+            // inside execute_substrait matters for thread-leak safety.
+            unsafe {
+                let session = &*(session_ptr as *const crate::local_executor::LocalSession);
+                session.log_substrait_plan(&bytes_vec).await;
+            }
 
             let inner_fut = async move {
                 unsafe {

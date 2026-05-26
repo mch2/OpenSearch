@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use native_bridge_common::log_debug;
+use native_bridge_common::{log_debug, log_info};
 use datafusion::{
     common::DataFusionError,
     datasource::listing::{ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl},
@@ -219,12 +219,12 @@ pub async fn execute_with_context(
 
         // Union schema widening was applied at table registration (session_context::widen_to_union_schema).
         let logical_plan = from_substrait_plan(&handle.ctx.state(), &substrait_plan).await?;
-        log_debug!("DataFusion logical plan:\n{}", logical_plan.display_indent());
+        log_info!("[shard] execute_with_context: logical plan:\n{}", logical_plan.display_indent());
         let dataframe = handle.ctx.execute_logical_plan(logical_plan).await?;
         let physical_plan = dataframe.create_physical_plan().await?;
         let target_schema = crate::schema_coerce::coerce_inferred_schema(physical_plan.schema());
         let physical_plan = crate::relabel_exec::wrap_if_relabel_needed(physical_plan, target_schema)?;
-        log_debug!("DataFusion physical plan:\n{}", displayable(physical_plan.as_ref()).indent(true));
+        log_info!("[shard] execute_with_context: physical plan:\n{}", displayable(physical_plan.as_ref()).indent(true));
 
         let df_stream = execute_stream(physical_plan, handle.ctx.task_ctx()).map_err(|e| {
             error!("execute_with_context: failed to create stream: {}", e);
