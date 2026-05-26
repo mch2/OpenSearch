@@ -28,6 +28,7 @@ import org.opensearch.ppl.action.PPLRequest;
 import org.opensearch.ppl.action.PPLResponse;
 import org.opensearch.ppl.action.UnifiedPPLExecuteAction;
 import org.opensearch.test.OpenSearchIntegTestCase;
+import org.opensearch.test.junit.annotations.TestLogging;
 import org.opensearch.test.transport.MockTransportService;
 
 import java.util.Collection;
@@ -50,6 +51,7 @@ import java.util.concurrent.TimeUnit;
  * filtering semantics under controlled mock inputs.
  */
 @OpenSearchIntegTestCase.ClusterScope(scope = OpenSearchIntegTestCase.Scope.TEST, numDataNodes = 2, numClientNodes = 0, supportsDedicatedMasters = false)
+@TestLogging(reason = "verify can-match prune fires", value = "org.opensearch.analytics.exec.stage.shard.ShardFragmentStageExecution:DEBUG")
 public class CanMatchPreFilterIT extends OpenSearchIntegTestCase {
 
     private static final String INDEX = "canmatch_idx";

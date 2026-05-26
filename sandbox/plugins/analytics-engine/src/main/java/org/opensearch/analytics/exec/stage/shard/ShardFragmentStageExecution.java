@@ -18,7 +18,6 @@ import org.opensearch.analytics.exec.StreamingResponseListener;
 import org.opensearch.analytics.exec.action.FragmentExecutionArrowResponse;
 import org.opensearch.analytics.exec.action.FragmentExecutionRequest;
 import org.opensearch.analytics.exec.canmatch.CanMatchFilter;
-import org.opensearch.analytics.exec.canmatch.CanMatchFilterExtractor;
 import org.opensearch.analytics.exec.canmatch.CanMatchPreFilterPhase;
 import org.opensearch.analytics.exec.stage.AbstractStageExecution;
 import org.opensearch.analytics.exec.stage.DataProducer;
@@ -96,10 +95,10 @@ public class ShardFragmentStageExecution extends AbstractStageExecution implemen
      * target list — pruning is best-effort and must never produce incorrect results.
      */
     private List<ExecutionTarget> applyCanMatchFilter(List<ExecutionTarget> targets) {
-        if (targets.isEmpty() || stage.getFragment() == null) {
+        if (targets.isEmpty()) {
             return targets;
         }
-        List<CanMatchFilter> filters = CanMatchFilterExtractor.extract(stage.getFragment());
+        List<CanMatchFilter> filters = stage.getCanMatchFilters();
         String backendId = resolveBackendId();
         return applyCanMatchFilter(targets, filters, backendId, new CanMatchPreFilterPhase(dispatcher.streamTransportService()), CAN_MATCH_TIMEOUT);
     }

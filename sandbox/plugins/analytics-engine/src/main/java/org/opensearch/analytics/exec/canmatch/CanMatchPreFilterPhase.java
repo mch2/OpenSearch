@@ -85,6 +85,7 @@ public class CanMatchPreFilterPhase {
             }
 
             AnalyticsCanMatchRequest request = new AnalyticsCanMatchRequest(shardTarget.shardId(), filterBytes, backendId);
+            logger.info("can-match dispatch shard={} node={} backend={}", shardTarget.shardId(), shardTarget.node().getName(), backendId);
             transportService.sendRequest(
                 shardTarget.node(),
                 AnalyticsCanMatchAction.NAME,
