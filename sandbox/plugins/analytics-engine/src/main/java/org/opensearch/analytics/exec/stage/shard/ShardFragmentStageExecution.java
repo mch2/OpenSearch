@@ -91,6 +91,16 @@ public class ShardFragmentStageExecution extends AbstractStageExecution implemen
      * <p>Failure modes (timeout, transport error, no extractable filters, unknown backend)
      * fall back to the full target list — pruning is best-effort and must never produce
      * incorrect results.
+     *
+     * <p>TODO(canmatch-as-stage): lift can-match into its own coordinator-side stage that
+     * produces a target manifest consumed via {@code TargetResolver.resolve(state, manifest)}.
+     * Wins: stage-level metrics + lifecycle (start/end, cancel cascade, retry); composes
+     * naturally with future pre-filter phases (bloom, partition pruning); separates "what
+     * shards exist" from "what shards can match" inside this class. Defer until either a
+     * second pre-filter phase lands, can-match metrics become load-bearing, or
+     * cancellation correctness needs to abort in-flight dispatch deterministically. The
+     * {@code TargetResolver.resolve(state, manifest)} signature already accepts a manifest
+     * argument — it's half-built for this.
      */
     @Override
     protected void materializeTasksAsync(ActionListener<List<StageTask>> listener) {
