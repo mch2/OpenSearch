@@ -40,5 +40,6 @@
       75,
       "openai chatgpt"
     ]
-  ]
+  ],
+  "tolerance": 1
 }
