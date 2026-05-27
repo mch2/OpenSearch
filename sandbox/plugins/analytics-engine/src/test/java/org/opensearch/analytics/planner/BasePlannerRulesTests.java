@@ -40,6 +40,7 @@ import org.opensearch.analytics.spi.FieldStorageInfo;
 import org.opensearch.analytics.spi.FieldType;
 import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.metadata.IndexMetadata;
+import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
 import org.opensearch.cluster.metadata.MappingMetadata;
 import org.opensearch.cluster.metadata.Metadata;
 import org.opensearch.cluster.routing.GroupShardsIterator;
@@ -47,6 +48,7 @@ import org.opensearch.cluster.routing.OperationRouting;
 import org.opensearch.cluster.routing.ShardIterator;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.settings.Settings;
+import org.opensearch.common.util.concurrent.ThreadContext;
 import org.opensearch.core.index.Index;
 import org.opensearch.index.engine.dataformat.FieldTypeCapabilities;
 import org.opensearch.index.engine.dataformat.ReaderManagerConfig;
@@ -143,6 +145,7 @@ public abstract class BasePlannerRulesTests extends OpenSearchTestCase {
         IndexMetadata indexMetadata = mock(IndexMetadata.class);
         when(indexMetadata.getIndex()).thenReturn(new Index("test_index", "uuid"));
         when(indexMetadata.getNumberOfShards()).thenReturn(shardCount);
+        when(indexMetadata.getSettings()).thenReturn(Settings.EMPTY);
         when(metadata.index("test_index")).thenReturn(indexMetadata);
         when(clusterState.metadata()).thenReturn(metadata);
 
@@ -181,6 +184,22 @@ public abstract class BasePlannerRulesTests extends OpenSearchTestCase {
         Map<String, Map<String, Object>> fieldMappings,
         List<AnalyticsSearchBackendPlugin> backends
     ) {
+        return buildContextPerIndex(primaryFormat, shardCountByIndex, Map.of(), fieldMappings, backends);
+    }
+
+    /**
+     * Per-index context with extra index-scoped settings overrides per index. Each entry in
+     * {@code extraSettingsByIndex} is layered on top of the default composite-format
+     * settings for that index.
+     */
+    @SuppressWarnings("unchecked")
+    protected PlannerContext buildContextPerIndex(
+        String primaryFormat,
+        Map<String, Integer> shardCountByIndex,
+        Map<String, Settings> extraSettingsByIndex,
+        Map<String, Map<String, Object>> fieldMappings,
+        List<AnalyticsSearchBackendPlugin> backends
+    ) {
         Map<String, Object> mappingSource = Map.of("properties", fieldMappings);
 
         Metadata metadata = mock(Metadata.class);
@@ -196,12 +215,14 @@ public abstract class BasePlannerRulesTests extends OpenSearchTestCase {
 
             IndexMetadata indexMetadata = mock(IndexMetadata.class);
             when(indexMetadata.getIndex()).thenReturn(new Index(indexName, indexName + "-uuid"));
-            when(indexMetadata.getSettings()).thenReturn(
-                Settings.builder()
-                    .put("index.composite.primary_data_format", primaryFormat)
-                    .putList("index.composite.secondary_data_formats", "lucene")
-                    .build()
-            );
+            Settings.Builder settingsBuilder = Settings.builder()
+                .put("index.composite.primary_data_format", primaryFormat)
+                .putList("index.composite.secondary_data_formats", "lucene");
+            Settings extra = extraSettingsByIndex.get(indexName);
+            if (extra != null) {
+                settingsBuilder.put(extra);
+            }
+            when(indexMetadata.getSettings()).thenReturn(settingsBuilder.build());
             when(indexMetadata.mapping()).thenReturn(mappingMetadata);
             when(indexMetadata.getNumberOfShards()).thenReturn(shardCount);
 
@@ -324,6 +345,9 @@ public abstract class BasePlannerRulesTests extends OpenSearchTestCase {
     }
 
     // ---- Cluster service ----
+
+    /** Default resolver for DAGBuilder in tests; production injects core's resolver. */
+    protected static final IndexNameExpressionResolver TEST_RESOLVER = new IndexNameExpressionResolver(new ThreadContext(Settings.EMPTY));
 
     protected ClusterService mockClusterService() {
         ClusterService clusterService = mock(ClusterService.class);
