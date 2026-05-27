@@ -1,0 +1,44 @@
+{
+  "rows": [
+    [
+      79,
+      "docker tutorial"
+    ],
+    [
+      66,
+      "rust programming"
+    ],
+    [
+      74,
+      "python tutorial"
+    ],
+    [
+      59,
+      "best restaurants"
+    ],
+    [
+      75,
+      "cheap flights"
+    ],
+    [
+      72,
+      "clickhouse benchmark"
+    ],
+    [
+      64,
+      "machine learning"
+    ],
+    [
+      61,
+      "opensearch"
+    ],
+    [
+      75,
+      "openai chatgpt"
+    ],
+    [
+      65,
+      "weather today"
+    ]
+  ]
+}
