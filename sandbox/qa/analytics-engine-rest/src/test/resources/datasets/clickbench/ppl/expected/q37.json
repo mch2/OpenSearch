@@ -1,10 +1,6 @@
 {
   "rows": [
     [
-      4,
-      "https://www.google.com/maps"
-    ],
-    [
       2,
       "https://google.com/search?q=test"
     ],
@@ -17,24 +13,28 @@
       "https://example.com/products/widget-123"
     ],
     [
-      2,
-      "https://news.google.com/article/123"
+      5,
+      "https://example.com/page2"
+    ],
+    [
+      4,
+      "https://www.google.com/maps"
     ],
     [
       3,
       "https://github.com/opensearch"
     ],
     [
-      1,
-      "https://test.org/home"
+      2,
+      "https://news.google.com/article/123"
     ],
     [
       6,
       "https://docs.aws.amazon.com"
     ],
     [
-      5,
-      "https://example.com/page2"
+      1,
+      "https://test.org/home"
     ]
   ]
 }

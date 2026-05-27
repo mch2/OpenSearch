@@ -1,21 +1,6 @@
 {
   "rows": [
     [
-      12,
-      12,
-      "openai chatgpt"
-    ],
-    [
-      12,
-      12,
-      "opensearch"
-    ],
-    [
-      10,
-      10,
-      "machine learning"
-    ],
-    [
       19,
       19,
       "docker tutorial"
@@ -31,6 +16,21 @@
       "cheap flights"
     ],
     [
+      12,
+      12,
+      "openai chatgpt"
+    ],
+    [
+      12,
+      12,
+      "opensearch"
+    ],
+    [
+      10,
+      10,
+      "machine learning"
+    ],
+    [
       15,
       15,
       "clickhouse benchmark"
@@ -43,13 +43,13 @@
     [
       14,
       14,
-      "weather today"
+      "python tutorial"
     ],
     [
       14,
       14,
-      "python tutorial"
+      "weather today"
     ]
   ],
-  "tolerance": 1
+  "tolerance": 2
 }

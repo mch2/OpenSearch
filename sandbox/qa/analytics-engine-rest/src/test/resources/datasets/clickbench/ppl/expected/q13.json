@@ -1,6 +1,18 @@
 {
   "rows": [
     [
+      65,
+      "weather today"
+    ],
+    [
+      72,
+      "clickhouse benchmark"
+    ],
+    [
+      59,
+      "best restaurants"
+    ],
+    [
       79,
       "docker tutorial"
     ],
@@ -9,20 +21,8 @@
       "rust programming"
     ],
     [
-      74,
-      "python tutorial"
-    ],
-    [
-      59,
-      "best restaurants"
-    ],
-    [
       75,
-      "cheap flights"
-    ],
-    [
-      72,
-      "clickhouse benchmark"
+      "openai chatgpt"
     ],
     [
       64,
@@ -33,12 +33,12 @@
       "opensearch"
     ],
     [
-      75,
-      "openai chatgpt"
+      74,
+      "python tutorial"
     ],
     [
-      65,
-      "weather today"
+      75,
+      "cheap flights"
     ]
   ]
 }

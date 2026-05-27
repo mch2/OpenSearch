@@ -1,12 +1,12 @@
 {
   "rows": [
     [
-      17,
-      "best restaurants"
+      18,
+      "weather today"
     ],
     [
-      23,
-      "openai chatgpt"
+      22,
+      "cheap flights"
     ],
     [
       17,
@@ -18,15 +18,15 @@
     ],
     [
       23,
-      "clickhouse benchmark"
+      "openai chatgpt"
     ],
     [
-      18,
-      "weather today"
+      20,
+      "python tutorial"
     ],
     [
-      22,
-      "cheap flights"
+      17,
+      "best restaurants"
     ],
     [
       33,
@@ -37,8 +37,8 @@
       "rust programming"
     ],
     [
-      20,
-      "python tutorial"
+      23,
+      "clickhouse benchmark"
     ]
   ]
 }
