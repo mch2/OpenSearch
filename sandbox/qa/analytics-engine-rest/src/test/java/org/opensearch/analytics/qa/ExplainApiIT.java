@@ -16,9 +16,17 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Integration test for {@code POST /_plugins/_ppl/_explain}.
- * Verifies that the explain endpoint executes the query and returns
- * profiling information (stage timings, plan) alongside the normal results.
+ * Integration test for {@code POST /_analytics/ppl/_explain}.
+ *
+ * <p>Unlike the other QA ITs in this package, this one targets the {@code test-ppl-frontend}
+ * shim rather than the real {@code opensearch-sql} plugin. The shim's explain output ships
+ * a structured {@code profile} block ({@code query_id}, {@code execution_time_ms}, per-stage
+ * timing) that these tests assert against; the real plugin's {@code /_plugins/_ppl/_explain}
+ * returns just the Calcite plan text with no profile wrapper. Until the explain shape is
+ * unified (or these tests are rewritten against plain plan-text), keep them on the shim.
+ *
+ * <p>Verifies that the explain endpoint executes the query and returns profiling information
+ * (stage timings, plan) alongside the normal results.
  */
 public class ExplainApiIT extends AnalyticsRestTestCase {
 
@@ -47,8 +55,8 @@ public class ExplainApiIT extends AnalyticsRestTestCase {
         Map<String, Object> result = executeExplain("source=" + DATASET.indexName + " | fields str0, num0");
 
         // Should have normal query results
-        assertNotNull("schema present", result.get("schema"));
-        assertNotNull("rows present", result.get("datarows"));
+        assertNotNull("columns present", result.get("columns"));
+        assertNotNull("rows present", result.get("rows"));
 
         // Should have profile section
         Map<String, Object> profile = (Map<String, Object>) result.get("profile");
@@ -173,7 +181,7 @@ public class ExplainApiIT extends AnalyticsRestTestCase {
     }
 
     private Map<String, Object> executeExplain(String ppl) throws IOException {
-        Request request = new Request("POST", "/_plugins/_ppl/_explain");
+        Request request = new Request("POST", "/_analytics/ppl/_explain");
         request.setJsonEntity("{\"query\": \"" + escapeJson(ppl) + "\"}");
         Response response = client().performRequest(request);
         return assertOkAndParse(response, "EXPLAIN: " + ppl);

@@ -38,6 +38,11 @@ dependencies {
     testImplementation project(':sandbox:plugins:dsl-query-executor')
     testImplementation project(':sandbox:plugins:composite-engine')
     testImplementation project(':sandbox:plugins:parquet-data-format')
+    // test-ppl-frontend kept available so ExplainApiIT can hit /_analytics/ppl/_explain;
+    // its profile/stage-timing output isn't matched by the real opensearch-sql plugin's
+    // explain endpoint (returns plain Calcite plan text). All other QA tests use
+    // /_plugins/_ppl on the real plugin.
+    testImplementation project(':sandbox:plugins:test-ppl-frontend')
 
     // job-scheduler pulled from OpenSearch Snapshots (no local build).
     jobSchedulerPlugin "org.opensearch.plugin:opensearch-job-scheduler:3.7.0.0-SNAPSHOT@zip"
@@ -61,6 +66,9 @@ def configureAnalyticsCluster = { cluster ->
     cluster.plugin ':sandbox:plugins:dsl-query-executor'
     cluster.plugin ':sandbox:plugins:composite-engine'
     cluster.plugin ':sandbox:plugins:parquet-data-format'
+    // Shim — keeps /_analytics/ppl/_explain available for ExplainApiIT, which asserts on
+    // the shim's profile/stage-timing output that the real plugin doesn't emit.
+    cluster.plugin ':sandbox:plugins:test-ppl-frontend'
     // External plugins from Maven. job-scheduler must be installed before
     // opensearch-sql (which declares it in extended.plugins).
     cluster.plugin project.layout.file(provider { configurations.jobSchedulerPlugin.singleFile })
