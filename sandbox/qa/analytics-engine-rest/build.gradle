@@ -16,9 +16,6 @@ apply plugin: 'opensearch.rest-test'
 java { sourceCompatibility = JavaVersion.toVersion(25); targetCompatibility = JavaVersion.toVersion(25) }
 
 repositories {
-  // mavenLocal lets us consume locally-built opensearch-sql snapshots
-  // (run `./gradlew publishToMavenLocal` in the sibling opensearch-sql repo).
-  mavenLocal()
   maven {
     name = 'OpenSearch Snapshots'
     url = 'https://ci.opensearch.org/ci/dbc/snapshots/maven/'
@@ -42,10 +39,12 @@ dependencies {
     testImplementation project(':sandbox:plugins:composite-engine')
     testImplementation project(':sandbox:plugins:parquet-data-format')
 
-    // Real PPL/SQL plugin + its mandatory dependency. Both pulled from the
-    // OpenSearch Snapshots repo (or ~/.m2 if locally published).
+    // job-scheduler pulled from OpenSearch Snapshots (no local build).
     jobSchedulerPlugin "org.opensearch.plugin:opensearch-job-scheduler:3.7.0.0-SNAPSHOT@zip"
-    sqlPlugin "org.opensearch.plugin:opensearch-sql-plugin:3.7.0.0-SNAPSHOT@zip"
+    // opensearch-sql consumed directly from ~/.m2 (avoids gradle's snapshot-merge
+    // behavior overriding our locally-published version with the CI snapshot).
+    // Refresh via: `./gradlew :opensearch-sql-plugin:publishToMavenLocal` in the sql repo.
+    sqlPlugin files("${System.getProperty('user.home')}/.m2/repository/org/opensearch/plugin/opensearch-sql-plugin/3.7.0.0-SNAPSHOT/opensearch-sql-plugin-3.7.0.0-SNAPSHOT.zip")
 }
 
 // ── Shared cluster configuration closure ─────────────────────────────────────
@@ -91,6 +90,11 @@ def configureAnalyticsCluster = { cluster ->
 
     // Enable pluggable dataformat feature flag
     cluster.systemProperty 'opensearch.experimental.feature.pluggable.dataformat.enabled', 'true'
+
+    // Cluster-level opt-in: opensearch-sql plugin's RestUnifiedQueryAction#isAnalyticsIndex
+    // gates on this — when true it routes every PPL/SQL query to the analytics-engine path
+    // (bypassing the per-index lookup that doesn't handle aliases, wildcards, or comma-lists).
+    cluster.setting 'cluster.pluggable.dataformat.enabled', 'true'
 
     // analytics-engine requires the streaming transport — fragment dispatch is streaming-only.
     cluster.systemProperty 'opensearch.experimental.feature.transport.stream.enabled', 'true'
