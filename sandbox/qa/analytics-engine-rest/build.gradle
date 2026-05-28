@@ -92,9 +92,10 @@ def configureAnalyticsCluster = { cluster ->
     cluster.systemProperty 'opensearch.experimental.feature.pluggable.dataformat.enabled', 'true'
 
     // Cluster-level opt-in: opensearch-sql plugin's RestUnifiedQueryAction#isAnalyticsIndex
-    // gates on this — when true it routes every PPL/SQL query to the analytics-engine path
-    // (bypassing the per-index lookup that doesn't handle aliases, wildcards, or comma-lists).
-    cluster.setting 'cluster.pluggable.dataformat.enabled', 'true'
+    // gates on this — when set to "composite" it routes every PPL/SQL query to the
+    // analytics-engine path (bypassing the per-index lookup that doesn't handle aliases,
+    // wildcards, or comma-lists).
+    cluster.setting 'cluster.pluggable.dataformat', 'composite'
 
     // analytics-engine requires the streaming transport — fragment dispatch is streaming-only.
     cluster.systemProperty 'opensearch.experimental.feature.transport.stream.enabled', 'true'
