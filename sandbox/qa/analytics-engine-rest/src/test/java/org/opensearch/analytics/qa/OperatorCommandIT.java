@@ -220,19 +220,19 @@ public class OperatorCommandIT extends AnalyticsRestTestCase {
         );
     }
 
-    /** MOD on zero divisor follows IEEE 754 for fp: {@code num0 % 0} → NaN (serialized as string). */
+    /** MOD on zero divisor → NaN, which opensearch-sql renders as JSON null (not "NaN" string). */
     public void testArithmeticModByZero() throws IOException {
         assertSingleRowField(
             "source=" + DATASET.indexName + " | where key = 'key00' | eval r = num0 % 0 | fields r",
-            "NaN"
+            null
         );
     }
 
-    /** DIVIDE by zero follows IEEE 754 for fp: positive numerator over 0 → +Infinity (serialized as string). */
+    /** DIVIDE by zero → ±Infinity, which opensearch-sql renders as JSON null. */
     public void testArithmeticDivideByZero() throws IOException {
         assertSingleRowField(
             "source=" + DATASET.indexName + " | where key = 'key00' | eval q = num0 / 0 | fields q",
-            "Infinity"
+            null
         );
     }
 

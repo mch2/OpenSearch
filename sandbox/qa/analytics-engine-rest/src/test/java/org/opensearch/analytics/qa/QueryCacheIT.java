@@ -250,7 +250,7 @@ public class QueryCacheIT extends AnalyticsRestTestCase {
     }
 
     private Map<String, Object> executePPL(String ppl) throws Exception {
-        Request request = new Request("POST", "/_analytics/ppl");
+        Request request = new Request("POST", "/_plugins/_ppl");
         request.setJsonEntity("{\"query\": \"" + ppl + "\"}");
         Response response = client().performRequest(request);
         return entityAsMap(response);
@@ -258,7 +258,7 @@ public class QueryCacheIT extends AnalyticsRestTestCase {
 
     @SuppressWarnings("unchecked")
     private void assertRowCount(Map<String, Object> result, long expectedCount) {
-        List<List<Object>> rows = (List<List<Object>>) result.get("rows");
+        List<List<Object>> rows = (List<List<Object>>) result.get("datarows");
         assertNotNull("rows must not be null", rows);
         assertEquals("scalar agg must return exactly 1 row", 1, rows.size());
         assertEquals(expectedCount, ((Number) rows.get(0).get(0)).longValue());

@@ -154,7 +154,7 @@ public class AliasIT extends AnalyticsRestTestCase {
     private long singleCount(String ppl) throws IOException {
         Map<String, Object> body = executePpl(ppl);
         @SuppressWarnings("unchecked")
-        List<List<Object>> rows = (List<List<Object>>) body.get("rows");
+        List<List<Object>> rows = (List<List<Object>>) body.get("datarows");
         assertNotNull("missing 'rows' for: " + ppl, rows);
         assertEquals("single count row expected: " + ppl, 1, rows.size());
         Object cell = rows.get(0).get(0);
@@ -163,14 +163,14 @@ public class AliasIT extends AnalyticsRestTestCase {
     }
 
     private Map<String, Object> executePpl(String ppl) throws IOException {
-        Request request = new Request("POST", "/_analytics/ppl");
+        Request request = new Request("POST", "/_plugins/_ppl");
         request.setJsonEntity("{\"query\": \"" + escapeJson(ppl) + "\"}");
         Response response = client().performRequest(request);
         return assertOkAndParse(response, "PPL: " + ppl);
     }
 
     private String executePplExpectingFailure(String ppl) throws IOException {
-        Request request = new Request("POST", "/_analytics/ppl");
+        Request request = new Request("POST", "/_plugins/_ppl");
         request.setJsonEntity("{\"query\": \"" + escapeJson(ppl) + "\"}");
         try {
             Response response = client().performRequest(request);

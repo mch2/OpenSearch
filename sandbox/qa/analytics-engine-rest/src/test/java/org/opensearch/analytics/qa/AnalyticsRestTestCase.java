@@ -78,7 +78,7 @@ public abstract class AnalyticsRestTestCase extends OpenSearchRestTestCase {
     /**
      * Extract column names from a PPL response's {@code schema} field. The real opensearch-sql
      * plugin emits {@code "schema": [{"name": "...", "type": "..."}, ...]} (vs. the legacy
-     * test-ppl-frontend shim's bare {@code "columns": [name, ...]}). Returns an empty list
+     * opensearch-sql shim's bare {@code "columns": [name, ...]}). Returns an empty list
      * if no schema is present.
      */
     @SuppressWarnings("unchecked")
