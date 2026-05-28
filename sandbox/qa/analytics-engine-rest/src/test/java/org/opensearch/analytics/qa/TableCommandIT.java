@@ -76,8 +76,8 @@ public class TableCommandIT extends AnalyticsRestTestCase {
             "source=" + DATASET.indexName + " | table *0 | head 1"
         );
         @SuppressWarnings("unchecked")
-        List<String> columns = (List<String>) response.get("columns");
-        assertNotNull("Response missing 'columns'", columns);
+        List<String> columns = extractColumnNames(response);
+        assertNotNull("Response missing 'schema'", columns);
         java.util.Set<String> actual = new java.util.HashSet<>(columns);
         java.util.Set<String> expected = new java.util.HashSet<>(
             java.util.Arrays.asList("num0", "str0", "int0", "bool0", "date0", "time0", "datetime0")
@@ -94,8 +94,8 @@ public class TableCommandIT extends AnalyticsRestTestCase {
             "source=" + DATASET.indexName + " | table - num0, num1, num2, num3, num4 | head 1"
         );
         @SuppressWarnings("unchecked")
-        List<String> columns = (List<String>) response.get("columns");
-        assertNotNull("Response missing 'columns'", columns);
+        List<String> columns = extractColumnNames(response);
+        assertNotNull("Response missing 'schema'", columns);
         for (String name : columns) {
             assertFalse("Excluded column should not appear: " + name, name.startsWith("num"));
         }
@@ -121,7 +121,7 @@ public class TableCommandIT extends AnalyticsRestTestCase {
     private void assertColumns(String ppl, String... expectedColumns) throws IOException {
         Map<String, Object> response = executePpl(ppl);
         @SuppressWarnings("unchecked")
-        List<String> columns = (List<String>) response.get("columns");
+        List<String> columns = extractColumnNames(response);
         assertNotNull("Response missing 'columns' for query: " + ppl, columns);
         assertEquals("Column count for query: " + ppl, expectedColumns.length, columns.size());
         for (int i = 0; i < expectedColumns.length; i++) {

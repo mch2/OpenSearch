@@ -43,8 +43,8 @@ public class StreamingCoordinatorReduceIT extends AnalyticsRestTestCase {
         Map<String, Object> result = executePPL("source = " + INDEX);
 
         @SuppressWarnings("unchecked")
-        List<String> columns = (List<String>) result.get("columns");
-        assertNotNull("columns must not be null", columns);
+        List<String> columns = extractColumnNames(result);
+        assertNotNull("schema must not be null", columns);
         assertTrue("columns must contain 'value', got " + columns, columns.contains("value"));
 
         @SuppressWarnings("unchecked")
@@ -235,8 +235,8 @@ public class StreamingCoordinatorReduceIT extends AnalyticsRestTestCase {
     /** Local copy of {@code CoordinatorReduceIT.scalarRows} (the original is package-private). */
     private static List<List<Object>> scalarRows(Map<String, Object> result, String columnName) {
         @SuppressWarnings("unchecked")
-        List<String> columns = (List<String>) result.get("columns");
-        assertNotNull("columns must not be null", columns);
+        List<String> columns = extractColumnNames(result);
+        assertNotNull("schema must not be null", columns);
         assertTrue("columns must contain '" + columnName + "', got " + columns, columns.contains(columnName));
 
         @SuppressWarnings("unchecked")

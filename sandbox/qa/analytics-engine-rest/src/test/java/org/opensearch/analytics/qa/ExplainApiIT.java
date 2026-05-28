@@ -47,7 +47,7 @@ public class ExplainApiIT extends AnalyticsRestTestCase {
         Map<String, Object> result = executeExplain("source=" + DATASET.indexName + " | fields str0, num0");
 
         // Should have normal query results
-        assertNotNull("columns present", result.get("columns"));
+        assertNotNull("schema present", result.get("schema"));
         assertNotNull("rows present", result.get("datarows"));
 
         // Should have profile section

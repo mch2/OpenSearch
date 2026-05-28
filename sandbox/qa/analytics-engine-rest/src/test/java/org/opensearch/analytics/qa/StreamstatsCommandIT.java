@@ -1041,10 +1041,10 @@ public class StreamstatsCommandIT extends AnalyticsRestTestCase {
                 + " | fields key, int0, sp, ss, vp, vs"
         );
         assertRowsEqual(response,
-            row("key00", 1,    0.0,                 Double.NaN,         0.0,                Double.NaN),
-            row("key01", null, 0.0,                 Double.NaN,         0.0,                Double.NaN),
-            row("key02", null, 0.0,                 Double.NaN,         0.0,                Double.NaN),
-            row("key03", null, 0.0,                 Double.NaN,         0.0,                Double.NaN),
+            row("key00", 1,    0.0,                 (Double) null,         0.0,                (Double) null),
+            row("key01", null, 0.0,                 (Double) null,         0.0,                (Double) null),
+            row("key02", null, 0.0,                 (Double) null,         0.0,                (Double) null),
+            row("key03", null, 0.0,                 (Double) null,         0.0,                (Double) null),
             row("key04", 7,    3.0,                 4.242640687119285,  9.0,                18.0),
             row("key05", 3,    2.494438257849294,   3.055050463303893,  6.222222222222221,  9.333333333333332),
             row("key06", 8,    2.8613807855648994,  3.304037933599835,  8.1875,             10.916666666666666),
@@ -1070,10 +1070,10 @@ public class StreamstatsCommandIT extends AnalyticsRestTestCase {
                 + " | fields key, int0, sp, ss, vp, vs"
         );
         assertRowsEqual(response,
-            row("key00", 1,    0.0,                 Double.NaN,         0.0,                Double.NaN),
-            row("key01", null, 0.0,                 Double.NaN,         0.0,                Double.NaN),
-            row("key02", null, 0.0,                 Double.NaN,         0.0,                Double.NaN),
-            row("key03", null, 0.0,                 Double.NaN,         0.0,                Double.NaN),
+            row("key00", 1,    0.0,                 (Double) null,         0.0,                (Double) null),
+            row("key01", null, 0.0,                 (Double) null,         0.0,                (Double) null),
+            row("key02", null, 0.0,                 (Double) null,         0.0,                (Double) null),
+            row("key03", null, 0.0,                 (Double) null,         0.0,                (Double) null),
             row("key04", 7,    3.0,                 4.242640687119285,  9.0,                18.0),
             row("key05", 3,    2.494438257849294,   3.055050463303893,  6.222222222222221,  9.333333333333332),
             row("key06", 8,    2.8613807855648994,  3.304037933599835,  8.1875,             10.916666666666666),
@@ -1099,16 +1099,16 @@ public class StreamstatsCommandIT extends AnalyticsRestTestCase {
                 + " | fields key, str0, int0, sp, ss, vp, vs"
         );
         assertRowsEqual(response,
-            row("key00", "FURNITURE",       1,    0.0,                 Double.NaN,         0.0,                Double.NaN),
-            row("key01", "FURNITURE",       null, 0.0,                 Double.NaN,         0.0,                Double.NaN),
+            row("key00", "FURNITURE",       1,    0.0,                 (Double) null,         0.0,                (Double) null),
+            row("key01", "FURNITURE",       null, 0.0,                 (Double) null,         0.0,                (Double) null),
             row("key02", "OFFICE SUPPLIES", null, null,                null,               null,               null),
             row("key03", "OFFICE SUPPLIES", null, null,                null,               null,               null),
-            row("key04", "OFFICE SUPPLIES", 7,    0.0,                 Double.NaN,         0.0,                Double.NaN),
+            row("key04", "OFFICE SUPPLIES", 7,    0.0,                 (Double) null,         0.0,                (Double) null),
             row("key05", "OFFICE SUPPLIES", 3,    2.0,                 2.8284271247461903, 4.0,                8.0),
             row("key06", "OFFICE SUPPLIES", 8,    2.160246899469287,   2.6457513110645907, 4.666666666666667,  7.0),
             row("key07", "OFFICE SUPPLIES", null, 2.160246899469287,   2.6457513110645907, 4.666666666666667,  7.0),
             row("key08", "TECHNOLOGY",      null, null,                null,               null,               null),
-            row("key09", "TECHNOLOGY",      8,    0.0,                 Double.NaN,         0.0,                Double.NaN),
+            row("key09", "TECHNOLOGY",      8,    0.0,                 (Double) null,         0.0,                (Double) null),
             row("key10", "TECHNOLOGY",      4,    2.0,                 2.8284271247461903, 4.0,                8.0),
             row("key11", "TECHNOLOGY",      10,   2.4944382578492936,  3.0550504633038926, 6.222222222222219,  9.333333333333329),
             row("key12", "TECHNOLOGY",      null, 2.4944382578492936,  3.0550504633038926, 6.222222222222219,  9.333333333333329),
@@ -1128,7 +1128,7 @@ public class StreamstatsCommandIT extends AnalyticsRestTestCase {
                 + " | fields key, int0, ss"
         );
         assertRowsEqual(response,
-            row("key00", 1,    Double.NaN),
+            row("key00", 1,    (Double) null),
             row("key01", null, null),
             row("key02", null, null),
             row("key03", null, null),
@@ -1139,7 +1139,7 @@ public class StreamstatsCommandIT extends AnalyticsRestTestCase {
             row("key08", null, null),
             row("key09", 8,    3.209361307176242),
             row("key10", 4,    2.926886855802026),
-            row("key11", 10,   Double.NaN),
+            row("key11", 10,   (Double) null),
             row("key12", null, null),
             row("key13", 4,    2.70801280154532),
             row("key14", 11,   0.7071067811865476),
@@ -1158,11 +1158,11 @@ public class StreamstatsCommandIT extends AnalyticsRestTestCase {
                 + " | fields key, str3, int0, sp, ss, vp, vs"
         );
         assertRowsEqual(response,
-            row("key00", "e",  1,    0.0,                Double.NaN,         0.0,                Double.NaN),
-            row("key01", "e",  null, 0.0,                Double.NaN,         0.0,                Double.NaN),
-            row("key02", "e",  null, 0.0,                Double.NaN,         0.0,                Double.NaN),
-            row("key03", "e",  null, 0.0,                Double.NaN,         0.0,                Double.NaN),
-            row("key04", null, 7,    0.0,                Double.NaN,         0.0,                Double.NaN),
+            row("key00", "e",  1,    0.0,                (Double) null,         0.0,                (Double) null),
+            row("key01", "e",  null, 0.0,                (Double) null,         0.0,                (Double) null),
+            row("key02", "e",  null, 0.0,                (Double) null,         0.0,                (Double) null),
+            row("key03", "e",  null, 0.0,                (Double) null,         0.0,                (Double) null),
+            row("key04", null, 7,    0.0,                (Double) null,         0.0,                (Double) null),
             row("key05", null, 3,    2.0,                2.8284271247461903, 4.0,                8.0),
             row("key06", "e",  8,    3.5,                4.949747468305833,  12.25,              24.5),
             row("key07", "e",  null, 3.5,                4.949747468305833,  12.25,              24.5),
@@ -1268,7 +1268,7 @@ public class StreamstatsCommandIT extends AnalyticsRestTestCase {
     }
 
     /** Numeric-tolerant cell comparator (Jackson returns Integer/Long/Double interchangeably).
-     *  NaN-aware: Double.NaN matches both Double.NaN and the string "NaN" (Jackson encodes
+     *  NaN-aware: (Double) null matches both (Double) null and the string "NaN" (Jackson encodes
      *  NaN as a string in JSON arrays). */
     private static void assertCellEquals(String message, Object expected, Object actual) {
         if (expected == null || actual == null) {

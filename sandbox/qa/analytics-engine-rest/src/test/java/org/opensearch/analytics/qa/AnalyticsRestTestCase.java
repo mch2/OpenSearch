@@ -18,6 +18,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
@@ -71,5 +73,21 @@ public abstract class AnalyticsRestTestCase extends OpenSearchRestTestCase {
     protected Map<String, Object> assertOkAndParse(Response response, String context) throws IOException {
         assertEquals(context + ": expected HTTP 200", 200, response.getStatusLine().getStatusCode());
         return entityAsMap(response);
+    }
+
+    /**
+     * Extract column names from a PPL response's {@code schema} field. The real opensearch-sql
+     * plugin emits {@code "schema": [{"name": "...", "type": "..."}, ...]} (vs. the legacy
+     * test-ppl-frontend shim's bare {@code "columns": [name, ...]}). Returns an empty list
+     * if no schema is present.
+     */
+    @SuppressWarnings("unchecked")
+    protected static List<String> extractColumnNames(Map<String, Object> response) {
+        Object schema = response.get("schema");
+        if (schema == null) {
+            return new ArrayList<>();
+        }
+        List<Map<String, Object>> entries = (List<Map<String, Object>>) schema;
+        return entries.stream().map(e -> (String) e.get("name")).collect(Collectors.toList());
     }
 }

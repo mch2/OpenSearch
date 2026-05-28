@@ -138,8 +138,8 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
         Map<String, Object> result = executePPL("source = " + index + " | stats take(value, 3) as t");
 
         @SuppressWarnings("unchecked")
-        List<String> columns = (List<String>) result.get("columns");
-        assertNotNull("columns must not be null", columns);
+        List<String> columns = extractColumnNames(result);
+        assertNotNull("schema must not be null", columns);
         assertTrue("columns must contain 't', got " + columns, columns.contains("t"));
 
         @SuppressWarnings("unchecked")
@@ -171,8 +171,8 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
         Map<String, Object> result = executePPL("source = " + index + " | stats take(value, 5) as t");
 
         @SuppressWarnings("unchecked")
-        List<String> columns = (List<String>) result.get("columns");
-        assertNotNull("columns must not be null", columns);
+        List<String> columns = extractColumnNames(result);
+        assertNotNull("schema must not be null", columns);
         assertTrue("columns must contain 't', got " + columns, columns.contains("t"));
 
         @SuppressWarnings("unchecked")
@@ -208,7 +208,7 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
         List<List<Object>> rows = scalarRows(result, "f");
 
         @SuppressWarnings("unchecked")
-        List<String> columns = (List<String>) result.get("columns");
+        List<String> columns = extractColumnNames(result);
         Object cell = rows.get(0).get(columns.indexOf("f"));
         int actual = ((Number) cell).intValue();
         assertTrue("first(value) must be in {1.." + DOCS_PER_SHARD + "}, got " + actual, actual >= 1 && actual <= DOCS_PER_SHARD);
@@ -224,7 +224,7 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
         List<List<Object>> rows = scalarRows(result, "f");
 
         @SuppressWarnings("unchecked")
-        List<String> columns = (List<String>) result.get("columns");
+        List<String> columns = extractColumnNames(result);
         Object cell = rows.get(0).get(columns.indexOf("f"));
         int actual = ((Number) cell).intValue();
         int totalDocs = NUM_SHARDS * DOCS_PER_SHARD;
@@ -241,7 +241,7 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
         List<List<Object>> rows = scalarRows(result, "l");
 
         @SuppressWarnings("unchecked")
-        List<String> columns = (List<String>) result.get("columns");
+        List<String> columns = extractColumnNames(result);
         Object cell = rows.get(0).get(columns.indexOf("l"));
         int actual = ((Number) cell).intValue();
         assertTrue("last(value) must be in {1.." + DOCS_PER_SHARD + "}, got " + actual, actual >= 1 && actual <= DOCS_PER_SHARD);
@@ -257,7 +257,7 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
         List<List<Object>> rows = scalarRows(result, "l");
 
         @SuppressWarnings("unchecked")
-        List<String> columns = (List<String>) result.get("columns");
+        List<String> columns = extractColumnNames(result);
         Object cell = rows.get(0).get(columns.indexOf("l"));
         int actual = ((Number) cell).intValue();
         int totalDocs = NUM_SHARDS * DOCS_PER_SHARD;
@@ -273,8 +273,8 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
         Map<String, Object> result = executePPL("source = " + index + " | stats list(value) as l");
 
         @SuppressWarnings("unchecked")
-        List<String> columns = (List<String>) result.get("columns");
-        assertNotNull("columns must not be null", columns);
+        List<String> columns = extractColumnNames(result);
+        assertNotNull("schema must not be null", columns);
         assertTrue("columns must contain 'l', got " + columns, columns.contains("l"));
 
         @SuppressWarnings("unchecked")
@@ -312,8 +312,8 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
         Map<String, Object> result = executePPL("source = " + index + " | stats list(value) as l");
 
         @SuppressWarnings("unchecked")
-        List<String> columns = (List<String>) result.get("columns");
-        assertNotNull("columns must not be null", columns);
+        List<String> columns = extractColumnNames(result);
+        assertNotNull("schema must not be null", columns);
         assertTrue("columns must contain 'l', got " + columns, columns.contains("l"));
 
         @SuppressWarnings("unchecked")
@@ -351,8 +351,8 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
         Map<String, Object> result = executePPL("source = " + index + " | stats values(value) as v");
 
         @SuppressWarnings("unchecked")
-        List<String> columns = (List<String>) result.get("columns");
-        assertNotNull("columns must not be null", columns);
+        List<String> columns = extractColumnNames(result);
+        assertNotNull("schema must not be null", columns);
         assertTrue("columns must contain 'v', got " + columns, columns.contains("v"));
 
         @SuppressWarnings("unchecked")
@@ -390,8 +390,8 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
         Map<String, Object> result = executePPL("source = " + index + " | stats values(value) as v");
 
         @SuppressWarnings("unchecked")
-        List<String> columns = (List<String>) result.get("columns");
-        assertNotNull("columns must not be null", columns);
+        List<String> columns = extractColumnNames(result);
+        assertNotNull("schema must not be null", columns);
         assertTrue("columns must contain 'v', got " + columns, columns.contains("v"));
 
         @SuppressWarnings("unchecked")
@@ -451,8 +451,8 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
         );
 
         @SuppressWarnings("unchecked")
-        List<String> columns = (List<String>) result.get("columns");
-        assertNotNull("columns must not be null", columns);
+        List<String> columns = extractColumnNames(result);
+        assertNotNull("schema must not be null", columns);
         @SuppressWarnings("unchecked")
         List<List<Object>> rows = (List<List<Object>>) result.get("datarows");
         assertNotNull("rows must not be null", rows);
@@ -567,8 +567,8 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
      */
     private static List<List<Object>> scalarRows(Map<String, Object> result, String columnName) {
         @SuppressWarnings("unchecked")
-        List<String> columns = (List<String>) result.get("columns");
-        assertNotNull("columns must not be null", columns);
+        List<String> columns = extractColumnNames(result);
+        assertNotNull("schema must not be null", columns);
         assertTrue("columns must contain '" + columnName + "', got " + columns, columns.contains(columnName));
 
         @SuppressWarnings("unchecked")

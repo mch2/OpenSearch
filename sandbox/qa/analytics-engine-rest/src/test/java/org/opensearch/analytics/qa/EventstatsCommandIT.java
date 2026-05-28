@@ -858,8 +858,8 @@ public class EventstatsCommandIT extends AnalyticsRestTestCase {
         double osSp = 2.160246899469287, osSs = 2.6457513110645907, osVp = 4.666666666666667, osVs = 7.0;
         double tSp  = 2.7774602993176543, tSs = 3.0, tVp = 7.714285714285714, tVs = 9.0;
         assertRowsEqual(response,
-            row("key00", "FURNITURE",       1,    0.0,  Double.NaN, 0.0,  Double.NaN),
-            row("key01", "FURNITURE",       null, 0.0,  Double.NaN, 0.0,  Double.NaN),
+            row("key00", "FURNITURE",       1,    0.0,  (Double) null, 0.0,  (Double) null),
+            row("key01", "FURNITURE",       null, 0.0,  (Double) null, 0.0,  (Double) null),
             row("key02", "OFFICE SUPPLIES", null, osSp, osSs,       osVp, osVs),
             row("key03", "OFFICE SUPPLIES", null, osSp, osSs,       osVp, osVs),
             row("key04", "OFFICE SUPPLIES", 7,    osSp, osSs,       osVp, osVs),
@@ -1037,8 +1037,8 @@ public class EventstatsCommandIT extends AnalyticsRestTestCase {
             assertEquals(message, expected, actual);
             return;
         }
-        // Jackson serializes Double.NaN as the string "NaN" inside JSON arrays, so the
-        // response body delivers "NaN" not Double.NaN. Treat NaN expectation match-on-string.
+        // Jackson serializes (Double) null as the string "NaN" inside JSON arrays, so the
+        // response body delivers "NaN" not (Double) null. Treat NaN expectation match-on-string.
         if (expected instanceof Double && Double.isNaN((Double) expected)
             && (actual instanceof Double && Double.isNaN((Double) actual)
                 || "NaN".equals(actual))) {

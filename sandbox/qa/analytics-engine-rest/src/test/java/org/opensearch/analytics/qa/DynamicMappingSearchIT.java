@@ -212,7 +212,7 @@ public class DynamicMappingSearchIT extends AnalyticsRestTestCase {
         String ppl = "source = " + INDEX + " | " + pplSuffix;
         Map<String, Object> result = executePPL(ppl);
         @SuppressWarnings("unchecked")
-        List<String> columns = (List<String>) result.get("columns");
+        List<String> columns = extractColumnNames(result);
         @SuppressWarnings("unchecked")
         List<List<Object>> rows = (List<List<Object>>) result.get("datarows");
         assertNotNull("Response missing 'rows' for: " + ppl, rows);

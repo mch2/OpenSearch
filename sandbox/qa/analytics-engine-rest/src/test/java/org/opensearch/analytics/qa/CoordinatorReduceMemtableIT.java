@@ -37,8 +37,8 @@ public class CoordinatorReduceMemtableIT extends AnalyticsRestTestCase {
         Map<String, Object> result = executePPL("source = " + INDEX + " | stats sum(value) as total");
 
         @SuppressWarnings("unchecked")
-        List<String> columns = (List<String>) result.get("columns");
-        assertNotNull("columns must not be null", columns);
+        List<String> columns = extractColumnNames(result);
+        assertNotNull("schema must not be null", columns);
         assertTrue("columns must contain 'total', got " + columns, columns.contains("total"));
 
         @SuppressWarnings("unchecked")

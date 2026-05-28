@@ -58,8 +58,8 @@ public class RenameCommandIT extends AnalyticsRestTestCase {
                 + " | rename str2 as label, num0 as value | fields label, value | head 5"
         );
         @SuppressWarnings("unchecked")
-        List<String> columns = (List<String>) response.get("columns");
-        assertNotNull("Response missing 'columns'", columns);
+        List<String> columns = extractColumnNames(response);
+        assertNotNull("Response missing 'schema'", columns);
         assertEquals("Column count", 2, columns.size());
         assertEquals("First renamed column", "label", columns.get(0));
         assertEquals("Second renamed column", "value", columns.get(1));
@@ -88,8 +88,8 @@ public class RenameCommandIT extends AnalyticsRestTestCase {
 
     private void assertSingletonColumn(Map<String, Object> response, String expectedName) {
         @SuppressWarnings("unchecked")
-        List<String> columns = (List<String>) response.get("columns");
-        assertNotNull("Response missing 'columns'", columns);
+        List<String> columns = extractColumnNames(response);
+        assertNotNull("Response missing 'schema'", columns);
         assertEquals("Column count", 1, columns.size());
         assertEquals("Column name", expectedName, columns.get(0));
     }
