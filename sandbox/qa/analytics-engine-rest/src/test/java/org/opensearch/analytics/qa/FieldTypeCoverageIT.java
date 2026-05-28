@@ -8,6 +8,7 @@
 
 package org.opensearch.analytics.qa;
 
+import org.apache.lucene.tests.util.LuceneTestCase;
 import org.opensearch.client.Request;
 import org.opensearch.client.Response;
 import org.opensearch.client.ResponseException;
@@ -161,6 +162,7 @@ public class FieldTypeCoverageIT extends AnalyticsRestTestCase {
         assertScanSucceeds("ft_boolean", 3);
     }
 
+    @LuceneTestCase.AwaitsFix(bugUrl = "opensearch-sql PPL response formatter chokes on byte[] from analytics-engine IP/Binary UDTs — `unsupported object class [B`")
     public void testBinary() throws IOException {
         // Scan binds as VARBINARY; the BinaryView → Binary rewrite happens in
         // schema_coerce::coerce_for_substrait. Predicates on binary columns now work via the
@@ -172,6 +174,7 @@ public class FieldTypeCoverageIT extends AnalyticsRestTestCase {
         assertScanSucceeds("ft_binary", 3);
     }
 
+    @LuceneTestCase.AwaitsFix(bugUrl = "opensearch-sql PPL response formatter chokes on byte[] from analytics-engine IP/Binary UDTs — `unsupported object class [B`")
     public void testIp() throws IOException {
         // Scan binds as VARBINARY; the BinaryView → Binary rewrite happens in
         // schema_coerce::coerce_for_substrait. Projections return raw 16-byte IPv6-mapped
@@ -198,6 +201,7 @@ public class FieldTypeCoverageIT extends AnalyticsRestTestCase {
      *       {@code OpenSearchFilter.stripAnnotations}.</li>
      * </ul>
      */
+    @LuceneTestCase.AwaitsFix(bugUrl = "opensearch-sql PPL response formatter chokes on byte[] from analytics-engine IP/Binary UDTs — `unsupported object class [B`")
     public void testIpFilters() throws IOException {
         Map<String, Object> bulk = ingest("ft_ip_filters", "ip", "\"192.168.1.1\"", "\"10.0.0.1\"", "\"172.16.0.1\"");
         assertBulkSucceeded(bulk, "ft_ip_filters");
@@ -230,6 +234,7 @@ public class FieldTypeCoverageIT extends AnalyticsRestTestCase {
      * {@code BINARY('lit':VARCHAR)} placeholder inside a {@code LogicalProject} (or a CASE in
      * the project tree above an aggregate).
      */
+    @LuceneTestCase.AwaitsFix(bugUrl = "opensearch-sql PPL response formatter chokes on byte[] from analytics-engine IP/Binary UDTs — `unsupported object class [B`")
     public void testIpAndBinaryProjectExpressions() throws IOException {
         Map<String, Object> ipBulk = ingest("ft_ip_project", "ip", "\"192.168.1.1\"", "\"10.0.0.1\"", "\"172.16.0.1\"");
         assertBulkSucceeded(ipBulk, "ft_ip_project");
