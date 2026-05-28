@@ -347,7 +347,7 @@ public class FieldTypeCoverageIT extends AnalyticsRestTestCase {
      * fail and prompt the test to be flipped to {@link #assertScanSucceeds}.
      */
     private void assertScanFails(String index) {
-        Request req = new Request("POST", "/_analytics/ppl");
+        Request req = new Request("POST", "/_plugins/_ppl");
         req.setJsonEntity("{\"query\": \"source=" + index + "\"}");
         try {
             Response resp = client().performRequest(req);
@@ -447,7 +447,7 @@ public class FieldTypeCoverageIT extends AnalyticsRestTestCase {
     }
 
     private Map<String, Object> executePpl(String ppl) throws IOException {
-        Request request = new Request("POST", "/_analytics/ppl");
+        Request request = new Request("POST", "/_plugins/_ppl");
         request.setJsonEntity("{\"query\": \"" + escapeJson(ppl) + "\"}");
         return assertOkAndParse(client().performRequest(request), "PPL: " + ppl);
     }

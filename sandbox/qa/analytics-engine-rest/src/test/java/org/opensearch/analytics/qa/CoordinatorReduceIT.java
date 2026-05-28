@@ -735,7 +735,7 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
     }
 
     private Map<String, Object> executePPL(String ppl) throws Exception {
-        Request request = new Request("POST", "/_analytics/ppl");
+        Request request = new Request("POST", "/_plugins/_ppl");
         request.setJsonEntity("{\"query\": \"" + ppl + "\"}");
         Response response = client().performRequest(request);
         return entityAsMap(response);

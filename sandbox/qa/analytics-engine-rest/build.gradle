@@ -16,10 +16,19 @@ apply plugin: 'opensearch.rest-test'
 java { sourceCompatibility = JavaVersion.toVersion(25); targetCompatibility = JavaVersion.toVersion(25) }
 
 repositories {
+  // mavenLocal lets us consume locally-built opensearch-sql snapshots
+  // (run `./gradlew publishToMavenLocal` in the sibling opensearch-sql repo).
+  mavenLocal()
   maven {
     name = 'OpenSearch Snapshots'
     url = 'https://ci.opensearch.org/ci/dbc/snapshots/maven/'
   }
+}
+
+configurations {
+    // The opensearch-sql plugin is consumed as a zip artifact from Maven and
+    // installed onto the test cluster via cluster.plugin(Provider<RegularFile>).
+    sqlPlugin
 }
 
 dependencies {
@@ -29,7 +38,10 @@ dependencies {
     testImplementation project(':sandbox:plugins:dsl-query-executor')
     testImplementation project(':sandbox:plugins:composite-engine')
     testImplementation project(':sandbox:plugins:parquet-data-format')
-    testImplementation project(':sandbox:plugins:test-ppl-frontend')
+
+    // Real PPL/SQL plugin — must be published to ~/.m2 via opensearch-sql's
+    // `./gradlew publishToMavenLocal` before integTest can install it.
+    sqlPlugin "org.opensearch.plugin:opensearch-sql-plugin:3.7.0.0-SNAPSHOT@zip"
 }
 
 // ── Shared cluster configuration closure ─────────────────────────────────────
@@ -46,7 +58,8 @@ def configureAnalyticsCluster = { cluster ->
     cluster.plugin ':sandbox:plugins:dsl-query-executor'
     cluster.plugin ':sandbox:plugins:composite-engine'
     cluster.plugin ':sandbox:plugins:parquet-data-format'
-    cluster.plugin ':sandbox:plugins:test-ppl-frontend'
+    // Real PPL/SQL plugin — installed from the sqlPlugin configuration's resolved zip.
+    cluster.plugin project.layout.file(provider { configurations.sqlPlugin.singleFile })
 
     // Arrow/Flight JVM flags for DataFusion native library
     cluster.jvmArgs '--add-opens=java.base/java.nio=ALL-UNNAMED'

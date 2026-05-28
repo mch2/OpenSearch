@@ -21,7 +21,7 @@ import java.util.Map;
  * route (PPL → CalciteRelNodeVisitor → Substrait → DataFusion).
  *
  * <p>Each test exercises a single math function against a specific row of the
- * {@code calcs} dataset via {@code POST /_analytics/ppl}. Tests pin a
+ * {@code calcs} dataset via {@code POST /_plugins/_ppl}. Tests pin a
  * particular row by filtering on the {@code key} keyword field and then apply
  * the math function to one of that row's {@code num*} (DOUBLE) fields — field
  * references both block Calcite's {@code ReduceExpressionsRule} from
@@ -402,7 +402,7 @@ public class MathScalarFunctionsIT extends AnalyticsRestTestCase {
 
     private Map<String, Object> executePpl(String ppl) throws IOException {
         ensureDataProvisioned();
-        Request request = new Request("POST", "/_analytics/ppl");
+        Request request = new Request("POST", "/_plugins/_ppl");
         request.setJsonEntity("{\"query\": \"" + escapeJson(ppl) + "\"}");
         Response response = client().performRequest(request);
         return assertOkAndParse(response, "PPL: " + ppl);

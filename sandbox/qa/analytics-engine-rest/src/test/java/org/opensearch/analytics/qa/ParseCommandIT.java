@@ -24,7 +24,7 @@ import java.util.Map;
  * <p>Mirrors {@code CalciteParseCommandIT} from the {@code opensearch-project/sql}
  * repository so the analytics-engine path can be verified inside core without a
  * cross-plugin dependency on the SQL plugin. Each test sends a PPL query through
- * {@code POST /_analytics/ppl} (exposed by the {@code test-ppl-frontend} plugin),
+ * {@code POST /_plugins/_ppl} (exposed by the {@code opensearch-sql} plugin),
  * which runs the {@code UnifiedQueryPlanner} → {@code CalciteRelNodeVisitor} →
  * Substrait → DataFusion pipeline.
  *
@@ -230,10 +230,10 @@ public class ParseCommandIT extends AnalyticsRestTestCase {
         }
     }
 
-    /** Send {@code POST /_analytics/ppl} and return the parsed JSON body. */
+    /** Send {@code POST /_plugins/_ppl} and return the parsed JSON body. */
     private Map<String, Object> executePpl(String ppl) throws IOException {
         ensureDataProvisioned();
-        Request request = new Request("POST", "/_analytics/ppl");
+        Request request = new Request("POST", "/_plugins/_ppl");
         request.setJsonEntity("{\"query\": \"" + escapeJson(ppl) + "\"}");
         Response response = client().performRequest(request);
         return assertOkAndParse(response, "PPL: " + ppl);

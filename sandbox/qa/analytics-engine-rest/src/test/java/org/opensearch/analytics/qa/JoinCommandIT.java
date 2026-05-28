@@ -19,7 +19,7 @@ import java.util.Map;
 
 /**
  * Integration tests for PPL commands that lower to {@code LogicalJoin} on the
- * analytics-engine route (POST /_analytics/ppl).
+ * analytics-engine route (POST /_plugins/_ppl).
  *
  * <p>Exercises the three commands that produce a join RelNode:
  * <ul>
@@ -305,10 +305,10 @@ public class JoinCommandIT extends AnalyticsRestTestCase {
         assertEquals("Count mismatch for query: " + ppl, expected, ((Number) actual).longValue());
     }
 
-    /** Send {@code POST /_analytics/ppl} and return the parsed JSON body. */
+    /** Send {@code POST /_plugins/_ppl} and return the parsed JSON body. */
     private Map<String, Object> executePpl(String ppl) throws IOException {
         ensureDataProvisioned();
-        Request request = new Request("POST", "/_analytics/ppl");
+        Request request = new Request("POST", "/_plugins/_ppl");
         request.setJsonEntity("{\"query\": \"" + escapeJson(ppl) + "\"}");
         Response response = client().performRequest(request);
         return assertOkAndParse(response, "PPL: " + ppl);

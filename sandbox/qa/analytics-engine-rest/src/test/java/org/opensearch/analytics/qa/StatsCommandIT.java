@@ -24,8 +24,8 @@ import java.util.Map;
  * the broader stats family (AVG, SUM, COUNT, MIN/MAX, DISTINCT_COUNT, STDDEV_POP / SAMP,
  * VAR_POP / SAMP) which already flow through the analytics-engine route via Calcite's
  * {@link org.opensearch.analytics.planner.rules.OpenSearchAggregateReduceRule} decomposition.
- * Each test sends a PPL query through {@code POST /_analytics/ppl} (exposed by the
- * {@code test-ppl-frontend} plugin), exercising the same {@code UnifiedQueryPlanner} →
+ * Each test sends a PPL query through {@code POST /_plugins/_ppl} (exposed by the
+ * {@code opensearch-sql} plugin), exercising the same {@code UnifiedQueryPlanner} →
  * {@code CalciteRelNodeVisitor} → Substrait → DataFusion pipeline as the SQL plugin's
  * analytics-route ITs, but inside core without depending on the SQL plugin.
  *
@@ -229,7 +229,7 @@ public class StatsCommandIT extends AnalyticsRestTestCase {
 
     private Map<String, Object> executePpl(String ppl) throws IOException {
         ensureDataProvisioned();
-        Request request = new Request("POST", "/_analytics/ppl");
+        Request request = new Request("POST", "/_plugins/_ppl");
         request.setJsonEntity("{\"query\": \"" + escapeJson(ppl) + "\"}");
         Response response = client().performRequest(request);
         return assertOkAndParse(response, "PPL: " + ppl);

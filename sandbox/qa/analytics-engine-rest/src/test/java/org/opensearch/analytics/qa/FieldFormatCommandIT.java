@@ -25,7 +25,7 @@ import java.util.Map;
  *
  * <p>{@code fieldformat} is a Calcite-only command (gated on
  * {@code plugins.calcite.enabled}; the gate is satisfied here because
- * {@code test-ppl-frontend}'s {@code UnifiedQueryService} sets the cluster setting
+ * {@code opensearch-sql}'s {@code UnifiedQueryService} sets the cluster setting
  * to true on every request). It lowers to a plain {@code Eval} node — see
  * {@code AstBuilder.visitFieldformatCommand} in the SQL plugin. The unique surface
  * vs plain {@code eval} is the prefix-{@code .} and suffix-{@code .} string-concat
@@ -164,7 +164,7 @@ public class FieldFormatCommandIT extends AnalyticsRestTestCase {
 
     private Map<String, Object> executePpl(String ppl) throws IOException {
         ensureDataProvisioned();
-        Request request = new Request("POST", "/_analytics/ppl");
+        Request request = new Request("POST", "/_plugins/_ppl");
         request.setJsonEntity("{\"query\": \"" + escapeJson(ppl) + "\"}");
         Response response = client().performRequest(request);
         return assertOkAndParse(response, "PPL: " + ppl);

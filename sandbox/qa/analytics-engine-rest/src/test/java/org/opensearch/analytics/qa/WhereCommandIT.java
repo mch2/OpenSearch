@@ -22,8 +22,8 @@ import java.util.Map;
  * <p>Mirrors the surface exercised by {@code CalciteWhereCommandIT} from the
  * {@code opensearch-project/sql} repository, adapted to the {@code calcs} dataset
  * shipped under {@code sandbox/qa/analytics-engine-rest/src/test/resources/datasets/calcs/}.
- * Each test sends a PPL query through {@code POST /_analytics/ppl} (exposed by the
- * {@code test-ppl-frontend} plugin), exercising the same {@code UnifiedQueryPlanner} →
+ * Each test sends a PPL query through {@code POST /_plugins/_ppl} (exposed by the
+ * {@code opensearch-sql} plugin), exercising the same {@code UnifiedQueryPlanner} →
  * {@code CalciteRelNodeVisitor} → analytics-engine planner → Substrait → DataFusion
  * pipeline as the SQL plugin's force-routed analytics path.
  *
@@ -322,7 +322,7 @@ public class WhereCommandIT extends AnalyticsRestTestCase {
 
     private Map<String, Object> executePpl(String ppl) throws IOException {
         ensureDataProvisioned();
-        Request request = new Request("POST", "/_analytics/ppl");
+        Request request = new Request("POST", "/_plugins/_ppl");
         request.setJsonEntity("{\"query\": \"" + escapeJson(ppl) + "\"}");
         Response response = client().performRequest(request);
         return assertOkAndParse(response, "PPL: " + ppl);

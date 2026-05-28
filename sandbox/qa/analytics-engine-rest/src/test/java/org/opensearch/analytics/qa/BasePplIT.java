@@ -57,7 +57,7 @@ public abstract class BasePplIT extends AnalyticsRestTestCase {
             queryNumbers,
             (client, dataset, queryBody) -> {
                 String ppl = queryBody.trim();
-                Request request = new Request("POST", "/_analytics/ppl");
+                Request request = new Request("POST", "/_plugins/_ppl");
                 request.setJsonEntity("{\"query\": \"" + escapeJson(ppl) + "\"}");
                 Response response = client.performRequest(request);
                 return assertOkAndParse(response, "PPL query");

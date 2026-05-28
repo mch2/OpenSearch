@@ -1293,7 +1293,7 @@ public class StreamstatsCommandIT extends AnalyticsRestTestCase {
 
     private Map<String, Object> executePpl(String ppl) throws IOException {
         ensureDataProvisioned();
-        Request request = new Request("POST", "/_analytics/ppl");
+        Request request = new Request("POST", "/_plugins/_ppl");
         request.setJsonEntity("{\"query\": \"" + escapeJson(ppl) + "\"}");
         Response response = client().performRequest(request);
         return assertOkAndParse(response, "PPL: " + ppl);
@@ -1301,7 +1301,7 @@ public class StreamstatsCommandIT extends AnalyticsRestTestCase {
 
     /** Send a PPL query and assert response body contains {@code expectedSubstring}. */
     private void assertErrorContains(String ppl, String expectedSubstring) throws IOException {
-        Request request = new Request("POST", "/_analytics/ppl");
+        Request request = new Request("POST", "/_plugins/_ppl");
         request.setJsonEntity("{\"query\": \"" + escapeJson(ppl) + "\"}");
         try {
             Response response = client().performRequest(request);
@@ -1326,7 +1326,7 @@ public class StreamstatsCommandIT extends AnalyticsRestTestCase {
      *  may change as more analytics-engine functionality lands). The contract here is just
      *  "this PPL form is not yet supported". */
     private void assertErrorAny(String ppl) throws IOException {
-        Request request = new Request("POST", "/_analytics/ppl");
+        Request request = new Request("POST", "/_plugins/_ppl");
         request.setJsonEntity("{\"query\": \"" + escapeJson(ppl) + "\"}");
         try {
             Response response = client().performRequest(request);

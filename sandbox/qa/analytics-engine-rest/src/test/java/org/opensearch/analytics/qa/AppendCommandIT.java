@@ -23,7 +23,7 @@ import java.util.Map;
  * <p>Mirrors {@code CalcitePPLAppendCommandIT} from the {@code opensearch-project/sql}
  * repository so that the analytics-engine path can be verified inside core without
  * cross-plugin dependencies on the SQL plugin. Each test sends a PPL query through
- * {@code POST /_analytics/ppl} (exposed by the {@code test-ppl-frontend} plugin), which
+ * {@code POST /_plugins/_ppl} (exposed by the {@code opensearch-sql} plugin), which
  * runs the same {@code UnifiedQueryPlanner} → {@code CalciteRelNodeVisitor} → Substrait
  * → DataFusion pipeline as the SQL plugin's force-routed analytics path.
  *
@@ -339,7 +339,7 @@ public class AppendCommandIT extends AnalyticsRestTestCase {
     }
 
     /**
-     * Send a PPL query to {@code POST /_analytics/ppl} and assert the response's
+     * Send a PPL query to {@code POST /_plugins/_ppl} and assert the response's
      * {@code rows} match the expected list element-by-element using a numeric-tolerant
      * comparator (Java JSON parsing returns Integer/Long/Double interchangeably).
      */
@@ -427,10 +427,10 @@ public class AppendCommandIT extends AnalyticsRestTestCase {
         }
     }
 
-    /** Send {@code POST /_analytics/ppl} and return the parsed JSON body. */
+    /** Send {@code POST /_plugins/_ppl} and return the parsed JSON body. */
     private Map<String, Object> executePpl(String ppl) throws IOException {
         ensureDataProvisioned();
-        Request request = new Request("POST", "/_analytics/ppl");
+        Request request = new Request("POST", "/_plugins/_ppl");
         request.setJsonEntity("{\"query\": \"" + escapeJson(ppl) + "\"}");
         Response response = client().performRequest(request);
         return assertOkAndParse(response, "PPL: " + ppl);

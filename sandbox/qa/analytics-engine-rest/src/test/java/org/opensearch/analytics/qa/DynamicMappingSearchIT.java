@@ -191,7 +191,7 @@ public class DynamicMappingSearchIT extends AnalyticsRestTestCase {
     }
 
     private Map<String, Object> executePPL(String ppl) throws IOException {
-        Request req = new Request("POST", "/_analytics/ppl");
+        Request req = new Request("POST", "/_plugins/_ppl");
         req.setJsonEntity("{\"query\": \"" + escapeJson(ppl) + "\"}");
         Response response = client().performRequest(req);
         return assertOkAndParse(response, "PPL: " + ppl);

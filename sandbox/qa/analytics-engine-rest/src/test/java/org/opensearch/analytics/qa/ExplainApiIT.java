@@ -16,7 +16,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Integration test for {@code POST /_analytics/ppl/_explain}.
+ * Integration test for {@code POST /_plugins/_ppl/_explain}.
  * Verifies that the explain endpoint executes the query and returns
  * profiling information (stage timings, plan) alongside the normal results.
  */
@@ -173,7 +173,7 @@ public class ExplainApiIT extends AnalyticsRestTestCase {
     }
 
     private Map<String, Object> executeExplain(String ppl) throws IOException {
-        Request request = new Request("POST", "/_analytics/ppl/_explain");
+        Request request = new Request("POST", "/_plugins/_ppl/_explain");
         request.setJsonEntity("{\"query\": \"" + escapeJson(ppl) + "\"}");
         Response response = client().performRequest(request);
         return assertOkAndParse(response, "EXPLAIN: " + ppl);
