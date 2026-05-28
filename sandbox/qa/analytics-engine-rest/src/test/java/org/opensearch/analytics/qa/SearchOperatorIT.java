@@ -74,7 +74,7 @@ public class SearchOperatorIT extends AnalyticsRestTestCase {
     private void assertInt0Values(String ppl, long... expected) throws IOException {
         Map<String, Object> response = executePpl(ppl);
         @SuppressWarnings("unchecked")
-        List<List<Object>> rows = (List<List<Object>>) response.get("rows");
+        List<List<Object>> rows = (List<List<Object>>) response.get("datarows");
         assertNotNull("Response missing 'rows' for query: " + ppl, rows);
         assertEquals("Row count mismatch for query: " + ppl, expected.length, rows.size());
         long[] actual = new long[rows.size()];

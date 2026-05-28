@@ -113,7 +113,7 @@ public class TableCommandIT extends AnalyticsRestTestCase {
             "source=" + DATASET.indexName + " | table str0, num0, int0 | head 3"
         );
         assertEquals("columns from fields vs table", fieldsResp.get("columns"), tableResp.get("columns"));
-        assertEquals("rows from fields vs table", fieldsResp.get("rows"), tableResp.get("rows"));
+        assertEquals("rows from fields vs table", fieldsResp.get("datarows"), tableResp.get("datarows"));
     }
 
     // ── helpers ─────────────────────────────────────────────────────────────────

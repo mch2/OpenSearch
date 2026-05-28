@@ -305,7 +305,7 @@ public class FieldTypeCoverageIT extends AnalyticsRestTestCase {
     private void assertScanSucceeds(String index, int expected) throws IOException {
         Map<String, Object> resp = executePpl("source=" + index);
         @SuppressWarnings("unchecked")
-        List<List<Object>> rows = (List<List<Object>>) resp.get("rows");
+        List<List<Object>> rows = (List<List<Object>>) resp.get("datarows");
         assertNotNull("source=" + index + " response missing rows", rows);
         assertEquals("source=" + index + " row count", expected, rows.size());
     }
@@ -318,7 +318,7 @@ public class FieldTypeCoverageIT extends AnalyticsRestTestCase {
     private void assertFilterRowCount(String ppl, int expected) throws IOException {
         Map<String, Object> resp = executePpl(ppl);
         @SuppressWarnings("unchecked")
-        List<List<Object>> rows = (List<List<Object>>) resp.get("rows");
+        List<List<Object>> rows = (List<List<Object>>) resp.get("datarows");
         assertNotNull("[" + ppl + "] response missing rows", rows);
         assertEquals("[" + ppl + "] row count", expected, rows.size());
     }
@@ -332,7 +332,7 @@ public class FieldTypeCoverageIT extends AnalyticsRestTestCase {
         final double tolerance = 0.05;
         Map<String, Object> resp = executePpl("source=" + index + " | sort val | fields val");
         @SuppressWarnings("unchecked")
-        List<List<Object>> rows = (List<List<Object>>) resp.get("rows");
+        List<List<Object>> rows = (List<List<Object>>) resp.get("datarows");
         assertEquals(expectedSorted.length, rows.size());
         for (int i = 0; i < expectedSorted.length; i++) {
             double got = ((Number) rows.get(i).get(0)).doubleValue();

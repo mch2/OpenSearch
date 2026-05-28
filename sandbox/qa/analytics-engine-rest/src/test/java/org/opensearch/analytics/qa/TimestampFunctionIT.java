@@ -224,7 +224,7 @@ public class TimestampFunctionIT extends AnalyticsRestTestCase {
     private Object firstRowFirstCell(String ppl) throws IOException {
         Map<String, Object> response = executePpl(ppl);
         @SuppressWarnings("unchecked")
-        List<List<Object>> rows = (List<List<Object>>) response.get("rows");
+        List<List<Object>> rows = (List<List<Object>>) response.get("datarows");
         assertNotNull("Response missing 'rows' for query: " + ppl, rows);
         assertTrue("Expected at least one row for query: " + ppl, rows.size() >= 1);
         return rows.get(0).get(0);

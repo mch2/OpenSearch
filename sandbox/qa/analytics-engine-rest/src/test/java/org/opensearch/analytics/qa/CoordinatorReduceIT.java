@@ -143,7 +143,7 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
         assertTrue("columns must contain 't', got " + columns, columns.contains("t"));
 
         @SuppressWarnings("unchecked")
-        List<List<Object>> rows = (List<List<Object>>) result.get("rows");
+        List<List<Object>> rows = (List<List<Object>>) result.get("datarows");
         assertNotNull("rows must not be null", rows);
         assertEquals("scalar agg must return exactly 1 row", 1, rows.size());
 
@@ -176,7 +176,7 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
         assertTrue("columns must contain 't', got " + columns, columns.contains("t"));
 
         @SuppressWarnings("unchecked")
-        List<List<Object>> rows = (List<List<Object>>) result.get("rows");
+        List<List<Object>> rows = (List<List<Object>>) result.get("datarows");
         assertNotNull("rows must not be null", rows);
         assertEquals("scalar agg must return exactly 1 row", 1, rows.size());
 
@@ -278,7 +278,7 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
         assertTrue("columns must contain 'l', got " + columns, columns.contains("l"));
 
         @SuppressWarnings("unchecked")
-        List<List<Object>> rows = (List<List<Object>>) result.get("rows");
+        List<List<Object>> rows = (List<List<Object>>) result.get("datarows");
         assertNotNull("rows must not be null", rows);
         assertEquals("scalar agg must return exactly 1 row", 1, rows.size());
 
@@ -317,7 +317,7 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
         assertTrue("columns must contain 'l', got " + columns, columns.contains("l"));
 
         @SuppressWarnings("unchecked")
-        List<List<Object>> rows = (List<List<Object>>) result.get("rows");
+        List<List<Object>> rows = (List<List<Object>>) result.get("datarows");
         assertNotNull("rows must not be null", rows);
         assertEquals("scalar agg must return exactly 1 row", 1, rows.size());
 
@@ -356,7 +356,7 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
         assertTrue("columns must contain 'v', got " + columns, columns.contains("v"));
 
         @SuppressWarnings("unchecked")
-        List<List<Object>> rows = (List<List<Object>>) result.get("rows");
+        List<List<Object>> rows = (List<List<Object>>) result.get("datarows");
         assertNotNull("rows must not be null", rows);
         assertEquals("scalar agg must return exactly 1 row", 1, rows.size());
 
@@ -395,7 +395,7 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
         assertTrue("columns must contain 'v', got " + columns, columns.contains("v"));
 
         @SuppressWarnings("unchecked")
-        List<List<Object>> rows = (List<List<Object>>) result.get("rows");
+        List<List<Object>> rows = (List<List<Object>>) result.get("datarows");
         assertNotNull("rows must not be null", rows);
         assertEquals("scalar agg must return exactly 1 row", 1, rows.size());
 
@@ -431,7 +431,7 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
         Map<String, Object> result = executePPL("source = " + INDEX + " | stats sum(value) as total by value");
 
         @SuppressWarnings("unchecked")
-        List<List<Object>> rows = (List<List<Object>>) result.get("rows");
+        List<List<Object>> rows = (List<List<Object>>) result.get("datarows");
         assertNotNull("rows must not be null", rows);
         assertEquals("grouped agg on a single-valued column must return exactly 1 group", 1, rows.size());
     }
@@ -454,7 +454,7 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
         List<String> columns = (List<String>) result.get("columns");
         assertNotNull("columns must not be null", columns);
         @SuppressWarnings("unchecked")
-        List<List<Object>> rows = (List<List<Object>>) result.get("rows");
+        List<List<Object>> rows = (List<List<Object>>) result.get("datarows");
         assertNotNull("rows must not be null", rows);
         assertEquals("Q10-shape on a single-valued column must return exactly 1 group", 1, rows.size());
 
@@ -508,7 +508,7 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
         );
 
         @SuppressWarnings("unchecked")
-        List<List<Object>> rows = (List<List<Object>>) result.get("rows");
+        List<List<Object>> rows = (List<List<Object>>) result.get("datarows");
         assertNotNull("rows must not be null", rows);
         assertFalse("should return at least one group", rows.isEmpty());
     }
@@ -572,7 +572,7 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
         assertTrue("columns must contain '" + columnName + "', got " + columns, columns.contains(columnName));
 
         @SuppressWarnings("unchecked")
-        List<List<Object>> rows = (List<List<Object>>) result.get("rows");
+        List<List<Object>> rows = (List<List<Object>>) result.get("datarows");
         assertNotNull("rows must not be null", rows);
         assertEquals("scalar agg must return exactly 1 row", 1, rows.size());
 

@@ -998,7 +998,7 @@ public class EventstatsCommandIT extends AnalyticsRestTestCase {
     @SafeVarargs
     @SuppressWarnings({"unchecked", "varargs"})
     private final void assertRowsEqual(Map<String, Object> response, List<Object>... expected) {
-        List<List<Object>> actualRows = (List<List<Object>>) response.get("rows");
+        List<List<Object>> actualRows = (List<List<Object>>) response.get("datarows");
         assertNotNull("Response missing 'rows'", actualRows);
         assertEquals("Row count mismatch", expected.length, actualRows.size());
         for (int i = 0; i < expected.length; i++) {
@@ -1013,7 +1013,7 @@ public class EventstatsCommandIT extends AnalyticsRestTestCase {
 
     @SuppressWarnings("unchecked")
     private static void assertScalarRow(Map<String, Object> response, Object... expected) {
-        List<List<Object>> rows = (List<List<Object>>) response.get("rows");
+        List<List<Object>> rows = (List<List<Object>>) response.get("datarows");
         assertNotNull("Response missing 'rows'", rows);
         assertEquals("Expected exactly one row", 1, rows.size());
         List<Object> got = rows.get(0);
@@ -1025,7 +1025,7 @@ public class EventstatsCommandIT extends AnalyticsRestTestCase {
 
     @SuppressWarnings("unchecked")
     private static void assertRowCount(Map<String, Object> response, int expected) {
-        List<List<Object>> rows = (List<List<Object>>) response.get("rows");
+        List<List<Object>> rows = (List<List<Object>>) response.get("datarows");
         assertNotNull("Response missing 'rows'", rows);
         assertEquals("Row count mismatch", expected, rows.size());
     }

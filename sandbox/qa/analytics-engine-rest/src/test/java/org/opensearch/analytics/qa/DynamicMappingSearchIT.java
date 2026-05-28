@@ -201,7 +201,7 @@ public class DynamicMappingSearchIT extends AnalyticsRestTestCase {
         String ppl = "source = " + INDEX + " | " + pplSuffix;
         Map<String, Object> result = executePPL(ppl);
         @SuppressWarnings("unchecked")
-        List<List<Object>> rows = (List<List<Object>>) result.get("rows");
+        List<List<Object>> rows = (List<List<Object>>) result.get("datarows");
         assertNotNull("Response missing 'rows' for: " + ppl, rows);
         assertEquals("Expected 1 row for count query: " + ppl, 1, rows.size());
         long actual = ((Number) rows.get(0).get(0)).longValue();
@@ -214,7 +214,7 @@ public class DynamicMappingSearchIT extends AnalyticsRestTestCase {
         @SuppressWarnings("unchecked")
         List<String> columns = (List<String>) result.get("columns");
         @SuppressWarnings("unchecked")
-        List<List<Object>> rows = (List<List<Object>>) result.get("rows");
+        List<List<Object>> rows = (List<List<Object>>) result.get("datarows");
         assertNotNull("Response missing 'rows' for: " + ppl, rows);
         assertEquals(1, rows.size());
         int idx = columns.indexOf(column);

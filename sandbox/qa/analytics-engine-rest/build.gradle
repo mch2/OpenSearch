@@ -26,8 +26,11 @@ repositories {
 }
 
 configurations {
-    // The opensearch-sql plugin is consumed as a zip artifact from Maven and
-    // installed onto the test cluster via cluster.plugin(Provider<RegularFile>).
+    // External plugin zips consumed from Maven and installed onto the test cluster
+    // via cluster.plugin(Provider<RegularFile>). opensearch-sql declares
+    // opensearch-job-scheduler in its extended.plugins, so both must be installed
+    // (job-scheduler first to satisfy opensearch-plugin install's jarHell check).
+    jobSchedulerPlugin
     sqlPlugin
 }
 
@@ -39,8 +42,9 @@ dependencies {
     testImplementation project(':sandbox:plugins:composite-engine')
     testImplementation project(':sandbox:plugins:parquet-data-format')
 
-    // Real PPL/SQL plugin — must be published to ~/.m2 via opensearch-sql's
-    // `./gradlew publishToMavenLocal` before integTest can install it.
+    // Real PPL/SQL plugin + its mandatory dependency. Both pulled from the
+    // OpenSearch Snapshots repo (or ~/.m2 if locally published).
+    jobSchedulerPlugin "org.opensearch.plugin:opensearch-job-scheduler:3.7.0.0-SNAPSHOT@zip"
     sqlPlugin "org.opensearch.plugin:opensearch-sql-plugin:3.7.0.0-SNAPSHOT@zip"
 }
 
@@ -58,7 +62,9 @@ def configureAnalyticsCluster = { cluster ->
     cluster.plugin ':sandbox:plugins:dsl-query-executor'
     cluster.plugin ':sandbox:plugins:composite-engine'
     cluster.plugin ':sandbox:plugins:parquet-data-format'
-    // Real PPL/SQL plugin — installed from the sqlPlugin configuration's resolved zip.
+    // External plugins from Maven. job-scheduler must be installed before
+    // opensearch-sql (which declares it in extended.plugins).
+    cluster.plugin project.layout.file(provider { configurations.jobSchedulerPlugin.singleFile })
     cluster.plugin project.layout.file(provider { configurations.sqlPlugin.singleFile })
 
     // Arrow/Flight JVM flags for DataFusion native library

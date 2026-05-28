@@ -42,7 +42,7 @@ public class CoordinatorReduceMemtableIT extends AnalyticsRestTestCase {
         assertTrue("columns must contain 'total', got " + columns, columns.contains("total"));
 
         @SuppressWarnings("unchecked")
-        List<List<Object>> rows = (List<List<Object>>) result.get("rows");
+        List<List<Object>> rows = (List<List<Object>>) result.get("datarows");
         assertNotNull("rows must not be null", rows);
         assertEquals("scalar agg must return exactly 1 row", 1, rows.size());
 

@@ -46,7 +46,7 @@ public class RenameCommandIT extends AnalyticsRestTestCase {
         assertSingletonColumn(response, "label");
 
         @SuppressWarnings("unchecked")
-        List<List<Object>> rows = (List<List<Object>>) response.get("rows");
+        List<List<Object>> rows = (List<List<Object>>) response.get("datarows");
         assertEquals("Row count", 3, rows.size());
     }
 

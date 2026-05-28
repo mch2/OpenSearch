@@ -200,7 +200,7 @@ public final class ResponseValidator {
         }
 
         if (response.containsKey("rows")) {
-            return (List<List<Object>>) response.get("rows");
+            return (List<List<Object>>) response.get("datarows");
         }
 
         // DSL format: response.hits.hits[].fields or _source

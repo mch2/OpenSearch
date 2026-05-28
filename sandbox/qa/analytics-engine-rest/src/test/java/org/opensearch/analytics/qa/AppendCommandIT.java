@@ -348,8 +348,8 @@ public class AppendCommandIT extends AnalyticsRestTestCase {
     private final void assertRows(String ppl, List<Object>... expected) throws IOException {
         Map<String, Object> response = executePpl(ppl);
         @SuppressWarnings("unchecked")
-        List<List<Object>> actualRows = (List<List<Object>>) response.get("rows");
-        assertNotNull("Response missing 'rows' field for query: " + ppl, actualRows);
+        List<List<Object>> actualRows = (List<List<Object>>) response.get("datarows");
+        assertNotNull("Response missing 'datarows' field for query: " + ppl, actualRows);
         assertEquals("Row count mismatch for query: " + ppl, expected.length, actualRows.size());
         for (int i = 0; i < expected.length; i++) {
             List<Object> want = expected[i];
@@ -380,8 +380,8 @@ public class AppendCommandIT extends AnalyticsRestTestCase {
     private final void assertRowsAnyOrder(String ppl, List<Object>... expected) throws IOException {
         Map<String, Object> response = executePpl(ppl);
         @SuppressWarnings("unchecked")
-        List<List<Object>> actualRows = (List<List<Object>>) response.get("rows");
-        assertNotNull("Response missing 'rows' field for query: " + ppl, actualRows);
+        List<List<Object>> actualRows = (List<List<Object>>) response.get("datarows");
+        assertNotNull("Response missing 'datarows' field for query: " + ppl, actualRows);
         List<String> expectedNormalized = Arrays.stream(expected).map(AppendCommandIT::normalizeRow).sorted().toList();
         List<String> actualNormalized = actualRows.stream().map(AppendCommandIT::normalizeRow).sorted().toList();
         assertEquals("Row multisets differ for query: " + ppl, expectedNormalized, actualNormalized);

@@ -93,7 +93,7 @@ public class AppendPipeCommandIT extends AnalyticsRestTestCase {
     @SuppressWarnings("unchecked")
     private List<List<Object>> getRows(String ppl) throws IOException {
         Map<String, Object> response = executePpl(ppl);
-        return (List<List<Object>>) response.get("rows");
+        return (List<List<Object>>) response.get("datarows");
     }
 
     // ── duplicate + inline stats producing a smaller schema (merged column) ─────
@@ -150,7 +150,7 @@ public class AppendPipeCommandIT extends AnalyticsRestTestCase {
     private final void assertRowsAnyOrder(String ppl, List<Object>... expected) throws IOException {
         Map<String, Object> response = executePpl(ppl);
         @SuppressWarnings("unchecked")
-        List<List<Object>> actualRows = (List<List<Object>>) response.get("rows");
+        List<List<Object>> actualRows = (List<List<Object>>) response.get("datarows");
         assertNotNull("Response missing 'rows' for query: " + ppl, actualRows);
         assertEquals("Row count mismatch for query: " + ppl, expected.length, actualRows.size());
         java.util.List<List<Object>> remaining = new java.util.ArrayList<>(actualRows);
@@ -189,7 +189,7 @@ public class AppendPipeCommandIT extends AnalyticsRestTestCase {
     private final void assertRows(String ppl, List<Object>... expected) throws IOException {
         Map<String, Object> response = executePpl(ppl);
         @SuppressWarnings("unchecked")
-        List<List<Object>> actualRows = (List<List<Object>>) response.get("rows");
+        List<List<Object>> actualRows = (List<List<Object>>) response.get("datarows");
         assertNotNull("Response missing 'rows' for query: " + ppl, actualRows);
         assertEquals("Row count mismatch for query: " + ppl, expected.length, actualRows.size());
         for (int i = 0; i < expected.length; i++) {

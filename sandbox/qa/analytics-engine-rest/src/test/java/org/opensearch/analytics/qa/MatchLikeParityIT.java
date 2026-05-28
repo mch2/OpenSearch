@@ -267,7 +267,7 @@ public class MatchLikeParityIT extends AnalyticsRestTestCase {
         req.setJsonEntity("{\"query\": \"" + escapeJson(ppl) + "\"}");
         Map<String, Object> parsed = assertOkAndParse(client().performRequest(req), "PPL: " + ppl);
         @SuppressWarnings("unchecked")
-        List<List<Object>> rows = (List<List<Object>>) parsed.get("rows");
+        List<List<Object>> rows = (List<List<Object>>) parsed.get("datarows");
         assertNotNull("PPL response missing `rows` for: " + ppl, rows);
         assertEquals("PPL scalar count should return exactly 1 row for: " + ppl, 1, rows.size());
         assertEquals("PPL scalar count should return exactly 1 column for: " + ppl, 1, rows.get(0).size());

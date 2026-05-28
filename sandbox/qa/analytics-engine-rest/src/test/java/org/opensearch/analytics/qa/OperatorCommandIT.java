@@ -149,7 +149,7 @@ public class OperatorCommandIT extends AnalyticsRestTestCase {
             "source=" + DATASET.indexName + " | where bool0 xor bool1 | fields bool0, bool1"
         );
         @SuppressWarnings("unchecked")
-        List<List<Object>> rows = (List<List<Object>>) response.get("rows");
+        List<List<Object>> rows = (List<List<Object>>) response.get("datarows");
         assertNotNull("xor query returned no rows block", rows);
         // The calcs dataset contains rows where bool0 != bool1; assert the filter surfaces them.
         assertTrue("xor should return at least 1 row, got " + rows.size(), !rows.isEmpty());
@@ -272,7 +272,7 @@ public class OperatorCommandIT extends AnalyticsRestTestCase {
     private void assertRowCount(String ppl, int expected) throws IOException {
         Map<String, Object> response = executePpl(ppl);
         @SuppressWarnings("unchecked")
-        List<List<Object>> rows = (List<List<Object>>) response.get("rows");
+        List<List<Object>> rows = (List<List<Object>>) response.get("datarows");
         assertNotNull("Response missing 'rows' for query: " + ppl, rows);
         assertEquals("Row count mismatch for query: " + ppl, expected, rows.size());
     }
@@ -280,7 +280,7 @@ public class OperatorCommandIT extends AnalyticsRestTestCase {
     private void assertSingleRowField(String ppl, Object expected) throws IOException {
         Map<String, Object> response = executePpl(ppl);
         @SuppressWarnings("unchecked")
-        List<List<Object>> rows = (List<List<Object>>) response.get("rows");
+        List<List<Object>> rows = (List<List<Object>>) response.get("datarows");
         assertNotNull("Response missing 'rows' for query: " + ppl, rows);
         assertEquals("Expected exactly 1 row for query: " + ppl, 1, rows.size());
         Object actual = rows.get(0).get(0);
@@ -290,7 +290,7 @@ public class OperatorCommandIT extends AnalyticsRestTestCase {
     private void assertSingleRowApprox(String ppl, double expected, double tolerance) throws IOException {
         Map<String, Object> response = executePpl(ppl);
         @SuppressWarnings("unchecked")
-        List<List<Object>> rows = (List<List<Object>>) response.get("rows");
+        List<List<Object>> rows = (List<List<Object>>) response.get("datarows");
         assertNotNull("Response missing 'rows' for query: " + ppl, rows);
         assertEquals("Expected exactly 1 row for query: " + ppl, 1, rows.size());
         Object actual = rows.get(0).get(0);

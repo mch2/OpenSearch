@@ -274,7 +274,7 @@ public class LocalRecoveryIT extends AnalyticsRestTestCase {
         Response response = client().performRequest(request);
         Map<String, Object> parsed = assertOkAndParse(response, "PPL: " + ppl);
         @SuppressWarnings("unchecked")
-        List<List<Object>> rows = (List<List<Object>>) parsed.get("rows");
+        List<List<Object>> rows = (List<List<Object>>) parsed.get("datarows");
         assertNotNull("Response missing 'rows' for: " + ppl, rows);
         return rows;
     }

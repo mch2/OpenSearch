@@ -48,7 +48,7 @@ public class StreamingCoordinatorReduceIT extends AnalyticsRestTestCase {
         assertTrue("columns must contain 'value', got " + columns, columns.contains("value"));
 
         @SuppressWarnings("unchecked")
-        List<List<Object>> rows = (List<List<Object>>) result.get("rows");
+        List<List<Object>> rows = (List<List<Object>>) result.get("datarows");
         assertNotNull("rows must not be null", rows);
 
         int expectedRows = NUM_SHARDS * DOCS_PER_SHARD;
@@ -240,7 +240,7 @@ public class StreamingCoordinatorReduceIT extends AnalyticsRestTestCase {
         assertTrue("columns must contain '" + columnName + "', got " + columns, columns.contains(columnName));
 
         @SuppressWarnings("unchecked")
-        List<List<Object>> rows = (List<List<Object>>) result.get("rows");
+        List<List<Object>> rows = (List<List<Object>>) result.get("datarows");
         assertNotNull("rows must not be null", rows);
         assertEquals("scalar agg must return exactly 1 row", 1, rows.size());
 

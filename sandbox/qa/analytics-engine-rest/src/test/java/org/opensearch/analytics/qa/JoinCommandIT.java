@@ -276,7 +276,7 @@ public class JoinCommandIT extends AnalyticsRestTestCase {
     private void assertRowCountPositive(String ppl) throws IOException {
         Map<String, Object> response = executePpl(ppl);
         @SuppressWarnings("unchecked")
-        List<List<Object>> rows = (List<List<Object>>) response.get("rows");
+        List<List<Object>> rows = (List<List<Object>>) response.get("datarows");
         assertNotNull("Response missing 'rows' for query: " + ppl, rows);
         assertEquals("Expected single count row for query: " + ppl, 1, rows.size());
         Object actual = rows.get(0).get(0);
@@ -294,7 +294,7 @@ public class JoinCommandIT extends AnalyticsRestTestCase {
     private void assertSingleCount(String ppl, long expected) throws IOException {
         Map<String, Object> response = executePpl(ppl);
         @SuppressWarnings("unchecked")
-        List<List<Object>> rows = (List<List<Object>>) response.get("rows");
+        List<List<Object>> rows = (List<List<Object>>) response.get("datarows");
         assertNotNull("Response missing 'rows' for query: " + ppl, rows);
         assertEquals("Expected single count row for query: " + ppl, 1, rows.size());
         Object actual = rows.get(0).get(0);

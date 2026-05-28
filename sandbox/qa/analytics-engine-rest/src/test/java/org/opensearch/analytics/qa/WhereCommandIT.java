@@ -280,8 +280,8 @@ public class WhereCommandIT extends AnalyticsRestTestCase {
     private void assertRowCount(String ppl, int expectedCount) throws IOException {
         Map<String, Object> response = executePpl(ppl);
         @SuppressWarnings("unchecked")
-        List<List<Object>> actualRows = (List<List<Object>>) response.get("rows");
-        assertNotNull("Response missing 'rows' field for query: " + ppl, actualRows);
+        List<List<Object>> actualRows = (List<List<Object>>) response.get("datarows");
+        assertNotNull("Response missing 'datarows' field for query: " + ppl, actualRows);
         assertEquals(
             "Row count mismatch for query: " + ppl + " — got rows: " + actualRows,
             expectedCount,
@@ -299,8 +299,8 @@ public class WhereCommandIT extends AnalyticsRestTestCase {
     private final void assertRows(String ppl, List<Object>... expected) throws IOException {
         Map<String, Object> response = executePpl(ppl);
         @SuppressWarnings("unchecked")
-        List<List<Object>> actualRows = (List<List<Object>>) response.get("rows");
-        assertNotNull("Response missing 'rows' field for query: " + ppl, actualRows);
+        List<List<Object>> actualRows = (List<List<Object>>) response.get("datarows");
+        assertNotNull("Response missing 'datarows' field for query: " + ppl, actualRows);
         assertEquals("Row count mismatch for query: " + ppl, expected.length, actualRows.size());
         for (int i = 0; i < expected.length; i++) {
             List<Object> want = expected[i];
