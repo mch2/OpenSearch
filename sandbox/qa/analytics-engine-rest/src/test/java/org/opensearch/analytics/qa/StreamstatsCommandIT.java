@@ -84,7 +84,8 @@ public class StreamstatsCommandIT extends AnalyticsRestTestCase {
     private static boolean dataProvisioned = false;
     private static boolean multiProvisioned = false;
 
-    private void ensureDataProvisioned() throws IOException {
+    @Override
+    protected void onBeforeQuery() throws IOException {
         if (dataProvisioned == false) {
             DatasetProvisioner.provision(client(), DATASET);
             dataProvisioned = true;
@@ -168,7 +169,6 @@ public class StreamstatsCommandIT extends AnalyticsRestTestCase {
      *  rows form their own running partition and accumulate normally. {@code str3} has 7 nulls
      *  + 10 'e' rows; companion to {@link #testStreamstatsByWithNullBucket}. */
     public void testStreamstatsByWithNull() throws IOException {
-        ensureDataProvisioned();
         Map<String, Object> response = executePpl(
             "source=" + DATASET.indexName + " | sort key"
                 + " | streamstats count() as cnt, avg(int0) as avg, min(int0) as mn, max(int0) as mx by str3"
@@ -200,7 +200,6 @@ public class StreamstatsCommandIT extends AnalyticsRestTestCase {
      *  the non-null partition's running count proceeds as usual. Same {@code by str3} as
      *  {@link #testStreamstatsByWithNull}; null-key rows now show NULL aggregates. */
     public void testStreamstatsByWithNullBucket() throws IOException {
-        ensureDataProvisioned();
         Map<String, Object> response = executePpl(
             "source=" + DATASET.indexName + " | sort key"
                 + " | streamstats bucket_nullable=false count() as cnt, avg(int0) as avg, min(int0) as mn, max(int0) as mx by str3"
@@ -572,7 +571,6 @@ public class StreamstatsCommandIT extends AnalyticsRestTestCase {
     /** sql IT: testStreamstatsWindowError. window=-1 must be a parse-time / argument-validation
      *  error. PPL parser rejects this before reaching analytics-engine planner. */
     public void testStreamstatsWindowError() throws IOException {
-        ensureDataProvisioned();
         assertErrorContains(
             "source=" + DATASET.indexName + " | streamstats window=-1 avg(int0) as avg",
             "Window size must be >= 0"
@@ -676,7 +674,6 @@ public class StreamstatsCommandIT extends AnalyticsRestTestCase {
 
     /** sql IT: testStreamstatsGlobalWithNull. */
     public void testStreamstatsGlobalWithNull() throws IOException {
-        ensureDataProvisioned();
         assertErrorAny(
             "source=" + DATASET.indexName
                 + " | streamstats window=2 global=true avg(int0) as avg by str0"
@@ -685,7 +682,6 @@ public class StreamstatsCommandIT extends AnalyticsRestTestCase {
 
     /** sql IT: testStreamstatsGlobalWithNullBucket. */
     public void testStreamstatsGlobalWithNullBucket() throws IOException {
-        ensureDataProvisioned();
         assertErrorAny(
             "source=" + DATASET.indexName
                 + " | streamstats bucket_nullable=false window=2 global=true avg(int0) as avg by str0"
@@ -695,7 +691,6 @@ public class StreamstatsCommandIT extends AnalyticsRestTestCase {
     /** sql IT: testStreamstatsReset. {@code reset_before} / {@code reset_after} use
      *  {@code buildStreamWindowJoinPlan} — Correlate + segment-id filter, not RexOver. */
     public void testStreamstatsReset() throws IOException {
-        ensureDataProvisioned();
         assertErrorAny(
             "source=" + DATASET.indexName
                 + " | streamstats reset_before=(int0 > 5) avg(int0) as avg by str0"
@@ -704,7 +699,6 @@ public class StreamstatsCommandIT extends AnalyticsRestTestCase {
 
     /** sql IT: testStreamstatsResetWithNull. */
     public void testStreamstatsResetWithNull() throws IOException {
-        ensureDataProvisioned();
         assertErrorAny(
             "source=" + DATASET.indexName
                 + " | streamstats reset_before=(int0 > 5) avg(int0) as avg by str0"
@@ -713,7 +707,6 @@ public class StreamstatsCommandIT extends AnalyticsRestTestCase {
 
     /** sql IT: testStreamstatsResetWithNullBucket. */
     public void testStreamstatsResetWithNullBucket() throws IOException {
-        ensureDataProvisioned();
         assertErrorAny(
             "source=" + DATASET.indexName
                 + " | streamstats bucket_nullable=false reset_before=(int0 > 5)"
@@ -725,7 +718,6 @@ public class StreamstatsCommandIT extends AnalyticsRestTestCase {
 
     /** sql IT: testUnsupportedWindowFunctions. */
     public void testUnsupportedWindowFunctions() throws IOException {
-        ensureDataProvisioned();
         assertErrorContains(
             "source=" + DATASET.indexName + " | streamstats percentile_approx(int0)",
             "percentile_approx"
@@ -913,7 +905,6 @@ public class StreamstatsCommandIT extends AnalyticsRestTestCase {
      *  may not flow through analytics-engine for the specific embedded shape; conservatively
      *  expect throw. */
     public void testLeftJoinWithStreamstats() throws IOException {
-        ensureDataProvisioned();
         // Test source uses BANK_TWO which we don't have. Use a self-join on calcs as a stand-in;
         // analytics-engine likely rejects the streamstats-in-subsearch shape.
         assertErrorAny(
@@ -937,7 +928,6 @@ public class StreamstatsCommandIT extends AnalyticsRestTestCase {
             + " assert a deterministic outcome"
     )
     public void testWhereInWithStreamstatsSubquery() throws IOException {
-        ensureDataProvisioned();
         assertErrorAny(
             "source=" + DATASET.indexName + " | where key in"
                 + " [ source=" + DATASET.indexName + " | streamstats count() as cnt"
@@ -1182,7 +1172,6 @@ public class StreamstatsCommandIT extends AnalyticsRestTestCase {
 
     /** sql IT: testStreamstatsDistinctCount. */
     public void testStreamstatsDistinctCount() throws IOException {
-        ensureDataProvisioned();
         assertErrorContains(
             "source=" + DATASET.indexName + " | streamstats dc(str3) as dc_str3",
             "DISTINCT_COUNT_APPROX"
@@ -1191,7 +1180,6 @@ public class StreamstatsCommandIT extends AnalyticsRestTestCase {
 
     /** sql IT: testStreamstatsDistinctCountByCountry. */
     public void testStreamstatsDistinctCountByCountry() throws IOException {
-        ensureDataProvisioned();
         assertErrorContains(
             "source=" + DATASET.indexName + " | streamstats dc(str3) as dc_str3 by str0",
             "DISTINCT_COUNT_APPROX"
@@ -1200,7 +1188,6 @@ public class StreamstatsCommandIT extends AnalyticsRestTestCase {
 
     /** sql IT: testStreamstatsDistinctCountFunction. */
     public void testStreamstatsDistinctCountFunction() throws IOException {
-        ensureDataProvisioned();
         assertErrorContains(
             "source=" + DATASET.indexName + " | streamstats distinct_count(str0) as dc_str0",
             "DISTINCT_COUNT_APPROX"
@@ -1209,7 +1196,6 @@ public class StreamstatsCommandIT extends AnalyticsRestTestCase {
 
     /** sql IT: testStreamstatsDistinctCountWithNull. */
     public void testStreamstatsDistinctCountWithNull() throws IOException {
-        ensureDataProvisioned();
         assertErrorContains(
             "source=" + DATASET.indexName + " | streamstats dc(str3) as dc_str3",
             "DISTINCT_COUNT_APPROX"
@@ -1220,7 +1206,6 @@ public class StreamstatsCommandIT extends AnalyticsRestTestCase {
      *  default-{@code @timestamp} check — calcs has no @timestamp column. Either way the
      *  path is not yet reachable on analytics-engine — assert the failure. */
     public void testStreamstatsEarliestAndLatest() throws IOException {
-        ensureDataProvisioned();
         assertErrorAny(
             "source=" + DATASET.indexName + " | streamstats earliest(str0), latest(str0) by str3"
         );
@@ -1291,13 +1276,6 @@ public class StreamstatsCommandIT extends AnalyticsRestTestCase {
         assertEquals(message, expected, actual);
     }
 
-    private Map<String, Object> executePpl(String ppl) throws IOException {
-        ensureDataProvisioned();
-        Request request = new Request("POST", "/_plugins/_ppl");
-        request.setJsonEntity("{\"query\": \"" + escapeJson(ppl) + "\"}");
-        Response response = client().performRequest(request);
-        return assertOkAndParse(response, "PPL: " + ppl);
-    }
 
     /** Send a PPL query and assert response body contains {@code expectedSubstring}. */
     private void assertErrorContains(String ppl, String expectedSubstring) throws IOException {

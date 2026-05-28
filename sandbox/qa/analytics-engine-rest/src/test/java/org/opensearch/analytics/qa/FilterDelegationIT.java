@@ -40,7 +40,7 @@ public class FilterDelegationIT extends AnalyticsRestTestCase {
         indexDocs();
 
         String ppl = "source = " + INDEX_NAME + " | where match(message, 'hello') | stats sum(value) as total";
-        Map<String, Object> result = executePPL(ppl);
+        Map<String, Object> result = executePpl(ppl);
 
         @SuppressWarnings("unchecked")
         List<List<Object>> rows = (List<List<Object>>) result.get("datarows");
@@ -75,7 +75,7 @@ public class FilterDelegationIT extends AnalyticsRestTestCase {
         indexDocs();
 
         String ppl = "source = " + INDEX_NAME + " | where tag = 'hello' | stats sum(value) as total";
-        Map<String, Object> result = executePPL(ppl);
+        Map<String, Object> result = executePpl(ppl);
 
         @SuppressWarnings("unchecked")
         List<List<Object>> rows = (List<List<Object>>) result.get("datarows");
@@ -109,7 +109,7 @@ public class FilterDelegationIT extends AnalyticsRestTestCase {
         indexDocs();
 
         String ppl = "source = " + INDEX_NAME + " | where tag = 'hello' or value = 3 | stats sum(value) as total";
-        Map<String, Object> result = executePPL(ppl);
+        Map<String, Object> result = executePpl(ppl);
 
         @SuppressWarnings("unchecked")
         List<List<Object>> rows = (List<List<Object>>) result.get("datarows");
@@ -135,7 +135,7 @@ public class FilterDelegationIT extends AnalyticsRestTestCase {
         // 10 docs tag='hello' value=5 + 10 docs tag='goodbye' value=3.
         // match(message,'hello') OR value > 4 → 10 hello docs ∪ 10 value=5 docs (same set) = 10.
         String ppl = "source = " + INDEX_NAME + " | where match(message, 'hello') or value > 4 | stats count() as c";
-        Map<String, Object> result = executePPL(ppl);
+        Map<String, Object> result = executePpl(ppl);
 
         @SuppressWarnings("unchecked")
         List<List<Object>> rows = (List<List<Object>>) result.get("datarows");
@@ -156,7 +156,7 @@ public class FilterDelegationIT extends AnalyticsRestTestCase {
 
         // NOT(match(message,'hello')) → 10 goodbye docs.
         String ppl = "source = " + INDEX_NAME + " | where not match(message, 'hello') | stats count() as c";
-        Map<String, Object> result = executePPL(ppl);
+        Map<String, Object> result = executePpl(ppl);
 
         @SuppressWarnings("unchecked")
         List<List<Object>> rows = (List<List<Object>>) result.get("datarows");
@@ -179,7 +179,7 @@ public class FilterDelegationIT extends AnalyticsRestTestCase {
 
         // dc(value) over docs matching match(message,'hello') → all values are 5 → 1 distinct.
         String ppl = "source = " + INDEX_NAME + " | where match(message, 'hello') | stats dc(value) as d";
-        Map<String, Object> result = executePPL(ppl);
+        Map<String, Object> result = executePpl(ppl);
 
         @SuppressWarnings("unchecked")
         List<List<Object>> rows = (List<List<Object>>) result.get("datarows");
@@ -203,7 +203,7 @@ public class FilterDelegationIT extends AnalyticsRestTestCase {
         // 10 docs match all three: match(message,'hello') AND tag='hello' AND value=5.
         String ppl = "source = " + INDEX_NAME
             + " | where match(message, 'hello') and tag = 'hello' and value = 5 | stats count() as c";
-        Map<String, Object> result = executePPL(ppl);
+        Map<String, Object> result = executePpl(ppl);
 
         @SuppressWarnings("unchecked")
         List<List<Object>> rows = (List<List<Object>>) result.get("datarows");
@@ -223,7 +223,7 @@ public class FilterDelegationIT extends AnalyticsRestTestCase {
         // sum(value) over the 10 matching docs (value=5 each) → 50.
         String ppl = "source = " + INDEX_NAME
             + " | where match(message, 'hello') and tag = 'hello' and value = 5 | stats sum(value) as s";
-        Map<String, Object> result = executePPL(ppl);
+        Map<String, Object> result = executePpl(ppl);
 
         @SuppressWarnings("unchecked")
         List<List<Object>> rows = (List<List<Object>>) result.get("datarows");
@@ -283,7 +283,7 @@ public class FilterDelegationIT extends AnalyticsRestTestCase {
 
         // First call — registers query with the caching policy but does NOT cache yet
         // (min_frequency=2, BooleanQuery gets -1 discount → needs 1 use before caching)
-        Map<String, Object> result1 = executePPL(ppl);
+        Map<String, Object> result1 = executePpl(ppl);
         @SuppressWarnings("unchecked")
         List<List<Object>> rows1 = (List<List<Object>>) result1.get("datarows");
         assertNotNull(rows1);
@@ -299,7 +299,7 @@ public class FilterDelegationIT extends AnalyticsRestTestCase {
         );
 
         // Second call — policy threshold met, cache populates the DocIdSet
-        executePPL(ppl);
+        executePpl(ppl);
 
         long cacheSizeAfterSecond = getQueryCacheCacheSize();
         assertTrue(
@@ -312,7 +312,7 @@ public class FilterDelegationIT extends AnalyticsRestTestCase {
         long hitsBefore = getQueryCacheHitCount();
 
         // Third call — should produce a cache hit (same segment, same query, cached)
-        Map<String, Object> result3 = executePPL(ppl);
+        Map<String, Object> result3 = executePpl(ppl);
         @SuppressWarnings("unchecked")
         List<List<Object>> rows3 = (List<List<Object>>) result3.get("datarows");
         assertEquals(count, ((Number) rows3.get(0).get(0)).longValue());
@@ -472,10 +472,4 @@ public class FilterDelegationIT extends AnalyticsRestTestCase {
         client().performRequest(new Request("POST", "/" + INDEX_NAME + "/_flush?force=true"));
     }
 
-    private Map<String, Object> executePPL(String ppl) throws Exception {
-        Request request = new Request("POST", "/_plugins/_ppl");
-        request.setJsonEntity("{\"query\": \"" + ppl + "\"}");
-        Response response = client().performRequest(request);
-        return entityAsMap(response);
-    }
 }

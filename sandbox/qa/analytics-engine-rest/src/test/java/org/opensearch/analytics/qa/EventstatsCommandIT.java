@@ -87,7 +87,8 @@ public class EventstatsCommandIT extends AnalyticsRestTestCase {
     private static boolean dataProvisioned = false;
     private static boolean multiProvisioned = false;
 
-    private void ensureDataProvisioned() throws IOException {
+    @Override
+    protected void onBeforeQuery() throws IOException {
         if (dataProvisioned == false) {
             DatasetProvisioner.provision(client(), DATASET);
             dataProvisioned = true;
@@ -173,7 +174,6 @@ public class EventstatsCommandIT extends AnalyticsRestTestCase {
      *  {@code str3} has 7 nulls (int0 non-null=[7,3,10,4,8] → cnt=7, avg=6.4, min=3, max=10)
      *  and 10 'e' rows (int0 non-null=[1,8,8,4,11,4] → cnt=10, avg=6.0, min=1, max=11). */
     public void testEventstatsByWithNull() throws IOException {
-        ensureDataProvisioned();
         Map<String, Object> response = executePpl(
             "source=" + DATASET.indexName + " | sort key"
                 + " | eventstats count() as cnt, avg(int0) as avg, min(int0) as mn, max(int0) as mx by str3"
@@ -206,7 +206,6 @@ public class EventstatsCommandIT extends AnalyticsRestTestCase {
      *  {@link #testEventstatsByWithNull} — null-key rows now show NULL aggregates instead of
      *  the (cnt=7, avg=6.4, min=3, max=10) the default mode would broadcast. */
     public void testEventstatsByWithNullBucket() throws IOException {
-        ensureDataProvisioned();
         Map<String, Object> response = executePpl(
             "source=" + DATASET.indexName + " | sort key"
                 + " | eventstats bucket_nullable=false count() as cnt, avg(int0) as avg, min(int0) as mn, max(int0) as mx by str3"
@@ -545,7 +544,6 @@ public class EventstatsCommandIT extends AnalyticsRestTestCase {
      *  PPL frontend with {@code "Unexpected window function: <name>"} before reaching the
      *  analytics-engine planner. */
     public void testUnsupportedWindowFunctions() throws IOException {
-        ensureDataProvisioned();
         assertErrorContains(
             "source=" + DATASET.indexName + " | eventstats percentile_approx(int0)",
             "percentile_approx"
@@ -666,7 +664,6 @@ public class EventstatsCommandIT extends AnalyticsRestTestCase {
      *  </ul>
      */
     public void testMultipleEventstatsWithNullBucket() throws IOException {
-        ensureDataProvisioned();
         Map<String, Object> response = executePpl(
             "source=" + DATASET.indexName + " | sort key"
                 + " | eventstats bucket_nullable=false avg(int0) as avg_int0 by str3, str0"
@@ -941,7 +938,6 @@ public class EventstatsCommandIT extends AnalyticsRestTestCase {
      *  fails before reaching the window-function gate with
      *  {@code "Cannot resolve function: DISTINCT_COUNT_APPROX"}. */
     public void testEventstatsDistinctCount() throws IOException {
-        ensureDataProvisioned();
         assertErrorContains(
             "source=" + DATASET.indexName + " | eventstats dc(str3) as dc_str3",
             "DISTINCT_COUNT_APPROX"
@@ -950,7 +946,6 @@ public class EventstatsCommandIT extends AnalyticsRestTestCase {
 
     /** sql IT: testEventstatsDistinctCountByCountry. */
     public void testEventstatsDistinctCountByCountry() throws IOException {
-        ensureDataProvisioned();
         assertErrorContains(
             "source=" + DATASET.indexName + " | eventstats dc(str3) as dc_str3 by str0",
             "DISTINCT_COUNT_APPROX"
@@ -959,7 +954,6 @@ public class EventstatsCommandIT extends AnalyticsRestTestCase {
 
     /** sql IT: testEventstatsDistinctCountFunction. {@code distinct_count()} alias for dc. */
     public void testEventstatsDistinctCountFunction() throws IOException {
-        ensureDataProvisioned();
         assertErrorContains(
             "source=" + DATASET.indexName + " | eventstats distinct_count(str0) as dc_str0",
             "DISTINCT_COUNT_APPROX"
@@ -968,7 +962,6 @@ public class EventstatsCommandIT extends AnalyticsRestTestCase {
 
     /** sql IT: testEventstatsDistinctCountWithNull. */
     public void testEventstatsDistinctCountWithNull() throws IOException {
-        ensureDataProvisioned();
         assertErrorContains(
             "source=" + DATASET.indexName + " | eventstats dc(str3) as dc_str3",
             "DISTINCT_COUNT_APPROX"
@@ -981,7 +974,6 @@ public class EventstatsCommandIT extends AnalyticsRestTestCase {
      *  frontend's default-{@code @timestamp}-field check (calcs has no @timestamp column).
      *  Either way, the path is not reachable on analytics-engine today — assert the failure. */
     public void testEventstatsEarliestAndLatest() throws IOException {
-        ensureDataProvisioned();
         // The actual error is "Default @timestamp field not found" because calcs has no
         // timestamp column, but the contract here is just "this PPL form is not yet supported".
         assertErrorAny(
@@ -1056,13 +1048,6 @@ public class EventstatsCommandIT extends AnalyticsRestTestCase {
         assertEquals(message, expected, actual);
     }
 
-    private Map<String, Object> executePpl(String ppl) throws IOException {
-        ensureDataProvisioned();
-        Request request = new Request("POST", "/_plugins/_ppl");
-        request.setJsonEntity("{\"query\": \"" + escapeJson(ppl) + "\"}");
-        Response response = client().performRequest(request);
-        return assertOkAndParse(response, "PPL: " + ppl);
-    }
 
     /**
      * Send a PPL query expecting an error response. Asserts the response body contains

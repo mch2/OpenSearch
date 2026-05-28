@@ -53,7 +53,8 @@ public class WhereCommandIT extends AnalyticsRestTestCase {
      * as {@link FillNullCommandIT} — {@code client()} is only reliably available inside a
      * test body, not in {@code @BeforeClass} / {@code setUp()}.
      */
-    private void ensureDataProvisioned() throws IOException {
+    @Override
+    protected void onBeforeQuery() throws IOException {
         if (dataProvisioned == false) {
             DatasetProvisioner.provision(client(), DATASET);
             dataProvisioned = true;
@@ -320,13 +321,6 @@ public class WhereCommandIT extends AnalyticsRestTestCase {
         }
     }
 
-    private Map<String, Object> executePpl(String ppl) throws IOException {
-        ensureDataProvisioned();
-        Request request = new Request("POST", "/_plugins/_ppl");
-        request.setJsonEntity("{\"query\": \"" + escapeJson(ppl) + "\"}");
-        Response response = client().performRequest(request);
-        return assertOkAndParse(response, "PPL: " + ppl);
-    }
 
     private static void assertCellEquals(String message, Object expected, Object actual) {
         if (expected == null || actual == null) {

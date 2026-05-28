@@ -34,7 +34,7 @@ public class CoordinatorReduceMemtableIT extends AnalyticsRestTestCase {
         createParquetBackedIndex();
         indexDeterministicDocs();
 
-        Map<String, Object> result = executePPL("source = " + INDEX + " | stats sum(value) as total");
+        Map<String, Object> result = executePpl("source = " + INDEX + " | stats sum(value) as total");
 
         @SuppressWarnings("unchecked")
         List<String> columns = extractColumnNames(result);
@@ -102,10 +102,4 @@ public class CoordinatorReduceMemtableIT extends AnalyticsRestTestCase {
         client().performRequest(new Request("POST", "/" + INDEX + "/_flush?force=true"));
     }
 
-    private Map<String, Object> executePPL(String ppl) throws Exception {
-        Request request = new Request("POST", "/_plugins/_ppl");
-        request.setJsonEntity("{\"query\": \"" + ppl + "\"}");
-        Response response = client().performRequest(request);
-        return entityAsMap(response);
-    }
 }

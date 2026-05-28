@@ -32,7 +32,8 @@ public class AliasIT extends AnalyticsRestTestCase {
 
     private static boolean dataProvisioned = false;
 
-    private void ensureDataProvisioned() throws IOException {
+    @Override
+    protected void onBeforeQuery() throws IOException {
         if (dataProvisioned == false) {
             DatasetProvisioner.provision(client(), CALCS_A);
             DatasetProvisioner.provision(client(), CALCS_B);
@@ -46,7 +47,6 @@ public class AliasIT extends AnalyticsRestTestCase {
      * Verifies the alias fans out — a missing-fan-out bug would return 17.
      */
     public void testAliasSpansAllBackingIndices() throws IOException {
-        ensureDataProvisioned();
         long count = singleCount("source=" + COMPAT_ALIAS + " | stats count() as c");
         assertEquals("alias fan-out: 17 + 17", 34L, count);
     }
@@ -56,7 +56,6 @@ public class AliasIT extends AnalyticsRestTestCase {
      * passes through as a singleton list).
      */
     public void testConcreteIndexStillResolvesAsBefore() throws IOException {
-        ensureDataProvisioned();
         long count = singleCount("source=" + CALCS_A.indexName + " | stats count() as c");
         assertEquals("single concrete index", 17L, count);
     }
@@ -67,7 +66,6 @@ public class AliasIT extends AnalyticsRestTestCase {
      * the user can fix the mapping rather than guess.
      */
     public void testSchemaMismatchAliasIsRejected() throws IOException {
-        ensureDataProvisioned();
         // Provision a third index whose `key` field is a long (calcs has it as keyword) and
         // alias it together with calcs_a. The planner should reject when the query references
         // either index.
@@ -133,7 +131,6 @@ public class AliasIT extends AnalyticsRestTestCase {
      * rows than the user asked for. Better to error with a clear message.
      */
     public void testFilterAliasIsRejected() throws IOException {
-        ensureDataProvisioned();
         String filterAlias = "calcs_filter_only";
         // PUT alias with a term filter against the existing calcs_a index.
         Request put = new Request("POST", "/_aliases");
@@ -162,12 +159,6 @@ public class AliasIT extends AnalyticsRestTestCase {
         return ((Number) cell).longValue();
     }
 
-    private Map<String, Object> executePpl(String ppl) throws IOException {
-        Request request = new Request("POST", "/_plugins/_ppl");
-        request.setJsonEntity("{\"query\": \"" + escapeJson(ppl) + "\"}");
-        Response response = client().performRequest(request);
-        return assertOkAndParse(response, "PPL: " + ppl);
-    }
 
     private String executePplExpectingFailure(String ppl) throws IOException {
         Request request = new Request("POST", "/_plugins/_ppl");

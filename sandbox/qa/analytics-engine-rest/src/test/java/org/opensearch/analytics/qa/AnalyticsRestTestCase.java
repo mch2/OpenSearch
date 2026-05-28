@@ -10,6 +10,8 @@ package org.opensearch.analytics.qa;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.junit.Before;
+import org.opensearch.client.Request;
 import org.opensearch.client.Response;
 import org.opensearch.test.rest.OpenSearchRestTestCase;
 
@@ -89,5 +91,36 @@ public abstract class AnalyticsRestTestCase extends OpenSearchRestTestCase {
         }
         List<Map<String, Object>> entries = (List<Map<String, Object>>) schema;
         return entries.stream().map(e -> (String) e.get("name")).collect(Collectors.toList());
+    }
+
+    /**
+     * Hook invoked before each test method via JUnit's {@code @Before}, and also before
+     * each {@link #executePpl} call as a belt-and-braces guard. Subclasses with lazily-
+     * provisioned datasets should override to call their {@code DatasetProvisioner.provision}
+     * (gated on a static {@code dataProvisioned} flag so the work only happens once per
+     * JVM). Default: no-op.
+     *
+     * <p>Routing through {@code @Before} means setup that doesn't go through
+     * {@link #executePpl} (alias creation, raw {@code _search}, expect-failure paths) still
+     * sees the dataset present.
+     */
+    protected void onBeforeQuery() throws IOException {}
+
+    @Before
+    public final void invokeOnBeforeQueryHook() throws IOException {
+        onBeforeQuery();
+    }
+
+    /**
+     * Execute a PPL query against the real opensearch-sql plugin at {@code /_plugins/_ppl},
+     * asserting HTTP 200 and returning the parsed JSON body. The {@link #onBeforeQuery}
+     * hook has already fired via {@code @Before}, so subclasses don't need to ensure data
+     * provisioning here.
+     */
+    protected Map<String, Object> executePpl(String ppl) throws IOException {
+        Request request = new Request("POST", "/_plugins/_ppl");
+        request.setJsonEntity("{\"query\": \"" + escapeJson(ppl) + "\"}");
+        Response response = client().performRequest(request);
+        return assertOkAndParse(response, "PPL: " + ppl);
     }
 }

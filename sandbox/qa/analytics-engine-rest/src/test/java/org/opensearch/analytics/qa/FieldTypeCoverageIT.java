@@ -446,9 +446,4 @@ public class FieldTypeCoverageIT extends AnalyticsRestTestCase {
         client().performRequest(new Request("POST", "/" + index + "/_flush?force=true"));
     }
 
-    private Map<String, Object> executePpl(String ppl) throws IOException {
-        Request request = new Request("POST", "/_plugins/_ppl");
-        request.setJsonEntity("{\"query\": \"" + escapeJson(ppl) + "\"}");
-        return assertOkAndParse(client().performRequest(request), "PPL: " + ppl);
-    }
 }

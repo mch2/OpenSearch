@@ -190,16 +190,10 @@ public class DynamicMappingSearchIT extends AnalyticsRestTestCase {
         client().performRequest(new Request("POST", "/" + INDEX + "/_flush?force=true"));
     }
 
-    private Map<String, Object> executePPL(String ppl) throws IOException {
-        Request req = new Request("POST", "/_plugins/_ppl");
-        req.setJsonEntity("{\"query\": \"" + escapeJson(ppl) + "\"}");
-        Response response = client().performRequest(req);
-        return assertOkAndParse(response, "PPL: " + ppl);
-    }
 
     private void assertCount(String pplSuffix, int expected) throws IOException {
         String ppl = "source = " + INDEX + " | " + pplSuffix;
-        Map<String, Object> result = executePPL(ppl);
+        Map<String, Object> result = executePpl(ppl);
         @SuppressWarnings("unchecked")
         List<List<Object>> rows = (List<List<Object>>) result.get("datarows");
         assertNotNull("Response missing 'rows' for: " + ppl, rows);
@@ -210,7 +204,7 @@ public class DynamicMappingSearchIT extends AnalyticsRestTestCase {
 
     private void assertValue(String pplSuffix, String column, double expected) throws IOException {
         String ppl = "source = " + INDEX + " | " + pplSuffix;
-        Map<String, Object> result = executePPL(ppl);
+        Map<String, Object> result = executePpl(ppl);
         @SuppressWarnings("unchecked")
         List<String> columns = extractColumnNames(result);
         @SuppressWarnings("unchecked")

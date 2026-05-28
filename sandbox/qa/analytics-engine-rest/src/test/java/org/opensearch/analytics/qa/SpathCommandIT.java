@@ -57,7 +57,8 @@ public class SpathCommandIT extends AnalyticsRestTestCase {
      * {@code client()} is not initialized until after {@code @BeforeClass}, but is
      * reliably available inside test bodies.
      */
-    private void ensureDataProvisioned() throws IOException {
+    @Override
+    protected void onBeforeQuery() throws IOException {
         if (dataProvisioned == false) {
             DatasetProvisioner.provision(client(), SIMPLE);
             DatasetProvisioner.provision(client(), AUTO);
@@ -356,13 +357,7 @@ public class SpathCommandIT extends AnalyticsRestTestCase {
     }
 
     /** {@code POST /_plugins/_ppl} and parse the JSON body. */
-    private Map<String, Object> executePpl(String ppl) throws IOException {
-        ensureDataProvisioned();
-        Request request = new Request("POST", "/_plugins/_ppl");
-        request.setJsonEntity("{\"query\": \"" + escapeJson(ppl) + "\"}");
-        Response response = client().performRequest(request);
-        return assertOkAndParse(response, "PPL: " + ppl);
-    }
+
 
     /**
      * Numeric-tolerant cell comparison. Numbers cross-compare via {@code doubleValue()};

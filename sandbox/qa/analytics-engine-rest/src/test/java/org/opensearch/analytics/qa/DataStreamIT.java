@@ -312,12 +312,6 @@ public class DataStreamIT extends AnalyticsRestTestCase {
         return ((Number) cell).longValue();
     }
 
-    private Map<String, Object> executePpl(String ppl) throws IOException {
-        Request request = new Request("POST", "/_plugins/_ppl");
-        request.setJsonEntity("{\"query\": \"" + escapeJson(ppl) + "\"}");
-        Response response = client().performRequest(request);
-        return assertOkAndParse(response, "PPL: " + ppl);
-    }
 
     private String executePplExpectingFailure(String ppl) throws IOException {
         Request request = new Request("POST", "/_plugins/_ppl");

@@ -8,6 +8,7 @@
 
 package org.opensearch.analytics.qa;
 
+import java.io.IOException;
 import org.opensearch.client.Request;
 import org.opensearch.client.Response;
 
@@ -44,7 +45,8 @@ public class PplClickBenchIT extends AnalyticsRestTestCase {
 
     private static boolean dataProvisioned = false;
 
-    private void ensureDataProvisioned() throws Exception {
+    @Override
+    protected void onBeforeQuery() throws IOException {
         if (dataProvisioned == false) {
             DatasetProvisioner.provision(client(), ClickBenchTestHelper.DATASET);
             dataProvisioned = true;
@@ -52,7 +54,6 @@ public class PplClickBenchIT extends AnalyticsRestTestCase {
     }
 
     public void testClickBenchPplQueries() throws Exception {
-        ensureDataProvisioned();
 
         List<Integer> queryNumbers = DatasetQueryRunner.discoverQueryNumbers(ClickBenchTestHelper.DATASET, "ppl")
             .stream()

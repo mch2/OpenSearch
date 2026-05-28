@@ -52,7 +52,8 @@ public class JoinCommandIT extends AnalyticsRestTestCase {
      * Lazily provision both calcs indices on first invocation. Called inside test
      * methods — {@code client()} is not available in {@code @BeforeClass}.
      */
-    private void ensureDataProvisioned() throws IOException {
+    @Override
+    protected void onBeforeQuery() throws IOException {
         if (dataProvisioned == false) {
             DatasetProvisioner.provision(client(), CALCS);
             DatasetProvisioner.provision(client(), CALCS_ALT);
@@ -306,13 +307,7 @@ public class JoinCommandIT extends AnalyticsRestTestCase {
     }
 
     /** Send {@code POST /_plugins/_ppl} and return the parsed JSON body. */
-    private Map<String, Object> executePpl(String ppl) throws IOException {
-        ensureDataProvisioned();
-        Request request = new Request("POST", "/_plugins/_ppl");
-        request.setJsonEntity("{\"query\": \"" + escapeJson(ppl) + "\"}");
-        Response response = client().performRequest(request);
-        return assertOkAndParse(response, "PPL: " + ppl);
-    }
+
 
     /**
      * Send a PPL query expecting a failure and assert the response body contains

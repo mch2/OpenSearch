@@ -175,11 +175,6 @@ public class IndexPatternUnionIT extends AnalyticsRestTestCase {
 
     // ── helpers ──────────────────────────────────────────────────────────
 
-    private Map<String, Object> executePpl(String ppl) throws IOException {
-        Request request = new Request("POST", "/_plugins/_ppl");
-        request.setJsonEntity("{\"query\": \"" + escapeJson(ppl) + "\"}");
-        return assertOkAndParse(client().performRequest(request), "PPL: " + ppl);
-    }
 
     private void createParquetIndex(String name, String mappingJson) throws IOException {
         Request create = new Request("PUT", "/" + name);

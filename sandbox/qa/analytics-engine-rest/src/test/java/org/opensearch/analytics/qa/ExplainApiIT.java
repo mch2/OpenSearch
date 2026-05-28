@@ -35,7 +35,8 @@ public class ExplainApiIT extends AnalyticsRestTestCase {
     private static boolean dataProvisioned = false;
     private static boolean clickBenchProvisioned = false;
 
-    private void ensureDataProvisioned() throws IOException {
+    @Override
+    protected void onBeforeQuery() throws IOException {
         if (dataProvisioned == false) {
             DatasetProvisioner.provision(client(), DATASET);
             dataProvisioned = true;
@@ -51,7 +52,6 @@ public class ExplainApiIT extends AnalyticsRestTestCase {
 
     @SuppressWarnings("unchecked")
     public void testExplainReturnsProfileWithStages() throws IOException {
-        ensureDataProvisioned();
         Map<String, Object> result = executeExplain("source=" + DATASET.indexName + " | fields str0, num0");
 
         // Should have normal query results
@@ -79,7 +79,6 @@ public class ExplainApiIT extends AnalyticsRestTestCase {
 
     @SuppressWarnings("unchecked")
     public void testExplainReturnsFullPlan() throws IOException {
-        ensureDataProvisioned();
         Map<String, Object> result = executeExplain("source=" + DATASET.indexName + " | where num0 > 0 | fields str0");
 
         Map<String, Object> profile = (Map<String, Object>) result.get("profile");
@@ -154,7 +153,6 @@ public class ExplainApiIT extends AnalyticsRestTestCase {
 
     @SuppressWarnings("unchecked")
     public void testExplainStagesShowSucceededState() throws IOException {
-        ensureDataProvisioned();
         Map<String, Object> result = executeExplain("source=" + DATASET.indexName + " | fields str0");
 
         Map<String, Object> profile = (Map<String, Object>) result.get("profile");
@@ -169,7 +167,6 @@ public class ExplainApiIT extends AnalyticsRestTestCase {
 
     @SuppressWarnings("unchecked")
     public void testExplainTotalElapsedIsPositive() throws IOException {
-        ensureDataProvisioned();
         Map<String, Object> result = executeExplain("source=" + DATASET.indexName + " | fields str0");
 
         Map<String, Object> profile = (Map<String, Object>) result.get("profile");

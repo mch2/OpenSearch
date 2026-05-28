@@ -62,7 +62,7 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
         createParquetBackedIndex(INDEX);
         indexConstantValueDocs(INDEX);
 
-        Map<String, Object> result = executePPL("source = " + INDEX + " | stats sum(value) as total");
+        Map<String, Object> result = executePpl("source = " + INDEX + " | stats sum(value) as total");
         List<List<Object>> rows = scalarRows(result, "total");
 
         long actual = ((Number) rows.get(0).get(0)).longValue();
@@ -82,7 +82,7 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
         createParquetBackedIndex(INDEX);
         indexConstantValueDocs(INDEX);
 
-        Map<String, Object> result = executePPL("source = " + INDEX + " | stats count() as cnt");
+        Map<String, Object> result = executePpl("source = " + INDEX + " | stats count() as cnt");
         List<List<Object>> rows = scalarRows(result, "cnt");
 
         long actual = ((Number) rows.get(0).get(0)).longValue();
@@ -99,7 +99,7 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
         createParquetBackedIndex(INDEX);
         indexConstantValueDocs(INDEX);
 
-        Map<String, Object> result = executePPL("source = " + INDEX + " | stats avg(value) as a");
+        Map<String, Object> result = executePpl("source = " + INDEX + " | stats avg(value) as a");
         List<List<Object>> rows = scalarRows(result, "a");
 
         double actual = ((Number) rows.get(0).get(0)).doubleValue();
@@ -117,7 +117,7 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
         createParquetBackedIndex(index);
         indexVaryingValueDocs(index);
 
-        Map<String, Object> result = executePPL("source = " + index + " | stats dc(value) as dc");
+        Map<String, Object> result = executePpl("source = " + index + " | stats dc(value) as dc");
         List<List<Object>> rows = scalarRows(result, "dc");
 
         long actual = ((Number) rows.get(0).get(0)).longValue();
@@ -135,7 +135,7 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
         createSingleShardParquetBackedIndex(index);
         indexSequentialValueDocsSingleShard(index);
 
-        Map<String, Object> result = executePPL("source = " + index + " | stats take(value, 3) as t");
+        Map<String, Object> result = executePpl("source = " + index + " | stats take(value, 3) as t");
 
         @SuppressWarnings("unchecked")
         List<String> columns = extractColumnNames(result);
@@ -168,7 +168,7 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
         createParquetBackedIndex(index);
         indexVaryingValueDocs(index);
 
-        Map<String, Object> result = executePPL("source = " + index + " | stats take(value, 5) as t");
+        Map<String, Object> result = executePpl("source = " + index + " | stats take(value, 5) as t");
 
         @SuppressWarnings("unchecked")
         List<String> columns = extractColumnNames(result);
@@ -204,7 +204,7 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
         createSingleShardParquetBackedIndex(index);
         indexSequentialValueDocsSingleShard(index);
 
-        Map<String, Object> result = executePPL("source = " + index + " | stats first(value) as f");
+        Map<String, Object> result = executePpl("source = " + index + " | stats first(value) as f");
         List<List<Object>> rows = scalarRows(result, "f");
 
         @SuppressWarnings("unchecked")
@@ -220,7 +220,7 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
         createParquetBackedIndex(index);
         indexVaryingValueDocs(index);
 
-        Map<String, Object> result = executePPL("source = " + index + " | stats first(value) as f");
+        Map<String, Object> result = executePpl("source = " + index + " | stats first(value) as f");
         List<List<Object>> rows = scalarRows(result, "f");
 
         @SuppressWarnings("unchecked")
@@ -237,7 +237,7 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
         createSingleShardParquetBackedIndex(index);
         indexSequentialValueDocsSingleShard(index);
 
-        Map<String, Object> result = executePPL("source = " + index + " | stats last(value) as l");
+        Map<String, Object> result = executePpl("source = " + index + " | stats last(value) as l");
         List<List<Object>> rows = scalarRows(result, "l");
 
         @SuppressWarnings("unchecked")
@@ -253,7 +253,7 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
         createParquetBackedIndex(index);
         indexVaryingValueDocs(index);
 
-        Map<String, Object> result = executePPL("source = " + index + " | stats last(value) as l");
+        Map<String, Object> result = executePpl("source = " + index + " | stats last(value) as l");
         List<List<Object>> rows = scalarRows(result, "l");
 
         @SuppressWarnings("unchecked")
@@ -270,7 +270,7 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
         createSingleShardParquetBackedIndex(index);
         indexSequentialValueDocsSingleShard(index);
 
-        Map<String, Object> result = executePPL("source = " + index + " | stats list(value) as l");
+        Map<String, Object> result = executePpl("source = " + index + " | stats list(value) as l");
 
         @SuppressWarnings("unchecked")
         List<String> columns = extractColumnNames(result);
@@ -309,7 +309,7 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
         createParquetBackedIndex(index);
         indexVaryingValueDocs(index);
 
-        Map<String, Object> result = executePPL("source = " + index + " | stats list(value) as l");
+        Map<String, Object> result = executePpl("source = " + index + " | stats list(value) as l");
 
         @SuppressWarnings("unchecked")
         List<String> columns = extractColumnNames(result);
@@ -348,7 +348,7 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
         createSingleShardParquetBackedIndex(index);
         indexDuplicateValueDocsSingleShard(index);
 
-        Map<String, Object> result = executePPL("source = " + index + " | stats values(value) as v");
+        Map<String, Object> result = executePpl("source = " + index + " | stats values(value) as v");
 
         @SuppressWarnings("unchecked")
         List<String> columns = extractColumnNames(result);
@@ -387,7 +387,7 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
         createParquetBackedIndex(index);
         indexDuplicateValueDocs(index);
 
-        Map<String, Object> result = executePPL("source = " + index + " | stats values(value) as v");
+        Map<String, Object> result = executePpl("source = " + index + " | stats values(value) as v");
 
         @SuppressWarnings("unchecked")
         List<String> columns = extractColumnNames(result);
@@ -428,7 +428,7 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
         createParquetBackedIndex(INDEX);
         indexConstantValueDocs(INDEX);
 
-        Map<String, Object> result = executePPL("source = " + INDEX + " | stats sum(value) as total by value");
+        Map<String, Object> result = executePpl("source = " + INDEX + " | stats sum(value) as total by value");
 
         @SuppressWarnings("unchecked")
         List<List<Object>> rows = (List<List<Object>>) result.get("datarows");
@@ -446,7 +446,7 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
         createParquetBackedIndex(INDEX);
         indexConstantValueDocs(INDEX);
 
-        Map<String, Object> result = executePPL(
+        Map<String, Object> result = executePpl(
             "source = " + INDEX + " | stats sum(value) as s, count() as c, avg(value) as a, dc(value) as d by value"
         );
 
@@ -488,7 +488,7 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
         createStringGroupIndex();
         indexStringGroupDocs();
 
-        executePPL(
+        executePpl(
             "source = " + STRING_GROUP_INDEX + " | where category != '' | stats count() as c by category | sort - c | head 5"
         );
     }
@@ -503,7 +503,7 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
         createStringGroupIndex();
         indexStringGroupDocs();
 
-        Map<String, Object> result = executePPL(
+        Map<String, Object> result = executePpl(
             "source = " + STRING_GROUP_INDEX + " | stats count() as c by category | sort - c | head 5"
         );
 
@@ -734,10 +734,4 @@ public class CoordinatorReduceIT extends AnalyticsRestTestCase {
         client().performRequest(new Request("POST", "/" + indexName + "/_flush?force=true"));
     }
 
-    private Map<String, Object> executePPL(String ppl) throws Exception {
-        Request request = new Request("POST", "/_plugins/_ppl");
-        request.setJsonEntity("{\"query\": \"" + ppl + "\"}");
-        Response response = client().performRequest(request);
-        return entityAsMap(response);
-    }
 }

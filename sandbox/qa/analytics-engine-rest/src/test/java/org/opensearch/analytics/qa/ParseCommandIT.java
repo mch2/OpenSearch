@@ -50,7 +50,8 @@ public class ParseCommandIT extends AnalyticsRestTestCase {
      * Lazily provision the calcs dataset on first invocation. Mirrors
      * {@link RegexCommandIT}'s pattern — {@code client()} is unavailable at static init.
      */
-    private void ensureDataProvisioned() throws IOException {
+    @Override
+    protected void onBeforeQuery() throws IOException {
         if (dataProvisioned == false) {
             DatasetProvisioner.provision(client(), DATASET);
             dataProvisioned = true;
@@ -231,11 +232,5 @@ public class ParseCommandIT extends AnalyticsRestTestCase {
     }
 
     /** Send {@code POST /_plugins/_ppl} and return the parsed JSON body. */
-    private Map<String, Object> executePpl(String ppl) throws IOException {
-        ensureDataProvisioned();
-        Request request = new Request("POST", "/_plugins/_ppl");
-        request.setJsonEntity("{\"query\": \"" + escapeJson(ppl) + "\"}");
-        Response response = client().performRequest(request);
-        return assertOkAndParse(response, "PPL: " + ppl);
-    }
+
 }
