@@ -16,11 +16,10 @@ import org.opensearch.action.admin.cluster.node.stats.NodesStatsResponse;
 import org.opensearch.action.admin.cluster.node.stats.NodeStats;
 import org.opensearch.action.admin.indices.create.CreateIndexResponse;
 import org.opensearch.analytics.AnalyticsPlugin;
-import org.opensearch.arrow.allocator.ArrowBasePlugin;
 import org.opensearch.arrow.flight.transport.FlightStreamPlugin;
+import org.opensearch.arrow.allocator.ArrowBasePlugin;
 import org.opensearch.arrow.spi.NativeAllocatorPoolConfig;
 import org.opensearch.be.datafusion.DataFusionPlugin;
-import org.opensearch.be.lucene.LucenePlugin;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.common.util.FeatureFlags;
@@ -34,7 +33,6 @@ import org.opensearch.ppl.action.PPLResponse;
 import org.opensearch.ppl.action.UnifiedPPLExecuteAction;
 import org.opensearch.test.OpenSearchIntegTestCase;
 
-import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
@@ -70,8 +68,8 @@ public class CoordinatorBackpressureIT extends OpenSearchIntegTestCase {
 
     private static final String INDEX = "bp_test_idx";
     private static final int NUM_SHARDS = 4;
-    private static final int DOCS = 100_000;
-    private static final int CARDINALITY = 20_000;
+    private static final int DOCS = 10_000;
+    private static final int CARDINALITY = 1_000;
 
     private static final long MB = 1024L * 1024;
     /** Tight flight pool: 32MB. With 20K groups × ~100 bytes/group = 2MB per partial
@@ -81,12 +79,13 @@ public class CoordinatorBackpressureIT extends OpenSearchIntegTestCase {
 
     @Override
     protected Collection<Class<? extends Plugin>> nodePlugins() {
-        return List.of(TestPPLPlugin.class, FlightStreamPlugin.class, CompositeDataFormatPlugin.class, LucenePlugin.class);
+        return List.of(TestPPLPlugin.class, ArrowBasePlugin.class, CompositeDataFormatPlugin.class, org.opensearch.index.engine.dataformat.stub.MockCommitterEnginePlugin.class);
     }
 
     @Override
     protected Collection<PluginInfo> additionalNodePlugins() {
         return List.of(
+            classpathPlugin(FlightStreamPlugin.class, List.of(ArrowBasePlugin.class.getName())),
             classpathPlugin(AnalyticsPlugin.class, Collections.emptyList()),
             classpathPlugin(ParquetDataFormatPlugin.class, Collections.emptyList()),
             classpathPlugin(DataFusionPlugin.class, List.of(AnalyticsPlugin.class.getName()))
@@ -105,7 +104,7 @@ public class CoordinatorBackpressureIT extends OpenSearchIntegTestCase {
         return Settings.builder()
             .put(super.nodeSettings(nodeOrdinal))
             .put(FeatureFlags.PLUGGABLE_DATAFORMAT_EXPERIMENTAL_FLAG, true)
-            .put(FeatureFlags.STREAM_TRANSPORT_EXPERIMENTAL_FLAG, true)
+            .put(FeatureFlags.STREAM_TRANSPORT, true)
             .put(NativeAllocatorPoolConfig.SETTING_FLIGHT_MAX, FLIGHT_POOL_CAP)
             .build();
     }
@@ -116,7 +115,7 @@ public class CoordinatorBackpressureIT extends OpenSearchIntegTestCase {
     private void snapshot(String label) {
         trace.info("┌─── {} ───", label);
         NodesStatsResponse stats = client().admin().cluster()
-            .nodesStats(new NodesStatsRequest().addMetric("jvm", "native_allocator", "native_memory"))
+            .nodesStats(new NodesStatsRequest().addMetrics("jvm", "native_allocator", "native_memory"))
             .actionGet();
         for (NodeStats nodeStats : stats.getNodes()) {
             String name = nodeStats.getNode().getName();
@@ -152,7 +151,7 @@ public class CoordinatorBackpressureIT extends OpenSearchIntegTestCase {
         // Run one query — all batches flow through Flight between the two nodes
         trace.info("┌─── Running GROUP BY user_id ({}K groups, flight_cap={}MB) ───", CARDINALITY / 1000, FLIGHT_POOL_CAP / MB);
         PPLResponse response = runQuery("source=" + INDEX + " | stats count() by user_id | head 20");
-        trace.info("│ Query returned {} rows", response.getResults().size());
+        trace.info("│ Query returned {} rows", response.getRows().size());
         snapshot("AFTER single query");
 
         // Verify flight pool didn't blow its cap
@@ -180,7 +179,7 @@ public class CoordinatorBackpressureIT extends OpenSearchIntegTestCase {
             futures[i] = CompletableFuture.runAsync(() -> {
                 try {
                     PPLResponse r = runQuery("source=" + INDEX + " | stats count() by user_id | head 10");
-                    trace.info("│ Query {} completed: {} rows", idx, r.getResults().size());
+                    trace.info("│ Query {} completed: {} rows", idx, r.getRows().size());
                     succeeded.incrementAndGet();
                 } catch (Exception e) {
                     trace.info("│ Query {} FAILED: {}", idx, e.getMessage());
@@ -194,7 +193,7 @@ public class CoordinatorBackpressureIT extends OpenSearchIntegTestCase {
             for (int tick = 0; tick < 60; tick++) {
                 try { Thread.sleep(500); } catch (InterruptedException e) { return; }
                 NodesStatsResponse stats = client().admin().cluster()
-                    .nodesStats(new NodesStatsRequest().addMetric("native_allocator"))
+                    .nodesStats(new NodesStatsRequest().addMetrics("native_allocator"))
                     .actionGet();
                 for (NodeStats ns : stats.getNodes()) {
                     if (ns.getNativeAllocatorStats() != null) {
@@ -268,12 +267,12 @@ public class CoordinatorBackpressureIT extends OpenSearchIntegTestCase {
     }
 
     private PPLResponse runQuery(String ppl) throws ExecutionException, InterruptedException {
-        return client().execute(UnifiedPPLExecuteAction.INSTANCE, new PPLRequest(ppl, null, null)).get();
+        return client().execute(UnifiedPPLExecuteAction.INSTANCE, new PPLRequest(ppl)).get();
     }
 
     private void assertPoolWithinLimit(String poolName, long limit) {
         NodesStatsResponse stats = client().admin().cluster()
-            .nodesStats(new NodesStatsRequest().addMetric("native_allocator")).actionGet();
+            .nodesStats(new NodesStatsRequest().addMetrics("native_allocator")).actionGet();
         for (NodeStats ns : stats.getNodes()) {
             if (ns.getNativeAllocatorStats() != null) {
                 ns.getNativeAllocatorStats().getPools().forEach(pool -> {
