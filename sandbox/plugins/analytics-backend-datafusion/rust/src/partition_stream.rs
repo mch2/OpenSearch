@@ -86,7 +86,27 @@ impl PartitionStreamSender {
         batch: Result<RecordBatch, DataFusionError>,
         handle: &Handle,
     ) -> Result<(), DataFusionError> {
-        handle.block_on(self.tx.send(batch)).map_err(|_| {
+        // Free permits BEFORE send — 0 means this send will block until consumer pops.
+        let permits_before = self.tx.capacity();
+        let queue_full = permits_before == 0;
+        if queue_full {
+            native_bridge_common::log_info!(
+                "[mpsc-backpressure] queue FULL (permits=0, cap={}), sender BLOCKING",
+                CHANNEL_CAPACITY
+            );
+        }
+        let start = std::time::Instant::now();
+        let result = handle.block_on(self.tx.send(batch));
+        let blocked_ms = start.elapsed().as_millis();
+        if queue_full || blocked_ms > 5 {
+            native_bridge_common::log_info!(
+                "[mpsc-send] blocked={}ms permits_after={}/{}",
+                blocked_ms,
+                self.tx.capacity(),
+                CHANNEL_CAPACITY
+            );
+        }
+        result.map_err(|_| {
             DataFusionError::Execution("partition stream receiver dropped before send".to_string())
         })
     }
@@ -124,8 +144,15 @@ impl Stream for PartitionStreamReceiver {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let result = self.rx.poll_recv(cx);
         if let Poll::Ready(Some(Ok(ref batch))) = &result {
-            native_bridge_common::log_info!("[partition-recv] DF consuming batch: rows={} mem={}B",
-                batch.num_rows(), batch.get_array_memory_size());
+            // Items remaining in queue AFTER this poll (rx.len() = currently queued)
+            let queued = self.rx.len();
+            native_bridge_common::log_info!(
+                "[partition-recv] DF consuming batch: rows={} mem={}B queue_depth_after_pop={}/{}",
+                batch.num_rows(),
+                batch.get_array_memory_size(),
+                queued,
+                CHANNEL_CAPACITY
+            );
         }
         if let Poll::Ready(None) = &result {
             native_bridge_common::log_info!("[partition-stream] Receiver got EOF — sender was closed/dropped");

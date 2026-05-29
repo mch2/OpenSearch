@@ -148,14 +148,130 @@ public class CoordinatorBackpressureIT extends OpenSearchIntegTestCase {
         createAndSeedIndex();
         snapshot("BASELINE after seeding");
 
+        // Start a high-frequency monitor that samples the flight pool every 50ms
+        // DURING query execution. The other tests sample only before/after which
+        // misses the in-flight peak.
+        AtomicLong peakFlight = new AtomicLong();
+        AtomicInteger samples = new AtomicInteger();
+        java.util.concurrent.atomic.AtomicBoolean monitoring = new java.util.concurrent.atomic.AtomicBoolean(true);
+        Thread monitor = new Thread(() -> {
+            while (monitoring.get()) {
+                try {
+                    NodesStatsResponse stats = client().admin().cluster()
+                        .nodesStats(new NodesStatsRequest().addMetrics("native_allocator")).actionGet();
+                    for (NodeStats ns : stats.getNodes()) {
+                        if (ns.getNativeAllocatorStats() != null) {
+                            ns.getNativeAllocatorStats().getPools().forEach(pool -> {
+                                if ("flight".equals(pool.getName()) && pool.getAllocatedBytes() > 0) {
+                                    long prev = peakFlight.get();
+                                    peakFlight.accumulateAndGet(pool.getAllocatedBytes(), Math::max);
+                                    if (pool.getAllocatedBytes() > prev) {
+                                        trace.info("│ [hi-freq] [{}] flight rose to {}B ({}% of cap)",
+                                            ns.getNode().getName(), pool.getAllocatedBytes(),
+                                            pool.getLimitBytes() > 0 ? pool.getAllocatedBytes() * 100 / pool.getLimitBytes() : 0);
+                                    }
+                                }
+                            });
+                        }
+                    }
+                    samples.incrementAndGet();
+                    Thread.sleep(50);
+                } catch (InterruptedException e) {
+                    return;
+                } catch (Exception e) {
+                    // Ignore stats errors during shutdown
+                }
+            }
+        }, "flight-pool-monitor");
+        monitor.setDaemon(true);
+        monitor.start();
+
         // Run one query — all batches flow through Flight between the two nodes
         trace.info("┌─── Running GROUP BY user_id ({}K groups, flight_cap={}MB) ───", CARDINALITY / 1000, FLIGHT_POOL_CAP / MB);
+        long queryStart = System.nanoTime();
         PPLResponse response = runQuery("source=" + INDEX + " | stats count() by user_id | head 20");
-        trace.info("│ Query returned {} rows", response.getRows().size());
+        long queryMs = (System.nanoTime() - queryStart) / 1_000_000;
+        trace.info("│ Query returned {} rows in {}ms", response.getRows().size(), queryMs);
+
+        monitoring.set(false);
+        monitor.join(500);
+        trace.info("│ Monitor took {} samples, peak flight pool = {}B ({}% of {}MB cap)",
+            samples.get(), peakFlight.get(),
+            FLIGHT_POOL_CAP > 0 ? peakFlight.get() * 100 / FLIGHT_POOL_CAP : 0,
+            FLIGHT_POOL_CAP / MB);
+
         snapshot("AFTER single query");
 
         // Verify flight pool didn't blow its cap
         assertPoolWithinLimit("flight", FLIGHT_POOL_CAP);
+    }
+
+    /**
+     * Slow consumer test — uses {@code -Dtest.reduce.slowDrainMs=100} system
+     * property to inject a 100ms sleep between drained batches. This forces
+     * upstream (data node Flight producer) to back up. With backpressure
+     * working, the data node's flight pool stays bounded; without it, the pool
+     * fills up and the query OOMs.
+     *
+     * <p>The trace logs from {@code [mpsc-backpressure]} should fire during
+     * this test, showing the producer blocking on the bounded mpsc.
+     */
+    public void testSlowConsumerForcesBackpressure() throws Exception {
+        // Inject slow drain: 100ms per output batch on the coordinator
+        System.setProperty("test.reduce.slowDrainMs", "100");
+        try {
+            createAndSeedIndex();
+            snapshot("BASELINE before slow query");
+
+            AtomicLong peakFlight = new AtomicLong();
+            AtomicInteger samples = new AtomicInteger();
+            java.util.concurrent.atomic.AtomicBoolean monitoring = new java.util.concurrent.atomic.AtomicBoolean(true);
+            Thread monitor = new Thread(() -> {
+                while (monitoring.get()) {
+                    try {
+                        NodesStatsResponse stats = client().admin().cluster()
+                            .nodesStats(new NodesStatsRequest().addMetrics("native_allocator")).actionGet();
+                        for (NodeStats ns : stats.getNodes()) {
+                            if (ns.getNativeAllocatorStats() != null) {
+                                ns.getNativeAllocatorStats().getPools().forEach(pool -> {
+                                    if ("flight".equals(pool.getName()) && pool.getAllocatedBytes() > 0) {
+                                        long prev = peakFlight.get();
+                                        peakFlight.accumulateAndGet(pool.getAllocatedBytes(), Math::max);
+                                        if (pool.getAllocatedBytes() > prev) {
+                                            trace.info("│ [slow-drain] [{}] flight={}B ({}%)",
+                                                ns.getNode().getName(), pool.getAllocatedBytes(),
+                                                pool.getLimitBytes() > 0 ? pool.getAllocatedBytes() * 100 / pool.getLimitBytes() : 0);
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                        samples.incrementAndGet();
+                        Thread.sleep(100);
+                    } catch (InterruptedException e) { return; }
+                    catch (Exception e) { /* ignore */ }
+                }
+            }, "slow-drain-monitor");
+            monitor.setDaemon(true);
+            monitor.start();
+
+            trace.info("┌─── Slow drain query (100ms/batch sleep) ───");
+            long queryStart = System.nanoTime();
+            PPLResponse response = runQuery("source=" + INDEX + " | stats count() by user_id | head 20");
+            long queryMs = (System.nanoTime() - queryStart) / 1_000_000;
+            trace.info("│ Slow query returned {} rows in {}ms", response.getRows().size(), queryMs);
+
+            monitoring.set(false);
+            monitor.join(500);
+            trace.info("│ Monitor took {} samples, peak flight = {}B ({}%)",
+                samples.get(), peakFlight.get(),
+                FLIGHT_POOL_CAP > 0 ? peakFlight.get() * 100 / FLIGHT_POOL_CAP : 0);
+
+            snapshot("AFTER slow query");
+            assertPoolWithinLimit("flight", FLIGHT_POOL_CAP);
+        } finally {
+            System.clearProperty("test.reduce.slowDrainMs");
+        }
     }
 
     /**

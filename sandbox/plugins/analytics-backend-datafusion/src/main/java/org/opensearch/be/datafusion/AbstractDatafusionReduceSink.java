@@ -144,10 +144,22 @@ abstract class AbstractDatafusionReduceSink implements ReducingExchangeSink {
      */
     protected final void drainOutputIntoDownstream(StreamHandle outStream) {
         BufferAllocator alloc = ctx.allocator();
+        // Test-only slow-consumer hook: set -Dtest.reduce.slowDrainMs=N to inject
+        // a sleep between batches at the drain site. This forces upstream to back
+        // up — flight pool, mpsc, partial agg — making backpressure observable.
+        long slowMs = Long.getLong("test.reduce.slowDrainMs", 0L);
         try (CDataDictionaryProvider dictProvider = new CDataDictionaryProvider()) {
             DatafusionResultStream.BatchIterator it = new DatafusionResultStream.BatchIterator(outStream, alloc, dictProvider);
+            int batchIdx = 0;
             while (it.hasNext()) {
                 ctx.downstream().feed(it.next().getArrowRoot());
+                batchIdx++;
+                if (slowMs > 0) {
+                    try { Thread.sleep(slowMs); } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
             }
         }
     }

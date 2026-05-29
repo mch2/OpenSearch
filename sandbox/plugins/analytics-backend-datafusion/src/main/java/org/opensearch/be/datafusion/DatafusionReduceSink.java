@@ -204,21 +204,32 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
                     + batch.getSchema()
             );
         }
-        logger.info("[feedToSender] feeding batch: rows={} flight_alloc: used={}B | query_alloc: used={}B",
-            batch.getRowCount(), alloc.getAllocatedMemory(), ctx.allocator().getAllocatedMemory());
+        long flightAllocBefore = alloc.getAllocatedMemory();
+        logger.info("[feedToSender] BEFORE export: rows={} flight_alloc={}B query_alloc={}B",
+            batch.getRowCount(), flightAllocBefore, ctx.allocator().getAllocatedMemory());
         ArrowArray array = ArrowArray.allocateNew(alloc);
         ArrowSchema arrowSchema = ArrowSchema.allocateNew(alloc);
         try {
+            long exportStart = System.nanoTime();
             try {
                 Data.exportVectorSchemaRoot(alloc, batch, null, array, arrowSchema);
             } finally {
                 batch.close();
             }
+            long exportMs = (System.nanoTime() - exportStart) / 1_000_000;
+            long flightAllocAfter = alloc.getAllocatedMemory();
+            logger.info("[feedToSender] AFTER export ({}ms): flight_alloc {}B → {}B (Δ={}B)",
+                exportMs, flightAllocBefore, flightAllocAfter, flightAllocAfter - flightAllocBefore);
             // sender.send acquires its read lock so the native borrow outlives concurrent
             // close — see DatafusionPartitionSender. Throws IllegalStateException via
             // NativeHandle.getPointer() if the sender was closed (the close-race path).
             try {
+                long sendStart = System.nanoTime();
                 sender.send(array.memoryAddress(), arrowSchema.memoryAddress());
+                long sendMs = (System.nanoTime() - sendStart) / 1_000_000;
+                if (sendMs > 1) {
+                    logger.info("[feedToSender] sender.send blocked for {}ms (mpsc backpressure)", sendMs);
+                }
                 feedCount.incrementAndGet();
             } catch (IllegalStateException e) {
                 // Sender close raced our send — Rust didn't take ownership, so the FFI
