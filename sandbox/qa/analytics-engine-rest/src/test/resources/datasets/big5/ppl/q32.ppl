@@ -1,0 +1,1 @@
+source=big5 | eval bucket = case(`metrics.size` < 100, 'lt_100', `metrics.size` < 1000, '100_to_1000', `metrics.size` < 2000, '1000_to_2000' else 'gte_2000') | stats count() by bucket

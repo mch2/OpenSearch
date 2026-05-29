@@ -38,10 +38,10 @@ public class FilterDelegationIT extends AnalyticsRestTestCase {
         indexDocs();
 
         String ppl = "source = " + INDEX_NAME + " | where match(message, 'hello') | stats sum(value) as total";
-        Map<String, Object> result = executePpl(ppl);
+        Map<String, Object> result = executePplViaShim(ppl);
 
         @SuppressWarnings("unchecked")
-        List<List<Object>> rows = (List<List<Object>>) result.get("datarows");
+        List<List<Object>> rows = (List<List<Object>>) result.get("rows");
         assertNotNull("rows must not be null", rows);
         assertEquals("scalar agg must return exactly 1 row", 1, rows.size());
 
@@ -73,10 +73,10 @@ public class FilterDelegationIT extends AnalyticsRestTestCase {
         indexDocs();
 
         String ppl = "source = " + INDEX_NAME + " | where tag = 'hello' | stats sum(value) as total";
-        Map<String, Object> result = executePpl(ppl);
+        Map<String, Object> result = executePplViaShim(ppl);
 
         @SuppressWarnings("unchecked")
-        List<List<Object>> rows = (List<List<Object>>) result.get("datarows");
+        List<List<Object>> rows = (List<List<Object>>) result.get("rows");
         assertNotNull("rows must not be null", rows);
         assertEquals("scalar agg must return exactly 1 row", 1, rows.size());
 
@@ -107,10 +107,10 @@ public class FilterDelegationIT extends AnalyticsRestTestCase {
         indexDocs();
 
         String ppl = "source = " + INDEX_NAME + " | where tag = 'hello' or value = 3 | stats sum(value) as total";
-        Map<String, Object> result = executePpl(ppl);
+        Map<String, Object> result = executePplViaShim(ppl);
 
         @SuppressWarnings("unchecked")
-        List<List<Object>> rows = (List<List<Object>>) result.get("datarows");
+        List<List<Object>> rows = (List<List<Object>>) result.get("rows");
         assertNotNull("rows must not be null", rows);
         assertEquals("scalar agg must return exactly 1 row", 1, rows.size());
 
@@ -133,10 +133,10 @@ public class FilterDelegationIT extends AnalyticsRestTestCase {
         // 10 docs tag='hello' value=5 + 10 docs tag='goodbye' value=3.
         // match(message,'hello') OR value > 4 → 10 hello docs ∪ 10 value=5 docs (same set) = 10.
         String ppl = "source = " + INDEX_NAME + " | where match(message, 'hello') or value > 4 | stats count() as c";
-        Map<String, Object> result = executePpl(ppl);
+        Map<String, Object> result = executePplViaShim(ppl);
 
         @SuppressWarnings("unchecked")
-        List<List<Object>> rows = (List<List<Object>>) result.get("datarows");
+        List<List<Object>> rows = (List<List<Object>>) result.get("rows");
         assertNotNull(rows);
         assertEquals(1, rows.size());
         assertEquals(10L, ((Number) rows.get(0).get(0)).longValue());
@@ -154,10 +154,10 @@ public class FilterDelegationIT extends AnalyticsRestTestCase {
 
         // NOT(match(message,'hello')) → 10 goodbye docs.
         String ppl = "source = " + INDEX_NAME + " | where not match(message, 'hello') | stats count() as c";
-        Map<String, Object> result = executePpl(ppl);
+        Map<String, Object> result = executePplViaShim(ppl);
 
         @SuppressWarnings("unchecked")
-        List<List<Object>> rows = (List<List<Object>>) result.get("datarows");
+        List<List<Object>> rows = (List<List<Object>>) result.get("rows");
         assertNotNull(rows);
         assertEquals(10L, ((Number) rows.get(0).get(0)).longValue());
     }
@@ -177,10 +177,10 @@ public class FilterDelegationIT extends AnalyticsRestTestCase {
 
         // dc(value) over docs matching match(message,'hello') → all values are 5 → 1 distinct.
         String ppl = "source = " + INDEX_NAME + " | where match(message, 'hello') | stats dc(value) as d";
-        Map<String, Object> result = executePpl(ppl);
+        Map<String, Object> result = executePplViaShim(ppl);
 
         @SuppressWarnings("unchecked")
-        List<List<Object>> rows = (List<List<Object>>) result.get("datarows");
+        List<List<Object>> rows = (List<List<Object>>) result.get("rows");
         assertNotNull(rows);
         assertEquals(1L, ((Number) rows.get(0).get(0)).longValue());
     }
@@ -201,10 +201,10 @@ public class FilterDelegationIT extends AnalyticsRestTestCase {
         // 10 docs match all three: match(message,'hello') AND tag='hello' AND value=5.
         String ppl = "source = " + INDEX_NAME
             + " | where match(message, 'hello') and tag = 'hello' and value = 5 | stats count() as c";
-        Map<String, Object> result = executePpl(ppl);
+        Map<String, Object> result = executePplViaShim(ppl);
 
         @SuppressWarnings("unchecked")
-        List<List<Object>> rows = (List<List<Object>>) result.get("datarows");
+        List<List<Object>> rows = (List<List<Object>>) result.get("rows");
         assertNotNull(rows);
         assertEquals(10L, ((Number) rows.get(0).get(0)).longValue());
     }
@@ -221,10 +221,10 @@ public class FilterDelegationIT extends AnalyticsRestTestCase {
         // sum(value) over the 10 matching docs (value=5 each) → 50.
         String ppl = "source = " + INDEX_NAME
             + " | where match(message, 'hello') and tag = 'hello' and value = 5 | stats sum(value) as s";
-        Map<String, Object> result = executePpl(ppl);
+        Map<String, Object> result = executePplViaShim(ppl);
 
         @SuppressWarnings("unchecked")
-        List<List<Object>> rows = (List<List<Object>>) result.get("datarows");
+        List<List<Object>> rows = (List<List<Object>>) result.get("rows");
         assertNotNull(rows);
         assertEquals(50L, ((Number) rows.get(0).get(0)).longValue());
     }
@@ -240,7 +240,7 @@ public class FilterDelegationIT extends AnalyticsRestTestCase {
         createIndex();
         indexDocs();
         String ppl = "source = " + INDEX_NAME + " | where match(message, 'hello') and tag = 'hello' and value = 5 | stats count() as cnt";
-        Map<String, Object> result = executePPL(ppl);
+        Map<String, Object> result = executePplViaShim(ppl);
         @SuppressWarnings("unchecked")
         List<List<Object>> rows = (List<List<Object>>) result.get("rows");
         assertEquals(10L, ((Number) rows.get(0).get(0)).longValue());
@@ -254,7 +254,7 @@ public class FilterDelegationIT extends AnalyticsRestTestCase {
         createIndex();
         indexDocs();
         String ppl = "source = " + INDEX_NAME + " | where tag = 'hello' and value = 5 | stats count() as cnt";
-        Map<String, Object> result = executePPL(ppl);
+        Map<String, Object> result = executePplViaShim(ppl);
         @SuppressWarnings("unchecked")
         List<List<Object>> rows = (List<List<Object>>) result.get("rows");
         assertEquals(10L, ((Number) rows.get(0).get(0)).longValue());
@@ -270,7 +270,7 @@ public class FilterDelegationIT extends AnalyticsRestTestCase {
         createIndex();
         indexDocs();
         String ppl = "source = " + INDEX_NAME + " | where match(message, 'hello') or tag = 'hello' and value = 5 | stats count() as cnt";
-        Map<String, Object> result = executePPL(ppl);
+        Map<String, Object> result = executePplViaShim(ppl);
         @SuppressWarnings("unchecked")
         List<List<Object>> rows = (List<List<Object>>) result.get("rows");
         assertEquals(10L, ((Number) rows.get(0).get(0)).longValue());
@@ -286,7 +286,7 @@ public class FilterDelegationIT extends AnalyticsRestTestCase {
         indexDocs();
         String ppl = "source = " + INDEX_NAME
             + " | where (match(message, 'hello') and tag = 'hello') or (tag = 'goodbye' and value = 3) | stats count() as cnt";
-        Map<String, Object> result = executePPL(ppl);
+        Map<String, Object> result = executePplViaShim(ppl);
         @SuppressWarnings("unchecked")
         List<List<Object>> rows = (List<List<Object>>) result.get("rows");
         assertEquals(20L, ((Number) rows.get(0).get(0)).longValue());

@@ -54,7 +54,7 @@ public class PatternsCommandIT extends AnalyticsRestTestCase {
     }
 
     public void testSimplePatternLabelMode() throws IOException {
-        Map<String, Object> response = executePpl(
+        Map<String, Object> response = executePplViaShim(
             "source=" + DATASET.indexName
                 + " | patterns message method=simple_pattern mode=label"
                 + " | fields patterns_field"
@@ -73,7 +73,7 @@ public class PatternsCommandIT extends AnalyticsRestTestCase {
 
     public void testSimplePatternAggregationModeMultiShard() throws IOException {
         ensureMultiShardProvisioned();
-        Map<String, Object> response = executePpl(
+        Map<String, Object> response = executePplViaShim(
             "source=" + DATASET_MULTI.indexName
                 + " | patterns message method=simple_pattern mode=aggregation"
                 + " | fields patterns_field, pattern_count, sample_logs"
@@ -105,7 +105,7 @@ public class PatternsCommandIT extends AnalyticsRestTestCase {
 
     public void testSimplePatternAggregationGroupByServiceMultiShard() throws IOException {
         ensureMultiShardProvisioned();
-        Map<String, Object> response = executePpl(
+        Map<String, Object> response = executePplViaShim(
             "source=" + DATASET_MULTI.indexName
                 + " | patterns message method=simple_pattern mode=label"
                 + " | stats count() as c, take(message, 1) as sample_logs"
@@ -140,11 +140,8 @@ public class PatternsCommandIT extends AnalyticsRestTestCase {
 
     // ── helpers ─────────────────────────────────────────────────────────────────
 
-    private Map<String, Object> executePpl(String ppl) throws IOException {
+    @Override
+    protected void onBeforeQuery() throws IOException {
         ensureDataProvisioned();
-        Request request = new Request("POST", "/_analytics/ppl");
-        request.setJsonEntity("{\"query\": \"" + escapeJson(ppl) + "\"}");
-        Response response = client().performRequest(request);
-        return assertOkAndParse(response, "PPL: " + ppl);
     }
 }

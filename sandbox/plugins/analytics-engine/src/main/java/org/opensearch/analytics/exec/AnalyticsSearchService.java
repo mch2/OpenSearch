@@ -131,7 +131,11 @@ public class AnalyticsSearchService implements AutoCloseable {
             throw e;
         } catch (Exception e) {
             listener.onFragmentFailure(resolved.queryId, resolved.stageId, resolved.shardIdStr, e);
-            throw new RuntimeException("Failed to start streaming fragment on " + shard.shardId(), e);
+            // Include the cause's class + message in the wrapper text. The Flight transport drops
+            // the cause chain when serializing across the wire (StreamException carries only the
+            // top-level message), so without this the SQL plugin's REST surface only shows
+            // "Failed to start streaming fragment on [X]" — useless for diagnosis.
+            throw new RuntimeException("Failed to start streaming fragment on " + shard.shardId() + ": " + e, e);
         }
     }
 

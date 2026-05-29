@@ -123,4 +123,24 @@ public abstract class AnalyticsRestTestCase extends OpenSearchRestTestCase {
         Response response = client().performRequest(request);
         return assertOkAndParse(response, "PPL: " + ppl);
     }
+
+    /**
+     * Execute a PPL query against the {@code test-ppl-frontend} shim at {@code /_analytics/ppl}.
+     * Use this for tests that exercise <em>engine-internal</em> behavior (e.g. perf-delegation
+     * marker placement, explain output shape) where the opensearch-sql plugin's user-facing PPL
+     * surface isn't on the hook. Tests that exercise a real user-typed PPL feature should keep
+     * using {@link #executePpl(String)} so they validate the production path end-to-end.
+     */
+    protected Map<String, Object> executePplViaShim(String ppl) throws IOException {
+        Request request = new Request("POST", "/_analytics/ppl");
+        request.setJsonEntity("{\"query\": \"" + escapeJson(ppl) + "\"}");
+        Response response = client().performRequest(request);
+        Map<String, Object> parsed = assertOkAndParse(response, "PPL (shim): " + ppl);
+        // Normalize: shim returns {columns, rows}; real SQL plugin returns {schema, datarows}.
+        // Tests that share assertions across both helpers read 'datarows' — mirror it for shim.
+        if (parsed.containsKey("rows") && parsed.containsKey("datarows") == false) {
+            parsed.put("datarows", parsed.get("rows"));
+        }
+        return parsed;
+    }
 }
