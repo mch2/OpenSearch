@@ -114,6 +114,15 @@ impl CrossRtStream {
         Arc::clone(&self.schema)
     }
 
+    /// Extracts the driver future from this stream. The driver awaits the
+    /// CPU executor's JoinSet and resolves only after the spawned task is
+    /// fully dropped (including all captured state). Callers hold the driver
+    /// separately so they can block-await it after dropping the stream to
+    /// guarantee release callbacks have fired.
+    pub fn take_driver(&mut self) -> BoxFuture<'static, ()> {
+        std::mem::replace(&mut self.driver, async {}.boxed())
+    }
+
     /// Attach a phantom corrector for self-correcting budget.
     pub fn with_phantom_corrector(mut self, corrector: Arc<PhantomCorrector>) -> Self {
         self.phantom_corrector = Some(corrector);

@@ -299,10 +299,16 @@ pub fn snapshot_top_n_by_current(out: &mut [WireQueryMetric]) -> usize {
 /// No-op for unknown or already-completed queries.
 pub fn cancel_query(context_id: i64) {
     if let Some(tracker) = QUERY_REGISTRY.get(&context_id) {
+        native_bridge_common::log_info!(
+            "[cancel-query] Cancelling context_id={} — firing token + aborting CPU task",
+            context_id
+        );
         tracker.cancellation_token.cancel();
         if let Some(handle) = tracker.abort_handle.get() {
             handle.abort();
         }
+    } else {
+        native_bridge_common::log_info!("[cancel-query] context_id={} not in registry (completed?)", context_id);
     }
 }
 

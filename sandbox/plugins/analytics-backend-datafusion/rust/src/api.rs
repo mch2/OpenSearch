@@ -37,6 +37,7 @@ use std::sync::Arc;
 
 use arrow_schema::DataType;
 
+use arrow::compute::concat_batches;
 use arrow_array::ffi::FFI_ArrowArray;
 use arrow_array::RecordBatch;
 use arrow_array::{Array, StructArray};
@@ -78,6 +79,11 @@ pub struct QueryStreamHandle {
     /// Concurrency gate permit — held for the query's entire lifetime.
     /// Released on drop, which frees partition budget for other queries.
     _concurrency_permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    /// The driver future awaiting the CPU executor's JoinSet. Stored
+    /// separately so `close_blocking` can drop the stream (killing the
+    /// channel) then block-await this to ensure the CPU task fully drops
+    /// its captured state before returning.
+    cpu_driver: Option<futures::future::BoxFuture<'static, ()>>,
 }
 
 impl QueryStreamHandle {
@@ -99,6 +105,7 @@ impl QueryStreamHandle {
             _session_ctx: None,
             has_views,
             _concurrency_permit: permit,
+            cpu_driver: None,
         }
     }
 
@@ -115,7 +122,29 @@ impl QueryStreamHandle {
             _session_ctx: Some(ctx),
             has_views,
             _concurrency_permit: permit,
+            cpu_driver: None,
         }
+    }
+
+    pub fn with_cpu_driver(mut self, driver: futures::future::BoxFuture<'static, ()>) -> Self {
+        self.cpu_driver = Some(driver);
+        self
+    }
+
+    /// Drops the stream (closing channels, aborting the CPU task), then
+    /// blocks until the CPU executor task has fully dropped its captured
+    /// state. This guarantees all Arrow C Data release callbacks have
+    /// fired before this method returns.
+    pub fn close_blocking(mut self, io_handle: &tokio::runtime::Handle) {
+        let driver = self.cpu_driver.take();
+        // Drop the stream — closes the ReceiverStream (rx), which causes
+        // the CPU task's tx.send() to fail and the task to exit.
+        drop(self.stream);
+        // Block until the CPU task is fully dropped on the executor thread.
+        if let Some(driver) = driver {
+            io_handle.block_on(driver);
+        }
+        // self drops here — _query_tracking_context, _session_ctx, permit
     }
 }
 
@@ -522,7 +551,7 @@ fn resolve_dynamic_spill_limit(spill_dir: &str) -> u64 {
             limit
         }
         None => {
-            log::warn!(
+            native_bridge_common::log_info!(
                 "Could not determine disk space for '{}', using fallback {}GB",
                 spill_dir, FALLBACK / (1024 * 1024 * 1024)
             );
@@ -634,6 +663,16 @@ pub async unsafe fn stream_next(
             } else {
                 batch
             };
+            // Compact sliced batches so FFI export doesn't carry oversized
+            // backing buffers. DataFusion's output often slices a large batch
+            // into batch_size chunks — without compaction each slice exports
+            // the full underlying buffer, causing N× amplification in the
+            // receiver's allocator.
+            let batch = if batch.columns().iter().any(|col| col.offset() > 0) {
+                concat_batches(&batch.schema(), std::iter::once(&batch))?
+            } else {
+                batch
+            };
             let struct_array: StructArray = batch.into();
             let array_data = struct_array.into_data();
             let ffi_array = FFI_ArrowArray::new(&array_data);
@@ -643,29 +682,12 @@ pub async unsafe fn stream_next(
     }
 }
 
-/// Prevents sliced StringView batches from carrying full backing buffers across FFI.
+/// Compacts StringView/BinaryView columns before FFI export via gc().
+///
+/// gc() rebuilds variadic backing buffers so each batch owns exactly the
+/// bytes it references — no shared parent buffers carried across FFI.
 fn compact_string_view_columns(batch: RecordBatch) -> RecordBatch {
     let schema = batch.schema();
-    let needs_compaction = batch
-        .columns()
-        .iter()
-        .zip(schema.fields().iter())
-        .any(|(col, field)| match field.data_type() {
-            DataType::Utf8View => {
-                let view: &arrow_array::StringViewArray = col.as_any().downcast_ref()
-                    .expect("column must be StringViewArray when schema declares Utf8View");
-                view_needs_gc(view.data_buffers(), view.total_buffer_bytes_used())
-            }
-            DataType::BinaryView => {
-                let view: &arrow_array::BinaryViewArray = col.as_any().downcast_ref()
-                    .expect("column must be BinaryViewArray when schema declares BinaryView");
-                view_needs_gc(view.data_buffers(), view.total_buffer_bytes_used())
-            }
-            _ => false,
-        });
-    if !needs_compaction {
-        return batch;
-    }
     let columns: Vec<Arc<dyn Array>> = batch
         .columns()
         .iter()
@@ -687,26 +709,16 @@ fn compact_string_view_columns(batch: RecordBatch) -> RecordBatch {
     RecordBatch::try_new(schema, columns).expect("gc'd columns must match schema")
 }
 
-// 10KB: below this, the gc() copy cost outweighs the transfer savings.
-const GC_MIN_WASTE_BYTES: usize = 10_240;
-
-#[inline]
-fn view_needs_gc(buffers: &[arrow::buffer::Buffer], bytes_used: usize) -> bool {
-    let bytes_allocated: usize = buffers.iter().map(|b| b.len()).sum();
-    let waste = bytes_allocated.saturating_sub(bytes_used);
-    let is_significantly_bloated = bytes_allocated > 2 * bytes_used;
-    is_significantly_bloated && waste > GC_MIN_WASTE_BYTES
-}
-
-/// Closes a result stream. Safe to call with 0 (no-op).
+/// Closes a result stream. Blocks until the CPU executor task has fully
+/// dropped its captured state, ensuring all Arrow C Data release callbacks
+/// fire before this returns. Safe to call with 0 (no-op).
 ///
 /// # Safety
 /// `stream_ptr` must be 0 or a valid pointer returned by `execute_query`.
-pub unsafe fn stream_close(stream_ptr: i64) {
+pub unsafe fn stream_close(stream_ptr: i64, io_handle: &tokio::runtime::Handle) {
     if stream_ptr != 0 {
-        // Dropping the handle drops both the stream and the query context.
-        // The context's Drop impl marks the query completed in the registry.
-        let _ = Box::from_raw(stream_ptr as *mut QueryStreamHandle);
+        let handle = *Box::from_raw(stream_ptr as *mut QueryStreamHandle);
+        handle.close_blocking(io_handle);
     }
 }
 
@@ -1099,11 +1111,13 @@ pub async unsafe fn execute_local_plan(
     // Wrap the output in the same CrossRtStream + RecordBatchStreamAdapter
     // shape as `execute_query`, so existing `stream_next` / `stream_close`
     // drain this handle unchanged.
-    let cross_rt_stream =
+    let mut cross_rt_stream =
         CrossRtStream::new_with_df_error_stream(df_stream, manager.cpu_executor());
+    let driver = cross_rt_stream.take_driver();
     let wrapped = RecordBatchStreamAdapter::new(cross_rt_stream.schema(), cross_rt_stream);
 
-    let handle = QueryStreamHandle::new(wrapped, query_context, permit);
+    let handle = QueryStreamHandle::new(wrapped, query_context, permit)
+        .with_cpu_driver(driver);
     Ok(Box::into_raw(Box::new(handle)) as i64)
 }
 
@@ -1139,11 +1153,13 @@ pub unsafe fn execute_local_prepared_plan(
     let _guard = manager.io_runtime.enter();
     let df_stream = session.execute_prepared()?;
 
-    let cross_rt_stream =
+    let mut cross_rt_stream =
         CrossRtStream::new_with_df_error_stream(df_stream, manager.cpu_executor());
+    let driver = cross_rt_stream.take_driver();
     let wrapped = RecordBatchStreamAdapter::new(cross_rt_stream.schema(), cross_rt_stream);
 
-    let handle = QueryStreamHandle::new(wrapped, query_context, permit);
+    let handle = QueryStreamHandle::new(wrapped, query_context, permit)
+        .with_cpu_driver(driver);
     Ok(Box::into_raw(Box::new(handle)) as i64)
 }
 
@@ -1206,6 +1222,7 @@ pub unsafe fn sender_send(
 /// `register_partition_stream`.
 pub unsafe fn sender_close(sender_ptr: i64) {
     if sender_ptr != 0 {
+        native_bridge_common::log_info!("[partition-stream] sender_close called (ptr={})", sender_ptr);
         let _ = Box::from_raw(sender_ptr as *mut PartitionStreamSender);
     }
 }

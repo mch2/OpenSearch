@@ -60,6 +60,12 @@ pub struct PartitionStreamSender {
     schema: SchemaRef,
 }
 
+impl Drop for PartitionStreamSender {
+    fn drop(&mut self) {
+        native_bridge_common::log_info!("[partition-stream] Sender dropped — channel closed, EOF signaled to receiver");
+    }
+}
+
 impl PartitionStreamSender {
     /// Returns the schema this sender was created with.
     pub fn schema(&self) -> &SchemaRef {
@@ -116,7 +122,11 @@ impl Stream for PartitionStreamReceiver {
     type Item = Result<RecordBatch, DataFusionError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.rx.poll_recv(cx)
+        let result = self.rx.poll_recv(cx);
+        if let Poll::Ready(None) = &result {
+            native_bridge_common::log_info!("[partition-stream] Receiver got EOF — sender was closed/dropped");
+        }
+        result
     }
 }
 

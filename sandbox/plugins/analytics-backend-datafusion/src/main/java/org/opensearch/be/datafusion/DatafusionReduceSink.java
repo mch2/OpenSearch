@@ -180,7 +180,12 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
             batch.close();
             return;
         }
-        BufferAllocator alloc = ctx.allocator();
+        // Use the batch's own allocator (flight pool) for the C Data export. The export
+        // retains buffer references freed by a Rust-side release callback. Using the
+        // per-query allocator would race: the framework closes the query allocator on
+        // failure (from the shard stage's error path) before the reduce sink's cleanup
+        // runs, so the async release callbacks would fire against a closed allocator.
+        BufferAllocator alloc = batch.getFieldVectors().getFirst().getAllocator();
         // Type-only equality check; nullability and Timestamp precision are advisory.
         if (!typesMatch(batch.getSchema(), declaredSchema)) {
             batch.close();

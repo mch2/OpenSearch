@@ -278,7 +278,11 @@ pub unsafe extern "C" fn df_stream_next(stream_ptr: i64) -> i64 {
 
 #[no_mangle]
 pub unsafe extern "C" fn df_stream_close(stream_ptr: i64) {
-    api::stream_close(stream_ptr);
+    if let Ok(mgr) = get_rt_manager() {
+        api::stream_close(stream_ptr, mgr.io_runtime.handle());
+    } else if stream_ptr != 0 {
+        let _ = Box::from_raw(stream_ptr as *mut api::QueryStreamHandle);
+    }
 }
 
 #[no_mangle]
