@@ -175,6 +175,10 @@ class FlightTransportResponse<T extends TransportResponse> implements StreamTran
 
             VectorSchemaRoot streamRoot = demandStream.getRoot();
             currentBatchSize = FlightUtils.calculateVectorSchemaRootSize(streamRoot);
+            logger.info("[flight-recv] batch: rows={} size={}B allocator: used={}B limit={}B",
+                streamRoot.getRowCount(), currentBatchSize,
+                streamRoot.getFieldVectors().getFirst().getAllocator().getAllocatedMemory(),
+                streamRoot.getFieldVectors().getFirst().getAllocator().getLimit());
             try (VectorStreamInput input = newStreamInput(streamRoot)) {
                 input.setVersion(initialHeader.getVersion());
                 return handler.read(input);

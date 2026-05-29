@@ -947,6 +947,9 @@ pub async unsafe fn stream_next(
             } else {
                 batch
             };
+            native_bridge_common::log_info!("[stream-next] batch: rows={} cols={} mem_size={}B offset_cols={}",
+                batch.num_rows(), batch.num_columns(), batch.get_array_memory_size(),
+                batch.columns().iter().filter(|c| c.offset() > 0).count());
             let struct_array: StructArray = batch.into();
             let array_data = struct_array.into_data();
             let ffi_array = FFI_ArrowArray::new(&array_data);
@@ -1534,6 +1537,8 @@ pub unsafe fn sender_send(
     let struct_array = StructArray::from(array_data);
     let batch = RecordBatch::from(struct_array);
 
+    native_bridge_common::log_info!("[sender-send] pushing batch: rows={} mem={}B to mpsc",
+        batch.num_rows(), batch.get_array_memory_size());
     sender.send_blocking(Ok(batch), io_handle)
 }
 

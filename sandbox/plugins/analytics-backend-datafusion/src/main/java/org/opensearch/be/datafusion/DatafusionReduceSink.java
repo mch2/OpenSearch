@@ -204,6 +204,8 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
                     + batch.getSchema()
             );
         }
+        logger.info("[feedToSender] feeding batch: rows={} flight_alloc: used={}B | query_alloc: used={}B",
+            batch.getRowCount(), alloc.getAllocatedMemory(), ctx.allocator().getAllocatedMemory());
         ArrowArray array = ArrowArray.allocateNew(alloc);
         ArrowSchema arrowSchema = ArrowSchema.allocateNew(alloc);
         try {

@@ -128,6 +128,10 @@ class FlightServerChannel implements TcpChannel, ArrowFlightChannel {
         }
         logger.debug("Sending batch #{} for correlation ID: {}", batchNumber, correlationId);
         waitForReady();
+        logger.info("[putNext] batch#{} correlationId={} allocator: used={}B limit={}B ({}% full)",
+            batchNumber.get(), correlationId,
+            allocator.getAllocatedMemory(), allocator.getLimit(),
+            allocator.getLimit() > 0 ? (allocator.getAllocatedMemory() * 100 / allocator.getLimit()) : 0);
         serverStreamListener.putNext();
         long putNextTime = (System.nanoTime() - batchStartTime) / 1_000_000;
         if (callTracker != null) {

@@ -123,6 +123,10 @@ impl Stream for PartitionStreamReceiver {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let result = self.rx.poll_recv(cx);
+        if let Poll::Ready(Some(Ok(ref batch))) = &result {
+            native_bridge_common::log_info!("[partition-recv] DF consuming batch: rows={} mem={}B",
+                batch.num_rows(), batch.get_array_memory_size());
+        }
         if let Poll::Ready(None) = &result {
             native_bridge_common::log_info!("[partition-stream] Receiver got EOF — sender was closed/dropped");
         }

@@ -18,6 +18,8 @@ import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.Schema;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.backend.EngineResultBatch;
 import org.opensearch.analytics.backend.EngineResultStream;
 import org.opensearch.analytics.exec.ArrowValues;
@@ -43,6 +45,8 @@ import static org.apache.arrow.c.Data.importField;
  */
 @ExperimentalApi
 public class DatafusionResultStream implements EngineResultStream {
+
+    private static final Logger logger = LogManager.getLogger(DatafusionResultStream.class);
 
     private final StreamHandle streamHandle;
     private final BufferAllocator allocator;
@@ -138,6 +142,8 @@ public class DatafusionResultStream implements EngineResultStream {
                     Data.importIntoVectorSchemaRoot(allocator, arrowArray, freshRoot, dictionaryProvider);
                 }
                 imported = true;
+                logger.info("[drain-output] imported batch: rows={} allocator: used={}B limit={}B",
+                    freshRoot.getRowCount(), allocator.getAllocatedMemory(), allocator.getLimit());
             } finally {
                 if (!imported) {
                     freshRoot.close();
