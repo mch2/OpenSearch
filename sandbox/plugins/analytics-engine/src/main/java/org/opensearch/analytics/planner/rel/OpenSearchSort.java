@@ -103,19 +103,21 @@ public class OpenSearchSort extends Sort implements OpenSearchRelNode {
     }
 
     /**
-     * A collated Sort needs globally-ordered input. Our {@link OpenSearchExchangeReducer}
-     * is a concat gather (not a merge exchange), so per-partition sort + ER produces
-     * partition-locally ordered rows concatenated in arrival order — wrong. Returning
-     * infinite cost unless the input is EXECUTION(SINGLETON) forces Volcano to pick the
+     * A collated Sort needs globally-ordered input; a {@code fetch}/{@code offset} (LIMIT) is a
+     * GLOBAL bound that can only be applied over a single gathered stream. Our
+     * {@link OpenSearchExchangeReducer} is a concat gather (not a merge exchange), so a
+     * per-partition Sort + ER produces either partition-locally-ordered rows concatenated in
+     * arrival order, or {@code fetch × partitions} rows — both wrong. Returning infinite cost
+     * unless the input is EXECUTION(SINGLETON) forces Volcano to pick the
      * {@link org.opensearch.analytics.planner.rules.OpenSearchSortSplitRule} alternative
      * (ER below the Sort, Sort sees a fully-gathered input).
      *
-     * <p>Pure LIMIT Sort (empty collation) — nothing to order, partition-local fetch is
-     * correct. Skip the gate.
+     * <p>Only a Sort that neither orders nor limits (no collation, no fetch, no offset) is safe
+     * per-partition; it skips the gate.
      */
     @Override
     public RelOptCost computeSelfCost(RelOptPlanner planner, RelMetadataQuery mq) {
-        if (getCollation().getFieldCollations().isEmpty()) {
+        if (getCollation().getFieldCollations().isEmpty() && fetch == null && offset == null) {
             return planner.getCostFactory().makeTinyCost();
         }
         for (RelNode input : getInputs()) {
