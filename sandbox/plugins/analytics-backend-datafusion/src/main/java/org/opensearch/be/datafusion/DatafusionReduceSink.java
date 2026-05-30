@@ -65,6 +65,14 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
     private final AtomicLong feedCount = new AtomicLong();
 
     /**
+     * Latched once any sender reports {@link NativeBridge#SENDER_SEND_RECEIVER_DROPPED} — the
+     * consumer (e.g. a LimitExec above the ExchangeReducer) satisfied its fetch and tore down
+     * the receiver. Nothing downstream will read another batch from any shard after that, so
+     * subsequent feeds short-circuit before the (non-trivial) Arrow C Data export.
+     */
+    private volatile boolean receiverDropped;
+
+    /**
      * Routes cleanup to the {@link #reduce} caller when a drain is in flight — never to a
      * concurrent {@link #close()}, which would race {@code drop_in_place} on the senders
      * and abort the JVM. Transitions: READY → REDUCING (reduce entered) → DONE (drain
@@ -177,13 +185,17 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
      * Lock-free per-sender feed. Exports the batch via Arrow C Data outside any lock
      * (the allocator is thread-safe; multiple shard handlers can export concurrently),
      * then sends it through the supplied sender. The Rust mpsc::Sender is thread-safe,
-     * so multiple producers feeding the same sender is safe. If close() raced and
-     * already ran senderClose, the native side returns an error ("receiver dropped")
-     * which we catch and discard.
+     * so multiple producers feeding the same sender is safe.
+     *
+     * <p>Two teardown signals are handled distinctly, and neither fails the query: a benign
+     * receiver-drop (the consumer finished early) returns the {@link NativeBridge#SENDER_SEND_RECEIVER_DROPPED}
+     * code, while a concurrent {@link #close()} surfaces as an IllegalStateException from
+     * {@code getPointer()} before the native call. Both discard the batch.
      */
     private void feedToSender(DatafusionPartitionSender sender, VectorSchemaRoot batch, Schema declaredSchema) {
-        // Best-effort fast path — skip export work if already closed.
-        if (closed) {
+        // Best-effort fast path — skip the export if the sink is closed or the consumer already
+        // dropped the receiver (nothing downstream will read another batch).
+        if (closed || receiverDropped) {
             batch.close();
             return;
         }
@@ -211,14 +223,23 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
             // close — see DatafusionPartitionSender. Throws IllegalStateException via
             // NativeHandle.getPointer() if the sender was closed (the close-race path).
             try {
-                sender.send(array.memoryAddress(), arrowSchema.memoryAddress());
+                long rc = sender.send(array.memoryAddress(), arrowSchema.memoryAddress());
+                if (rc == NativeBridge.SENDER_SEND_RECEIVER_DROPPED) {
+                    // Consumer finished first (e.g. a LimitExec satisfied its fetch) and dropped the
+                    // receiver while shards were still feeding. api::sender_send already consumed the
+                    // FFI structs via from_raw, so the buffers are Rust's to drop — do NOT release()
+                    // here (double-free). Latch the drop so subsequent feeds short-circuit.
+                    receiverDropped = true;
+                    logger.debug("[ReduceSink] receiver dropped before send (consumer finished), discarding batch");
+                    return;
+                }
                 feedCount.incrementAndGet();
             } catch (IllegalStateException e) {
-                // Sender close raced our send — Rust didn't take ownership, so the FFI
-                // structs' release callbacks are still set. Invoke them explicitly to free
-                // the exported buffers back to the Java allocator. (ArrowArray.close /
-                // ArrowSchema.close in the finally below frees the wrapper but does NOT
-                // invoke the C release callback.)
+                // Sender close raced our send — getPointer() threw BEFORE the native call,
+                // so Rust never took ownership and the FFI structs' release callbacks are
+                // still set. Invoke them explicitly to free the exported buffers back to the
+                // Java allocator. (ArrowArray.close / ArrowSchema.close in the finally below
+                // frees the wrapper but does NOT invoke the C release callback.)
                 array.release();
                 arrowSchema.release();
                 if (closed) {
