@@ -52,6 +52,13 @@ public final class OrdinalAppendingSink implements ExchangeSink {
     }
 
     @Override
+    public boolean isConsumerDone() {
+        // Pure decorator — forward the downstream-satisfied signal to the wrapped sink so a shard
+        // producer feeding through this decorator still sees an early-terminating consumer.
+        return delegate.isConsumerDone();
+    }
+
+    @Override
     public void close() {
         delegate.close();
     }
