@@ -8,7 +8,6 @@
 
 package org.opensearch.analytics.qa;
 
-import org.apache.lucene.tests.util.LuceneTestCase.AwaitsFix;
 import org.opensearch.client.Request;
 import org.opensearch.client.Response;
 import org.opensearch.client.ResponseException;
@@ -201,7 +200,6 @@ public class JoinCommandIT extends AnalyticsRestTestCase {
      * {@code ROW_NUMBER() OVER (ORDER BY …)} for pairing rows. Window-function
      * support is a follow-up.
      */
-    @AwaitsFix(bugUrl = "Task #113: appendcol plans correctly (ROW_NUMBER supported) but hits the same AggregateSplit-under-per-side-ER issue surfacing a runtime schema coercion mismatch.")
     public void testAppendcol() throws IOException {
         final String ppl = "source="
             + CALCS.indexName

@@ -8,7 +8,6 @@
 
 package org.opensearch.analytics.qa;
 
-import org.apache.lucene.tests.util.LuceneTestCase.AwaitsFix;
 import org.opensearch.client.Request;
 import org.opensearch.client.Response;
 import org.opensearch.client.ResponseException;
@@ -922,11 +921,6 @@ public class StreamstatsCommandIT extends AnalyticsRestTestCase {
      *  sometimes returns one row successfully. Neither a positive nor a broad-failure
      *  assertion is stable across runs. Skipped until the downstream multi-node race is
      *  fixed — re-enable by removing {@code @AwaitsFix}. */
-    @AwaitsFix(
-        bugUrl = "streamstats-inside-decorrelated-correlate has a nondeterministic multi-node"
-            + " execution race; needs a downstream analytics-engine fix before this test can"
-            + " assert a deterministic outcome"
-    )
     public void testWhereInWithStreamstatsSubquery() throws IOException {
         assertErrorAny(
             "source=" + DATASET.indexName + " | where key in"

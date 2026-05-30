@@ -8,7 +8,6 @@
 
 package org.opensearch.analytics.qa;
 
-import org.apache.lucene.tests.util.LuceneTestCase.AwaitsFix;
 
 import org.opensearch.client.Request;
 import org.opensearch.client.Response;
@@ -73,7 +72,6 @@ public class PatternsCommandIT extends AnalyticsRestTestCase {
         }
     }
 
-    @AwaitsFix(bugUrl = "patterns mode=aggregation auto-generates take(message, 10) but the literal 10 resolves to UNDEFINED in the PPL type checker: 'Aggregation function TAKE expects {[ANY]|[ANY,INTEGER]}, but got [STRING,UNDEFINED]'. Frontend type-resolution bug in the patterns-aggregation lowering (unified-query / CalciteRelNodeVisitor.visitPatterns), surfaced by the upstream BRAIN/SIMPLE patterns merge. Explicit take(message,1) works (see sibling testSimplePatternAggregationGroupByServiceMultiShard); only the auto-generated N is mistyped. Needs an opensearch-sql fix, out of scope for analytics-engine.")
     public void testSimplePatternAggregationModeMultiShard() throws IOException {
         ensureMultiShardProvisioned();
         Map<String, Object> response = executePplViaShim(

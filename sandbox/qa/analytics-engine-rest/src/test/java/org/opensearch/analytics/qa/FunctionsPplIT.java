@@ -8,7 +8,6 @@
 
 package org.opensearch.analytics.qa;
 
-import org.apache.lucene.tests.util.LuceneTestCase.AwaitsFix;
 
 /**
  * PPL function testing PPL integration test.
@@ -20,7 +19,6 @@ public class FunctionsPplIT extends BasePplIT {
         return FunctionsTestHelper.DATASET;
     }
 
-    @AwaitsFix(bugUrl = "Failing due to unsupported operations")
     public void testFunctionsPplQueries() throws Exception {
         runPplQueries();
     }
