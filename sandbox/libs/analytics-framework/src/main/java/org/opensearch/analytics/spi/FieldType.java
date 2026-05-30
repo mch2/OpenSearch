@@ -137,7 +137,7 @@ public enum FieldType {
             case BIGINT -> LONG;
             case FLOAT, REAL -> FieldType.FLOAT;
             case DOUBLE, DECIMAL -> FieldType.DOUBLE;
-            case CHAR, VARCHAR -> KEYWORD;
+            case CHAR, VARCHAR, SYMBOL -> KEYWORD;
             case DATE -> FieldType.DATE;
             case TIME, TIMESTAMP, TIMESTAMP_WITH_LOCAL_TIME_ZONE -> FieldType.DATE;
             case BOOLEAN -> FieldType.BOOLEAN;
