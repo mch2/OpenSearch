@@ -26,6 +26,15 @@ public final class DatafusionPartitionSender extends NativeHandle {
 
     private final ReentrantReadWriteLock lifecycle = new ReentrantReadWriteLock();
 
+    /**
+     * Latched once a send reports {@link NativeBridge#SENDER_SEND_RECEIVER_DROPPED} — the
+     * consumer (e.g. a LimitExec above the ExchangeReducer) satisfied its fetch and tore down
+     * this channel's receiver. Monotonic; once set, no further batch on this channel will be
+     * consumed. Per-sender (not per-sink) so a multi-input reduce only stops the input whose
+     * receiver is actually gone.
+     */
+    private volatile boolean receiverDropped;
+
     public DatafusionPartitionSender(long senderPtr) {
         super(senderPtr);
     }
@@ -38,10 +47,19 @@ public final class DatafusionPartitionSender extends NativeHandle {
     public long send(long arrayAddr, long schemaAddr) {
         lifecycle.readLock().lock();
         try {
-            return NativeBridge.senderSend(getPointer(), arrayAddr, schemaAddr);
+            long rc = NativeBridge.senderSend(getPointer(), arrayAddr, schemaAddr);
+            if (rc == NativeBridge.SENDER_SEND_RECEIVER_DROPPED) {
+                receiverDropped = true;
+            }
+            return rc;
         } finally {
             lifecycle.readLock().unlock();
         }
+    }
+
+    /** True once the consumer dropped this channel's receiver (see {@link #receiverDropped}). */
+    public boolean isReceiverDropped() {
+        return receiverDropped;
     }
 
     @Override

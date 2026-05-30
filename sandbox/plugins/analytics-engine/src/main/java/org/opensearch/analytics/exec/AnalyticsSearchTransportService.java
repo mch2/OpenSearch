@@ -234,16 +234,26 @@ public class AnalyticsSearchTransportService {
             @Override
             public void handleStreamResponse(StreamTransportResponse<FragmentExecutionArrowResponse> stream) {
                 try {
-                    FragmentExecutionArrowResponse current;
-                    FragmentExecutionArrowResponse last = null;
-                    while ((current = stream.nextResponse()) != null) {
-                        if (last != null) {
-                            listener.onStreamResponse(last, false);
+                    // One-batch lookahead so each batch is delivered with the correct isLast flag.
+                    FragmentExecutionArrowResponse last = stream.nextResponse();
+                    while (last != null) {
+                        FragmentExecutionArrowResponse next = stream.nextResponse();
+                        boolean isLast = next == null;
+                        boolean keepReading = listener.onStreamResponse(last, isLast);
+                        if (!keepReading) {
+                            // Consumer is satisfied (e.g. a downstream LimitExec finished). The listener
+                            // has settled its terminal event; cancel the stream so the data-node fragment
+                            // stops scanning instead of streaming batches we would only discard. Close the
+                            // already-pulled-but-unconsumed lookahead batch to avoid leaking it.
+                            if (next != null) {
+                                if (next.getRoot() != null) {
+                                    next.getRoot().close();
+                                }
+                                stream.cancel("reduce input satisfied (downstream consumer finished)", null);
+                            }
+                            return;
                         }
-                        last = current;
-                    }
-                    if (last != null) {
-                        listener.onStreamResponse(last, true);
+                        last = next;
                     }
                 } catch (Exception e) {
                     listener.onFailure(e);

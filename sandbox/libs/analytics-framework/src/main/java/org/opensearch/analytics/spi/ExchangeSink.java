@@ -51,6 +51,19 @@ public interface ExchangeSink {
     }
 
     /**
+     * Whether this sink's downstream consumer has finished and will read no more batches — e.g.
+     * a coordinator reduce whose LimitExec satisfied its fetch and tore down the input receiver.
+     * Producers may poll this after a {@link #feed} to stop early instead of scanning to exhaustion.
+     *
+     * <p>Default {@code false} (always keep feeding). Sinks backed by a bounded/early-terminating
+     * consumer override it. Best-effort: a {@code true} return is monotonic, but a {@code false}
+     * may race a concurrent completion — callers treat it as "keep going for now".
+     */
+    default boolean isConsumerDone() {
+        return false;
+    }
+
+    /**
      * Signal that no more batches will be fed. Releases resources.
      */
     void close();

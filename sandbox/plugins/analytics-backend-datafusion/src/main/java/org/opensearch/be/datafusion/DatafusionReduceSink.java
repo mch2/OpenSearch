@@ -65,14 +65,6 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
     private final AtomicLong feedCount = new AtomicLong();
 
     /**
-     * Latched once any sender reports {@link NativeBridge#SENDER_SEND_RECEIVER_DROPPED} — the
-     * consumer (e.g. a LimitExec above the ExchangeReducer) satisfied its fetch and tore down
-     * the receiver. Nothing downstream will read another batch from any shard after that, so
-     * subsequent feeds short-circuit before the (non-trivial) Arrow C Data export.
-     */
-    private volatile boolean receiverDropped;
-
-    /**
      * Routes cleanup to the {@link #reduce} caller when a drain is in flight — never to a
      * concurrent {@link #close()}, which would race {@code drop_in_place} on the senders
      * and abort the JVM. Transitions: READY → REDUCING (reduce entered) → DONE (drain
@@ -170,6 +162,17 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
         feedToSender(sendersByChildStageId.values().iterator().next(), batch, childSchemas.values().iterator().next());
     }
 
+    /**
+     * Single-input path: true once the sole input's consumer dropped its receiver (e.g. a LimitExec
+     * above the ExchangeReducer satisfied its fetch). Multi-input callers feed via {@link #sinkForChild}
+     * and observe {@code isConsumerDone()} on the per-child wrapper, so this returns false unless there
+     * is exactly one registered sender.
+     */
+    @Override
+    public boolean isConsumerDone() {
+        return sendersByChildStageId.size() == 1 && sendersByChildStageId.values().iterator().next().isReceiverDropped();
+    }
+
     @Override
     public ExchangeSink sinkForChild(int childStageId) {
         DatafusionPartitionSender sender = sendersByChildStageId.get(childStageId);
@@ -193,9 +196,9 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
      * {@code getPointer()} before the native call. Both discard the batch.
      */
     private void feedToSender(DatafusionPartitionSender sender, VectorSchemaRoot batch, Schema declaredSchema) {
-        // Best-effort fast path — skip the export if the sink is closed or the consumer already
-        // dropped the receiver (nothing downstream will read another batch).
-        if (closed || receiverDropped) {
+        // Best-effort fast path — skip the export if the sink is closed or this input's consumer
+        // already dropped its receiver (nothing downstream will read another batch on it).
+        if (closed || sender.isReceiverDropped()) {
             batch.close();
             return;
         }
@@ -228,8 +231,9 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
                     // Consumer finished first (e.g. a LimitExec satisfied its fetch) and dropped the
                     // receiver while shards were still feeding. api::sender_send already consumed the
                     // FFI structs via from_raw, so the buffers are Rust's to drop — do NOT release()
-                    // here (double-free). Latch the drop so subsequent feeds short-circuit.
-                    receiverDropped = true;
+                    // here (double-free). The sender latched the drop (see DatafusionPartitionSender),
+                    // so subsequent feeds for this input short-circuit and the producer stream is
+                    // cancelled by the shard listener via isConsumerDone().
                     logger.debug("[ReduceSink] receiver dropped before send (consumer finished), discarding batch");
                     return;
                 }
@@ -300,6 +304,11 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
         @Override
         public void feed(VectorSchemaRoot batch) {
             feedToSender(sender, batch, declaredSchema);
+        }
+
+        @Override
+        public boolean isConsumerDone() {
+            return sender.isReceiverDropped();
         }
 
         @Override
