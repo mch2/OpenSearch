@@ -74,6 +74,28 @@ public class DatafusionReduceSinkTests extends OpenSearchTestCase {
     }
 
     /**
+     * A feed that races a consumer which already finished (e.g. a {@code LimitExec}
+     * satisfying its fetch and dropping the receiver) surfaces from the native
+     * {@code sender_send} as a plain {@link RuntimeException} carrying
+     * "partition stream receiver dropped before send". That is benign — there is
+     * nothing left to consume — and {@link DatafusionReduceSink#isBenignReceiverDrop}
+     * must recognise it so {@code feedToSender} can discard the batch instead of
+     * failing the query. Any other RuntimeException is a genuine error and must NOT
+     * be classified as benign.
+     */
+    public void testIsBenignReceiverDropClassifiesNativeMessage() {
+        assertTrue(
+            "native 'receiver dropped before send' must be benign",
+            DatafusionReduceSink.isBenignReceiverDrop(new RuntimeException("partition stream receiver dropped before send"))
+        );
+        assertFalse(
+            "an unrelated native failure must not be swallowed",
+            DatafusionReduceSink.isBenignReceiverDrop(new RuntimeException("Failed to import Arrow C Data array: bad alignment"))
+        );
+        assertFalse("a null message must not be benign", DatafusionReduceSink.isBenignReceiverDrop(new RuntimeException()));
+    }
+
+    /**
      * End-to-end feed + drain: feeds three Arrow batches (values 1..9) into a real
      * {@link DatafusionReduceSink} running a {@code SELECT SUM(x) FROM "input-0"}
      * Substrait plan, then asserts the downstream sink received a single-row batch

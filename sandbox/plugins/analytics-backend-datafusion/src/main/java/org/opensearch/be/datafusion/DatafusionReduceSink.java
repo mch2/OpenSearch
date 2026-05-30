@@ -214,15 +214,28 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
                 sender.send(array.memoryAddress(), arrowSchema.memoryAddress());
                 feedCount.incrementAndGet();
             } catch (IllegalStateException e) {
-                // Sender close raced our send — Rust didn't take ownership, so the FFI
-                // structs' release callbacks are still set. Invoke them explicitly to free
-                // the exported buffers back to the Java allocator. (ArrowArray.close /
-                // ArrowSchema.close in the finally below frees the wrapper but does NOT
-                // invoke the C release callback.)
+                // Sender close raced our send — getPointer() threw BEFORE the native call,
+                // so Rust never took ownership and the FFI structs' release callbacks are
+                // still set. Invoke them explicitly to free the exported buffers back to the
+                // Java allocator. (ArrowArray.close / ArrowSchema.close in the finally below
+                // frees the wrapper but does NOT invoke the C release callback.)
                 array.release();
                 arrowSchema.release();
                 if (closed) {
                     logger.debug("[ReduceSink] send-after-close race caught, discarding batch");
+                    return;
+                }
+                throw e;
+            } catch (RuntimeException e) {
+                // The native send failed AFTER api::sender_send consumed the FFI structs via
+                // from_raw — the buffers are Rust's to drop, so do NOT release() here (that
+                // would double-free). The benign case is the consumer finishing first: a
+                // LimitExec that satisfied its fetch drops the receiver while shard producers
+                // are still feeding. Unlike a closed sender, a producer can't observe that
+                // through `closed`, so we key off the native message, not the flag. Discard
+                // the batch and stop feeding — there is nothing left to consume.
+                if (isBenignReceiverDrop(e)) {
+                    logger.debug("[ReduceSink] receiver dropped before send (consumer finished), discarding batch");
                     return;
                 }
                 throw e;
@@ -234,6 +247,18 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
             array.close();
             arrowSchema.close();
         }
+    }
+
+    /**
+     * True when a native send failure is the benign "consumer already finished" case:
+     * the DataFusion receiver was dropped (e.g. a LimitExec satisfied its fetch and tore
+     * down) before this batch could be sent. Matched on the native error text raised by
+     * {@code api::sender_send} → {@code partition_stream.rs} ("receiver dropped before
+     * send"); anything else is a real failure and must propagate.
+     */
+    static boolean isBenignReceiverDrop(RuntimeException e) {
+        String message = e.getMessage();
+        return message != null && message.contains("receiver dropped");
     }
 
     /**
