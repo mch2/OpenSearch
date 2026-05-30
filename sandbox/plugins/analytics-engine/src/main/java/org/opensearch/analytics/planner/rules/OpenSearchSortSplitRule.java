@@ -20,11 +20,14 @@ import org.opensearch.analytics.planner.rel.OpenSearchDistributionTraitDef;
 import org.opensearch.analytics.planner.rel.OpenSearchSort;
 
 /**
- * For a collated {@link OpenSearchSort}, requests SINGLETON input so the plan becomes
- * {@code Sort ← ER ← scan} — gather first, then global sort. Our ExchangeReducer is a
- * concat gather, not a merge exchange, so per-partition sort + concat is wrong.
+ * For an {@link OpenSearchSort} that orders or limits, requests SINGLETON input so the plan
+ * becomes {@code Sort ← ER ← scan} — gather first, then sort/limit globally. Our ExchangeReducer
+ * is a concat gather, not a merge exchange, so per-partition sort + concat is wrong, and so is a
+ * per-partition {@code fetch} (it returns {@code fetch × partitions} rows). Pairs with the
+ * SINGLETON-input cost gate in {@link OpenSearchSort#computeSelfCost} that makes the per-partition
+ * alternative infinite-cost for any collated OR fetch/offset-bearing Sort.
  *
- * <p>Pure LIMIT Sorts (empty collation) are skipped — partition-local fetch is correct.
+ * <p>A Sort that neither orders nor limits (no collation, no fetch, no offset) is left alone.
  *
  * @opensearch.internal
  */
@@ -40,8 +43,8 @@ public class OpenSearchSortSplitRule extends RelOptRule {
     @Override
     public boolean matches(RelOptRuleCall call) {
         OpenSearchSort sort = call.rel(0);
-        if (sort.getCollation().getFieldCollations().isEmpty()) {
-            return false; // pure LIMIT — skip
+        if (sort.getCollation().getFieldCollations().isEmpty() && sort.fetch == null && sort.offset == null) {
+            return false; // neither orders nor limits — nothing to gather for
         }
         return !isSingleton(sort.getInput()) || !isSingleton(sort);
     }
