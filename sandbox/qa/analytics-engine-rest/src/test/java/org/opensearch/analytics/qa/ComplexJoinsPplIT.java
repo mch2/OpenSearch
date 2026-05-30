@@ -8,7 +8,6 @@
 
 package org.opensearch.analytics.qa;
 
-import org.apache.lucene.tests.util.LuceneTestCase.AwaitsFix;
 
 /**
  * Complex Joins PPL integration test (multi-index). Tests join operations across multiple indexes.
@@ -34,7 +33,6 @@ public class ComplexJoinsPplIT extends BasePplIT {
         }
     }
 
-    @AwaitsFix(bugUrl = "Failing due to unsupported operations")
     public void testComplexJoinsPplQueries() throws Exception {
         ensureAdditionalDataProvisioned();
         runPplQueries();
