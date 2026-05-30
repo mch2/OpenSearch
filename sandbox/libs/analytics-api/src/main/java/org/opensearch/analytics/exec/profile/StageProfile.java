@@ -27,6 +27,8 @@ import java.util.List;
  * @param endMs                wall-clock millis from {@code StageMetrics.recordEnd()}, 0 if still running
  * @param elapsedMs            {@code endMs - startMs}, or 0 if either stamp is missing
  * @param rowsProcessed        counter from {@code StageMetrics.addRowsProcessed}
+ * @param earlyTerminated      number of input streams this stage cancelled early because the
+ *                             downstream consumer was already satisfied (e.g. a LimitExec finished)
  * @param tasksCompleted       counter from {@code StageMetrics.incrementTasksCompleted}
  * @param tasksFailed          counter from {@code StageMetrics.incrementTasksFailed}
  * @param fragment             Calcite {@code RelOptUtil.toString(stage.getFragment())} rendered as an
@@ -35,7 +37,9 @@ import java.util.List;
  * @param tasks                per-partition task profiles registered with the TaskTracker
  */
 public record StageProfile(int stageId, String executionType, String distribution, String state, long startMs, long endMs, long elapsedMs,
-    long rowsProcessed, long tasksCompleted, long tasksFailed, List<String> fragment, List<TaskProfile> tasks) implements ToXContentObject {
+    long rowsProcessed, long earlyTerminated, long tasksCompleted, long tasksFailed, List<String> fragment, List<TaskProfile> tasks)
+    implements
+        ToXContentObject {
 
     @Override
     public XContentBuilder toXContent(XContentBuilder builder, Params params) throws IOException {
@@ -48,6 +52,7 @@ public record StageProfile(int stageId, String executionType, String distributio
         if (endMs > 0) builder.field("end_ms", endMs);
         builder.field("elapsed_ms", elapsedMs);
         builder.field("rows_processed", rowsProcessed);
+        if (earlyTerminated > 0) builder.field("early_terminated", earlyTerminated);
         builder.field("tasks_completed", tasksCompleted);
         builder.field("tasks_failed", tasksFailed);
         if (fragment != null && fragment.isEmpty() == false) {

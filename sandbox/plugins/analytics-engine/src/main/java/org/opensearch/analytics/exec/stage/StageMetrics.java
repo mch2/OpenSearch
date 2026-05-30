@@ -25,6 +25,7 @@ public class StageMetrics {
 
     private final AtomicLong rowsProcessed = new AtomicLong();
     private final AtomicLong bytesRead = new AtomicLong();
+    private final AtomicLong earlyTerminated = new AtomicLong();
     private volatile long startTimeMs;
     private volatile long endTimeMs;
 
@@ -56,8 +57,22 @@ public class StageMetrics {
         bytesRead.addAndGet(n);
     }
 
+    /**
+     * Records that one of this stage's input streams was cancelled early because the downstream
+     * consumer was already satisfied (e.g. a LimitExec above the reduce finished). Counts how many
+     * producer streams this stage stopped before they scanned to exhaustion.
+     */
+    public void markEarlyTerminated() {
+        earlyTerminated.incrementAndGet();
+    }
+
     public long getRowsProcessed() {
         return rowsProcessed.get();
+    }
+
+    /** Number of input streams this stage cancelled early on downstream satisfaction. */
+    public long getEarlyTerminated() {
+        return earlyTerminated.get();
     }
 
     public long getBytesRead() {

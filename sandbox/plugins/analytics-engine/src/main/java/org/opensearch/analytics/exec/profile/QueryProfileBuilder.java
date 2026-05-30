@@ -67,6 +67,7 @@ public final class QueryProfileBuilder {
                     end,
                     elapsed,
                     m.getRowsProcessed(),
+                    m.getEarlyTerminated(),
                     tasksCompleted,
                     tasksFailed,
                     fragment,

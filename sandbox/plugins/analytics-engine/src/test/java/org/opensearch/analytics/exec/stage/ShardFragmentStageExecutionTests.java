@@ -170,6 +170,7 @@ public class ShardFragmentStageExecutionTests extends OpenSearchTestCase {
         assertFalse("listener must signal stop when the consumer is done", keepReading);
         assertEquals("the in-hand batch is still fed before stopping", 1, sink.fed.size());
         assertEquals("task completes as SUCCESS (not cancelled/failed)", StageExecution.State.SUCCEEDED, exec.getState());
+        assertEquals("early-termination metric must record the cancelled stream", 1, exec.getMetrics().getEarlyTerminated());
         sink.close();
     }
 

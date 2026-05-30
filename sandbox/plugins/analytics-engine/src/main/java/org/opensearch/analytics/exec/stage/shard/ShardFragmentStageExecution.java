@@ -155,6 +155,7 @@ public class ShardFragmentStageExecution extends AbstractStageExecution implemen
                 // stream so this shard stops scanning instead of feeding batches that will be discarded.
                 // Each input reacts independently on its own stream.
                 if (outputSink.isConsumerDone()) {
+                    metrics.markEarlyTerminated();
                     listener.onResponse(null);
                     return false;
                 }
