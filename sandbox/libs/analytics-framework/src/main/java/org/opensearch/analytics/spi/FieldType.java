@@ -142,6 +142,10 @@ public enum FieldType {
             case TIME, TIMESTAMP, TIMESTAMP_WITH_LOCAL_TIME_ZONE -> FieldType.DATE;
             case BOOLEAN -> FieldType.BOOLEAN;
             case BINARY, VARBINARY -> FieldType.BINARY;
+            // Enum/flag literal (e.g. percentile's spec argument). Has no OpenSearch mapping;
+            // it is a string-like constant consumed by the owning function, never stored.
+            // KEYWORD lets FieldStorageInfo.resolve treat the projected column as a concrete type.
+            case SYMBOL -> KEYWORD;
             case ARRAY -> FieldType.ARRAY;
             case MAP -> FieldType.MAP;
             default -> null;
