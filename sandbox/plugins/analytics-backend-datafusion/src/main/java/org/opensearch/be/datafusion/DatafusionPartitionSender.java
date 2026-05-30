@@ -30,10 +30,15 @@ public final class DatafusionPartitionSender extends NativeHandle {
         super(senderPtr);
     }
 
-    public void send(long arrayAddr, long schemaAddr) {
+    /**
+     * Sends one exported batch. Returns {@code 0} on a normal send or
+     * {@link NativeBridge#SENDER_SEND_RECEIVER_DROPPED} if the consumer already dropped the
+     * receiver (benign — the caller should discard the batch and stop feeding).
+     */
+    public long send(long arrayAddr, long schemaAddr) {
         lifecycle.readLock().lock();
         try {
-            NativeBridge.senderSend(getPointer(), arrayAddr, schemaAddr);
+            return NativeBridge.senderSend(getPointer(), arrayAddr, schemaAddr);
         } finally {
             lifecycle.readLock().unlock();
         }
