@@ -1495,7 +1495,7 @@ pub unsafe fn sender_send(
     array_ptr: i64,
     schema_ptr: i64,
     io_handle: &tokio::runtime::Handle,
-) -> Result<(), DataFusionError> {
+) -> Result<crate::partition_stream::SendOutcome, DataFusionError> {
     let sender = &*(sender_ptr as *const PartitionStreamSender);
 
     // Take ownership of the Java-allocated FFI structs. `from_raw` reads
@@ -1518,7 +1518,7 @@ pub unsafe fn sender_send(
     let struct_array = StructArray::from(array_data);
     let batch = RecordBatch::from(struct_array);
 
-    sender.send_blocking(Ok(batch), io_handle)
+    Ok(sender.send_blocking(Ok(batch), io_handle))
 }
 
 /// Closes a partition stream sender. Dropping the sender closes the mpsc,

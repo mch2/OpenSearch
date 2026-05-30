@@ -542,12 +542,22 @@ pub unsafe extern "C" fn df_execute_local_plan(
         .map_err(|e| e.to_string())
 }
 
+/// Positive FFI sentinel returned by [`df_sender_send`] when the send was skipped because the
+/// consumer already finished (the receiver was dropped, e.g. a LimitExec satisfied its fetch).
+/// It rides the success half of the FFM return contract (`>= 0` = success, `< 0` = `-error_ptr`),
+/// so `NativeLibraryLoader.checkResult` passes it through untouched — no error-string path.
+/// MUST match `NativeBridge.SENDER_SEND_RECEIVER_DROPPED` on the Java side.
+pub const SENDER_SEND_RECEIVER_DROPPED: i64 = 1;
+
 #[ffm_safe]
 #[no_mangle]
 pub unsafe extern "C" fn df_sender_send(sender_ptr: i64, array_ptr: i64, schema_ptr: i64) -> i64 {
     let mgr = get_rt_manager()?;
     api::sender_send(sender_ptr, array_ptr, schema_ptr, mgr.io_runtime.handle())
-        .map(|_| 0)
+        .map(|outcome| match outcome {
+            crate::partition_stream::SendOutcome::Sent => 0,
+            crate::partition_stream::SendOutcome::ReceiverDropped => SENDER_SEND_RECEIVER_DROPPED,
+        })
         .map_err(|e| e.to_string())
 }
 
