@@ -1020,9 +1020,10 @@ fn view_needs_gc(buffers: &[arrow::buffer::Buffer], bytes_used: usize) -> bool {
 /// `stream_ptr` must be 0 or a valid pointer returned by `execute_query`.
 pub unsafe fn stream_close(stream_ptr: i64) {
     if stream_ptr != 0 {
-        // Dropping the handle drops both the stream and the query context.
-        // The context's Drop impl marks the query completed in the registry.
-        let _ = Box::from_raw(stream_ptr as *mut QueryStreamHandle);
+        native_bridge_common::log_info!("[stream-close] dropping QueryStreamHandle ptr={:#x}", stream_ptr);
+        let handle = Box::from_raw(stream_ptr as *mut QueryStreamHandle);
+        drop(handle);
+        native_bridge_common::log_info!("[stream-close] QueryStreamHandle dropped ptr={:#x}", stream_ptr);
     }
 }
 

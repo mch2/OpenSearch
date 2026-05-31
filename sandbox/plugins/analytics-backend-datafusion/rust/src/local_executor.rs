@@ -65,7 +65,8 @@ pub struct LocalSession {
 impl Drop for LocalSession {
     fn drop(&mut self) {
         let phantom = self._phantom_reservation.as_ref().map_or(0, |r| r.size());
-        log_info!("[local-session] DROP phantom_bytes={}", phantom);
+        let plan_refs = self.prepared_plan.as_ref().map_or(0, |p| Arc::strong_count(p));
+        log_info!("[local-session] DROP phantom_bytes={} plan_arc_refs={}", phantom, plan_refs);
     }
 }
 
