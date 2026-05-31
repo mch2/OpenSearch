@@ -378,17 +378,17 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
         }
         if (preparedState == null) {
             try {
+                logger.debug("[reduce-sink] CLOSE session taskId={}", ctx.taskId());
                 session.close();
-                logger.debug("[reduce-sink] CLOSE session taskId={} sessionPtr={}", ctx.taskId(), session.getPointer());
             } catch (Exception t) {
                 failure = accumulate(failure, t);
             }
         } else {
             try {
+                logger.debug("[reduce-sink] CLOSE preparedState taskId={}", ctx.taskId());
                 preparedState.close();
-                logger.debug("[reduce-sink] CLOSE preparedState taskId={} sessionPtr={}", ctx.taskId(), preparedState.session().getPointer());
             } catch (Exception t) {
-                logger.debug("[reduce-sink] CLOSE preparedState taskId={} (already closed)", ctx.taskId());
+                logger.debug("[reduce-sink] CLOSE preparedState taskId={} exception: {}", ctx.taskId(), t.getMessage());
                 failure = accumulate(failure, t);
             }
         }
