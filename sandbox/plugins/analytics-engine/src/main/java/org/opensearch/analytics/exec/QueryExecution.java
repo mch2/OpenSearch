@@ -14,6 +14,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.message.ParameterizedMessage;
 import org.opensearch.analytics.exec.stage.DataProducer;
+import org.opensearch.analytics.backend.ExchangeSource;
 import org.opensearch.analytics.exec.stage.StageExecution;
 import org.opensearch.analytics.spi.ExchangeSink;
 import org.opensearch.core.action.ActionListener;
@@ -39,7 +40,7 @@ public class QueryExecution {
     private final QueryContext config;
     private final ExecutionGraph graph;
     private final Consumer<StageExecution> scheduler;
-    private final ActionListener<Iterable<VectorSchemaRoot>> listener;
+    private final ActionListener<Iterable<Object[]>> listener;
     private final AtomicReference<State> state = new AtomicReference<>(State.CREATED);
     private final AtomicBoolean closed = new AtomicBoolean(false);
 
@@ -56,7 +57,7 @@ public class QueryExecution {
         QueryContext config,
         ExecutionGraph graph,
         Consumer<StageExecution> scheduler,
-        ActionListener<Iterable<VectorSchemaRoot>> listener
+        ActionListener<Iterable<Object[]>> listener
     ) {
         this.config = config;
         this.graph = graph;
@@ -164,8 +165,11 @@ public class QueryExecution {
     private void fireListener(State terminal) {
         if (terminal == State.SUCCEEDED) {
             DataProducer producer = (DataProducer) graph.rootExecution();
-            listener.onResponse(producer.outputSource().readResult());
+            ExchangeSource source = producer.outputSource();
+            logger.trace("[query-diag] query {} SUCCEEDED, delivering via readResult()", config.queryId());
+            listener.onResponse(DefaultPlanExecutor.batchesToRows(source.readResult()));
         } else {
+            logger.trace("[query-diag] query {} terminal={}, delivering failure", config.queryId(), terminal);
             listener.onFailure(terminalCause(terminal));
         }
     }
