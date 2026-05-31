@@ -31,9 +31,12 @@ import java.util.List;
  */
 public class EagerRowProducingSink implements ExchangeSink, ExchangeSource {
 
+    private static final int MAX_ROWS = 10_000;
+
     private final List<Object[]> rows = new ArrayList<>();
     private final List<String> fieldNames = new ArrayList<>();
     private long totalRows;
+    private boolean truncated;
 
     public EagerRowProducingSink() {}
 
@@ -45,10 +48,20 @@ public class EagerRowProducingSink implements ExchangeSink, ExchangeSource {
                     fieldNames.add(f.getName());
                 }
             }
+            if (rows.size() >= MAX_ROWS) {
+                truncated = true;
+                totalRows += batch.getRowCount();
+                return;
+            }
             int rowCount = batch.getRowCount();
             List<FieldVector> vectors = batch.getFieldVectors();
             int colCount = vectors.size();
             for (int r = 0; r < rowCount; r++) {
+                if (rows.size() >= MAX_ROWS) {
+                    truncated = true;
+                    totalRows += (rowCount - r);
+                    break;
+                }
                 Object[] row = new Object[colCount];
                 for (int c = 0; c < colCount; c++) {
                     row[c] = ArrowValues.toJavaValue(vectors.get(c), r);
