@@ -349,46 +349,27 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
      */
     @Override
     protected Exception closeImpl() {
-        SinkState before = state.compareAndExchange(SinkState.READY, SinkState.DONE);
-        logger.debug("[reduce-sink] closeImpl: taskId={} stateBefore={} feedCount={}",
-            ctx.taskId(), before, feedCount.get());
-        if (before == SinkState.REDUCING) {
-            logger.debug("[reduce-sink] closeImpl: drain in flight, firing cancelQuery taskId={}", ctx.taskId());
-            fireCancelQuery();
-            return null;
-        }
         if (torndown.compareAndSet(false, true) == false) {
-            logger.debug("[reduce-sink] closeImpl: already torn down, skipping taskId={}", ctx.taskId());
             return null;
         }
+        assert torndown.get() == true;
+        logger.debug("[reduce-sink] teardown taskId={} feedCount={}", ctx.taskId(), feedCount.get());
         Exception failure = null;
-        // Close outStream FIRST — drops the native plan and its receiver, which unblocks
-        // any shard threads stuck in sender.send() waiting for channel capacity.
         try {
-            logger.debug("[reduce-sink] CLOSE outStream taskId={}", ctx.taskId());
             outStream.close();
         } catch (Exception t) {
             failure = accumulate(failure, t);
         }
-        // Close session (via preparedState or directly). This also closes senders inside
-        // DataFusionReduceState.close(), which is safe now that outStream dropped the
-        // receiver — stuck senders have already exited.
-        if (preparedState == null) {
-            try {
-                logger.debug("[reduce-sink] CLOSE session taskId={}", ctx.taskId());
-                session.close();
-            } catch (Exception t) {
-                failure = accumulate(failure, t);
-            }
-        } else {
-            try {
-                logger.debug("[reduce-sink] CLOSE preparedState taskId={}", ctx.taskId());
+        try {
+            if (preparedState != null) {
                 preparedState.close();
-            } catch (Exception t) {
-                logger.debug("[reduce-sink] CLOSE preparedState taskId={} exception: {}", ctx.taskId(), t.getMessage());
-                failure = accumulate(failure, t);
+            } else {
+                session.close();
             }
+        } catch (Exception t) {
+            failure = accumulate(failure, t);
         }
+        logger.debug("[reduce-sink] teardown complete taskId={}", ctx.taskId());
         return failure;
     }
 
