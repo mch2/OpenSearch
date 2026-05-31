@@ -233,7 +233,7 @@ public class AnalyticsSearchTransportService {
             public void handleStreamResponse(StreamTransportResponse<FragmentExecutionArrowResponse> stream) {
                 String shardInfo = request instanceof org.opensearch.analytics.exec.action.FragmentExecutionRequest fr
                     ? fr.getShardId().toString() : "unknown";
-                logger.info("[shard-diag] stream started for shard={} target={}", shardInfo, targetNode.getId());
+                logger.debug("[shard-diag] stream started for shard={} target={}", shardInfo, targetNode.getId());
                 int batchCount = 0;
                 long totalRows = 0;
                 try {
@@ -246,11 +246,11 @@ public class AnalyticsSearchTransportService {
                         totalRows += rows;
                         // Per-batch log at TRACE only (extremely verbose under load)
                         if (logger.isTraceEnabled() && (batchCount <= 3 || batchCount % 500 == 0)) {
-                            logger.trace("[shard-stream] shard feeding batch #{} rows={} cumRows={}", batchCount, rows, totalRows);
+                            logger.debug("[shard-stream] shard feeding batch #{} rows={} cumRows={}", batchCount, rows, totalRows);
                         }
                         boolean keepReading = listener.onStreamResponse(last, isLast);
                         if (!keepReading) {
-                            logger.trace("[shard-stream] EARLY-CANCEL shard={} after {} batches, {} rows - consumer done",
+                            logger.debug("[shard-stream] EARLY-CANCEL shard={} after {} batches, {} rows - consumer done",
                                 batchCount, totalRows);
                             if (next != null) {
                                 if (next.getRoot() != null) {
@@ -262,9 +262,9 @@ public class AnalyticsSearchTransportService {
                         }
                         last = next;
                     }
-                    logger.trace("[shard-stream] shard stream complete: {} batches, {} totalRows", batchCount, totalRows);
+                    logger.debug("[shard-stream] shard stream complete: {} batches, {} totalRows", batchCount, totalRows);
                 } catch (Exception e) {
-                    logger.trace("[shard-stream] shard stream failed after {} batches, {} rows: {}", batchCount, totalRows, e.getMessage());
+                    logger.debug("[shard-stream] shard stream failed after {} batches, {} rows: {}", batchCount, totalRows, e.getMessage());
                     listener.onFailure(e);
                 } finally {
                     try {

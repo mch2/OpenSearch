@@ -148,7 +148,7 @@ public class AnalyticsSearchService implements AutoCloseable {
     ) {
         try {
             executor.execute(() -> {
-                LOGGER.trace("[shard-producer] shard={} starting stream iteration", request.getShardId());
+                LOGGER.debug("[shard-producer] shard={} starting stream iteration", request.getShardId());
                 try (FragmentResources ctx = executeFragmentStreaming(request, shard, task)) {
                     Iterator<EngineResultBatch> it = ctx.stream().iterator();
                     int batches = 0;
@@ -156,10 +156,10 @@ public class AnalyticsSearchService implements AutoCloseable {
                         responseHandler.onBatch(it.next());
                         batches++;
                     }
-                    LOGGER.trace("[shard-producer] shard={} stream complete, {} batches produced", request.getShardId(), batches);
+                    LOGGER.debug("[shard-producer] shard={} stream complete, {} batches produced", request.getShardId(), batches);
                     responseHandler.onComplete();
                 } catch (Exception e) {
-                    LOGGER.trace("[shard-producer] shard={} stream failed: {} cause={}",
+                    LOGGER.debug("[shard-producer] shard={} stream failed: {} cause={}",
                         request.getShardId(), e.getMessage(),
                         e.getCause() != null ? e.getCause().toString() : "none", e);
                     responseHandler.onFailure(e);

@@ -147,7 +147,7 @@ abstract class AbstractDatafusionReduceSink implements ReducingExchangeSink {
      * feeds it downstream. Caller retains ownership of {@code outStream}.
      */
     protected final void drainOutputIntoDownstream(StreamHandle outStream) {
-        logger.trace("[drain-diag] drainOutputIntoDownstream started, taskId={}", ctx.taskId());
+        logger.debug("[drain-diag] drainOutputIntoDownstream started, taskId={}", ctx.taskId());
         long startNanos = System.nanoTime();
         int batchCount = 0;
         long totalRows = 0;
@@ -159,7 +159,7 @@ abstract class AbstractDatafusionReduceSink implements ReducingExchangeSink {
                 batchCount++;
                 totalRows += root.getRowCount();
                 if (batchCount % 100 == 1) {
-                    logger.trace("[drain-diag] taskId={} batch #{}, totalRows={}, elapsed={}ms",
+                    logger.debug("[drain-diag] taskId={} batch #{}, totalRows={}, elapsed={}ms",
                         ctx.taskId(), batchCount, totalRows,
                         (System.nanoTime() - startNanos) / 1_000_000);
                 }
@@ -167,7 +167,7 @@ abstract class AbstractDatafusionReduceSink implements ReducingExchangeSink {
             }
         }
         long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000;
-        logger.trace("[drain-diag] drainOutputIntoDownstream complete: taskId={}, batches={}, rows={}, elapsed={}ms",
+        logger.debug("[drain-diag] drainOutputIntoDownstream complete: taskId={}, batches={}, rows={}, elapsed={}ms",
             ctx.taskId(), batchCount, totalRows, elapsedMs);
     }
 

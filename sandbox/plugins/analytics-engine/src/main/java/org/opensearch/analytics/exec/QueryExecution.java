@@ -166,10 +166,10 @@ public class QueryExecution {
         if (terminal == State.SUCCEEDED) {
             DataProducer producer = (DataProducer) graph.rootExecution();
             ExchangeSource source = producer.outputSource();
-            logger.trace("[query-diag] query {} SUCCEEDED, delivering via readResult()", config.queryId());
+            logger.debug("[query-diag] query {} SUCCEEDED, delivering via readResult()", config.queryId());
             listener.onResponse(DefaultPlanExecutor.batchesToRows(source.readResult()));
         } else {
-            logger.trace("[query-diag] query {} terminal={}, delivering failure", config.queryId(), terminal);
+            logger.debug("[query-diag] query {} terminal={}, delivering failure", config.queryId(), terminal);
             listener.onFailure(terminalCause(terminal));
         }
     }

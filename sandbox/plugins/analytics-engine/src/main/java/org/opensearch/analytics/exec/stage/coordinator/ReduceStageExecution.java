@@ -63,7 +63,7 @@ public final class ReduceStageExecution extends AbstractStageExecution implement
 
     @Override
     public void closeChildInput(int childStageId) {
-        logger.trace("[reduce-stage] closeChildInput: stageId={} childStageId={} isMultiInput={}",
+        logger.debug("[reduce-stage] closeChildInput: stageId={} childStageId={} isMultiInput={}",
             getStageId(), childStageId, backendSink instanceof MultiInputExchangeSink);
         if (backendSink instanceof MultiInputExchangeSink multi) {
             multi.sinkForChild(childStageId).close();
@@ -98,13 +98,13 @@ public final class ReduceStageExecution extends AbstractStageExecution implement
     @Override
     protected List<StageTask> materializeTasks() {
         return List.of(new LocalStageTask(new StageTaskId(getStageId(), 0), listener -> {
-            logger.trace("[reduce-stage] reduce task dispatched, stageId={}", getStageId());
+            logger.debug("[reduce-stage] reduce task dispatched, stageId={}", getStageId());
             reduceExecutor.execute(() -> {
                 try {
                     backendSink.reduce(listener);
-                    logger.trace("[reduce-stage] reduce() returned normally, stageId={}", getStageId());
+                    logger.debug("[reduce-stage] reduce() returned normally, stageId={}", getStageId());
                 } catch (Exception e) {
-                    logger.trace("[reduce-stage] reduce() threw, stageId={}: {}", getStageId(), e.getMessage());
+                    logger.debug("[reduce-stage] reduce() threw, stageId={}: {}", getStageId(), e.getMessage());
                     listener.onFailure(e);
                 }
             });
@@ -113,14 +113,14 @@ public final class ReduceStageExecution extends AbstractStageExecution implement
 
     @Override
     public boolean failWithCause(Exception cause) {
-        logger.trace("[reduce-stage] failWithCause: stageId={} cause={}", getStageId(),
+        logger.debug("[reduce-stage] failWithCause: stageId={} cause={}", getStageId(),
             cause != null ? cause.getMessage() : "null");
         return super.failWithCause(cause);
     }
 
     @Override
     protected void onTerminalTransition(State terminal) {
-        logger.trace("[reduce-stage] onTerminalTransition: stageId={} terminal={}", getStageId(), terminal);
+        logger.debug("[reduce-stage] onTerminalTransition: stageId={} terminal={}", getStageId(), terminal);
         try {
             backendSink.close();
         } catch (Exception ignore) {}

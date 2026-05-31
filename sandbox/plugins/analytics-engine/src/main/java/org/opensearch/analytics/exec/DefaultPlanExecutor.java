@@ -273,7 +273,7 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
                     request.isProfile(),
                     ActionListener.wrap(
                         result -> {
-                            logger.info("[exec-diag] query complete, sending response");
+                            logger.debug("[exec-diag] query complete, sending response");
                             if (request.isProfile()) {
                                 convertingListener.onResponse(new AnalyticsQueryResponse(result));
                             } else {
