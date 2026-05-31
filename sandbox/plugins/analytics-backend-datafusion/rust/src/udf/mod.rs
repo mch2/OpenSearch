@@ -120,12 +120,15 @@ pub(crate) fn coerce_args(
         .collect()
 }
 
+pub mod binary_to_base64;
+pub mod conv;
 pub mod convert_tz;
 pub mod conversion;
 pub mod crc32;
 pub mod date_format;
 pub mod extract;
 pub mod from_unixtime;
+pub mod ip_to_string;
 pub mod item;
 pub mod json_append;
 pub mod json_array_length;
@@ -144,6 +147,7 @@ pub mod mvfind;
 pub mod mvzip;
 pub(crate) mod mysql_format;
 pub mod parse;
+pub mod pattern_parser;
 pub mod range_bucket;
 pub mod rex_extract;
 pub mod rex_extract_multi;
@@ -163,12 +167,15 @@ pub mod width_bucket;
 // `./gradlew :sandbox:libs:dataformat-native:buildRustLibrary --rerun-tasks`
 // and restart the OpenSearch JVM (the loaded dylib is JVM-cached).
 pub fn register_all(ctx: &SessionContext) {
+    binary_to_base64::register_all(ctx);
+    conv::register_all(ctx);
     convert_tz::register_all(ctx);
     conversion::register_all(ctx);
     crc32::register_all(ctx);
     date_format::register_all(ctx);
     extract::register_all(ctx);
     from_unixtime::register_all(ctx);
+    ip_to_string::register_all(ctx);
     item::register_all(ctx);
     json_append::register_all(ctx);
     json_array_length::register_all(ctx);
@@ -185,6 +192,7 @@ pub fn register_all(ctx: &SessionContext) {
     mvfind::register_all(ctx);
     mvzip::register_all(ctx);
     parse::register_all(ctx);
+    pattern_parser::register_all(ctx);
     range_bucket::register_all(ctx);
     rex_extract::register_all(ctx);
     rex_extract_multi::register_all(ctx);
