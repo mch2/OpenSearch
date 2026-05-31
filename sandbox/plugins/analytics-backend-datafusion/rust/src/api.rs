@@ -1359,11 +1359,10 @@ pub(crate) fn base_schema_for_table(plan: &substrait::proto::Plan, table_name: &
 /// `create_global_runtime`.
 pub unsafe fn create_local_session(runtime_ptr: i64) -> Result<i64, DataFusionError> {
     let runtime = &*(runtime_ptr as *const DataFusionRuntime);
-    // No phantom reservation at creation time — the schema isn't known yet.
-    // register_partition_stream acquires a schema-accurate phantom once the
-    // output schema is derived from the producer plan.
     let session = LocalSession::new(&runtime.runtime_env);
-    Ok(Box::into_raw(Box::new(session)) as i64)
+    let ptr = Box::into_raw(Box::new(session)) as i64;
+    native_bridge_common::log_info!("[local-session] OPEN ptr={:#x}", ptr);
+    Ok(ptr)
 }
 
 /// Closes a `LocalSession`. Safe to call with 0 (no-op).
@@ -1372,7 +1371,10 @@ pub unsafe fn create_local_session(runtime_ptr: i64) -> Result<i64, DataFusionEr
 /// `ptr` must be 0 or a valid pointer returned by `create_local_session`.
 pub unsafe fn close_local_session(ptr: i64) {
     if ptr != 0 {
-        let _ = Box::from_raw(ptr as *mut LocalSession);
+        let session = Box::from_raw(ptr as *mut LocalSession);
+        let phantom_size = session.phantom_size();
+        native_bridge_common::log_info!("[local-session] CLOSE ptr={:#x} phantom_bytes={}", ptr, phantom_size);
+        drop(session);
     }
 }
 

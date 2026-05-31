@@ -38,7 +38,7 @@ use datafusion::execution::{SendableRecordBatchStream, SessionStateBuilder};
 use datafusion::physical_plan::displayable;
 use datafusion::physical_plan::streaming::PartitionStream;
 use datafusion::prelude::{SessionConfig, SessionContext};
-use native_bridge_common::log_debug;
+use native_bridge_common::{log_debug, log_info};
 use datafusion_substrait::logical_plan::consumer::from_substrait_plan;
 use prost::Message;
 use substrait::proto::Plan;
@@ -60,6 +60,13 @@ pub struct LocalSession {
     /// untracked memory (intermediate buffers, hash table overhead) in the shared
     /// pool so concurrent reduces trigger backpressure before OOM.
     _phantom_reservation: Option<datafusion::execution::memory_pool::MemoryReservation>,
+}
+
+impl Drop for LocalSession {
+    fn drop(&mut self) {
+        let phantom = self._phantom_reservation.as_ref().map_or(0, |r| r.size());
+        log_info!("[local-session] DROP phantom_bytes={}", phantom);
+    }
 }
 
 impl LocalSession {
