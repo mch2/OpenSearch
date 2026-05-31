@@ -78,9 +78,9 @@ impl PartitionStreamSender {
     pub fn send_blocking(
         &self,
         batch: Result<RecordBatch, DataFusionError>,
-        handle: &Handle,
+        _handle: &Handle,
     ) -> Result<(), DataFusionError> {
-        handle.block_on(self.tx.send(batch)).map_err(|_| {
+        self.tx.blocking_send(batch).map_err(|_| {
             DataFusionError::Execution("partition stream receiver dropped before send".to_string())
         })
     }
