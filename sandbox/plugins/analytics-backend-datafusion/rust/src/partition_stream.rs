@@ -60,6 +60,18 @@ pub struct PartitionStreamSender {
     schema: SchemaRef,
 }
 
+/// Outcome of a blocking send. `ReceiverDropped` is the benign terminal case — the
+/// DataFusion consumer finished (e.g. a `LimitExec` satisfied its fetch) and tore down the
+/// receiver while producers were still feeding. `mpsc::Sender::send` fails for exactly this
+/// one reason, so the condition is structurally unambiguous here; surfacing it as a distinct
+/// variant (rather than a stringly-typed error) lets the FFM layer signal it without the Java
+/// side substring-matching an error message.
+#[must_use]
+pub enum SendOutcome {
+    Sent,
+    ReceiverDropped,
+}
+
 impl PartitionStreamSender {
     /// Returns the schema this sender was created with.
     pub fn schema(&self) -> &SchemaRef {
@@ -73,16 +85,18 @@ impl PartitionStreamSender {
     /// bridge push without being async itself and without requiring the calling
     /// thread to be a Tokio worker.
     ///
-    /// Blocks while the channel is full (natural backpressure). Returns an
-    /// error only if the receiver has been dropped.
+    /// Blocks while the channel is full (natural backpressure). Returns
+    /// [`SendOutcome::ReceiverDropped`] only if the receiver has been dropped —
+    /// the sole failure mode of `mpsc::Sender::send`.
     pub fn send_blocking(
         &self,
         batch: Result<RecordBatch, DataFusionError>,
         handle: &Handle,
-    ) -> Result<(), DataFusionError> {
-        handle.block_on(self.tx.send(batch)).map_err(|_| {
-            DataFusionError::Execution("partition stream receiver dropped before send".to_string())
-        })
+    ) -> SendOutcome {
+        match handle.block_on(self.tx.send(batch)) {
+            Ok(()) => SendOutcome::Sent,
+            Err(_) => SendOutcome::ReceiverDropped,
+        }
     }
 }
 
@@ -259,9 +273,8 @@ mod tests {
 
         let sender_schema = Arc::clone(&schema);
         let producer = std::thread::spawn(move || {
-            sender
-                .send_blocking(Ok(test_batch(&sender_schema, &[7, 8, 9])), &handle)
-                .unwrap();
+            let outcome = sender.send_blocking(Ok(test_batch(&sender_schema, &[7, 8, 9])), &handle);
+            assert!(matches!(outcome, SendOutcome::Sent));
             drop(sender);
         });
 
@@ -280,14 +293,10 @@ mod tests {
         let (sender, receiver) = channel(Arc::clone(&schema));
         drop(receiver);
 
-        let err = std::thread::spawn(move || {
-            sender
-                .send_blocking(Ok(test_batch(&schema, &[1])), &handle)
-                .unwrap_err()
-        })
-        .join()
-        .unwrap();
-        assert!(err.to_string().contains("receiver dropped"));
+        let outcome = std::thread::spawn(move || sender.send_blocking(Ok(test_batch(&schema, &[1])), &handle))
+            .join()
+            .unwrap();
+        assert!(matches!(outcome, SendOutcome::ReceiverDropped));
     }
 
     #[tokio::test]

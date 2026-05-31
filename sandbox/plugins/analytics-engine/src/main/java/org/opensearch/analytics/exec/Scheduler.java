@@ -38,5 +38,5 @@ public interface Scheduler {
      * @return the {@link QueryExecution} driving this query, for post-execution inspection
      *         (e.g. profiling). Callers that don't need it may ignore the return value.
      */
-    QueryExecution execute(QueryContext context, ActionListener<Iterable<VectorSchemaRoot>> listener);
+    QueryExecution execute(QueryContext context, ActionListener<Iterable<Object[]>> listener);
 }

@@ -144,15 +144,13 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
 
     @Override
     public void executeWithProfile(RelNode logicalFragment, QueryRequestContext queryCtx, ActionListener<ProfiledResult> listener) {
-        searchExecutor.execute(() -> {
-            try {
-                executeInternal(logicalFragment, queryCtx, true, listener);
-            } catch (Exception e) {
-                listener.onFailure(e);
-            } catch (AssertionError e) {
-                listener.onFailure(new IllegalStateException("Analytics-engine executor rejected the plan: " + e.getMessage(), e));
-            }
-        });
+        String[] indices = RelNodeUtils.extractIndices(logicalFragment);
+        AnalyticsQueryRequest request = new AnalyticsQueryRequest(logicalFragment, queryCtx, indices, true);
+        client.execute(
+            AnalyticsQueryAction.INSTANCE,
+            request,
+            ActionListener.wrap(resp -> listener.onResponse(resp.getProfiledResult()), listener::onFailure)
+        );
     }
 
     /**
@@ -165,6 +163,7 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
      * the schema from. Otherwise a fresh {@code clusterService.state()} is read.
      */
     private void executeInternal(
+        AnalyticsQueryTask queryTask,
         RelNode logicalFragment,
         QueryRequestContext queryCtx,
         boolean profile,
@@ -174,10 +173,6 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
         logicalFragment.getCluster().invalidateMetadataQuery();
 
         final long planStartNanos = profile ? System.nanoTime() : 0;
-        // Reuse the snapshot captured at REST entry when present; this is the same ClusterState
-        // OpenSearchSchemaBuilder used to build the SchemaPlus, so planner and schema agree.
-        // TODO: remove the null fallback once every front-end (test-ppl-frontend,
-        // dsl-query-executor) threads an EngineContextProvider.getContext() snapshot through.
         ClusterState planningState = queryCtx != null ? queryCtx.clusterState() : clusterService.state();
         RelNode plan = PlannerImpl.createPlan(
             logicalFragment,
@@ -190,12 +185,6 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
         FragmentConversionDriver.convertAll(dag, capabilityRegistry);
         final long planningTimeMs = profile ? java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - planStartNanos) : 0;
         logger.debug("[DefaultPlanExecutor] QueryDAG:\n{}", dag);
-
-        final AnalyticsQueryTask queryTask = (AnalyticsQueryTask) taskManager.register(
-            "transport",
-            "analytics_query",
-            new AnalyticsQueryTaskRequest(dag.queryId(), null)
-        );
         final BufferAllocator queryAllocator;
         final boolean ownsAllocator;
         if (perQueryBufferLimit <= 0) {
@@ -232,25 +221,19 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
             ? buildProfilingRowsListener(execRef, context, fullPlan, planningTimeMs, listener)
             : ActionListener.wrap(rows -> listener.onResponse(new ProfiledResult(rows, null, null)), listener::onFailure);
 
-        final List<String> outputColumnOrder = logicalFragment.getRowType().getFieldNames();
-        ActionListener<Iterable<VectorSchemaRoot>> batchesListener = ActionListener.runAfter(
-            ActionListener.wrap(batches -> rowsListener.onResponse(batchesToRows(batches, outputColumnOrder)), rowsListener::onFailure),
-            () -> taskManager.unregister(queryTask)
-        );
-
         TimeValue taskTimeout = queryTask.getCancelAfterTimeInterval();
         TimeValue clusterTimeout = clusterService.getClusterSettings().get(SEARCH_CANCEL_AFTER_TIME_INTERVAL_SETTING);
         if (taskTimeout != null || SearchService.NO_TIMEOUT.equals(clusterTimeout) == false) {
-            batchesListener = TimeoutTaskCancellationUtility.wrapWithCancellationListener(
+            rowsListener = TimeoutTaskCancellationUtility.wrapWithCancellationListener(
                 client,
                 queryTask,
                 clusterTimeout,
-                batchesListener,
+                rowsListener,
                 e -> {}
             );
         }
 
-        execRef.set(scheduler.execute(context, batchesListener)); // execRef read by profile listener after execution completes
+        execRef.set(scheduler.execute(context, rowsListener));
     }
 
     /**
@@ -277,10 +260,6 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
 
     @Override
     protected void doExecute(Task task, AnalyticsQueryRequest request, ActionListener<AnalyticsQueryResponse> listener) {
-        // Runs after SecurityFilter has authorized the request.
-        // Fork the entire query lifecycle (planning, scheduling, cleanup) onto the SEARCH
-        // executor so the calling thread — which may be a transport thread — is freed
-        // immediately. The listener is wrapped to convert backend-specific exceptions.
         ActionListener<AnalyticsQueryResponse> convertingListener = ActionListener.wrap(
             listener::onResponse,
             e -> listener.onFailure(e instanceof Exception ex ? contextProvider.convertException(ex) : e)
@@ -288,12 +267,23 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
         searchExecutor.execute(() -> {
             try {
                 executeInternal(
+                    (AnalyticsQueryTask) task,
                     request.getPlan(),
                     request.getQueryCtx(),
-                    false,
+                    request.isProfile(),
                     ActionListener.wrap(
-                        result -> convertingListener.onResponse(new AnalyticsQueryResponse(result.rows())),
-                        convertingListener::onFailure
+                        result -> {
+                            logger.info("[exec-diag] query complete, sending response");
+                            if (request.isProfile()) {
+                                convertingListener.onResponse(new AnalyticsQueryResponse(result));
+                            } else {
+                                convertingListener.onResponse(new AnalyticsQueryResponse(result.rows()));
+                            }
+                        },
+                        e -> {
+                            logger.error("[exec-diag] query failed, sending error response", e);
+                            convertingListener.onFailure(e);
+                        }
                     )
                 );
             } catch (Exception e) {

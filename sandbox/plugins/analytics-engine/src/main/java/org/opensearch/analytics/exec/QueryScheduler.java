@@ -8,7 +8,6 @@
 
 package org.opensearch.analytics.exec;
 
-import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.backend.AnalyticsOperationListener;
@@ -44,7 +43,7 @@ public class QueryScheduler implements Scheduler {
     }
 
     @Override
-    public QueryExecution execute(QueryContext context, ActionListener<Iterable<VectorSchemaRoot>> listener) {
+    public QueryExecution execute(QueryContext context, ActionListener<Iterable<Object[]>> listener) {
         final String queryId = context.queryId();
         final AnalyticsOperationListener.CompositeListener opListener = new AnalyticsOperationListener.CompositeListener(
             context.operationListeners()
@@ -53,7 +52,7 @@ public class QueryScheduler implements Scheduler {
 
         ExecutionGraph graph = ExecutionGraph.build(context, stageExecutionBuilder, this::scheduleStage);
 
-        ActionListener<Iterable<VectorSchemaRoot>> wrapped = ActionListener.runBefore(ActionListener.wrap(result -> {
+        ActionListener<Iterable<Object[]>> wrapped = ActionListener.runBefore(ActionListener.wrap(result -> {
             opListener.onQuerySuccess(queryId, System.nanoTime() - queryStartNanos, 0);
             listener.onResponse(result);
         }, e -> {

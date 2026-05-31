@@ -12,6 +12,8 @@ import org.apache.arrow.c.CDataDictionaryProvider;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.types.pojo.Schema;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.spi.ExchangeSinkContext;
 import org.opensearch.analytics.spi.ReducingExchangeSink;
 import org.opensearch.be.datafusion.nativelib.StreamHandle;
@@ -138,18 +140,35 @@ abstract class AbstractDatafusionReduceSink implements ReducingExchangeSink {
      */
     protected abstract Exception closeImpl();
 
+    private static final Logger logger = LogManager.getLogger(AbstractDatafusionReduceSink.class);
+
     /**
      * Imports each batch from {@code outStream} into a fresh {@link VectorSchemaRoot} and
      * feeds it downstream. Caller retains ownership of {@code outStream}.
      */
     protected final void drainOutputIntoDownstream(StreamHandle outStream) {
+        logger.info("[drain-diag] drainOutputIntoDownstream started, taskId={}", ctx.taskId());
+        long startNanos = System.nanoTime();
+        int batchCount = 0;
+        long totalRows = 0;
         BufferAllocator alloc = ctx.allocator();
         try (CDataDictionaryProvider dictProvider = new CDataDictionaryProvider()) {
             DatafusionResultStream.BatchIterator it = new DatafusionResultStream.BatchIterator(outStream, alloc, dictProvider);
             while (it.hasNext()) {
-                ctx.downstream().feed(it.next().getArrowRoot());
+                VectorSchemaRoot root = it.next().getArrowRoot();
+                batchCount++;
+                totalRows += root.getRowCount();
+                if (batchCount % 100 == 1) {
+                    logger.info("[drain-diag] taskId={} batch #{}, totalRows={}, elapsed={}ms",
+                        ctx.taskId(), batchCount, totalRows,
+                        (System.nanoTime() - startNanos) / 1_000_000);
+                }
+                ctx.downstream().feed(root);
             }
         }
+        long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000;
+        logger.info("[drain-diag] drainOutputIntoDownstream complete: taskId={}, batches={}, rows={}, elapsed={}ms",
+            ctx.taskId(), batchCount, totalRows, elapsedMs);
     }
 
     /** Returns {@code t} if {@code acc} is null; otherwise adds {@code t} as a suppressed of {@code acc}. */

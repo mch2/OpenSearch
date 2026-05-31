@@ -162,6 +162,17 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
         feedToSender(sendersByChildStageId.values().iterator().next(), batch, childSchemas.values().iterator().next());
     }
 
+    /**
+     * Single-input path: true once the sole input's consumer dropped its receiver (e.g. a LimitExec
+     * above the ExchangeReducer satisfied its fetch). Multi-input callers feed via {@link #sinkForChild}
+     * and observe {@code isConsumerDone()} on the per-child wrapper, so this returns false unless there
+     * is exactly one registered sender.
+     */
+    @Override
+    public boolean isConsumerDone() {
+        return sendersByChildStageId.size() == 1 && sendersByChildStageId.values().iterator().next().isReceiverDropped();
+    }
+
     @Override
     public ExchangeSink sinkForChild(int childStageId) {
         DatafusionPartitionSender sender = sendersByChildStageId.get(childStageId);
@@ -177,13 +188,19 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
      * Lock-free per-sender feed. Exports the batch via Arrow C Data outside any lock
      * (the allocator is thread-safe; multiple shard handlers can export concurrently),
      * then sends it through the supplied sender. The Rust mpsc::Sender is thread-safe,
-     * so multiple producers feeding the same sender is safe. If close() raced and
-     * already ran senderClose, the native side returns an error ("receiver dropped")
-     * which we catch and discard.
+     * so multiple producers feeding the same sender is safe.
+     *
+     * <p>Two teardown signals are handled distinctly, and neither fails the query: a benign
+     * receiver-drop (the consumer finished early) returns the {@link NativeBridge#SENDER_SEND_RECEIVER_DROPPED}
+     * code, while a concurrent {@link #close()} surfaces as an IllegalStateException from
+     * {@code getPointer()} before the native call. Both discard the batch.
      */
     private void feedToSender(DatafusionPartitionSender sender, VectorSchemaRoot batch, Schema declaredSchema) {
-        // Best-effort fast path — skip export work if already closed.
-        if (closed) {
+        // Best-effort fast path — skip the export if the sink is closed or this input's consumer
+        // already dropped its receiver (nothing downstream will read another batch on it).
+        if (closed || sender.isReceiverDropped()) {
+            logger.info("[feed-diag] feedToSender skipping batch: closed={} receiverDropped={} rows={}",
+                closed, sender.isReceiverDropped(), batch.getRowCount());
             batch.close();
             return;
         }
@@ -211,14 +228,24 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
             // close — see DatafusionPartitionSender. Throws IllegalStateException via
             // NativeHandle.getPointer() if the sender was closed (the close-race path).
             try {
-                sender.send(array.memoryAddress(), arrowSchema.memoryAddress());
+                long rc = sender.send(array.memoryAddress(), arrowSchema.memoryAddress());
+                if (rc == NativeBridge.SENDER_SEND_RECEIVER_DROPPED) {
+                    // Consumer finished first (e.g. a LimitExec satisfied its fetch) and dropped the
+                    // receiver while shards were still feeding. api::sender_send already consumed the
+                    // FFI structs via from_raw, so the buffers are Rust's to drop — do NOT release()
+                    // here (double-free). The sender latched the drop (see DatafusionPartitionSender),
+                    // so subsequent feeds for this input short-circuit and the producer stream is
+                    // cancelled by the shard listener via isConsumerDone().
+                    logger.debug("[ReduceSink] receiver dropped before send (consumer finished), discarding batch");
+                    return;
+                }
                 feedCount.incrementAndGet();
             } catch (IllegalStateException e) {
-                // Sender close raced our send — Rust didn't take ownership, so the FFI
-                // structs' release callbacks are still set. Invoke them explicitly to free
-                // the exported buffers back to the Java allocator. (ArrowArray.close /
-                // ArrowSchema.close in the finally below frees the wrapper but does NOT
-                // invoke the C release callback.)
+                // Sender close raced our send — getPointer() threw BEFORE the native call,
+                // so Rust never took ownership and the FFI structs' release callbacks are
+                // still set. Invoke them explicitly to free the exported buffers back to the
+                // Java allocator. (ArrowArray.close / ArrowSchema.close in the finally below
+                // frees the wrapper but does NOT invoke the C release callback.)
                 array.release();
                 arrowSchema.release();
                 if (closed) {
@@ -279,6 +306,11 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
         @Override
         public void feed(VectorSchemaRoot batch) {
             feedToSender(sender, batch, declaredSchema);
+        }
+
+        @Override
+        public boolean isConsumerDone() {
+            return sender.isReceiverDropped();
         }
 
         @Override

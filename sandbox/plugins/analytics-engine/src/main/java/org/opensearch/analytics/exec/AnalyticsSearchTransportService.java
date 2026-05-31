@@ -8,8 +8,6 @@
 
 package org.opensearch.analytics.exec;
 
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.backend.EngineResultBatch;
 import org.opensearch.analytics.exec.action.FetchByRowIdsAction;
 import org.opensearch.analytics.exec.action.FetchByRowIdsRequest;
@@ -37,6 +35,9 @@ import org.opensearch.transport.TransportRequest;
 import org.opensearch.transport.TransportRequestOptions;
 import org.opensearch.transport.TransportResponseHandler;
 import org.opensearch.transport.stream.StreamTransportResponse;
+
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.io.IOException;
 
@@ -232,37 +233,36 @@ public class AnalyticsSearchTransportService {
             public void handleStreamResponse(StreamTransportResponse<FragmentExecutionArrowResponse> stream) {
                 String shardInfo = request instanceof org.opensearch.analytics.exec.action.FragmentExecutionRequest fr
                     ? fr.getShardId().toString() : "unknown";
-                logger.info("[shard-stream] STARTED shard={} target={}", shardInfo, targetNode.getId());
+                logger.info("[shard-diag] stream started for shard={} target={}", shardInfo, targetNode.getId());
                 int batchCount = 0;
                 long totalRows = 0;
-                long startNanos = System.nanoTime();
                 try {
-                    FragmentExecutionArrowResponse current;
-                    FragmentExecutionArrowResponse last = null;
-                    while ((current = stream.nextResponse()) != null) {
-                        if (last != null) {
-                            long rows = last.getRoot() != null ? last.getRoot().getRowCount() : 0;
-                            totalRows += rows;
-                            batchCount++;
-                            listener.onStreamResponse(last, false);
-                        }
-                        last = current;
-                    }
-                    if (last != null) {
+                    FragmentExecutionArrowResponse last = stream.nextResponse();
+                    while (last != null) {
+                        FragmentExecutionArrowResponse next = stream.nextResponse();
+                        boolean isLast = next == null;
+                        batchCount++;
                         long rows = last.getRoot() != null ? last.getRoot().getRowCount() : 0;
                         totalRows += rows;
-                        batchCount++;
-                        listener.onStreamResponse(last, true);
-                    } else {
-                        logger.warn("[shard-stream] EMPTY-STREAM shard={} - no batches received", shardInfo);
+                        logger.info("[reduce-diag] batch #{} fed to sink: rows={}, cumulativeRows={}",
+                            batchCount, rows, totalRows);
+                        boolean keepReading = listener.onStreamResponse(last, isLast);
+                        if (!keepReading) {
+                            logger.info("[shard-stream] EARLY-CANCEL shard={} after {} batches, {} rows - consumer done",
+                                batchCount, totalRows);
+                            if (next != null) {
+                                if (next.getRoot() != null) {
+                                    next.getRoot().close();
+                                }
+                                stream.cancel("reduce input satisfied (downstream consumer finished)", null);
+                            }
+                            return;
+                        }
+                        last = next;
                     }
-                    long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000;
-                    logger.info("[shard-stream] COMPLETE shard={} batches={} totalRows={} elapsed={}ms",
-                        shardInfo, batchCount, totalRows, elapsedMs);
+                    logger.info("[reduce-diag] shard={} stream complete: {} batches, {} totalRows", batchCount, totalRows);
                 } catch (Exception e) {
-                    long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000;
-                    logger.error("[shard-stream] FAILED shard={} after {} batches, {} rows, {}ms: {}",
-                        shardInfo, batchCount, totalRows, elapsedMs, e.getMessage());
+                    logger.error("[reduce-diag] stream failed after {} batches, {} rows", batchCount, totalRows, e);
                     listener.onFailure(e);
                 } finally {
                     try {
@@ -274,9 +274,6 @@ public class AnalyticsSearchTransportService {
 
             @Override
             public void handleResponse(FragmentExecutionArrowResponse response) {
-                String shardInfo2 = request instanceof org.opensearch.analytics.exec.action.FragmentExecutionRequest fr2
-                    ? fr2.getShardId().toString() : "unknown";
-                logger.info("[shard-stream] handleResponse (non-streaming) shard={}", shardInfo2);
                 try {
                     listener.onStreamResponse(response, true);
                 } finally {
@@ -286,9 +283,6 @@ public class AnalyticsSearchTransportService {
 
             @Override
             public void handleException(TransportException e) {
-                String shardInfo3 = request instanceof org.opensearch.analytics.exec.action.FragmentExecutionRequest fr3
-                    ? fr3.getShardId().toString() : "unknown";
-                logger.error("[shard-stream] handleException shard={}: {}", shardInfo3, e.getMessage());
                 try {
                     listener.onFailure(e);
                 } finally {
