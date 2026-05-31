@@ -95,7 +95,7 @@ public class OpenSearchSort extends Sort implements OpenSearchRelNode {
      */
     @Override
     public RelOptCost computeSelfCost(RelOptPlanner planner, RelMetadataQuery mq) {
-        if (getCollation().getFieldCollations().isEmpty()) {
+        if (getCollation().getFieldCollations().isEmpty() && fetch == null && offset == null) {
             return planner.getCostFactory().makeTinyCost();
         }
         for (RelNode input : getInputs()) {
