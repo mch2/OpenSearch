@@ -148,6 +148,7 @@ public class AnalyticsSearchService implements AutoCloseable {
     ) {
         try {
             executor.execute(() -> {
+                LOGGER.debug("[FragmentExecution] shard={} task={}", shard.shardId(), task.getId());
                 try (FragmentResources ctx = executeFragmentStreaming(request, shard, task)) {
                     LOGGER.trace("[shard-producer] shard={} starting stream iteration", request.getShardId());
                     Iterator<EngineResultBatch> it = ctx.stream().iterator();
@@ -167,6 +168,125 @@ public class AnalyticsSearchService implements AutoCloseable {
             });
         } catch (Exception e) {
             LOGGER.trace("[shard-producer] shard={} dispatch failed: {}", request.getShardId(), e.getMessage());
+            responseHandler.onFailure(e);
+        }
+    }
+
+    /**
+     * QTF fetch phase: retrieves specific rows by global row ID via the backend SPI and
+     * streams batches via {@link StreamingFragmentResponseHandler}. Forks onto
+     * {@code executor} so the iterator drain doesn't pin the transport thread — mirrors
+     * {@link #executeFragmentStreamingAsync}.
+     *
+     * <p>Reuses the {@link ReaderContext} opened during the query phase. If the context
+     * is missing (expired before fetch arrived, or query-phase reader-store invariant
+     * broken), the call fails — there is no cold-start fallback because shard-global
+     * {@code __row_id__} values produced by one reader cannot be reinterpreted by
+     * another (segment topology may differ across reopens).
+     */
+    public void executeFetchByRowIdsAsync(
+        FetchByRowIdsRequest request,
+        IndexShard shard,
+        AnalyticsShardTask task,
+        StreamingFragmentResponseHandler responseHandler,
+        Executor executor
+    ) {
+        try {
+            executor.execute(() -> drainFetchByRowIds(request, shard, task, responseHandler));
+        } catch (Exception e) {
+            responseHandler.onFailure(e);
+        }
+    }
+
+    /**
+     * Acquires the per-shard {@link ReaderContext}, materialises the rowId vector, invokes
+     * the backend, drains the stream into {@code responseHandler}, and releases all resources
+     * in a single try-with-resources scope. Runs on the caller's executor — exhausting the
+     * iterator here lets the native engine apply backpressure when the channel is slow.
+     */
+    private void drainFetchByRowIds(
+        FetchByRowIdsRequest request,
+        IndexShard shard,
+        AnalyticsShardTask task,
+        StreamingFragmentResponseHandler responseHandler
+    ) {
+        if (task != null && task.isCancelled()) {
+            responseHandler.onFailure(new TaskCancelledException("Fetch task cancelled before execution: " + task.getReasonCancelled()));
+            return;
+        }
+        long[] rowIds = request.getRowIds();
+        String[] columns = request.getColumns();
+        if (rowIds == null || rowIds.length == 0 || columns == null || columns.length == 0) {
+            responseHandler.onFailure(
+                new IllegalArgumentException(
+                    "fetch on "
+                        + shard.shardId()
+                        + " requires non-empty rowIds and columns; got rowIds="
+                        + (rowIds == null ? "null" : rowIds.length)
+                        + ", columns="
+                        + (columns == null ? "null" : columns.length)
+                )
+            );
+            return;
+        }
+        ReaderContext readerContext = readerContextStore.acquireContext(request.getQueryId(), shard.shardId());
+        if (readerContext == null) {
+            responseHandler.onFailure(
+                new IllegalStateException(
+                    "No ReaderContext for queryId="
+                        + request.getQueryId()
+                        + " on "
+                        + shard.shardId()
+                        + " — query phase missing or context expired"
+                )
+            );
+            return;
+        }
+        assert assertFetchInvariants(readerContext, request.getQueryId());
+        AnalyticsSearchBackendPlugin backend = backends.get(request.getBackendId());
+        if (backend == null) {
+            readerContextStore.releaseContext(request.getQueryId(), shard.shardId());
+            responseHandler.onFailure(
+                new IllegalStateException(
+                    "No backend registered for backendId="
+                        + request.getBackendId()
+                        + " on "
+                        + shard.shardId()
+                        + "; available: "
+                        + backends.keySet()
+                )
+            );
+            return;
+        }
+        // Caller contract: rowIds must already be sorted ascending (RowSelection invariant on
+        // native side). Asserted here so violations are caught in dev builds before the FFM call.
+        assert assertAscending(rowIds);
+        BigIntVector rowIdVector = null;
+        FragmentResources resources = null;
+        try {
+            rowIdVector = new BigIntVector(DocumentInput.ROW_ID_FIELD, allocator);
+            rowIdVector.allocateNew(rowIds.length);
+            for (int i = 0; i < rowIds.length; i++) {
+                rowIdVector.set(i, rowIds[i]);
+            }
+            rowIdVector.setValueCount(rowIds.length);
+            EngineResultStream stream = backend.fetchByRowIds(readerContext.getReader(), rowIdVector, columns, allocator);
+            // FragmentResources keeps the rowIdVector alive until the stream drains — closing
+            // it earlier would pull off-heap memory out from under the native FFM call.
+            resources = new FragmentResources(readerContextStore, readerContext, null, stream, null, rowIdVector);
+        } catch (Exception e) {
+            if (rowIdVector != null) rowIdVector.close();
+            readerContextStore.releaseContext(request.getQueryId(), shard.shardId());
+            responseHandler.onFailure(new RuntimeException("Failed to execute fetch-by-row-ids on " + shard.shardId(), e));
+            return;
+        }
+        try (FragmentResources ctx = resources) {
+            Iterator<EngineResultBatch> it = ctx.stream().iterator();
+            while (it.hasNext()) {
+                responseHandler.onBatch(it.next());
+            }
+            responseHandler.onComplete();
+        } catch (Exception e) {
             responseHandler.onFailure(e);
         }
     }
