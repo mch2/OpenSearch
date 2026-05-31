@@ -380,6 +380,14 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
         if (preparedState == null) {
             try {
                 session.close();
+                logger.trace("[reduce-sink] closeImpl: session closed (no preparedState), taskId={}", ctx.taskId());
+            } catch (Exception t) {
+                failure = accumulate(failure, t);
+            }
+        } else {
+            try {
+                preparedState.close();
+                logger.trace("[reduce-sink] closeImpl: preparedState closed (session+senders), taskId={}", ctx.taskId());
             } catch (Exception t) {
                 failure = accumulate(failure, t);
             }

@@ -244,8 +244,10 @@ public class AnalyticsSearchTransportService {
                         batchCount++;
                         long rows = last.getRoot() != null ? last.getRoot().getRowCount() : 0;
                         totalRows += rows;
-                        logger.info("[reduce-diag] batch #{} fed to sink: rows={}, cumulativeRows={}",
-                            batchCount, rows, totalRows);
+                        // Per-batch log at TRACE only (extremely verbose under load)
+                        if (logger.isTraceEnabled() && (batchCount <= 3 || batchCount % 500 == 0)) {
+                            logger.trace("[shard-stream] shard feeding batch #{} rows={} cumRows={}", batchCount, rows, totalRows);
+                        }
                         boolean keepReading = listener.onStreamResponse(last, isLast);
                         if (!keepReading) {
                             logger.trace("[shard-stream] EARLY-CANCEL shard={} after {} batches, {} rows - consumer done",
@@ -260,9 +262,9 @@ public class AnalyticsSearchTransportService {
                         }
                         last = next;
                     }
-                    logger.info("[reduce-diag] shard={} stream complete: {} batches, {} totalRows", batchCount, totalRows);
+                    logger.trace("[shard-stream] shard stream complete: {} batches, {} totalRows", batchCount, totalRows);
                 } catch (Exception e) {
-                    logger.error("[reduce-diag] stream failed after {} batches, {} rows", batchCount, totalRows, e);
+                    logger.trace("[shard-stream] shard stream failed after {} batches, {} rows: {}", batchCount, totalRows, e.getMessage());
                     listener.onFailure(e);
                 } finally {
                     try {
