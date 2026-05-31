@@ -12,7 +12,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.exec.AnalyticsSearchTransportService;
 import org.opensearch.analytics.exec.QueryContext;
-import org.opensearch.analytics.exec.EagerRowProducingSink;
+import org.opensearch.analytics.exec.RowProducingSink;
 import org.opensearch.analytics.exec.stage.coordinator.LateMaterializationStageExecutionFactory;
 import org.opensearch.analytics.exec.stage.coordinator.LocalComputeStageExecutionFactory;
 import org.opensearch.analytics.exec.stage.coordinator.PassThroughStageExecution;
@@ -82,14 +82,14 @@ public class StageExecutionBuilder {
 
     /**
      * Builds the root stage's execution. The root accumulates into a fresh
-     * {@link EagerRowProducingSink}; the query execution reads the final result via
+     * {@link RowProducingSink}; the query execution reads the final result via
      * the stage's {@code outputSource()} contract — the root must therefore
      * implement {@link DataProducer}, enforced here as a fail-fast invariant
      * rather than a runtime cast at every terminal listener fire.
      */
     public StageExecution buildRootExecution(Stage rootStage, QueryContext config) {
         // TODO: Update to read directly from back-end provided ExchangeSource when the root stage has a fragment
-        StageExecution rootExec = buildStageExecution(rootStage, new EagerRowProducingSink(), config);
+        StageExecution rootExec = buildStageExecution(rootStage, new RowProducingSink(), config);
         if ((rootExec instanceof DataProducer) == false) {
             throw new IllegalStateException(
                 "Root execution "

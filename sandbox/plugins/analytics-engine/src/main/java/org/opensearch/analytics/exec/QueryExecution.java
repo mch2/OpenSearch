@@ -166,14 +166,8 @@ public class QueryExecution {
         if (terminal == State.SUCCEEDED) {
             DataProducer producer = (DataProducer) graph.rootExecution();
             ExchangeSource source = producer.outputSource();
-            if (source instanceof EagerRowProducingSink eager) {
-                logger.info("[query-diag] query {} SUCCEEDED, delivering {} rows via EagerRowProducingSink",
-                    config.queryId(), eager.getRowCount());
-                listener.onResponse(eager.readRows());
-            } else {
-                logger.info("[query-diag] query {} SUCCEEDED, delivering via readResult()", config.queryId());
-                listener.onResponse(DefaultPlanExecutor.batchesToRows(source.readResult()));
-            }
+            logger.info("[query-diag] query {} SUCCEEDED, delivering via readResult()", config.queryId());
+            listener.onResponse(DefaultPlanExecutor.batchesToRows(source.readResult()));
         } else {
             logger.info("[query-diag] query {} terminal={}, delivering failure", config.queryId(), terminal);
             listener.onFailure(terminalCause(terminal));
