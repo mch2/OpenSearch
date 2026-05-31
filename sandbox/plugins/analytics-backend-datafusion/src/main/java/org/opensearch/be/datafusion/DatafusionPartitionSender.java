@@ -71,7 +71,6 @@ public final class DatafusionPartitionSender extends NativeHandle {
         logger.debug("[sender] close() called, ptr={}, thread={}", ptr, Thread.currentThread().getName());
         lifecycle.writeLock().lock();
         try {
-            assert lifecycle.isWriteLockedByCurrentThread() : "close must hold the write lock across super.close()";
             super.close();
             logger.debug("[sender] close() complete - sender dropped, native EOF signalled");
         } finally {

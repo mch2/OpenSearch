@@ -362,20 +362,17 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
             return null;
         }
         Exception failure = null;
-        logger.debug("[reduce-sink] CLOSE senders taskId={} count={}", ctx.taskId(), sendersByChildStageId.size());
-        for (DatafusionPartitionSender sender : sendersByChildStageId.values()) {
-            try {
-                sender.close();
-            } catch (Exception t) {
-                failure = accumulate(failure, t);
-            }
-        }
+        // Close outStream FIRST — drops the native plan and its receiver, which unblocks
+        // any shard threads stuck in sender.send() waiting for channel capacity.
         try {
-            outStream.close();
             logger.debug("[reduce-sink] CLOSE outStream taskId={}", ctx.taskId());
+            outStream.close();
         } catch (Exception t) {
             failure = accumulate(failure, t);
         }
+        // Close session (via preparedState or directly). This also closes senders inside
+        // DataFusionReduceState.close(), which is safe now that outStream dropped the
+        // receiver — stuck senders have already exited.
         if (preparedState == null) {
             try {
                 logger.debug("[reduce-sink] CLOSE session taskId={}", ctx.taskId());
