@@ -82,6 +82,8 @@ flowchart TD
 ### Blocking
 - `sendResponseBatch()` may block if transport buffers are full
 - Server will pause until client consumes data and frees buffer space
+- Blocking is gated by `arrow.flight.producer.backpressure.enabled` (default `true`).
+  See [backpressure.md](backpressure.md) for behaviour, settings, and sizing.
 
 ### Cancellation
 - `sendResponseBatch()` throws `StreamException` with `StreamErrorCode.CANCELLED` when client cancels

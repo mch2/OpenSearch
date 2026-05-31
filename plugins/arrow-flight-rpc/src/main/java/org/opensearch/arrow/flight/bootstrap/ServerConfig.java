@@ -145,6 +145,30 @@ public class ServerConfig {
         Setting.Property.NodeScope
     );
 
+    /**
+     * Selects between {@code ArrowFlightProducer} (no producer-side back-pressure) and
+     * {@code BackpressureArrowFlightProducer} (producer thread parks until gRPC reports
+     * ready). Defaults to {@code true}; honouring gRPC's {@code isReady} contract bounds
+     * per-stream memory under slow consumers.
+     */
+    public static final Setting<Boolean> FLIGHT_BACKPRESSURE_ENABLED = Setting.boolSetting(
+        "arrow.flight.producer.backpressure.enabled",
+        true,
+        Setting.Property.NodeScope
+    );
+
+    /**
+     * Maximum time the producer thread parks in {@code awaitReadyOrThrow} before failing
+     * the batch with {@link org.opensearch.transport.stream.StreamErrorCode#TIMED_OUT}.
+     * Only consulted when {@link #FLIGHT_BACKPRESSURE_ENABLED} is true.
+     */
+    public static final Setting<TimeValue> FLIGHT_READY_TIMEOUT = Setting.timeSetting(
+        "arrow.flight.channel.ready_timeout",
+        TimeValue.timeValueSeconds(30),
+        TimeValue.timeValueMillis(100),
+        Setting.Property.NodeScope
+    );
+
     static final Setting<Integer> FLIGHT_EVENT_LOOP_THREADS = Setting.intSetting(
         "flight.event_loop.threads",
         Math.max(1, NettyRuntime.availableProcessors() * 2),
@@ -262,7 +286,9 @@ public class ServerConfig {
                 ARROW_ENABLE_UNSAFE_MEMORY_ACCESS,
                 ARROW_SSL_ENABLE,
                 FLIGHT_EVENT_LOOP_THREADS,
-                FLIGHT_THREAD_POOL_MIN_SIZE
+                FLIGHT_THREAD_POOL_MIN_SIZE,
+                FLIGHT_BACKPRESSURE_ENABLED,
+                FLIGHT_READY_TIMEOUT
             )
         );
     }

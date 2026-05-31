@@ -67,6 +67,8 @@ public class ServerConfigTests extends OpenSearchTestCase {
         assertTrue(settings.contains(ServerConfig.ARROW_ENABLE_UNSAFE_MEMORY_ACCESS));
         assertTrue(settings.contains(ServerConfig.ARROW_ENABLE_DEBUG_ALLOCATOR));
         assertTrue(settings.contains(ServerConfig.ARROW_SSL_ENABLE));
+        assertTrue(settings.contains(ServerConfig.FLIGHT_BACKPRESSURE_ENABLED));
+        assertTrue(settings.contains(ServerConfig.FLIGHT_READY_TIMEOUT));
     }
 
     public void testDefaultSettings() {
@@ -80,5 +82,23 @@ public class ServerConfigTests extends OpenSearchTestCase {
         assertTrue(ServerConfig.ARROW_ENABLE_UNSAFE_MEMORY_ACCESS.get(defaultSettings));
         assertFalse(ServerConfig.ARROW_ENABLE_DEBUG_ALLOCATOR.get(defaultSettings));
         assertFalse(ServerConfig.ARROW_SSL_ENABLE.get(defaultSettings));
+        // Back-pressure producer is the default to honour gRPC's isReady contract.
+        assertTrue(ServerConfig.FLIGHT_BACKPRESSURE_ENABLED.get(defaultSettings));
+        assertEquals(TimeValue.timeValueSeconds(30), ServerConfig.FLIGHT_READY_TIMEOUT.get(defaultSettings));
+    }
+
+    public void testBackpressureSettingsParse() {
+        Settings overridden = Settings.builder()
+            .put(ServerConfig.FLIGHT_BACKPRESSURE_ENABLED.getKey(), false)
+            .put(ServerConfig.FLIGHT_READY_TIMEOUT.getKey(), TimeValue.timeValueSeconds(5))
+            .build();
+        assertFalse(ServerConfig.FLIGHT_BACKPRESSURE_ENABLED.get(overridden));
+        assertEquals(TimeValue.timeValueSeconds(5), ServerConfig.FLIGHT_READY_TIMEOUT.get(overridden));
+    }
+
+    public void testReadyTimeoutMinimum() {
+        // 100ms minimum is enforced; lower values must be rejected at parse.
+        Settings tooLow = Settings.builder().put(ServerConfig.FLIGHT_READY_TIMEOUT.getKey(), TimeValue.timeValueMillis(50)).build();
+        expectThrows(IllegalArgumentException.class, () -> ServerConfig.FLIGHT_READY_TIMEOUT.get(tooLow));
     }
 }

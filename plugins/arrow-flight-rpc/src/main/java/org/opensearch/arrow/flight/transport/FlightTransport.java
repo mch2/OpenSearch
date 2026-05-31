@@ -163,7 +163,15 @@ class FlightTransport extends TcpTransport {
                 statsCollector.setBufferAllocator(flightPool);
                 statsCollector.setThreadPool(threadPool);
             }
-            flightProducer = new ArrowFlightProducer(this, flightPool, SERVER_HEADER_KEY, statsCollector);
+            flightProducer = ServerConfig.FLIGHT_BACKPRESSURE_ENABLED.get(settings)
+                ? new BackpressureArrowFlightProducer(
+                    this,
+                    flightPool,
+                    SERVER_HEADER_KEY,
+                    statsCollector,
+                    ServerConfig.FLIGHT_READY_TIMEOUT.get(settings).millis()
+                )
+                : new ArrowFlightProducer(this, flightPool, SERVER_HEADER_KEY, statsCollector);
             bindServer();
             success = true;
             if (statsCollector != null) {

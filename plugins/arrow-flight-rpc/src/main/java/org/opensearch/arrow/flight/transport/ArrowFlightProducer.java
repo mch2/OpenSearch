@@ -30,12 +30,12 @@ import java.util.concurrent.ExecutorService;
  * FlightProducer implementation for handling Arrow Flight requests.
  */
 class ArrowFlightProducer extends NoOpFlightProducer {
-    private final BufferAllocator allocator;
-    private final FlightTransport flightTransport;
+    protected final BufferAllocator allocator;
+    protected final FlightTransport flightTransport;
     private final ThreadPool threadPool;
     private final Transport.RequestHandlers requestHandlers;
     private final FlightServerMiddleware.Key<ServerHeaderMiddleware> middlewareKey;
-    private final FlightStatsCollector statsCollector;
+    protected final FlightStatsCollector statsCollector;
     private final ExecutorService executor;
 
     public ArrowFlightProducer(
@@ -53,6 +53,15 @@ class ArrowFlightProducer extends NoOpFlightProducer {
         this.executor = threadPool.executor(ServerConfig.FLIGHT_SERVER_THREAD_POOL_NAME);
     }
 
+    /** Factory hook for subclasses to swap in a different {@link FlightServerChannel}. */
+    protected FlightServerChannel createChannel(
+        ServerStreamListener listener,
+        ServerHeaderMiddleware middleware,
+        FlightCallTracker callTracker
+    ) {
+        return new FlightServerChannel(listener, allocator, middleware, callTracker, flightTransport.getNextFlightExecutor());
+    }
+
     @Override
     public void getStream(CallContext context, Ticket ticket, ServerStreamListener listener) {
         ServerHeaderMiddleware middleware = context.getMiddleware(middlewareKey);
@@ -61,13 +70,7 @@ class ArrowFlightProducer extends NoOpFlightProducer {
         // https://github.com/apache/arrow/issues/38668
         executor.execute(() -> {
             FlightCallTracker callTracker = statsCollector.createServerCallTracker();
-            FlightServerChannel channel = new FlightServerChannel(
-                listener,
-                allocator,
-                middleware,
-                callTracker,
-                flightTransport.getNextFlightExecutor()
-            );
+            FlightServerChannel channel = createChannel(listener, middleware, callTracker);
             try {
                 BytesArray buf = new BytesArray(ticket.getBytes());
                 callTracker.recordRequestBytes(buf.ramBytesUsed());

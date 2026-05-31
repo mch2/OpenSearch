@@ -131,6 +131,12 @@ class FlightOutboundHandler extends ProtocolOutboundHandler {
             return;
         }
 
+        // Block the producer thread before queuing the batch so a slow consumer
+        // throttles allocation rather than letting the eventloop's queue grow.
+        if (flightChannel instanceof BackpressureFlightServerChannel bpChannel) {
+            bpChannel.awaitReadyOrThrow();
+        }
+
         flightChannel.getExecutor().execute(threadPool.getThreadContext().preserveContext(() -> {
             try (BatchTask ignored = task) {
                 processBatchTask(task);

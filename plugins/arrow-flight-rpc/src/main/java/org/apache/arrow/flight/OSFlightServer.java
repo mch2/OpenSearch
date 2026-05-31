@@ -57,8 +57,23 @@ import org.apache.arrow.util.Preconditions;
 public class OSFlightServer {
     /** The maximum size of an individual gRPC message. This effectively disables the limit. */
     static final int MAX_GRPC_MESSAGE_SIZE = Integer.MAX_VALUE;
-    /** The default number of bytes that can be queued on an output stream before blocking. */
-    static final int DEFAULT_BACKPRESSURE_THRESHOLD = 10 * 1024 * 1024; // 10MB
+    /**
+     * Default per-stream outbound buffered-bytes threshold. This is the watermark at
+     * which gRPC's {@code CallStreamObserver.isReady()} flips to false; the back-pressure
+     * producer (when enabled) parks on this signal.
+     *
+     * <p>Sized at 32 MiB to give typical OpenSearch streaming workloads (concurrent
+     * segment search, query analytics) ~16-32 batches of pipelining headroom while
+     * keeping per-channel pinned memory bounded. Smaller values throttle producers
+     * sooner (less memory, lower throughput); larger values pipeline more aggressively
+     * (more memory pinned per channel).
+     *
+     * <p>The flight pool max must be larger than this value plus a few in-flight
+     * batches' worth of headroom — otherwise the allocator OOMs before
+     * {@code isReady()} flips. As a rule of thumb,
+     * {@code native.allocator.pool.flight.max >= threshold + 16 MiB} per channel.
+     */
+    static final int DEFAULT_BACKPRESSURE_THRESHOLD = 32 * 1024 * 1024; // 32MB
 
     private static final MethodHandle FLIGHT_SERVER_CTOR_MH;
 

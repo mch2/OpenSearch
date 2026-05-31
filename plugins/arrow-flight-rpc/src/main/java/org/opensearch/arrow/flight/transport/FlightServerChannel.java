@@ -51,8 +51,8 @@ class FlightServerChannel implements TcpChannel, ArrowFlightChannel {
     private final List<ActionListener<Void>> closeListeners = Collections.synchronizedList(new ArrayList<>());
     private final ServerHeaderMiddleware middleware;
     private volatile VectorSchemaRoot root = null;
-    private final FlightCallTracker callTracker;
-    private volatile boolean cancelled = false;
+    final FlightCallTracker callTracker;
+    volatile boolean cancelled = false;
     private final ExecutorService executor;
     private final long correlationId;
     private final AtomicInteger batchNumber = new AtomicInteger(0);
@@ -68,17 +68,23 @@ class FlightServerChannel implements TcpChannel, ArrowFlightChannel {
         logger.debug("Creating FlightServerChannel for correlation ID: {}", correlationId);
         this.serverStreamListener = serverStreamListener;
         this.serverStreamListener.setUseZeroCopy(true);
-        this.serverStreamListener.setOnCancelHandler(() -> {
-            cancelled = true;
-            callTracker.recordCallEnd(StreamErrorCode.CANCELLED.name());
-            close();
-        });
         this.allocator = allocator;
         this.middleware = middleware;
         this.callTracker = callTracker;
         this.executor = executor;
         this.localAddress = new InetSocketAddress(InetAddress.getLoopbackAddress(), 0);
         this.remoteAddress = new InetSocketAddress(InetAddress.getLoopbackAddress(), 0);
+        this.serverStreamListener.setOnCancelHandler(this::onChannelCancelled);
+    }
+
+    /** Idempotent cleanup invoked when the client cancels. May also be called by a
+     *  subclass that routes cancel through its own back-pressure strategy. */
+    void onChannelCancelled() {
+        if (!cancelled) {
+            cancelled = true;
+            callTracker.recordCallEnd(StreamErrorCode.CANCELLED.name());
+            close();
+        }
     }
 
     public BufferAllocator getAllocator() {

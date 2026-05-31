@@ -344,6 +344,128 @@ public class FlightOutboundHandlerTests extends OpenSearchTestCase {
         assertSame("Error should be passed to listener", completeError, capturedError.get());
     }
 
+    // --- Back-pressure path: gating on the producer thread before executor submit ---
+
+    /**
+     * For a {@link BackpressureFlightServerChannel}, sendResponseBatch must call
+     * {@code awaitReadyOrThrow} on the producer thread BEFORE submitting the BatchTask
+     * to the executor — that is what throttles allocation under a slow consumer.
+     */
+    public void testSendResponseBatchOnBackpressureChannelGatesBeforeExecutor() throws Exception {
+        BackpressureFlightServerChannel bpChannel = mock(BackpressureFlightServerChannel.class);
+        when(bpChannel.getExecutor()).thenReturn(executor);
+        when(bpChannel.getAllocator()).thenReturn(mock(BufferAllocator.class));
+        when(bpChannel.getRoot()).thenReturn(mock(VectorSchemaRoot.class));
+
+        // Order capture: awaitReadyOrThrow must run before the executor's task starts.
+        CountDownLatch executorRan = new CountDownLatch(1);
+        AtomicReference<Boolean> readyCheckedBeforeExecute = new AtomicReference<>(false);
+        java.util.concurrent.atomic.AtomicBoolean awaitCalled = new java.util.concurrent.atomic.AtomicBoolean(false);
+
+        doAnswer(inv -> {
+            awaitCalled.set(true);
+            return null;
+        }).when(bpChannel).awaitReadyOrThrow();
+
+        // Replace executor with one that records whether awaitReadyOrThrow ran first.
+        ExecutorService recordingExecutor = Executors.newSingleThreadExecutor();
+        when(bpChannel.getExecutor()).thenReturn(recordingExecutor);
+        try {
+            doAnswer(invocation -> {
+                executorRan.countDown();
+                return null;
+            }).when(mockListener).onResponseSent(anyLong(), anyString(), any(TransportResponse.class));
+
+            handler.sendResponseBatch(
+                Version.CURRENT,
+                Collections.emptySet(),
+                bpChannel,
+                mock(FlightTransportChannel.class),
+                1L,
+                "test-action",
+                mock(TransportResponse.class),
+                false,
+                false
+            );
+
+            // sendResponseBatch returns synchronously after the gate AND submit.
+            readyCheckedBeforeExecute.set(awaitCalled.get());
+            assertTrue("awaitReadyOrThrow must run before sendResponseBatch returns", readyCheckedBeforeExecute.get());
+
+            // Executor's task still runs to completion (default mock returns void from awaitReadyOrThrow).
+            assertTrue("Executor task should complete", executorRan.await(5, TimeUnit.SECONDS));
+            verify(bpChannel).awaitReadyOrThrow();
+        } finally {
+            recordingExecutor.shutdown();
+            assertTrue(recordingExecutor.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    /**
+     * If awaitReadyOrThrow throws (timeout / cancellation), the StreamException must
+     * propagate to the caller — sendResponseBatch must NOT submit the BatchTask, and
+     * NOT silently swallow the failure.
+     */
+    public void testSendResponseBatchPropagatesAwaitReadyException() {
+        BackpressureFlightServerChannel bpChannel = mock(BackpressureFlightServerChannel.class);
+        ExecutorService submitTrap = mock(ExecutorService.class);
+        when(bpChannel.getExecutor()).thenReturn(submitTrap);
+        when(bpChannel.getAllocator()).thenReturn(mock(BufferAllocator.class));
+        when(bpChannel.getRoot()).thenReturn(mock(VectorSchemaRoot.class));
+
+        org.opensearch.transport.stream.StreamException timeoutEx = new org.opensearch.transport.stream.StreamException(
+            org.opensearch.transport.stream.StreamErrorCode.TIMED_OUT,
+            "consumer not ready"
+        );
+        doThrow(timeoutEx).when(bpChannel).awaitReadyOrThrow();
+
+        org.opensearch.transport.stream.StreamException thrown = expectThrows(
+            org.opensearch.transport.stream.StreamException.class,
+            () -> handler.sendResponseBatch(
+                Version.CURRENT,
+                Collections.emptySet(),
+                bpChannel,
+                mock(FlightTransportChannel.class),
+                1L,
+                "test-action",
+                mock(TransportResponse.class),
+                false,
+                false
+            )
+        );
+        assertSame(timeoutEx, thrown);
+        // Crucially: we must not have submitted the BatchTask after the gate failed.
+        verify(submitTrap, org.mockito.Mockito.never()).execute(any());
+    }
+
+    /**
+     * The default (non-backpressure) channel must skip the gate entirely — regression
+     * check that we didn't accidentally couple the existing path to the new behavior.
+     */
+    public void testSendResponseBatchOnDefaultChannelSkipsGate() throws Exception {
+        // mockFlightChannel is FlightServerChannel (not the back-pressure subclass).
+        CountDownLatch executorRan = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            executorRan.countDown();
+            return null;
+        }).when(mockListener).onResponseSent(anyLong(), anyString(), any(TransportResponse.class));
+
+        handler.sendResponseBatch(
+            Version.CURRENT,
+            Collections.emptySet(),
+            mockFlightChannel,
+            mock(FlightTransportChannel.class),
+            1L,
+            "test-action",
+            mock(TransportResponse.class),
+            false,
+            false
+        );
+
+        assertTrue(executorRan.await(5, TimeUnit.SECONDS));
+        // No back-pressure-related interactions on the default channel.
+    }
+
     public void testBatchTaskCloseWithIsErrorCallsReleaseChannelWithTrue() {
         FlightTransportChannel mockTransportChannel = mock(FlightTransportChannel.class);
 
