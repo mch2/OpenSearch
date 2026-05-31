@@ -248,7 +248,7 @@ public class AnalyticsSearchTransportService {
                             batchCount, rows, totalRows);
                         boolean keepReading = listener.onStreamResponse(last, isLast);
                         if (!keepReading) {
-                            logger.info("[shard-stream] EARLY-CANCEL shard={} after {} batches, {} rows - consumer done",
+                            logger.trace("[shard-stream] EARLY-CANCEL shard={} after {} batches, {} rows - consumer done",
                                 batchCount, totalRows);
                             if (next != null) {
                                 if (next.getRoot() != null) {

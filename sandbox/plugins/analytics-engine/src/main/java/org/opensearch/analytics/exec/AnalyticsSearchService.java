@@ -149,24 +149,24 @@ public class AnalyticsSearchService implements AutoCloseable {
         try {
             executor.execute(() -> {
                 try (FragmentResources ctx = executeFragmentStreaming(request, shard, task)) {
-                    LOGGER.info("[shard-producer] shard={} starting stream iteration", request.getShardId());
+                    LOGGER.trace("[shard-producer] shard={} starting stream iteration", request.getShardId());
                     Iterator<EngineResultBatch> it = ctx.stream().iterator();
                     int batches = 0;
                     while (it.hasNext()) {
                         responseHandler.onBatch(it.next());
                         batches++;
                     }
-                    LOGGER.info("[shard-producer] shard={} stream complete, {} batches produced", request.getShardId(), batches);
+                    LOGGER.trace("[shard-producer] shard={} stream complete, {} batches produced", request.getShardId(), batches);
                     responseHandler.onComplete();
                 } catch (Exception e) {
-                    LOGGER.error("[shard-producer] shard={} stream failed: {} cause={}",
+                    LOGGER.trace("[shard-producer] shard={} stream failed: {} cause={}",
                         request.getShardId(), e.getMessage(),
                         e.getCause() != null ? e.getCause().toString() : "none", e);
                     responseHandler.onFailure(e);
                 }
             });
         } catch (Exception e) {
-            LOGGER.error("[shard-producer] shard={} dispatch failed: {}", request.getShardId(), e.getMessage());
+            LOGGER.trace("[shard-producer] shard={} dispatch failed: {}", request.getShardId(), e.getMessage());
             responseHandler.onFailure(e);
         }
     }

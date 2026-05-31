@@ -199,7 +199,7 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
         // Best-effort fast path — skip the export if the sink is closed or this input's consumer
         // already dropped its receiver (nothing downstream will read another batch on it).
         if (closed || sender.isReceiverDropped()) {
-            logger.info("[feed-diag] feedToSender skipping batch: closed={} receiverDropped={} rows={}",
+            logger.trace("[feed-diag] feedToSender skipping batch: closed={} receiverDropped={} rows={}",
                 closed, sender.isReceiverDropped(), batch.getRowCount());
             batch.close();
             return;
@@ -352,19 +352,19 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
     @Override
     protected Exception closeImpl() {
         SinkState before = state.compareAndExchange(SinkState.READY, SinkState.DONE);
-        logger.info("[reduce-sink] closeImpl: taskId={} stateBefore={} feedCount={}",
+        logger.trace("[reduce-sink] closeImpl: taskId={} stateBefore={} feedCount={}",
             ctx.taskId(), before, feedCount.get());
         if (before == SinkState.REDUCING) {
-            logger.info("[reduce-sink] closeImpl: drain in flight, firing cancelQuery taskId={}", ctx.taskId());
+            logger.trace("[reduce-sink] closeImpl: drain in flight, firing cancelQuery taskId={}", ctx.taskId());
             fireCancelQuery();
             return null;
         }
         if (torndown.compareAndSet(false, true) == false) {
-            logger.info("[reduce-sink] closeImpl: already torn down, skipping taskId={}", ctx.taskId());
+            logger.trace("[reduce-sink] closeImpl: already torn down, skipping taskId={}", ctx.taskId());
             return null;
         }
         Exception failure = null;
-        logger.info("[reduce-sink] closeImpl: closing {} senders, taskId={}", sendersByChildStageId.size(), ctx.taskId());
+        logger.trace("[reduce-sink] closeImpl: closing {} senders, taskId={}", sendersByChildStageId.size(), ctx.taskId());
         for (DatafusionPartitionSender sender : sendersByChildStageId.values()) {
             try {
                 sender.close();
@@ -389,14 +389,14 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
 
     /** Test seam: overridden to count invocations without static mocking. */
     void fireCancelQuery() {
-        logger.info("[reduce-sink] fireCancelQuery: taskId={}", ctx.taskId());
+        logger.trace("[reduce-sink] fireCancelQuery: taskId={}", ctx.taskId());
         NativeBridge.cancelQuery(ctx.taskId());
     }
 
     @Override
     public void reduce(ActionListener<Void> listener) {
         SinkState before = state.compareAndExchange(SinkState.READY, SinkState.REDUCING);
-        logger.info("[reduce-sink] reduce() entered: taskId={} stateBefore={} feedCount={} senderCount={}",
+        logger.trace("[reduce-sink] reduce() entered: taskId={} stateBefore={} feedCount={} senderCount={}",
             ctx.taskId(), before, feedCount.get(), sendersByChildStageId.size());
         if (before == SinkState.DONE) {
             listener.onFailure(new IllegalStateException("sink closed before reduce"));
@@ -406,13 +406,13 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
         Exception failure = null;
         try {
             drainOutputIntoDownstream(outStream);
-            logger.info("[reduce-sink] drain returned normally: taskId={} totalFeedCount={}", ctx.taskId(), feedCount.get());
+            logger.trace("[reduce-sink] drain returned normally: taskId={} totalFeedCount={}", ctx.taskId(), feedCount.get());
         } catch (Exception e) {
-            logger.info("[reduce-sink] drain threw: taskId={} feedCount={} error={}", ctx.taskId(), feedCount.get(), e.getMessage());
+            logger.trace("[reduce-sink] drain threw: taskId={} feedCount={} error={}", ctx.taskId(), feedCount.get(), e.getMessage());
             failure = e;
         } finally {
             state.set(SinkState.DONE);
-            logger.info("[reduce-sink] closing in reduce finally: taskId={}", ctx.taskId());
+            logger.trace("[reduce-sink] closing in reduce finally: taskId={}", ctx.taskId());
             try {
                 Exception closeFailure = closeImpl();
                 if (closeFailure != null) {
@@ -423,10 +423,10 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
             }
         }
         if (failure == null) {
-            logger.info("[reduce-sink] reduce() success: taskId={}", ctx.taskId());
+            logger.trace("[reduce-sink] reduce() success: taskId={}", ctx.taskId());
             listener.onResponse(null);
         } else {
-            logger.info("[reduce-sink] reduce() failed: taskId={} error={}", ctx.taskId(), failure.getMessage());
+            logger.trace("[reduce-sink] reduce() failed: taskId={} error={}", ctx.taskId(), failure.getMessage());
             listener.onFailure(failure);
         }
     }
