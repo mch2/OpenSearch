@@ -8,6 +8,8 @@
 
 package org.opensearch.be.datafusion;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.backend.jni.NativeHandle;
 import org.opensearch.be.datafusion.nativelib.NativeBridge;
 
@@ -24,6 +26,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  */
 public final class DatafusionPartitionSender extends NativeHandle {
 
+    private static final Logger logger = LogManager.getLogger(DatafusionPartitionSender.class);
     private final ReentrantReadWriteLock lifecycle = new ReentrantReadWriteLock();
 
     public DatafusionPartitionSender(long senderPtr) {
@@ -41,10 +44,12 @@ public final class DatafusionPartitionSender extends NativeHandle {
 
     @Override
     public void close() {
+        logger.info("[sender] close() called, ptr={}, thread={}", ptr, Thread.currentThread().getName());
         lifecycle.writeLock().lock();
         try {
             assert lifecycle.isWriteLockedByCurrentThread() : "close must hold the write lock across super.close()";
             super.close();
+            logger.info("[sender] close() complete - sender dropped, native EOF signalled");
         } finally {
             lifecycle.writeLock().unlock();
         }

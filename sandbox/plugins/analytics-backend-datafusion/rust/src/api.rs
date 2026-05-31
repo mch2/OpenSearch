@@ -946,20 +946,9 @@ pub async unsafe fn stream_next(
             // the bounded Arrow query pool; if it overflows, the importer leaks the
             // whole Rust-side batch via an orphaned retain() (see MAX_EXPORT_BYTES).
             // Dropping `batch` here frees its buffers cleanly — no FFI Box, no leak.
-            let max_export = MAX_EXPORT_BYTES.load(std::sync::atomic::Ordering::Acquire);
-            if max_export > 0 {
-                let batch_bytes = batch.get_array_memory_size();
-                let projected = handle.exported_bytes.saturating_add(batch_bytes);
-                if projected > max_export {
-                    // `batch` drops at end of scope → buffers freed in Rust.
-                    return Err(DataFusionError::ResourcesExhausted(format!(
-                        "Query result export would reach {} bytes, exceeding the cap of {} bytes \
-                         (datafusion.max_query_export_fraction × native.allocator.pool.query.max).",
-                        projected, max_export
-                    )));
-                }
-                handle.exported_bytes = projected;
-            }
+            // Export cap disabled — track bytes for observability only.
+            let batch_bytes = batch.get_array_memory_size();
+            handle.exported_bytes = handle.exported_bytes.saturating_add(batch_bytes);
 
             let struct_array: StructArray = batch.into();
             let array_data = struct_array.into_data();

@@ -8,6 +8,8 @@
 
 package org.opensearch.analytics.exec;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.backend.EngineResultBatch;
 import org.opensearch.analytics.exec.action.FetchByRowIdsAction;
 import org.opensearch.analytics.exec.action.FetchByRowIdsRequest;
@@ -50,6 +52,7 @@ import java.io.IOException;
  */
 @Singleton
 public class AnalyticsSearchTransportService {
+    private static final Logger logger = LogManager.getLogger(AnalyticsSearchTransportService.class);
     private final StreamTransportService transportService;
     private final ClusterService clusterService;
 
@@ -227,19 +230,37 @@ public class AnalyticsSearchTransportService {
 
             @Override
             public void handleStreamResponse(StreamTransportResponse<FragmentExecutionArrowResponse> stream) {
+                String shardInfo = request instanceof org.opensearch.analytics.exec.action.FragmentExecutionRequest fr
+                    ? fr.getShardId().toString() : "unknown";
+                logger.info("[shard-stream] STARTED shard={} target={}", shardInfo, targetNode.getId());
+                int batchCount = 0;
+                long totalRows = 0;
+                long startNanos = System.nanoTime();
                 try {
                     FragmentExecutionArrowResponse current;
                     FragmentExecutionArrowResponse last = null;
                     while ((current = stream.nextResponse()) != null) {
                         if (last != null) {
+                            long rows = last.getRoot() != null ? last.getRoot().getRowCount() : 0;
+                            totalRows += rows;
+                            batchCount++;
                             listener.onStreamResponse(last, false);
                         }
                         last = current;
                     }
                     if (last != null) {
+                        long rows = last.getRoot() != null ? last.getRoot().getRowCount() : 0;
+                        totalRows += rows;
+                        batchCount++;
                         listener.onStreamResponse(last, true);
                     }
+                    long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000;
+                    logger.info("[shard-stream] COMPLETE shard={} batches={} totalRows={} elapsed={}ms",
+                        shardInfo, batchCount, totalRows, elapsedMs);
                 } catch (Exception e) {
+                    long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000;
+                    logger.error("[shard-stream] FAILED shard={} after {} batches, {} rows, {}ms: {}",
+                        shardInfo, batchCount, totalRows, elapsedMs, e.getMessage());
                     listener.onFailure(e);
                 } finally {
                     try {
