@@ -43,6 +43,13 @@ import java.util.concurrent.atomic.AtomicReference;
  *
  * <p>Cleanup ownership lives in {@link #reduce}'s {@code finally} (via {@link SinkState}),
  * not {@link #close}, so a close call from another thread never races a parked drain.
+ *
+ * <p>TODO abstraction leak: this class implements {@link MultiInputExchangeSink} unconditionally
+ * even when only one child stage feeds it. The marker is meant for genuine multi-input shapes
+ * (Union/Join), and callers like {@code ReduceStageExecution.inputSink} have to dispatch on
+ * the logical child-stage count instead of the marker. Either split into a single-input
+ * subclass and a multi-input subclass, or drop the marker and let the caller always go through
+ * {@code feed()} when there's one child. Current behaviour is correct but the typing lies.
  */
 public class DatafusionReduceSink extends AbstractDatafusionReduceSink implements MultiInputExchangeSink {
 
@@ -155,6 +162,17 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
         feedToSender(sendersByChildStageId.values().iterator().next(), batch, childSchemas.values().iterator().next());
     }
 
+    /**
+     * Single-input path: true once the sole input's consumer dropped its receiver (e.g. a LimitExec
+     * above the ExchangeReducer satisfied its fetch). Multi-input callers feed via {@link #sinkForChild}
+     * and observe {@code isConsumerDone()} on the per-child wrapper, so this returns false unless there
+     * is exactly one registered sender.
+     */
+    @Override
+    public boolean isConsumerDone() {
+        return sendersByChildStageId.size() == 1 && sendersByChildStageId.values().iterator().next().isReceiverDropped();
+    }
+
     @Override
     public ExchangeSink sinkForChild(int childStageId) {
         DatafusionPartitionSender sender = sendersByChildStageId.get(childStageId);
@@ -170,13 +188,19 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
      * Lock-free per-sender feed. Exports the batch via Arrow C Data outside any lock
      * (the allocator is thread-safe; multiple shard handlers can export concurrently),
      * then sends it through the supplied sender. The Rust mpsc::Sender is thread-safe,
-     * so multiple producers feeding the same sender is safe. If close() raced and
-     * already ran senderClose, the native side returns an error ("receiver dropped")
-     * which we catch and discard.
+     * so multiple producers feeding the same sender is safe.
+     *
+     * <p>Two teardown signals are handled distinctly, and neither fails the query: a benign
+     * receiver-drop (the consumer finished early) returns the {@link NativeBridge#SENDER_SEND_RECEIVER_DROPPED}
+     * code, while a concurrent {@link #close()} surfaces as an IllegalStateException from
+     * {@code getPointer()} before the native call. Both discard the batch.
      */
     private void feedToSender(DatafusionPartitionSender sender, VectorSchemaRoot batch, Schema declaredSchema) {
-        // Best-effort fast path — skip export work if already closed.
-        if (closed) {
+        // Best-effort fast path — skip the export if the sink is closed or this input's consumer
+        // already dropped its receiver (nothing downstream will read another batch on it).
+        if (closed || sender.isReceiverDropped()) {
+            logger.trace("[feed-diag] feedToSender skipping batch: closed={} receiverDropped={} rows={}",
+                closed, sender.isReceiverDropped(), batch.getRowCount());
             batch.close();
             return;
         }
@@ -204,14 +228,24 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
             // close — see DatafusionPartitionSender. Throws IllegalStateException via
             // NativeHandle.getPointer() if the sender was closed (the close-race path).
             try {
-                sender.send(array.memoryAddress(), arrowSchema.memoryAddress());
+                long rc = sender.send(array.memoryAddress(), arrowSchema.memoryAddress());
+                if (rc == NativeBridge.SENDER_SEND_RECEIVER_DROPPED) {
+                    // Consumer finished first (e.g. a LimitExec satisfied its fetch) and dropped the
+                    // receiver while shards were still feeding. api::sender_send already consumed the
+                    // FFI structs via from_raw, so the buffers are Rust's to drop — do NOT release()
+                    // here (double-free). The sender latched the drop (see DatafusionPartitionSender),
+                    // so subsequent feeds for this input short-circuit and the producer stream is
+                    // cancelled by the shard listener via isConsumerDone().
+                    logger.debug("[ReduceSink] receiver dropped before send (consumer finished), discarding batch");
+                    return;
+                }
                 feedCount.incrementAndGet();
             } catch (IllegalStateException e) {
-                // Sender close raced our send — Rust didn't take ownership, so the FFI
-                // structs' release callbacks are still set. Invoke them explicitly to free
-                // the exported buffers back to the Java allocator. (ArrowArray.close /
-                // ArrowSchema.close in the finally below frees the wrapper but does NOT
-                // invoke the C release callback.)
+                // Sender close raced our send — getPointer() threw BEFORE the native call,
+                // so Rust never took ownership and the FFI structs' release callbacks are
+                // still set. Invoke them explicitly to free the exported buffers back to the
+                // Java allocator. (ArrowArray.close / ArrowSchema.close in the finally below
+                // frees the wrapper but does NOT invoke the C release callback.)
                 array.release();
                 arrowSchema.release();
                 if (closed) {
@@ -275,6 +309,11 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
         }
 
         @Override
+        public boolean isConsumerDone() {
+            return sender.isReceiverDropped();
+        }
+
+        @Override
         public void close() {
             if (childClosed) {
                 return;
@@ -313,17 +352,19 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
     @Override
     protected Exception closeImpl() {
         SinkState before = state.compareAndExchange(SinkState.READY, SinkState.DONE);
+        logger.trace("[reduce-sink] closeImpl: taskId={} stateBefore={} feedCount={}",
+            ctx.taskId(), before, feedCount.get());
         if (before == SinkState.REDUCING) {
-            // Drain parked — dropping senders/outStream now would panic in drop_in_place.
+            logger.trace("[reduce-sink] closeImpl: drain in flight, firing cancelQuery taskId={}", ctx.taskId());
             fireCancelQuery();
-            return null;  // reduce()'s finally calls closeImpl directly to tear down.
+            return null;
         }
-        // before == READY (we just won) or DONE (reduce's finally calling us, or duplicate close).
         if (torndown.compareAndSet(false, true) == false) {
+            logger.trace("[reduce-sink] closeImpl: already torn down, skipping taskId={}", ctx.taskId());
             return null;
         }
         Exception failure = null;
-        // 1. Signal EOF on every sender (ChildSink may have closed some already; idempotent).
+        logger.trace("[reduce-sink] closeImpl: closing {} senders, taskId={}", sendersByChildStageId.size(), ctx.taskId());
         for (DatafusionPartitionSender sender : sendersByChildStageId.values()) {
             try {
                 sender.close();
@@ -348,19 +389,15 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
 
     /** Test seam: overridden to count invocations without static mocking. */
     void fireCancelQuery() {
+        logger.trace("[reduce-sink] fireCancelQuery: taskId={}", ctx.taskId());
         NativeBridge.cancelQuery(ctx.taskId());
     }
 
-    /**
-     * Drains inline on the caller (the reduce stage's task, on a virtual thread).
-     * Drain terminates on input EOF (all per-child wrappers closed via
-     * {@link #sinkForChild}) or on cancel-Err (an external {@link #close()} fired
-     * {@code cancel_query}). The {@code finally} runs {@code super.close()} so cleanup
-     * happens on the same thread as the drain — no race with concurrent close.
-     */
     @Override
     public void reduce(ActionListener<Void> listener) {
         SinkState before = state.compareAndExchange(SinkState.READY, SinkState.REDUCING);
+        logger.trace("[reduce-sink] reduce() entered: taskId={} stateBefore={} feedCount={} senderCount={}",
+            ctx.taskId(), before, feedCount.get(), sendersByChildStageId.size());
         if (before == SinkState.DONE) {
             listener.onFailure(new IllegalStateException("sink closed before reduce"));
             return;
@@ -369,10 +406,13 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
         Exception failure = null;
         try {
             drainOutputIntoDownstream(outStream);
+            logger.trace("[reduce-sink] drain returned normally: taskId={} totalFeedCount={}", ctx.taskId(), feedCount.get());
         } catch (Exception e) {
+            logger.trace("[reduce-sink] drain threw: taskId={} feedCount={} error={}", ctx.taskId(), feedCount.get(), e.getMessage());
             failure = e;
         } finally {
             state.set(SinkState.DONE);
+            logger.trace("[reduce-sink] closing in reduce finally: taskId={}", ctx.taskId());
             try {
                 Exception closeFailure = closeImpl();
                 if (closeFailure != null) {
@@ -383,8 +423,10 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
             }
         }
         if (failure == null) {
+            logger.trace("[reduce-sink] reduce() success: taskId={}", ctx.taskId());
             listener.onResponse(null);
         } else {
+            logger.trace("[reduce-sink] reduce() failed: taskId={} error={}", ctx.taskId(), failure.getMessage());
             listener.onFailure(failure);
         }
     }
