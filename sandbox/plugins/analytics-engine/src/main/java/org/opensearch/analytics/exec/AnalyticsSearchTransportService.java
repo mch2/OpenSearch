@@ -253,6 +253,8 @@ public class AnalyticsSearchTransportService {
                         totalRows += rows;
                         batchCount++;
                         listener.onStreamResponse(last, true);
+                    } else {
+                        logger.warn("[shard-stream] EMPTY-STREAM shard={} - no batches received", shardInfo);
                     }
                     long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000;
                     logger.info("[shard-stream] COMPLETE shard={} batches={} totalRows={} elapsed={}ms",
@@ -272,6 +274,9 @@ public class AnalyticsSearchTransportService {
 
             @Override
             public void handleResponse(FragmentExecutionArrowResponse response) {
+                String shardInfo2 = request instanceof org.opensearch.analytics.exec.action.FragmentExecutionRequest fr2
+                    ? fr2.getShardId().toString() : "unknown";
+                logger.info("[shard-stream] handleResponse (non-streaming) shard={}", shardInfo2);
                 try {
                     listener.onStreamResponse(response, true);
                 } finally {
@@ -281,6 +286,9 @@ public class AnalyticsSearchTransportService {
 
             @Override
             public void handleException(TransportException e) {
+                String shardInfo3 = request instanceof org.opensearch.analytics.exec.action.FragmentExecutionRequest fr3
+                    ? fr3.getShardId().toString() : "unknown";
+                logger.error("[shard-stream] handleException shard={}: {}", shardInfo3, e.getMessage());
                 try {
                     listener.onFailure(e);
                 } finally {

@@ -70,7 +70,18 @@ class BackpressureFlightServerChannel extends FlightServerChannel {
         if (cancelled) {
             throw StreamException.cancelled("stream cancelled before back-pressure wait");
         }
-        BackpressureStrategy.WaitResult result = bp.waitForListener(readyTimeoutMillis);
+        BackpressureStrategy.WaitResult result;
+        try {
+            result = bp.waitForListener(readyTimeoutMillis);
+        } catch (RuntimeException e) {
+            if (e.getMessage() != null && e.getMessage().contains("Invalid state")) {
+                // Race: waitForListener called before the onReady callback is wired.
+                // Safe to proceed — early batches flow without backpressure until the
+                // listener is fully registered.
+                return;
+            }
+            throw e;
+        }
         switch (result) {
             case READY:
                 return;

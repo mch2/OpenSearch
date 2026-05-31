@@ -494,7 +494,10 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
             return Project.builder().from(project).input(newInput).build();
         }
         if (wrapper instanceof Fetch fetch) {
-            return Fetch.builder().from(fetch).input(newInput).build();
+            Rel rewiredInput = fetch.getInput() instanceof Sort
+                ? replaceInput(fetch.getInput(), newInput)
+                : newInput;
+            return Fetch.builder().from(fetch).input(rewiredInput).build();
         }
         throw new UnsupportedOperationException(
             "Cannot attach-on-top a Substrait Rel of type " + wrapper.getClass().getSimpleName() + " — no single-input rewire defined"
