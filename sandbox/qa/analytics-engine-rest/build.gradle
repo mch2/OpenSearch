@@ -120,15 +120,11 @@ integTest {
     systemProperty 'tests.security.manager', 'false'
     exclude '**/CoordinatorReduceMemtableIT.class'
     exclude '**/StreamingCoordinatorReduceIT.class'
-    exclude '**/QueryCacheIT.class'
-<<<<<<< HEAD
-=======
 
     // Note: parallel forks against the same 2-node testCluster slow the suite down
     // (cluster is the bottleneck, not JVM startup) and cause cross-fork data races
     // when ITs provision their indices lazily. Keep the OpenSearchTestBasePlugin
     // defaults (single fork, no maxParallelForks override).
->>>>>>> upstream/main
 }
 
 // ── Memtable variant: 2 nodes, datafusion.reduce.input_mode=memtable ─────────
