@@ -77,6 +77,7 @@ public final class NativeBridge {
      */
     private static final MethodHandle SET_SPILL_LIMIT;
     private static final MethodHandle SET_MIN_TARGET_PARTITIONS;
+    private static final MethodHandle SET_REDUCE_TARGET_PARTITIONS;
     private static final MethodHandle SET_MEMORY_GUARD_THRESHOLDS;
     private static final MethodHandle CREATE_READER;
     private static final MethodHandle CLOSE_READER;
@@ -182,6 +183,11 @@ public final class NativeBridge {
 
         SET_MIN_TARGET_PARTITIONS = linker.downcallHandle(
             lib.find("df_set_min_target_partitions").orElseThrow(),
+            FunctionDescriptor.ofVoid(ValueLayout.JAVA_LONG)
+        );
+
+        SET_REDUCE_TARGET_PARTITIONS = linker.downcallHandle(
+            lib.find("df_set_reduce_target_partitions").orElseThrow(),
             FunctionDescriptor.ofVoid(ValueLayout.JAVA_LONG)
         );
 
@@ -719,6 +725,15 @@ public final class NativeBridge {
         }
     }
 
+    /** Sets the initial target_partitions for coordinator-reduce sessions. */
+    public static void setReduceTargetPartitions(int value) {
+        try {
+            SET_REDUCE_TARGET_PARTITIONS.invokeExact((long) value);
+        } catch (Throwable t) {
+            logger.debug("Failed to set reduce target partitions", t);
+        }
+    }
+
     /** Sets the memory guard thresholds (0.0–1.0): admission throttle, admission reject, execution spill, execution critical. */
     public static void setMemoryGuardThresholds(
         double admissionThrottle,
@@ -1041,8 +1056,19 @@ public final class NativeBridge {
     }
 
     /**
+     * Positive sentinel returned by {@code df_sender_send} (via {@link #senderSend}) when the
+     * send was skipped because the consumer dropped the receiver before this batch could be sent
+     * — the benign "consumer finished first" case (e.g. a LimitExec satisfied its fetch). It
+     * rides the success half of the native return contract ({@code >= 0} success, {@code < 0}
+     * {@code -error_ptr}), so {@code checkResult} passes it through without throwing.
+     * MUST match {@code SENDER_SEND_RECEIVER_DROPPED} in {@code ffm.rs}.
+     */
+    public static final long SENDER_SEND_RECEIVER_DROPPED = 1L;
+
+    /**
      * Pushes one Arrow C Data-exported batch (array + schema addresses) into the sender. The
-     * native side takes ownership of both FFI structs.
+     * native side takes ownership of both FFI structs. Returns {@code 0} on a normal send or
+     * {@link #SENDER_SEND_RECEIVER_DROPPED} if the consumer already dropped the receiver.
      */
     public static long senderSend(long senderPtr, long arrayPtr, long schemaPtr) {
         NativeHandle.validatePointer(senderPtr, "sender");

@@ -157,6 +157,11 @@ pub extern "C" fn df_set_min_target_partitions(value: i64) {
     api::set_min_target_partitions(value);
 }
 
+#[no_mangle]
+pub extern "C" fn df_set_reduce_target_partitions(value: i64) {
+    api::set_reduce_target_partitions(value);
+}
+
 /// Sets memory guard thresholds. Values are thresholds multiplied by 1000
 /// (e.g., 700 = 0.70, 850 = 0.85, 950 = 0.95).
 #[no_mangle]
@@ -542,12 +547,20 @@ pub unsafe extern "C" fn df_execute_local_plan(
         .map_err(|e| e.to_string())
 }
 
+/// Positive FFI sentinel from [`df_sender_send`] when the send was skipped because the consumer
+/// finished (receiver dropped). Rides the success half of the return contract (`>= 0` = success),
+/// so `checkResult` passes it through. MUST match `NativeBridge.SENDER_SEND_RECEIVER_DROPPED`.
+pub const SENDER_SEND_RECEIVER_DROPPED: i64 = 1;
+
 #[ffm_safe]
 #[no_mangle]
 pub unsafe extern "C" fn df_sender_send(sender_ptr: i64, array_ptr: i64, schema_ptr: i64) -> i64 {
     let mgr = get_rt_manager()?;
     api::sender_send(sender_ptr, array_ptr, schema_ptr, mgr.io_runtime.handle())
-        .map(|_| 0)
+        .map(|outcome| match outcome {
+            crate::partition_stream::SendOutcome::Sent => 0,
+            crate::partition_stream::SendOutcome::ReceiverDropped => SENDER_SEND_RECEIVER_DROPPED,
+        })
         .map_err(|e| e.to_string())
 }
 

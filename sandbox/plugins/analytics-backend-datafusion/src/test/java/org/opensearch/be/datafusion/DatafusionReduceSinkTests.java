@@ -76,6 +76,25 @@ public class DatafusionReduceSinkTests extends OpenSearchTestCase {
     }
 
     /**
+     * The benign "consumer finished first" case (a {@code LimitExec} satisfied its fetch and
+     * dropped the receiver while producers were still feeding) is signalled by {@code df_sender_send}
+     * returning the positive sentinel {@link NativeBridge#SENDER_SEND_RECEIVER_DROPPED} rather than a
+     * stringly-typed error — {@code feedToSender} keys off this code. The sentinel must be positive
+     * (so {@code checkResult} passes it through the success half of the return contract instead of
+     * treating it as an error pointer) and distinct from a normal send ({@code 0}). The Rust↔Java
+     * agreement on the value is enforced by the matching {@code SENDER_SEND_RECEIVER_DROPPED} in
+     * {@code ffm.rs}; the structural "only a dropped receiver maps here" guarantee is covered by the
+     * Rust {@code send_blocking_reports_receiver_dropped} unit test.
+     */
+    public void testReceiverDroppedSentinelIsPositiveAndDistinctFromSuccess() {
+        assertTrue(
+            "sentinel must be positive so checkResult treats it as success, not an error pointer",
+            NativeBridge.SENDER_SEND_RECEIVER_DROPPED > 0
+        );
+        assertNotEquals("sentinel must be distinct from a normal send (0)", 0L, NativeBridge.SENDER_SEND_RECEIVER_DROPPED);
+    }
+
+    /**
      * End-to-end feed + drain: feeds three Arrow batches (values 1..9) into a real
      * {@link DatafusionReduceSink} running a {@code SELECT SUM(x) FROM "input-0"}
      * Substrait plan, then asserts the downstream sink received a single-row batch
