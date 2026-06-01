@@ -120,7 +120,6 @@ integTest {
     systemProperty 'tests.security.manager', 'false'
     exclude '**/CoordinatorReduceMemtableIT.class'
     exclude '**/StreamingCoordinatorReduceIT.class'
-    exclude '**/QueryCacheIT.class'
 
     // Note: parallel forks against the same 2-node testCluster slow the suite down
     // (cluster is the bottleneck, not JVM startup) and cause cross-fork data races

@@ -240,7 +240,11 @@ public class FilterDelegationIT extends AnalyticsRestTestCase {
         createIndex();
         indexDocs();
         String ppl = "source = " + INDEX_NAME + " | where match(message, 'hello') and tag = 'hello' and value = 5 | stats count() as cnt";
+<<<<<<< HEAD
+        Map<String, Object> result = executePPL(ppl);
+=======
         Map<String, Object> result = executePplViaShim(ppl);
+>>>>>>> upstream/main
         @SuppressWarnings("unchecked")
         List<List<Object>> rows = (List<List<Object>>) result.get("rows");
         assertEquals(10L, ((Number) rows.get(0).get(0)).longValue());
@@ -254,7 +258,11 @@ public class FilterDelegationIT extends AnalyticsRestTestCase {
         createIndex();
         indexDocs();
         String ppl = "source = " + INDEX_NAME + " | where tag = 'hello' and value = 5 | stats count() as cnt";
+<<<<<<< HEAD
+        Map<String, Object> result = executePPL(ppl);
+=======
         Map<String, Object> result = executePplViaShim(ppl);
+>>>>>>> upstream/main
         @SuppressWarnings("unchecked")
         List<List<Object>> rows = (List<List<Object>>) result.get("rows");
         assertEquals(10L, ((Number) rows.get(0).get(0)).longValue());
@@ -270,7 +278,11 @@ public class FilterDelegationIT extends AnalyticsRestTestCase {
         createIndex();
         indexDocs();
         String ppl = "source = " + INDEX_NAME + " | where match(message, 'hello') or tag = 'hello' and value = 5 | stats count() as cnt";
+<<<<<<< HEAD
+        Map<String, Object> result = executePPL(ppl);
+=======
         Map<String, Object> result = executePplViaShim(ppl);
+>>>>>>> upstream/main
         @SuppressWarnings("unchecked")
         List<List<Object>> rows = (List<List<Object>>) result.get("rows");
         assertEquals(10L, ((Number) rows.get(0).get(0)).longValue());
@@ -286,7 +298,11 @@ public class FilterDelegationIT extends AnalyticsRestTestCase {
         indexDocs();
         String ppl = "source = " + INDEX_NAME
             + " | where (match(message, 'hello') and tag = 'hello') or (tag = 'goodbye' and value = 3) | stats count() as cnt";
+<<<<<<< HEAD
+        Map<String, Object> result = executePPL(ppl);
+=======
         Map<String, Object> result = executePplViaShim(ppl);
+>>>>>>> upstream/main
         @SuppressWarnings("unchecked")
         List<List<Object>> rows = (List<List<Object>>) result.get("rows");
         assertEquals(20L, ((Number) rows.get(0).get(0)).longValue());

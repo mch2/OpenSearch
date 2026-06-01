@@ -19,7 +19,6 @@ import org.opensearch.analytics.exec.stage.StageTask;
 import org.opensearch.analytics.exec.stage.StageTaskId;
 import org.opensearch.analytics.planner.dag.InputSinkDecorator;
 import org.opensearch.analytics.planner.dag.Stage;
-import org.opensearch.analytics.spi.CancellableExchangeSink;
 import org.opensearch.analytics.spi.ExchangeSink;
 import org.opensearch.analytics.spi.MultiInputExchangeSink;
 import org.opensearch.analytics.spi.ReducingExchangeSink;
@@ -64,6 +63,8 @@ public final class ReduceStageExecution extends AbstractStageExecution implement
 
     @Override
     public void closeChildInput(int childStageId) {
+        logger.debug("[reduce-stage] closeChildInput: stageId={} childStageId={} isMultiInput={}",
+            getStageId(), childStageId, backendSink instanceof MultiInputExchangeSink);
         if (backendSink instanceof MultiInputExchangeSink multi) {
             multi.sinkForChild(childStageId).close();
         }
@@ -97,10 +98,13 @@ public final class ReduceStageExecution extends AbstractStageExecution implement
     @Override
     protected List<StageTask> materializeTasks() {
         return List.of(new LocalStageTask(new StageTaskId(getStageId(), 0), listener -> {
+            logger.debug("[reduce-stage] reduce task dispatched, stageId={}", getStageId());
             reduceExecutor.execute(() -> {
                 try {
                     backendSink.reduce(listener);
+                    logger.debug("[reduce-stage] reduce() returned normally, stageId={}", getStageId());
                 } catch (Exception e) {
+                    logger.debug("[reduce-stage] reduce() threw, stageId={}: {}", getStageId(), e.getMessage());
                     listener.onFailure(e);
                 }
             });
@@ -108,17 +112,15 @@ public final class ReduceStageExecution extends AbstractStageExecution implement
     }
 
     @Override
+    public boolean failWithCause(Exception cause) {
+        logger.debug("[reduce-stage] failWithCause: stageId={} cause={}", getStageId(),
+            cause != null ? cause.getMessage() : "null");
+        return super.failWithCause(cause);
+    }
+
+    @Override
     protected void onTerminalTransition(State terminal) {
-        if (terminal == State.CANCELLED || terminal == State.FAILED) {
-            if (backendSink instanceof CancellableExchangeSink cancellable) {
-                logger.warn("[ReduceStageExecution] stage {} terminal={}, firing cancellable.cancel()", getStageId(), terminal);
-                try {
-                    cancellable.cancel();
-                } catch (Exception e) {
-                    logger.warn("[ReduceStageExecution] cancel() threw for stage " + getStageId(), e);
-                }
-            }
-        }
+        logger.debug("[reduce-stage] onTerminalTransition: stageId={} terminal={}", getStageId(), terminal);
         try {
             backendSink.close();
         } catch (Exception ignore) {}

@@ -71,7 +71,7 @@ impl LocalSession {
     pub fn new(runtime_env: &RuntimeEnv) -> Self {
         let runtime_env = Arc::new(runtime_env.clone());
         let mut config = SessionConfig::new();
-        config.options_mut().execution.target_partitions = 4;
+        config.options_mut().execution.target_partitions = crate::api::get_reduce_target_partitions();
         let state = SessionStateBuilder::new()
             .with_config(config)
             .with_runtime_env(runtime_env)
@@ -217,16 +217,15 @@ impl LocalSession {
             ))
         })?;
         let logical_plan = from_substrait_plan(&self.ctx.state(), &plan).await?;
-        log_debug!("DataFusion logical plan (reduce):\n{}", logical_plan.display_indent());
         let dataframe = self.ctx.execute_logical_plan(logical_plan).await?;
         let physical_plan = dataframe.create_physical_plan().await?;
         let target_schema = crate::schema_coerce::coerce_inferred_schema(physical_plan.schema());
         let physical_plan = crate::relabel_exec::wrap_if_relabel_needed(physical_plan, target_schema)?;
-        log_debug!("DataFusion physical plan (reduce):\n{}", displayable(physical_plan.as_ref()).indent(true));
         let stripped = crate::agg_mode::apply_aggregate_mode(
             physical_plan,
             crate::agg_mode::Mode::Final,
         )?;
+        log_debug!("DataFusion physical plan (reduce):\n{}", displayable(stripped.as_ref()).indent(true));
         self.prepared_plan = Some(stripped);
         Ok(())
     }
@@ -330,9 +329,8 @@ mod tests {
         let handle = Handle::current();
         let producer = std::thread::spawn(move || {
             for chunk in &[vec![1i64, 2, 3], vec![4, 5, 6], vec![7, 8, 9]] {
-                sender
-                    .send_blocking(Ok(i64_batch(&producer_schema, chunk)), &handle)
-                    .expect("send");
+                let outcome = sender.send_blocking(Ok(i64_batch(&producer_schema, chunk)), &handle);
+                assert!(matches!(outcome, crate::partition_stream::SendOutcome::Sent));
             }
             drop(sender); // EOF
         });

@@ -12,10 +12,8 @@ import org.apache.arrow.c.CDataDictionaryProvider;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.types.pojo.Schema;
-import org.opensearch.analytics.spi.CancellableExchangeSink;
 import org.opensearch.analytics.spi.ExchangeSinkContext;
 import org.opensearch.analytics.spi.ReducingExchangeSink;
-import org.opensearch.be.datafusion.nativelib.NativeBridge;
 import org.opensearch.be.datafusion.nativelib.StreamHandle;
 
 import java.util.LinkedHashMap;
@@ -43,7 +41,7 @@ import java.util.Map;
  *
  * @opensearch.internal
  */
-abstract class AbstractDatafusionReduceSink implements ReducingExchangeSink, CancellableExchangeSink {
+abstract class AbstractDatafusionReduceSink implements ReducingExchangeSink {
 
     /** Single-input shortcut for the per-child table id; multi-input uses {@link #inputIdFor(int)}. */
     static final String INPUT_ID = "input-0";
@@ -94,20 +92,6 @@ abstract class AbstractDatafusionReduceSink implements ReducingExchangeSink, Can
     /** DataFusion table name for an input partition associated with the given child stage id. */
     protected static String inputIdFor(int childStageId) {
         return "input-" + childStageId;
-    }
-
-    /**
-     * Fires the Rust CancellationToken for this query so that {@code stream_next}
-     * returns the sentinel {@code 0} immediately and the drain unblocks without
-     * waiting for DataFusion to finish naturally. No-op when {@code taskId} is 0
-     * (no context registered) or when already closed.
-     */
-    @Override
-    public final void cancel() {
-        long taskId = ctx.taskId();
-        if (taskId != 0L) {
-            NativeBridge.cancelQuery(taskId);
-        }
     }
 
     @Override
@@ -163,7 +147,8 @@ abstract class AbstractDatafusionReduceSink implements ReducingExchangeSink, Can
         try (CDataDictionaryProvider dictProvider = new CDataDictionaryProvider()) {
             DatafusionResultStream.BatchIterator it = new DatafusionResultStream.BatchIterator(outStream, alloc, dictProvider);
             while (it.hasNext()) {
-                ctx.downstream().feed(it.next().getArrowRoot());
+                VectorSchemaRoot root = it.next().getArrowRoot();
+                ctx.downstream().feed(root);
             }
         }
     }
