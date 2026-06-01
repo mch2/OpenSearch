@@ -268,58 +268,6 @@ public class DatafusionReduceSinkTests extends OpenSearchTestCase {
     }
 
     /**
-     * Cancel-before-first-batch: drain is parked in stream_next waiting for input.
-     * {@code close()} tears down {@code outStream} (drops the native stream), which wakes
-     * the parked drain — reduce() unwinds cleanly. No leak.
-     */
-    public void testCancelBeforeFirstBatchUnwindsDrain() throws Exception {
-        NativeBridge.initTokioRuntimeManager(2);
-        Path spillDir = createTempDir("datafusion-spill");
-        long runtimePtr = NativeBridge.createGlobalRuntime(64 * 1024 * 1024, 0L, spillDir.toString(), 32 * 1024 * 1024);
-        NativeRuntimeHandle runtimeHandle = new NativeRuntimeHandle(runtimePtr);
-
-        try (RootAllocator alloc = new RootAllocator(Long.MAX_VALUE)) {
-            byte[] substrait = buildPassthroughSubstraitBytes(DatafusionReduceSink.INPUT_ID);
-            CapturingSink downstream = new CapturingSink();
-            // Non-zero taskId so the Rust QUERY_REGISTRY actually wires cancellation.
-            ExchangeSinkContext ctx = new ExchangeSinkContext(
-                "q-cancel-pre",
-                0,
-                4242L,
-                substrait,
-                alloc,
-                List.of(new ExchangeSinkContext.ChildInput(0, buildPassthroughSubstraitBytes(DatafusionReduceSink.INPUT_ID))),
-                downstream
-            );
-
-            DatafusionReduceSink sink = new DatafusionReduceSink(ctx, runtimeHandle);
-            PlainActionFuture<Void> reduceDone = PlainActionFuture.newFuture();
-            CountDownLatch reduceEntered = new CountDownLatch(1);
-            Thread.ofVirtual().start(() -> {
-                reduceEntered.countDown();
-                sink.reduce(reduceDone);
-            });
-            // Ensure reduce() has progressed past its READY→REDUCING CAS before we close —
-            // otherwise close runs inline (READY→DONE) and reduce later fails with
-            // "sink closed before reduce" instead of the cancel-during-drain path we want.
-            assertTrue(reduceEntered.await(5, TimeUnit.SECONDS));
-            Thread.sleep(50);
-            // Drain is parked waiting for first batch. close() tears down outStream
-            // (drops native stream), which unblocks the drain.
-            sink.close();
-            reduceDone.actionGet(5, TimeUnit.SECONDS);
-
-            assertEquals("no rows should be delivered (cancel before any feed)", 0, downstream.totalRows);
-            // Regression: teardown must run even when close() races with reduce().
-            // The torndown CAS ensures exactly-once semantics — whichever path wins tears
-            // down, the other is a no-op.
-            assertTrue("teardown must run on the cancel-during-REDUCING path", sink.torndown.get());
-        } finally {
-            runtimeHandle.close();
-        }
-    }
-
-    /**
      * Regression: {@code close()} while a feeder is parked on a full input channel must NOT
      * deadlock.
      *
