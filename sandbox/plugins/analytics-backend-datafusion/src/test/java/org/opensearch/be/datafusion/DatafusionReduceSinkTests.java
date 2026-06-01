@@ -269,9 +269,8 @@ public class DatafusionReduceSinkTests extends OpenSearchTestCase {
 
     /**
      * Cancel-before-first-batch: drain is parked in stream_next waiting for input.
-     * {@code close()} fires {@code cancel_query} on the registered taskId — the cancellation
-     * token wakes the {@code cancellable_or}'s select, drain returns sentinel, reduce()
-     * unwinds cleanly. No leak.
+     * {@code close()} tears down {@code outStream} (drops the native stream), which wakes
+     * the parked drain — reduce() unwinds cleanly. No leak.
      */
     public void testCancelBeforeFirstBatchUnwindsDrain() throws Exception {
         NativeBridge.initTokioRuntimeManager(2);
@@ -305,16 +304,15 @@ public class DatafusionReduceSinkTests extends OpenSearchTestCase {
             // "sink closed before reduce" instead of the cancel-during-drain path we want.
             assertTrue(reduceEntered.await(5, TimeUnit.SECONDS));
             Thread.sleep(50);
-            // Drain is parked waiting for first batch. Fire cancel via close().
-            // close() sees state=REDUCING, calls cancelQuery(4242L), returns immediately.
+            // Drain is parked waiting for first batch. close() tears down outStream
+            // (drops native stream), which unblocks the drain.
             sink.close();
             reduceDone.actionGet(5, TimeUnit.SECONDS);
 
             assertEquals("no rows should be delivered (cancel before any feed)", 0, downstream.totalRows);
-            // Regression: the cancel-during-REDUCING path used to leak outStream/session
-            // because close() set the base's `closed` flag, then reduce()'s finally called
-            // super.close() which short-circuited on that flag — closeImpl never ran a
-            // second time and teardown never happened. reduce() now calls closeImpl directly.
+            // Regression: teardown must run even when close() races with reduce().
+            // The torndown CAS ensures exactly-once semantics — whichever path wins tears
+            // down, the other is a no-op.
             assertTrue("teardown must run on the cancel-during-REDUCING path", sink.torndown.get());
         } finally {
             runtimeHandle.close();
@@ -442,17 +440,12 @@ public class DatafusionReduceSinkTests extends OpenSearchTestCase {
     }
 
     /**
-     * Regression: {@code close()} must fire {@code cancelQuery} when state is REDUCING
-     * even if the prior {@code state.get()} observed READY. The old {@code get()+
-     * compareAndSet(READY,DONE)} pattern silently returned when the CAS failed (because
-     * {@code reduce()} raced and moved state to REDUCING in between), leaving the parked
-     * drain with no cancel signal. The fixed {@code compareAndExchange} returns the prior
-     * state atomically so the REDUCING branch fires unconditionally.
-     *
-     * <p>Simulates the race by pre-setting state to REDUCING via the package-private field
-     * (the same observable end-state the race produces) and verifying the cancel hook fires.
+     * Double-close is idempotent: calling {@code close()} multiple times (including from
+     * different threads, or after {@code reduce()} already tore down) must not throw or
+     * double-free native resources. The {@code torndown} CAS ensures the teardown body
+     * runs exactly once regardless of how many paths call {@code closeImpl}.
      */
-    public void testCloseFiresCancelWhenStateRacedToReducing() throws Exception {
+    public void testDoubleCloseIsIdempotent() throws Exception {
         NativeBridge.initTokioRuntimeManager(2);
         Path spillDir = createTempDir("datafusion-spill");
         long runtimePtr = NativeBridge.createGlobalRuntime(64 * 1024 * 1024, 0L, spillDir.toString(), 32 * 1024 * 1024);
@@ -462,7 +455,7 @@ public class DatafusionReduceSinkTests extends OpenSearchTestCase {
             byte[] substrait = buildPassthroughSubstraitBytes(DatafusionReduceSink.INPUT_ID);
             CapturingSink downstream = new CapturingSink();
             ExchangeSinkContext ctx = new ExchangeSinkContext(
-                "q-race",
+                "q-double-close",
                 0,
                 7777L,
                 substrait,
@@ -470,22 +463,21 @@ public class DatafusionReduceSinkTests extends OpenSearchTestCase {
                 List.of(new ExchangeSinkContext.ChildInput(0, buildPassthroughSubstraitBytes(DatafusionReduceSink.INPUT_ID))),
                 downstream
             );
-            java.util.concurrent.atomic.AtomicInteger cancels = new java.util.concurrent.atomic.AtomicInteger();
-            DatafusionReduceSink sink = new DatafusionReduceSink(ctx, runtimeHandle) {
-                @Override
-                void fireCancelQuery() {
-                    cancels.incrementAndGet();
-                }
-            };
-            // Stand-in for "reduce() won the race to set REDUCING before close()'s CAS ran."
+
+            DatafusionReduceSink sink = new DatafusionReduceSink(ctx, runtimeHandle);
+            // First close tears down.
+            sink.close();
+            assertTrue("teardown must run on first close", sink.torndown.get());
+
+            // Second close must be a no-op (no exception, no double-free).
+            sink.close();
+            assertTrue("torndown still true after second close", sink.torndown.get());
+
+            // Close from REDUCING state: simulate reduce() already set state, then close
+            // arrives concurrently. Teardown already ran so torndown CAS fails — no-op.
             sink.state.set(DatafusionReduceSink.SinkState.REDUCING);
             sink.close();
-            assertEquals("close must fire cancel via compareAndExchange when state is REDUCING", 1, cancels.get());
-            assertEquals(
-                "close must NOT mutate REDUCING state — the in-flight reduce() owns the DONE transition",
-                DatafusionReduceSink.SinkState.REDUCING,
-                sink.state.get()
-            );
+            assertTrue("third close (from REDUCING) is still idempotent", sink.torndown.get());
         } finally {
             runtimeHandle.close();
         }
