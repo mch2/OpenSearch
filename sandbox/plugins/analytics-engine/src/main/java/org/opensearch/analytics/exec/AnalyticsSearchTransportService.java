@@ -279,7 +279,10 @@ public class AnalyticsSearchTransportService {
             }
         };
 
-        TransportRequestOptions options = TransportRequestOptions.builder().withType(TransportRequestOptions.Type.STREAM).build();
+        TransportRequestOptions options = TransportRequestOptions.builder()
+            .withType(TransportRequestOptions.Type.STREAM)
+            .withTimeout(StreamTransportService.STREAM_TRANSPORT_REQ_TIMEOUT_SETTING.get(clusterService.getSettings()))
+            .build();
         pending.tryRun(() -> {
             try {
                 Transport.Connection connection = getConnection(null, targetNode.getId());
