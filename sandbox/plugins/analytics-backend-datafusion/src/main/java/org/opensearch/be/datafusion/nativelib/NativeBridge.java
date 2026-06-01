@@ -621,16 +621,9 @@ public final class NativeBridge {
      * {@code df_init_runtime_manager} <em>replaces</em> the global {@code RuntimeManager}, dropping
      * the previous tokio {@code Runtime} and stopping its worker threads — any task still settling
      * on it (e.g. a cancelled reduce drain) then dies with "worker gone". Production initializes
-     * once at node start; the test suite re-calls per method, so this flag makes the first call win
-     * and turns later calls into no-ops.
+     * once at node start; the native side is idempotent (second call is a no-op).
      */
-    private static final java.util.concurrent.atomic.AtomicBoolean RUNTIME_MANAGER_INITIALIZED =
-        new java.util.concurrent.atomic.AtomicBoolean(false);
-
     public static void initTokioRuntimeManager(int cpuThreads, double datanodeMultiplier, double coordinatorMultiplier) {
-        if (RUNTIME_MANAGER_INITIALIZED.compareAndSet(false, true) == false) {
-            return;
-        }
         NativeCall.invokeVoid(INIT_RUNTIME_MANAGER, cpuThreads, datanodeMultiplier, coordinatorMultiplier);
     }
 
