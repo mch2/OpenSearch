@@ -54,6 +54,7 @@ import org.opensearch.test.disruption.NetworkDisruption;
 import org.opensearch.test.junit.annotations.TestLogging;
 import org.opensearch.test.transport.MockTransportService;
 import org.opensearch.transport.TransportChannel;
+import org.opensearch.transport.StreamTransportService;
 import org.opensearch.transport.TransportService;
 import org.junit.After;
 import org.junit.Before;
@@ -185,6 +186,8 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
             // Match NetworkDisruptionIT: speeds up reconnection after disruption
             // stops, so assertions about recovery don't wait the 10s default.
             .put(NodeConnectionsService.CLUSTER_NODE_RECONNECT_INTERVAL_SETTING.getKey(), "2s")
+            // Short transport request timeout so testTransportTimeoutFailsQuery doesn't wait 5m.
+            .put(StreamTransportService.STREAM_TRANSPORT_REQ_TIMEOUT_SETTING.getKey(), "3s")
             // ServerConfig#init unconditionally sets the arrow.memory.debug.allocator
             // system property from this node setting, clobbering the -D VM arg. Turn
             // it on here so Arrow's BaseAllocator.DEBUG picks up `true` at class init
@@ -674,25 +677,23 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
 
     /**
      * Transport timeout: a data node holds the fragment request indefinitely (simulating a
-     * stuck shard or network partition). The coordinator's request-level timeout fires
-     * {@code handleException} with {@code ReceiveTimeoutTransportException}, which propagates
-     * through the stage cascade and fails the query in bounded time.
+     * stuck shard or network partition). The coordinator's request-level timeout (3s via
+     * nodeSettings) fires {@code handleException} with {@code ReceiveTimeoutTransportException},
+     * which propagates through the stage cascade and fails the query in bounded time.
      */
     public void testTransportTimeoutFailsQuery() throws Exception {
         createAndSeedIndex();
         String victim = pickShardHostingNode();
         MockTransportService mts = (MockTransportService) internalCluster().getInstance(TransportService.class, victim);
-        CountDownLatch held = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         mts.addRequestHandlingBehavior(FragmentExecutionAction.NAME, (handler, request, channel, task) -> {
-            held.countDown();
             try {
                 release.await(30, TimeUnit.SECONDS);
             } catch (InterruptedException ignored) {}
         });
         try {
             Throwable failure = expectThrows(Exception.class, () ->
-                executePPL("source = " + INDEX + " | stats sum(value) as total", TimeValue.timeValueSeconds(10)));
+                executePPL("source = " + INDEX + " | stats sum(value) as total", TimeValue.timeValueSeconds(15)));
             assertNotNull("query must fail when shard times out", failure);
         } finally {
             release.countDown();
