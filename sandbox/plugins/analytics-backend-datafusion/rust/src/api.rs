@@ -163,6 +163,8 @@ pub struct DataFusionRuntime {
     pub runtime_env: datafusion::execution::runtime_env::RuntimeEnv,
     pub custom_cache_manager: Option<CustomCacheManager>,
     pub dynamic_limit_handle: DynamicLimitHandle,
+    /// Typed reference to the pool for diagnostic reporting (report_top).
+    pub tracked_pool: Arc<TrackConsumersPool<crate::memory::DynamicLimitPool>>,
 }
 
 /// Per-file metadata passed from Java at shard view creation time.
@@ -262,11 +264,13 @@ pub fn build_shard_files(
 
 impl DataFusionRuntime {
     pub fn new_for_bench(runtime_env: datafusion::execution::runtime_env::RuntimeEnv) -> Self {
-        let (_pool, handle) = DynamicLimitPool::new(0);
+        let (pool, handle) = DynamicLimitPool::new(0);
+        let tracked_pool = Arc::new(TrackConsumersPool::new(pool, NonZeroUsize::new(5).unwrap()));
         Self {
             runtime_env,
             custom_cache_manager: None,
             dynamic_limit_handle: handle,
+            tracked_pool,
         }
     }
 }
@@ -327,10 +331,11 @@ pub fn create_global_runtime(
         .with_mode(DiskManagerMode::Directories(vec![PathBuf::from(spill_dir)]));
 
     let (dynamic_pool, dynamic_limit_handle) = DynamicLimitPool::new(memory_pool_limit as usize);
-    let memory_pool = Arc::new(TrackConsumersPool::new(
+    let tracked_pool = Arc::new(TrackConsumersPool::new(
         dynamic_pool,
         NonZeroUsize::new(5).unwrap(),
     ));
+    let memory_pool = Arc::clone(&tracked_pool) as Arc<dyn datafusion::execution::memory_pool::MemoryPool>;
 
     let (cache_manager_config, custom_cache_manager) = if cache_manager_ptr != 0 {
         let mgr = unsafe { *Box::from_raw(cache_manager_ptr as *mut CustomCacheManager) };
@@ -345,7 +350,7 @@ pub fn create_global_runtime(
         .with_cache_manager(cache_manager_config)
         .build()?;
 
-    let runtime = DataFusionRuntime { runtime_env, custom_cache_manager, dynamic_limit_handle };
+    let runtime = DataFusionRuntime { runtime_env, custom_cache_manager, dynamic_limit_handle, tracked_pool };
     Ok(Box::into_raw(Box::new(runtime)) as i64)
 }
 
@@ -387,8 +392,22 @@ pub unsafe fn get_memory_pool_limit(ptr: i64) -> i64 {
 /// `out_ptr` must point to a buffer of at least 2 i64 values.
 pub unsafe fn get_memory_pool_stats(ptr: i64, out_ptr: *mut i64) {
     let runtime = &*(ptr as *const DataFusionRuntime);
-    *out_ptr = runtime.runtime_env.memory_pool.reserved() as i64;
+    let reserved = runtime.tracked_pool.reserved();
+    *out_ptr = reserved as i64;
     *out_ptr.add(1) = runtime.dynamic_limit_handle.tripped_count() as i64;
+    // Log top consumers when reserved > 500MB (to avoid spam on idle checks)
+    if reserved > 500 * 1048576 {
+        let report = runtime.tracked_pool.report_top(10);
+        native_bridge_common::log_info!("[memory-pool] reserved={}MB top consumers:\n{}", reserved / 1048576, report);
+    }
+}
+
+/// Logs the top memory consumers in the pool. Call from Java for diagnostics.
+pub unsafe fn log_memory_pool_consumers(ptr: i64) {
+    let runtime = &*(ptr as *const DataFusionRuntime);
+    let report = runtime.tracked_pool.report_top(10);
+    let reserved = runtime.tracked_pool.reserved();
+    native_bridge_common::log_info!("[memory-pool] Top consumers (reserved={}MB):\n{}", reserved / 1048576, report);
 }
 
 /// Sets the memory pool limit at runtime. Takes effect for new allocations only.
