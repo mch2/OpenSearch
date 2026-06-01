@@ -382,8 +382,6 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
     @Override
     public void reduce(ActionListener<Void> listener) {
         SinkState before = state.compareAndExchange(SinkState.READY, SinkState.REDUCING);
-        logger.debug("[reduce-sink] reduce() entered: taskId={} stateBefore={} feedCount={} senderCount={}",
-            ctx.taskId(), before, feedCount.get(), sendersByChildStageId.size());
         if (before == SinkState.DONE) {
             listener.onFailure(new IllegalStateException("sink closed before reduce"));
             return;
@@ -392,13 +390,10 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
         Exception failure = null;
         try {
             drainOutputIntoDownstream(outStream);
-            logger.debug("[reduce-sink] drain returned normally: taskId={} totalFeedCount={}", ctx.taskId(), feedCount.get());
         } catch (Exception e) {
-            logger.debug("[reduce-sink] drain threw: taskId={} feedCount={} error={}", ctx.taskId(), feedCount.get(), e.getMessage());
             failure = e;
         } finally {
             state.set(SinkState.DONE);
-            logger.debug("[reduce-sink] closing in reduce finally: taskId={}", ctx.taskId());
             try {
                 Exception closeFailure = closeImpl();
                 if (closeFailure != null) {
@@ -409,10 +404,9 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
             }
         }
         if (failure == null) {
-            logger.debug("[reduce-sink] reduce() success: taskId={}", ctx.taskId());
             listener.onResponse(null);
         } else {
-            logger.debug("[reduce-sink] reduce() failed: taskId={} error={}", ctx.taskId(), failure.getMessage());
+            logger.debug("[reduce-sink] reduce failed: taskId={} error={}", ctx.taskId(), failure.getMessage());
             listener.onFailure(failure);
         }
     }
