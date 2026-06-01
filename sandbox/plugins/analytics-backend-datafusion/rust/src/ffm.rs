@@ -157,6 +157,11 @@ pub extern "C" fn df_set_min_target_partitions(value: i64) {
     api::set_min_target_partitions(value);
 }
 
+#[no_mangle]
+pub extern "C" fn df_set_reduce_target_partitions(value: i64) {
+    api::set_reduce_target_partitions(value);
+}
+
 /// Sets the max CUMULATIVE per-query export size (bytes) for the C-Data boundary.
 /// A query is rejected once its running total of exported bytes would exceed this,
 /// to avoid the Arrow import-failure native leak (foreign buffers accumulating past

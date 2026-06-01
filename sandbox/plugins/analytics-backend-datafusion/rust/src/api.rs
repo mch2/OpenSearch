@@ -395,11 +395,14 @@ pub unsafe fn get_memory_pool_stats(ptr: i64, out_ptr: *mut i64) {
     let reserved = runtime.tracked_pool.reserved();
     *out_ptr = reserved as i64;
     *out_ptr.add(1) = runtime.dynamic_limit_handle.tripped_count() as i64;
-    // Log top consumers when reserved > 500MB (to avoid spam on idle checks)
-    if reserved > 500 * 1048576 {
-        let report = runtime.tracked_pool.report_top(10);
-        native_bridge_common::log_info!("[memory-pool] reserved={}MB top consumers:\n{}", reserved / 1048576, report);
-    }
+}
+
+/// Logs the top memory pool consumers. Called from Java diagnostics.
+pub unsafe fn log_memory_pool_consumers(ptr: i64) {
+    let runtime = &*(ptr as *const DataFusionRuntime);
+    let reserved = runtime.tracked_pool.reserved();
+    let report = runtime.tracked_pool.report_top(10);
+    native_bridge_common::log_info!("[memory-pool] reserved={}MB top consumers:\n{}", reserved / 1048576, report);
 }
 
 /// Logs the top memory consumers in the pool. Call from Java for diagnostics.
@@ -430,6 +433,18 @@ pub unsafe fn set_memory_pool_limit(ptr: i64, new_limit: i64) -> Result<(), Stri
 /// effectively disables adaptive reduction.
 pub fn set_min_target_partitions(value: i64) {
     crate::query_budget::set_min_target_partitions(value.max(1) as usize);
+}
+
+/// Initial target_partitions for coordinator-reduce sessions. Defaults to 4.
+static REDUCE_TARGET_PARTITIONS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(4);
+
+pub fn set_reduce_target_partitions(value: i64) {
+    REDUCE_TARGET_PARTITIONS.store(value.max(1).min(32) as usize, std::sync::atomic::Ordering::Release);
+}
+
+pub fn get_reduce_target_partitions() -> usize {
+    REDUCE_TARGET_PARTITIONS.load(std::sync::atomic::Ordering::Acquire)
 }
 
 /// Maximum CUMULATIVE bytes a single query may export across the Arrow C-Data
@@ -1039,10 +1054,10 @@ fn view_needs_gc(buffers: &[arrow::buffer::Buffer], bytes_used: usize) -> bool {
 /// `stream_ptr` must be 0 or a valid pointer returned by `execute_query`.
 pub unsafe fn stream_close(stream_ptr: i64) {
     if stream_ptr != 0 {
-        native_bridge_common::log_info!("[stream-close] dropping QueryStreamHandle ptr={:#x}", stream_ptr);
+        native_bridge_common::log_debug!("[stream-close] dropping QueryStreamHandle ptr={:#x}", stream_ptr);
         let handle = Box::from_raw(stream_ptr as *mut QueryStreamHandle);
         drop(handle);
-        native_bridge_common::log_info!("[stream-close] QueryStreamHandle dropped ptr={:#x}", stream_ptr);
+        native_bridge_common::log_debug!("[stream-close] QueryStreamHandle dropped ptr={:#x}", stream_ptr);
     }
 }
 
@@ -1381,7 +1396,7 @@ pub unsafe fn create_local_session(runtime_ptr: i64) -> Result<i64, DataFusionEr
     let runtime = &*(runtime_ptr as *const DataFusionRuntime);
     let session = LocalSession::new(&runtime.runtime_env);
     let ptr = Box::into_raw(Box::new(session)) as i64;
-    native_bridge_common::log_info!("[local-session] OPEN ptr={:#x}", ptr);
+    native_bridge_common::log_debug!("[local-session] OPEN ptr={:#x}", ptr);
     Ok(ptr)
 }
 
@@ -1393,7 +1408,7 @@ pub unsafe fn close_local_session(ptr: i64) {
     if ptr != 0 {
         let session = Box::from_raw(ptr as *mut LocalSession);
         let phantom_size = session.phantom_size();
-        native_bridge_common::log_info!("[local-session] CLOSE ptr={:#x} phantom_bytes={}", ptr, phantom_size);
+        native_bridge_common::log_debug!("[local-session] CLOSE ptr={:#x} phantom_bytes={}", ptr, phantom_size);
         drop(session);
     }
 }

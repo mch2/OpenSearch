@@ -38,7 +38,7 @@ pub struct CrossRtStream {
 
 impl Drop for CrossRtStream {
     fn drop(&mut self) {
-        native_bridge_common::log_info!("[cross-rt-stream] DROP");
+        native_bridge_common::log_debug!("[cross-rt-stream] DROP");
     }
 }
 
@@ -83,11 +83,11 @@ impl CrossRtStream {
             tokio::pin!(stream);
             while let Some(res) = stream.next().await {
                 if tx_captured.send(res).await.is_err() {
-                    native_bridge_common::log_info!("[cross-rt-stream] CPU task: receiver gone, exiting");
+                    native_bridge_common::log_debug!("[cross-rt-stream] CPU task: receiver gone, exiting");
                     return;
                 }
             }
-            native_bridge_common::log_info!("[cross-rt-stream] CPU task: stream exhausted normally");
+            native_bridge_common::log_debug!("[cross-rt-stream] CPU task: stream exhausted normally");
         };
 
         let (abort_handle, join_fut) = exec.spawn_with_abort_handle(fut);

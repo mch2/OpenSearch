@@ -307,6 +307,20 @@ public class DataFusionPlugin extends Plugin
         Setting.Property.Dynamic
     );
 
+    /**
+     * Number of partitions used by the coordinator-reduce DataFusion plan.
+     * More partitions = more parallelism = more memory (each partition holds its own hash table).
+     * Lower values reduce peak memory at the cost of slower single-query latency.
+     */
+    public static final Setting<Integer> DATAFUSION_REDUCE_TARGET_PARTITIONS = Setting.intSetting(
+        "datafusion.reduce.target_partitions",
+        4,
+        1,
+        32,
+        Setting.Property.NodeScope,
+        Setting.Property.Dynamic
+    );
+
     private static final String SUPPORTED_FORMAT = "parquet";
 
     /**
@@ -371,6 +385,7 @@ public class DataFusionPlugin extends Plugin
         clusterService.getClusterSettings().addSettingsUpdateConsumer(DATAFUSION_MEMORY_POOL_LIMIT, this::updateMemoryPoolLimit);
         clusterService.getClusterSettings().addSettingsUpdateConsumer(DATAFUSION_SPILL_MEMORY_LIMIT, this::updateSpillMemoryLimit);
         clusterService.getClusterSettings().addSettingsUpdateConsumer(DATAFUSION_MIN_TARGET_PARTITIONS, this::updateMinTargetPartitions);
+        clusterService.getClusterSettings().addSettingsUpdateConsumer(DATAFUSION_REDUCE_TARGET_PARTITIONS, NativeBridge::setReduceTargetPartitions);
         // The export cap = pool.query.max × fraction. Recompute on a change to EITHER input.
         clusterService.getClusterSettings()
             .addSettingsUpdateConsumer(DATAFUSION_MAX_QUERY_EXPORT_FRACTION, v -> updateMaxQueryExportBytes());
@@ -387,6 +402,7 @@ public class DataFusionPlugin extends Plugin
 
         // Apply initial values
         NativeBridge.setMinTargetPartitions(DATAFUSION_MIN_TARGET_PARTITIONS.get(settings));
+        NativeBridge.setReduceTargetPartitions(DATAFUSION_REDUCE_TARGET_PARTITIONS.get(settings));
         updateMaxQueryExportBytes();
         NativeBridge.setMemoryGuardThresholds(
             DATAFUSION_MEMORY_GUARD_ADMISSION_THROTTLE_THRESHOLD.get(settings),
