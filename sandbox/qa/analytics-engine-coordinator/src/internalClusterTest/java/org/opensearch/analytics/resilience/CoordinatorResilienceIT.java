@@ -703,12 +703,14 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
     }
 
     /**
-     * Producer-side backpressure error: a data node sends an error response mid-stream
-     * (simulating a backpressure timeout on the producer side). The coordinator receives the
-     * error via {@code handleException}, propagates it through the stage cascade, and the
-     * query fails cleanly without leaking tasks or native resources.
+     * Producer error propagation: a data node sends an error response instead of batches
+     * (simulating a backpressure timeout or other producer-side failure). The error propagates
+     * through {@code handleException} → task failure → stage FAILED → query failure. With no
+     * replica available (replicas=0), the task failure is terminal for the query. With replicas,
+     * the scheduler's {@code retargetForRetry} would attempt an alternate — this test covers
+     * the no-retry terminal path and verifies no task/resource leaks.
      */
-    public void testProducerErrorMidStreamFailsQuery() throws Exception {
+    public void testProducerErrorFailsTaskAndPropagates() throws Exception {
         createAndSeedIndex();
         String victim = pickShardHostingNode();
         MockTransportService mts = (MockTransportService) internalCluster().getInstance(TransportService.class, victim);
@@ -718,7 +720,7 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
         try {
             Throwable failure = expectThrows(Exception.class, () ->
                 executePPL("source = " + INDEX + " | stats sum(value) as total", QUERY_TIMEOUT));
-            assertNotNull("query must fail when producer sends error", failure);
+            assertNotNull("query must fail when producer sends error and no replica available", failure);
         } finally {
             mts.clearAllRules();
         }
