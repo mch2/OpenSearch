@@ -673,6 +673,58 @@ public class CoordinatorResilienceIT extends OpenSearchIntegTestCase {
     }
 
     /**
+     * Transport timeout: a data node holds the fragment request indefinitely (simulating a
+     * stuck shard or network partition). The coordinator's request-level timeout fires
+     * {@code handleException} with {@code ReceiveTimeoutTransportException}, which propagates
+     * through the stage cascade and fails the query in bounded time.
+     */
+    public void testTransportTimeoutFailsQuery() throws Exception {
+        createAndSeedIndex();
+        String victim = pickShardHostingNode();
+        MockTransportService mts = (MockTransportService) internalCluster().getInstance(TransportService.class, victim);
+        CountDownLatch held = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        mts.addRequestHandlingBehavior(FragmentExecutionAction.NAME, (handler, request, channel, task) -> {
+            held.countDown();
+            try {
+                release.await(30, TimeUnit.SECONDS);
+            } catch (InterruptedException ignored) {}
+        });
+        try {
+            Throwable failure = expectThrows(Exception.class, () ->
+                executePPL("source = " + INDEX + " | stats sum(value) as total", TimeValue.timeValueSeconds(10)));
+            assertNotNull("query must fail when shard times out", failure);
+        } finally {
+            release.countDown();
+            mts.clearAllRules();
+        }
+        assertNoPendingFragmentTasks();
+    }
+
+    /**
+     * Producer-side backpressure error: a data node sends an error response mid-stream
+     * (simulating a backpressure timeout on the producer side). The coordinator receives the
+     * error via {@code handleException}, propagates it through the stage cascade, and the
+     * query fails cleanly without leaking tasks or native resources.
+     */
+    public void testProducerErrorMidStreamFailsQuery() throws Exception {
+        createAndSeedIndex();
+        String victim = pickShardHostingNode();
+        MockTransportService mts = (MockTransportService) internalCluster().getInstance(TransportService.class, victim);
+        mts.addRequestHandlingBehavior(FragmentExecutionAction.NAME, (handler, request, channel, task) -> {
+            channel.sendResponse(new RuntimeException("simulated backpressure timeout on producer"));
+        });
+        try {
+            Throwable failure = expectThrows(Exception.class, () ->
+                executePPL("source = " + INDEX + " | stats sum(value) as total", QUERY_TIMEOUT));
+            assertNotNull("query must fail when producer sends error", failure);
+        } finally {
+            mts.clearAllRules();
+        }
+        assertNoPendingFragmentTasks();
+    }
+
+    /**
      * #9 — Cancel the data-node fragment task mid-flight. Data-node task goes away,
      * coordinator surfaces cancellation.
      */
