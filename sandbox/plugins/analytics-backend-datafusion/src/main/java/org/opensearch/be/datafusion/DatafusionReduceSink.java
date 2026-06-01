@@ -234,7 +234,7 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
                     // here (double-free). The sender latched the drop (see DatafusionPartitionSender),
                     // so subsequent feeds for this input short-circuit and the producer stream is
                     // cancelled by the shard listener via isConsumerDone().
-                    logger.trace("[ReduceSink] receiver dropped before send (consumer finished), discarding batch");
+                    logger.debug("[ReduceSink] receiver dropped before send (consumer finished), discarding batch");
                     return;
                 }
                 feedCount.incrementAndGet();
@@ -247,7 +247,7 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
                 array.release();
                 arrowSchema.release();
                 if (closed) {
-                    logger.trace("[ReduceSink] send-after-close race caught, discarding batch");
+                    logger.debug("[ReduceSink] send-after-close race caught, discarding batch");
                     return;
                 }
                 throw e;
