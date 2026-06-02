@@ -64,7 +64,7 @@ public class ObjectFieldStitchTests extends OpenSearchTestCase {
         Optional<ObjectFieldStitch.Rewrite> rewrite = ObjectFieldStitch.maybeRewrite(project);
         assertTrue(rewrite.isPresent());
         assertEquals(List.of("city.name"), rewrite.get().stitch().names());
-        assertTrue(rewrite.get().stitch().outputs().get(0) instanceof ObjectFieldStitch.Output.Passthrough);
+        assertTrue(rewrite.get().stitch().outputs().get(0) instanceof Stitch.Output.Passthrough);
 
         // Top Project (passthrough RexInputRef) → stripped TableScan (leaves only).
         RelNode rewritten = rewrite.get().plan();
@@ -89,24 +89,24 @@ public class ObjectFieldStitchTests extends OpenSearchTestCase {
 
         ObjectFieldStitch.Rewrite rewrite = ObjectFieldStitch.maybeRewrite(project).orElseThrow();
         assertEquals(List.of("city"), rewrite.stitch().names());
-        assertTrue(rewrite.stitch().outputs().get(0) instanceof ObjectFieldStitch.Output.ObjectMap);
+        assertTrue(rewrite.stitch().outputs().get(0) instanceof Stitch.Output.ObjectMap);
 
-        ObjectFieldStitch.Output.ObjectMap stitch = (ObjectFieldStitch.Output.ObjectMap) rewrite.stitch().outputs().get(0);
+        Stitch.Output.ObjectMap stitch = (Stitch.Output.ObjectMap) rewrite.stitch().outputs().get(0);
         assertEquals(java.util.Set.of("name", "population", "location"), stitch.children().keySet());
-        assertTrue(stitch.children().get("name") instanceof ObjectFieldStitch.MapSource.Leaf);
-        assertTrue(stitch.children().get("population") instanceof ObjectFieldStitch.MapSource.Leaf);
-        assertTrue(stitch.children().get("location") instanceof ObjectFieldStitch.MapSource.Nested);
+        assertTrue(stitch.children().get("name") instanceof Stitch.MapSource.Leaf);
+        assertTrue(stitch.children().get("population") instanceof Stitch.MapSource.Leaf);
+        assertTrue(stitch.children().get("location") instanceof Stitch.MapSource.Nested);
 
         // 4 leaves emitted by the rewritten Project (name, population, latitude, longitude).
         assertEquals(4, ((LogicalProject) rewrite.plan()).getRowType().getFieldCount());
 
         // Apply the stitch to a synthetic engine row and verify the produced nested Map.
         Object[] engineRow = new Object[4];
-        engineRow[((ObjectFieldStitch.MapSource.Leaf) stitch.children().get("name")).engineColumnIndex()] = "Seattle";
-        engineRow[((ObjectFieldStitch.MapSource.Leaf) stitch.children().get("population")).engineColumnIndex()] = 750000;
-        ObjectFieldStitch.MapSource.Nested loc = (ObjectFieldStitch.MapSource.Nested) stitch.children().get("location");
-        engineRow[((ObjectFieldStitch.MapSource.Leaf) loc.children().get("latitude")).engineColumnIndex()] = 47.6;
-        engineRow[((ObjectFieldStitch.MapSource.Leaf) loc.children().get("longitude")).engineColumnIndex()] = -122.3;
+        engineRow[((Stitch.MapSource.Leaf) stitch.children().get("name")).engineColumnIndex()] = "Seattle";
+        engineRow[((Stitch.MapSource.Leaf) stitch.children().get("population")).engineColumnIndex()] = 750000;
+        Stitch.MapSource.Nested loc = (Stitch.MapSource.Nested) stitch.children().get("location");
+        engineRow[((Stitch.MapSource.Leaf) loc.children().get("latitude")).engineColumnIndex()] = 47.6;
+        engineRow[((Stitch.MapSource.Leaf) loc.children().get("longitude")).engineColumnIndex()] = -122.3;
 
         List<Object[]> stitched = rewrite.stitch().apply(java.util.Collections.singletonList(engineRow));
         assertEquals(1, stitched.size());
@@ -158,8 +158,8 @@ public class ObjectFieldStitchTests extends OpenSearchTestCase {
 
         ObjectFieldStitch.Rewrite rewrite = ObjectFieldStitch.maybeRewrite(project).orElseThrow();
         assertEquals(List.of("city.name", "city"), rewrite.stitch().names());
-        assertTrue(rewrite.stitch().outputs().get(0) instanceof ObjectFieldStitch.Output.Passthrough);
-        assertTrue(rewrite.stitch().outputs().get(1) instanceof ObjectFieldStitch.Output.ObjectMap);
+        assertTrue(rewrite.stitch().outputs().get(0) instanceof Stitch.Output.Passthrough);
+        assertTrue(rewrite.stitch().outputs().get(1) instanceof Stitch.Output.ObjectMap);
     }
 
     /** No ObjectType columns anywhere in the plan: rewriter is a no-op via short-circuit. */

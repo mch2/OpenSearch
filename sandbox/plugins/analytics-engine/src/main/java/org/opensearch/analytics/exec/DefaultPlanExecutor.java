@@ -31,6 +31,7 @@ import org.opensearch.analytics.exec.profile.QueryProfileBuilder;
 import org.opensearch.analytics.exec.task.AnalyticsQueryTask;
 import org.opensearch.analytics.planner.CapabilityRegistry;
 import org.opensearch.analytics.planner.ObjectFieldStitch;
+import org.opensearch.analytics.planner.Stitch;
 import org.opensearch.analytics.planner.PlannerContext;
 import org.opensearch.analytics.planner.PlannerImpl;
 import org.opensearch.analytics.planner.RelNodeUtils;
@@ -316,7 +317,7 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
         // Order engine columns against the rewritten plan's row type — for ObjectType-bearing
         // queries this is the leaf-only projection that the coordinator stitch then re-shapes.
         final List<String> outputColumnOrder = engineFragment.getRowType().getFieldNames();
-        final ObjectFieldStitch.Stitch stitch = objectRewrite.map(ObjectFieldStitch.Rewrite::stitch).orElse(null);
+        final Stitch stitch = objectRewrite.map(ObjectFieldStitch.Rewrite::stitch).orElse(null);
         // No taskManager.unregister here: the framework (HandledTransportAction) unregisters the
         // task it created for doExecute once this listener settles.
         ActionListener<Iterable<VectorSchemaRoot>> batchesListener = ActionListener.wrap(batches -> {

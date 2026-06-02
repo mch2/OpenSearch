@@ -188,6 +188,40 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
         );
     }
 
+    /** {@code | stats count() by city} — group-by on an object parent must be rejected. */
+    public void testGroupByObjectParentFails() throws IOException {
+        expectFailure(
+            "source=" + DATASET.indexName + " | stats count() by city",
+            "group-by on object parent should fail"
+        );
+    }
+
+    /**
+     * {@code | join} between two indices that both expose ObjectType columns.
+     * Multi-input operators are out of scope for the rewriter — must fail loudly rather than
+     * silently produce wrong results.
+     */
+    public void testJoinWithObjectTypeFails() throws IOException {
+        expectFailure(
+            "source=" + DATASET.indexName + " | join on city.name=city.name " + DATASET.indexName + " | fields city",
+            "join with ObjectType column on either side should fail"
+        );
+    }
+
+    /**
+     * Wildcard source matching the single object-bearing index. Wildcards resolve through
+     * IndexResolution; with only one matching index this should behave identically to the
+     * concrete-index path. Confirms that the rewriter doesn't break on wildcard sources.
+     */
+    public void testWildcardSourceWithObjectField() throws IOException {
+        // object_fields is the only index with that prefix in the test cluster; wildcard
+        // resolves to it alone, so the result mirrors the direct-source case.
+        assertRowsEqual(
+            "source=object_field* | sort id | fields city | head 1",
+            row(Map.of("name", "Seattle", "population", 750000, "location", Map.of("latitude", 47.6062, "longitude", -122.3321)))
+        );
+    }
+
     // ── helpers (mirrored from FieldsCommandIT) ────────────────────────────────
 
     private static List<Object> row(Object... values) {
