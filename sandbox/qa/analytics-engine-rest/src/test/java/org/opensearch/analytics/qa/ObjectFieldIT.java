@@ -112,7 +112,6 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
     // a fetch stage pulls the doc from the shard, and the parent sub-object is
     // reconstructed from _source or from parquet rows. QTF is tracked separately.
 
-    @AwaitsFix(bugUrl = "Object parent projection requires query-then-fetch (QTF) for source-based materialization")
     public void testSelectIntermediateObjectField() throws IOException {
         assertRowsEqual(
             "source=" + DATASET.indexName + " | fields city.location | head 1",
@@ -120,7 +119,6 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
         );
     }
 
-    @AwaitsFix(bugUrl = "Object parent projection requires query-then-fetch (QTF) for source-based materialization")
     public void testSelectTopLevelObjectField() throws IOException {
         assertRowsEqual(
             "source=" + DATASET.indexName + " | fields city | head 1",
@@ -128,7 +126,6 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
         );
     }
 
-    @AwaitsFix(bugUrl = "Object parent projection requires query-then-fetch (QTF) for source-based materialization")
     public void testSelectTopLevelObjectFieldWithSiblings() throws IOException {
         assertRowsEqual(
             "source=" + DATASET.indexName + " | fields city, account | head 1",
@@ -139,7 +136,6 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
         );
     }
 
-    @AwaitsFix(bugUrl = "Object parent projection requires query-then-fetch (QTF) for source-based materialization")
     public void testSelectParentAndLeafMixed() throws IOException {
         assertRowsEqual(
             "source=" + DATASET.indexName + " | fields city.name, city.location | head 1",

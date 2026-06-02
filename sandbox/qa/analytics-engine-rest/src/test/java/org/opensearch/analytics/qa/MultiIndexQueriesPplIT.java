@@ -8,7 +8,6 @@
 
 package org.opensearch.analytics.qa;
 
-import org.apache.lucene.tests.util.LuceneTestCase.AwaitsFix;
 
 /**
  * Multi-Index Queries PPL integration test (multi-index). Tests fields, rename, top, rare, span commands.
@@ -33,7 +32,6 @@ public class MultiIndexQueriesPplIT extends BasePplIT {
         }
     }
 
-    @AwaitsFix(bugUrl = "Failing due to unsupported operations")
     public void testMultiIndexQueriesPplQueries() throws Exception {
         ensureAdditionalDataProvisioned();
         runPplQueries();

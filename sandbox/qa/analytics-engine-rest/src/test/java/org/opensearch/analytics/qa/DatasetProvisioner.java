@@ -52,7 +52,11 @@ public final class DatasetProvisioner {
     }
 
     public static void provision(RestClient client, Dataset dataset) throws IOException {
-        provision(client, dataset, 0);
+        // Default to 2 shards so every dataset exercises the multi-shard planner paths
+        // (exchange insertion, coordinator reduce, per-shard fragment dispatch) rather than
+        // collapsing to a single-shard local plan. Tests needing a specific count call the
+        // 3-arg overload.
+        provision(client, dataset, 2);
     }
 
     /**
@@ -122,22 +126,39 @@ public final class DatasetProvisioner {
     }
 
     /**
-     * Inject parquet data format settings into the existing settings block.
+     * Inject parquet data format settings so EVERY provisioned index is a composite index
+     * with Lucene as the secondary format.
      *
      * <p>Lucene is set as the secondary format so the Lucene analytics backend is available
      * for text-search functions (match, match_phrase, query_string, ...). Without it those
      * functions fail at planning time with
      * {@code "No backend can evaluate filter predicate [OTHER_FUNCTION] on fields [...:text]"}
      * because the Lucene backend never gets enrolled as a candidate.
+     *
+     * <p>Robust to three mapping shapes: (1) a settings block with {@code number_of_shards}
+     * (anchor on it), (2) a settings block without it, (3) no settings block at all. Earlier
+     * this only handled (1), so mappings without {@code number_of_shards} (e.g. several
+     * lookup/join sub-indices) silently got NO composite settings and queried as plain Lucene
+     * indices — the source of spurious "Field [x] not found" failures.
      */
     private static String injectParquetSettings(String mappingBody) {
-        return mappingBody.replace(
-            "\"number_of_shards\"",
-            "\"index.pluggable.dataformat.enabled\": true, "
-                + "\"index.pluggable.dataformat\": \"composite\", "
-                + "\"index.composite.primary_data_format\": \"parquet\", "
-                + "\"index.composite.secondary_data_formats\": [\"lucene\"], "
-                + "\"number_of_shards\""
+        String composite = "\"index.pluggable.dataformat.enabled\": true, "
+            + "\"index.pluggable.dataformat\": \"composite\", "
+            + "\"index.composite.primary_data_format\": \"parquet\", "
+            + "\"index.composite.secondary_data_formats\": [\"lucene\"], ";
+        if (mappingBody.contains("\"number_of_shards\"")) {
+            return mappingBody.replace("\"number_of_shards\"", composite + "\"number_of_shards\"");
+        }
+        if (mappingBody.contains("\"settings\"")) {
+            return mappingBody.replaceFirst(
+                "\"settings\"\\s*:\\s*\\{",
+                "\"settings\": { " + composite + "\"number_of_shards\": 2,"
+            );
+        }
+        // No settings block — add one right after the root object's opening brace.
+        return mappingBody.replaceFirst(
+            "\\{",
+            "{ \"settings\": { " + composite + "\"number_of_shards\": 2 },"
         );
     }
 
