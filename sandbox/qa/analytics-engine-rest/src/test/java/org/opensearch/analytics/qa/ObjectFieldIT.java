@@ -10,6 +10,7 @@ package org.opensearch.analytics.qa;
 
 import org.opensearch.client.Request;
 import org.opensearch.client.Response;
+import org.opensearch.client.ResponseException;
 
 import java.io.IOException;
 import java.util.Arrays;
@@ -101,18 +102,15 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
         );
     }
 
-    // ── Object-parent projection (gated on query-then-fetch) ──────────────────
+    // ── Object-parent projection (analytics-engine ObjectFieldStitch) ─────────
     //
     // Projecting an object parent (top-level "city" or intermediate "city.location")
-    // returns a nested JSON value reconstructed from _source. Analytics-engine emits
-    // only flat leaves into the Calcite row type today, so parent references fall
-    // through QualifiedNameResolver and throw "Field [city.location] not found".
-    //
-    // Support requires query-then-fetch (QTF): coordinator returns docIds post-filter,
-    // a fetch stage pulls the doc from the shard, and the parent sub-object is
-    // reconstructed from _source or from parquet rows. QTF is tracked separately.
+    // returns a nested JSON value built from the underlying flat leaves. The schema
+    // surfaces each parent as a synthetic ObjectType column; analytics-engine's
+    // ObjectFieldStitch rewrites those references into leaf projections at planning
+    // time and re-assembles them into a Map<String,Object> on the coordinator side
+    // before the response goes back to the SQL plugin.
 
-    @AwaitsFix(bugUrl = "Object parent projection requires query-then-fetch (QTF) for source-based materialization")
     public void testSelectIntermediateObjectField() throws IOException {
         assertRowsEqual(
             "source=" + DATASET.indexName + " | fields city.location | head 1",
@@ -120,7 +118,6 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
         );
     }
 
-    @AwaitsFix(bugUrl = "Object parent projection requires query-then-fetch (QTF) for source-based materialization")
     public void testSelectTopLevelObjectField() throws IOException {
         assertRowsEqual(
             "source=" + DATASET.indexName + " | fields city | head 1",
@@ -128,7 +125,6 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
         );
     }
 
-    @AwaitsFix(bugUrl = "Object parent projection requires query-then-fetch (QTF) for source-based materialization")
     public void testSelectTopLevelObjectFieldWithSiblings() throws IOException {
         assertRowsEqual(
             "source=" + DATASET.indexName + " | fields city, account | head 1",
@@ -139,7 +135,6 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
         );
     }
 
-    @AwaitsFix(bugUrl = "Object parent projection requires query-then-fetch (QTF) for source-based materialization")
     public void testSelectParentAndLeafMixed() throws IOException {
         assertRowsEqual(
             "source=" + DATASET.indexName + " | fields city.name, city.location | head 1",
@@ -147,10 +142,73 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
         );
     }
 
+    // ── Negative tests: only fetch/projection of object parents is supported ──
+    //
+    // Filtering, aggregating, evaluating, sorting on an object-parent column has no defined
+    // semantics — the schema only exposes the parent as an opaque MAP marker, and the engine
+    // strips it before execution. These tests pin the failure surface so a future change that
+    // accidentally allows the operation surfaces here.
+
+    /** {@code | where city = ...} — predicate on an object parent must be rejected. */
+    public void testFilterOnObjectParentFails() throws IOException {
+        expectFailure(
+            "source=" + DATASET.indexName + " | where city = 'Seattle'",
+            "filter on object parent should fail"
+        );
+    }
+
+    /** {@code | stats min(city)} — aggregate over an object parent must be rejected. */
+    public void testAggregateOnObjectParentFails() throws IOException {
+        expectFailure(
+            "source=" + DATASET.indexName + " | stats min(city)",
+            "aggregate on object parent should fail"
+        );
+    }
+
+    /**
+     * {@code | eval x = city | fields x} — assigning the parent to a new alias and projecting
+     * it works as if the user had written {@code | fields city} directly. The SQL plugin
+     * flattens the eval+fields pair, so the topmost Project we see still references the
+     * underlying ObjectType column. We exercise it here as positive coverage rather than a
+     * negative case.
+     */
+    public void testEvalAssignObjectParentPasses() throws IOException {
+        assertRowsEqual(
+            "source=" + DATASET.indexName + " | eval x = city | fields x | head 1",
+            row(Map.of("name", "Seattle", "population", 750000, "location", Map.of("latitude", 47.6062, "longitude", -122.3321)))
+        );
+    }
+
+    /** {@code | sort city} — sorting on an object parent must be rejected. */
+    public void testSortOnObjectParentFails() throws IOException {
+        expectFailure(
+            "source=" + DATASET.indexName + " | sort city",
+            "sort on object parent should fail"
+        );
+    }
+
     // ── helpers (mirrored from FieldsCommandIT) ────────────────────────────────
 
     private static List<Object> row(Object... values) {
         return Arrays.asList(values);
+    }
+
+    /**
+     * Runs a PPL query and asserts that it fails — the SQL plugin or analytics-engine must
+     * reject the query rather than silently producing wrong results. We deliberately don't
+     * pin a specific error code or message because the failure can surface from the SQL
+     * plugin's validator (column-not-found semantics on the synthetic ObjectType column),
+     * from analytics-engine's rewriter (RexInputRef-to-stripped-column thrown), or from
+     * DataFusion (unable to convert MAP type) — all valid forms of "reject this".
+     */
+    private void expectFailure(String ppl, String why) throws IOException {
+        try {
+            executePpl(ppl);
+            fail("Query should have failed (" + why + "): " + ppl);
+        } catch (ResponseException e) {
+            // Expected: the server returned a 4xx / 5xx error. We don't assert on the exact
+            // status code or message — any non-success return is acceptable here.
+        }
     }
 
     @SafeVarargs

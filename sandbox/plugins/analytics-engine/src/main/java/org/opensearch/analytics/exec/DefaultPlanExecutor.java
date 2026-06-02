@@ -30,6 +30,7 @@ import org.opensearch.analytics.exec.profile.QueryProfile;
 import org.opensearch.analytics.exec.profile.QueryProfileBuilder;
 import org.opensearch.analytics.exec.task.AnalyticsQueryTask;
 import org.opensearch.analytics.planner.CapabilityRegistry;
+import org.opensearch.analytics.planner.ObjectFieldStitch;
 import org.opensearch.analytics.planner.PlannerContext;
 import org.opensearch.analytics.planner.PlannerImpl;
 import org.opensearch.analytics.planner.RelNodeUtils;
@@ -227,8 +228,13 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
         // TODO: remove the null fallback once every front-end (test-ppl-frontend,
         // dsl-query-executor) threads an EngineContextProvider.getContext() snapshot through.
         ClusterState planningState = queryCtx != null ? queryCtx.clusterState() : clusterService.state();
+        // Strip any synthetic ObjectType columns from the plan so the rest of planning sees
+        // only real leaf columns, and capture the coordinator-side stitch needed to re-shape
+        // the engine output rows back into nested Maps for any | fields parent.object reference.
+        ObjectFieldStitch.StitchPlan stitchPlan = ObjectFieldStitch.rewrite(logicalFragment);
+        RelNode engineFragment = stitchPlan.rewrittenPlan();
         RelNode plan = PlannerImpl.createPlan(
-            logicalFragment,
+            engineFragment,
             new PlannerContext(capabilityRegistry, planningState, indexNameExpressionResolver, false, preferMetadataDriver)
         );
         final String fullPlan = profile ? org.apache.calcite.plan.RelOptUtil.toString(plan) : null;
@@ -307,12 +313,17 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
             listener
         );
 
-        final List<String> outputColumnOrder = logicalFragment.getRowType().getFieldNames();
+        // Engine output column order: post-stitch the row will only retain the user-visible
+        // columns, but the engine itself produces the Project's full output (leaves needed by
+        // the stitch + any passthrough columns), so order against the rewritten plan's row
+        // type, not the original plan's.
+        final List<String> outputColumnOrder = engineFragment.getRowType().getFieldNames();
+        final ObjectFieldStitch.StitchPlan capturedStitch = stitchPlan;
         // No taskManager.unregister here: the framework (HandledTransportAction) unregisters the
-        // task it created for doExecute once this listener settles. Unregistering it ourselves
-        // would double-free a task we no longer own.
+        // task it created for doExecute once this listener settles.
         ActionListener<Iterable<VectorSchemaRoot>> batchesListener = ActionListener.wrap(batches -> {
-            Iterable<Object[]> rows = batchesToRows(batches, outputColumnOrder);
+            Iterable<Object[]> engineRows = batchesToRows(batches, outputColumnOrder);
+            Iterable<Object[]> rows = capturedStitch.needsStitch() ? applyStitch(engineRows, capturedStitch.outputs()) : engineRows;
             long totalRows = rows instanceof List ? ((List<?>) rows).size() : 0;
             queryListener.onQueryComplete(dag.queryId(), System.nanoTime() - queryStartNanos, totalRows);
             rowsListener.onResponse(rows);
@@ -438,6 +449,22 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
             }
         }
         return rows;
+    }
+
+    /**
+     * Apply the {@link ObjectFieldStitch.StitchPlan} to engine-output rows. The result
+     * has one cell per user-visible output column; Stitch outputs are assembled into a
+     * nested {@code Map<String,Object>}, Passthrough outputs are forwarded unchanged.
+     */
+    private static Iterable<Object[]> applyStitch(Iterable<Object[]> engineRows, List<ObjectFieldStitch.OutputColumn> outputs) {
+        // Materialize once: engineRows is itself a List built by batchesToRows, but assert the
+        // contract by walking eagerly so any IndexOutOfBoundsException surfaces at the same
+        // call site as the engine response (not lazily on later iteration).
+        List<Object[]> stitched = new ArrayList<>();
+        for (Object[] row : engineRows) {
+            stitched.add(ObjectFieldStitch.stitchRow(row, outputs));
+        }
+        return stitched;
     }
 
     private static List<FieldVector> orderedColumns(VectorSchemaRoot batch, List<String> targetColumnOrder) {

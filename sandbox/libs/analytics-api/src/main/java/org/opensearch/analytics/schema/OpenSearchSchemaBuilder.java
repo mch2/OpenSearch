@@ -279,11 +279,18 @@ public class OpenSearchSchemaBuilder {
             Map<String, Object> fieldProps = (Map<String, Object>) fieldEntry.getValue();
             String fieldType = (String) fieldProps.get("type");
             // Object types: implicit when "properties" is present without "type", or explicit "type: object".
-            // Recurse into sub-properties so dotted leaf paths ("city.location.latitude") appear as flat columns.
+            // Recurse into sub-properties so dotted leaf paths ("city.location.latitude") appear as flat
+            // columns, and also emit the parent itself as a synthetic {@link ObjectType} column so PPL
+            // {@code | fields city} can resolve. The analytics-engine rewrites references to that synthetic
+            // column into a stitched Map<String,Object> over the underlying leaves before execution.
             if (fieldType == null || "object".equals(fieldType)) {
                 Map<String, Object> nested = (Map<String, Object>) fieldProps.get("properties");
                 if (nested != null) {
                     addLeafFields(builder, typeFactory, nested, fieldName);
+                    ObjectType parentType = buildObjectType(typeFactory, nested, fieldName);
+                    if (parentType != null) {
+                        builder.add(fieldName, parentType);
+                    }
                 }
                 continue;
             }
@@ -300,5 +307,47 @@ public class OpenSearchSchemaBuilder {
             }
             builder.add(fieldName, columnType);
         }
+    }
+
+    /**
+     * Build the {@link ObjectType} descriptor for an object-parent column. Walks the same
+     * sub-properties that {@link #addLeafFields} does and records, for each immediate child:
+     * either a leaf-path child (the flat dotted column it lowers to) or a nested-object child
+     * (its own recursively-built {@link ObjectType}). Returns {@code null} when the object has
+     * no projectable leaves under it (every child unsupported / nested) — exposing such an
+     * object as a parent column would just produce an empty Map.
+     */
+    @SuppressWarnings("unchecked")
+    private static ObjectType buildObjectType(RelDataTypeFactory typeFactory, Map<String, Object> properties, String pathPrefix) {
+        LinkedHashMap<String, ObjectType.Child> children = new LinkedHashMap<>();
+        for (Map.Entry<String, Object> fieldEntry : properties.entrySet()) {
+            String childName = fieldEntry.getKey();
+            String childPath = pathPrefix + "." + childName;
+            Map<String, Object> childProps = (Map<String, Object>) fieldEntry.getValue();
+            String childType = (String) childProps.get("type");
+            if (childType == null || "object".equals(childType)) {
+                Map<String, Object> nested = (Map<String, Object>) childProps.get("properties");
+                if (nested != null) {
+                    ObjectType nestedType = buildObjectType(typeFactory, nested, childPath);
+                    if (nestedType != null) {
+                        children.put(childName, new ObjectType.Child.Nested(nestedType));
+                    }
+                }
+                continue;
+            }
+            if ("nested".equals(childType)) {
+                continue;
+            }
+            // Only include children that have a Calcite representation — unsupported leaves are
+            // dropped so the synthesized stitch doesn't reference a column that isn't in the row type.
+            if (buildLeafType(childType, typeFactory) == null) {
+                continue;
+            }
+            children.put(childName, new ObjectType.Child.Leaf(childPath));
+        }
+        if (children.isEmpty()) {
+            return null;
+        }
+        return new ObjectType(true, children);
     }
 }

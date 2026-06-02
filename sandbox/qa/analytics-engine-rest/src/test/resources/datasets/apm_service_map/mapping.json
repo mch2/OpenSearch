@@ -1,0 +1,64 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0
+  },
+  "mappings": {
+    "properties": {
+      "timestamp": {
+        "type": "date",
+        "format": "yyyy-MM-dd HH:mm:ss.SSS"
+      },
+      "nodeConnectionHash": {
+        "type": "keyword"
+      },
+      "operationConnectionHash": {
+        "type": "keyword"
+      },
+      "sourceNode": {
+        "properties": {
+          "keyAttributes": {
+            "properties": {
+              "name": {"type": "keyword"},
+              "environment": {"type": "keyword"},
+              "type": {"type": "keyword"}
+            }
+          },
+          "groupByAttributes": {
+            "properties": {
+              "sdkName": {"type": "keyword"},
+              "sdkLanguage": {"type": "keyword"}
+            }
+          }
+        }
+      },
+      "targetNode": {
+        "properties": {
+          "keyAttributes": {
+            "properties": {
+              "name": {"type": "keyword"},
+              "environment": {"type": "keyword"},
+              "type": {"type": "keyword"}
+            }
+          },
+          "groupByAttributes": {
+            "properties": {
+              "sdkName": {"type": "keyword"},
+              "sdkLanguage": {"type": "keyword"}
+            }
+          }
+        }
+      },
+      "sourceOperation": {
+        "properties": {
+          "name": {"type": "keyword"}
+        }
+      },
+      "targetOperation": {
+        "properties": {
+          "name": {"type": "keyword"}
+        }
+      }
+    }
+  }
+}

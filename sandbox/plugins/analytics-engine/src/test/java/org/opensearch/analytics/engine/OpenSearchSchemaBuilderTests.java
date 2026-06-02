@@ -114,9 +114,12 @@ public class OpenSearchSchemaBuilderTests extends OpenSearchTestCase {
     }
 
     /**
-     * Test that nested/object fields are skipped.
+     * Test that nested fields are skipped, and that an empty object (no sub-properties) is
+     * also skipped because it has no children to stitch. Objects with sub-properties surface
+     * as {@link org.opensearch.analytics.schema.ObjectType} parent columns — covered by
+     * {@link #testObjectParentExposedAlongsideLeaves}.
      */
-    public void testNestedAndObjectFieldsSkipped() throws Exception {
+    public void testNestedAndEmptyObjectFieldsSkipped() throws Exception {
         ClusterState clusterState = buildClusterState(
             Map.of("nested_index", Map.of("name", "keyword", "address", "object", "tags", "nested"))
         );
@@ -127,7 +130,8 @@ public class OpenSearchSchemaBuilderTests extends OpenSearchTestCase {
         assertNotNull(table);
 
         RelDataType rowType = table.getRowType(new org.apache.calcite.jdbc.JavaTypeFactoryImpl());
-        assertEquals("Should only have 'name' field, skipping object/nested", 1, rowType.getFieldCount());
+        // Empty object (no sub-properties) and nested fields are both dropped.
+        assertEquals("Should only have 'name' field, skipping empty-object/nested", 1, rowType.getFieldCount());
         assertFieldType(rowType, "name", SqlTypeName.VARCHAR);
     }
 
@@ -255,10 +259,19 @@ public class OpenSearchSchemaBuilderTests extends OpenSearchTestCase {
         assertNotNull(table);
 
         RelDataType rowType = table.getRowType(new org.apache.calcite.jdbc.JavaTypeFactoryImpl());
-        assertEquals("Only 2 supported nested leaves should remain", 2, rowType.getFieldCount());
+        // 2 supported nested leaves + the synthetic 'customer' object-parent column.
+        assertEquals("2 leaves plus the parent object column", 3, rowType.getFieldCount());
         assertFieldType(rowType, "customer.id", SqlTypeName.VARCHAR);
         assertFieldType(rowType, "customer.age", SqlTypeName.INTEGER);
         assertNull("nested geo_point leaf must be dropped", rowType.getField("customer.home", true, false));
+        RelDataType customer = rowType.getField("customer", true, false).getType();
+        assertTrue("customer must be ObjectType, got " + customer.getClass(), customer instanceof org.opensearch.analytics.schema.ObjectType);
+        org.opensearch.analytics.schema.ObjectType customerObj = (org.opensearch.analytics.schema.ObjectType) customer;
+        assertEquals(
+            "Only the supported leaves are surfaced as children of the parent",
+            java.util.Set.of("id", "age"),
+            customerObj.children().keySet()
+        );
     }
 
     /**
@@ -404,6 +417,58 @@ public class OpenSearchSchemaBuilderTests extends OpenSearchTestCase {
         RelDataType binType = rowType.getField("blob", true, false).getType();
         assertTrue("binary column must be BinaryType, got " + binType.getClass(), binType instanceof BinaryType);
         assertEquals(SqlTypeName.VARBINARY, binType.getSqlTypeName());
+    }
+
+    /**
+     * Object-parent columns are exposed alongside their flat dotted leaves. PPL's qualified-name
+     * resolver does longest-match-first, so {@code city.name} finds the flat leaf; only a bare
+     * {@code city} reference resolves to the synthetic ObjectType column. The ObjectType records
+     * the immediate-child list so the analytics-engine rewriter can stitch back a Map without
+     * re-walking the mapping.
+     */
+    public void testObjectParentExposedAlongsideLeaves() throws Exception {
+        String mapping = "{\"properties\":{"
+            + "\"city\":{\"properties\":{"
+            + "\"name\":{\"type\":\"keyword\"},"
+            + "\"location\":{\"properties\":{"
+            + "\"latitude\":{\"type\":\"double\"},"
+            + "\"longitude\":{\"type\":\"double\"}"
+            + "}}"
+            + "}}"
+            + "}}";
+        ClusterState clusterState = buildClusterStateRaw("city_index", mapping);
+
+        SchemaPlus schema = OpenSearchSchemaBuilder.buildSchema(clusterState);
+        Table table = schema.getTable("city_index");
+        assertNotNull(table);
+
+        RelDataType rowType = table.getRowType(new org.apache.calcite.jdbc.JavaTypeFactoryImpl());
+        // Flat leaves: city.name, city.location.latitude, city.location.longitude.
+        // Parents: city, city.location.
+        assertEquals("3 leaves + 2 parents", 5, rowType.getFieldCount());
+        assertFieldType(rowType, "city.name", SqlTypeName.VARCHAR);
+        assertFieldType(rowType, "city.location.latitude", SqlTypeName.DOUBLE);
+        assertFieldType(rowType, "city.location.longitude", SqlTypeName.DOUBLE);
+
+        RelDataType cityType = rowType.getField("city", true, false).getType();
+        assertTrue("city must be ObjectType", cityType instanceof org.opensearch.analytics.schema.ObjectType);
+        org.opensearch.analytics.schema.ObjectType city = (org.opensearch.analytics.schema.ObjectType) cityType;
+        assertEquals(java.util.Set.of("name", "location"), city.children().keySet());
+        assertTrue(
+            "city.name child is a Leaf",
+            city.children().get("name") instanceof org.opensearch.analytics.schema.ObjectType.Child.Leaf
+        );
+        assertTrue(
+            "city.location child is a Nested",
+            city.children().get("location") instanceof org.opensearch.analytics.schema.ObjectType.Child.Nested
+        );
+
+        RelDataType locType = rowType.getField("city.location", true, false).getType();
+        assertTrue("city.location must be ObjectType", locType instanceof org.opensearch.analytics.schema.ObjectType);
+        org.opensearch.analytics.schema.ObjectType loc = (org.opensearch.analytics.schema.ObjectType) locType;
+        assertEquals(java.util.Set.of("latitude", "longitude"), loc.children().keySet());
+        assertTrue(loc.children().get("latitude") instanceof org.opensearch.analytics.schema.ObjectType.Child.Leaf);
+        assertEquals("city.location.latitude", ((org.opensearch.analytics.schema.ObjectType.Child.Leaf) loc.children().get("latitude")).path());
     }
 
     /**
