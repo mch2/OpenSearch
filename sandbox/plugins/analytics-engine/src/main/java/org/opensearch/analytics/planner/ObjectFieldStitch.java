@@ -11,6 +11,7 @@ package org.opensearch.analytics.planner;
 import org.apache.calcite.plan.RelOptAbstractTable;
 import org.apache.calcite.plan.RelOptTable;
 import org.apache.calcite.rel.RelNode;
+import org.apache.calcite.rel.RelVisitor;
 import org.apache.calcite.rel.core.TableScan;
 import org.apache.calcite.rel.logical.LogicalProject;
 import org.apache.calcite.rel.logical.LogicalTableScan;
@@ -25,33 +26,31 @@ import org.apache.calcite.rex.RexShuttle;
 import org.opensearch.analytics.schema.ObjectType;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 /**
- * Rewrites a logical plan that references {@link ObjectType} parent columns into one the
- * storage engine can run, plus a coordinator-side stitch description.
+ * Lowers PPL {@code | fields parent.object} queries onto a leaf-only physical plan plus a
+ * coordinator-side row stitcher.
  *
- * <p>The {@code OpenSearchSchemaBuilder} surfaces each object-parent as a synthetic
- * {@link ObjectType} column alongside the flat dotted leaves. This rewriter:
+ * <p>{@code OpenSearchSchemaBuilder} surfaces every object-parent as a synthetic
+ * {@link ObjectType} column alongside flat dotted leaves so PPL's name resolver can validate
+ * a bare {@code parent} reference. The storage backend can't read that synthetic column, so
+ * before planning we:
  * <ol>
- *   <li>Strips every {@link ObjectType} column from each {@link TableScan} in the tree.</li>
- *   <li>Remaps {@link RexInputRef} indices in every upstream operator so positions stay
- *       valid against the post-strip scan row type.</li>
- *   <li>Detects the topmost {@link LogicalProject} that references {@link ObjectType}
- *       columns and replaces those references with leaf-column projections, capturing a
- *       {@link StitchPlan} that re-assembles the leaves into a nested
- *       {@code Map<String,Object>} on the coordinator side.</li>
+ *   <li>Strip {@link ObjectType} columns from each {@link TableScan}.</li>
+ *   <li>Drop upstream RexInputRef-to-stripped passthroughs and remap surviving indices.</li>
+ *   <li>At the topmost {@link LogicalProject}, expand each {@link ObjectType} reference into
+ *       leaf-column projections plus a {@link Stitch} description that re-assembles the
+ *       leaves into a nested {@code Map<String,Object>} on the coordinator.</li>
  * </ol>
  *
- * <p>Scope: this rewriter only EXPANDS ObjectType references at the topmost projection. Any
- * ObjectType reference in a filter, aggregate, or eval upstream of that projection survives
- * as a typed-NULL value because the synthetic Project above the scan replaces ObjectType
- * columns with NULL placeholders. So a {@code | where parent.object IS NULL} would silently
- * be true; a {@code | stats min(parent.object)} would aggregate NULLs. We don't support those
- * semantically — the schema only exposes the parent as an opaque MAP marker, and pushing it
- * into a predicate has no defined meaning without query-then-fetch.
+ * <p>Only direct projection of an object parent is supported. Filters, aggregates, sorts, and
+ * computed expressions over an {@link ObjectType} fail fast — there's no defined semantic for
+ * computing on an opaque map placeholder.
  *
  * @opensearch.internal
  */
@@ -59,250 +58,314 @@ public final class ObjectFieldStitch {
 
     private ObjectFieldStitch() {}
 
-    /** Description of a single output column produced by the rewritten plan. */
-    public sealed interface OutputColumn permits OutputColumn.Passthrough, OutputColumn.Stitch {
-
-        /** User-visible column name. */
-        String name();
-
-        /** Pass through one column from the engine's rewritten output unchanged. */
-        record Passthrough(String name, int engineColumnIndex) implements OutputColumn {}
-
-        /**
-         * Build a nested {@code Map<String,Object>} from a set of engine columns according
-         * to a recursive child structure.
-         */
-        record Stitch(String name, Map<String, ChildSource> children) implements OutputColumn {}
-
-        /** Source for a child of a {@link Stitch}. */
-        sealed interface ChildSource permits ChildSource.LeafColumn, ChildSource.NestedStitch {
-
-            /** Pull the value from a column produced by the rewritten plan. */
-            record LeafColumn(int engineColumnIndex) implements ChildSource {}
-
-            /** Build a child {@code Map<String,Object>} from a nested {@link Stitch}. */
-            record NestedStitch(Stitch stitch) implements ChildSource {}
-        }
-    }
+    /**
+     * Rewrite output: the engine-safe plan plus the row-level stitch description (if any
+     * top-level Project actually selects an {@link ObjectType} column).
+     */
+    public record Rewrite(RelNode plan, Stitch stitch) {}
 
     /**
-     * Result of rewriting a plan: the engine-safe plan, and the description of how to
-     * reassemble its output rows into the user-requested column shape.
+     * Coordinator-side row reshape: takes engine-output rows and returns user-visible rows.
+     * Each entry in {@code outputs} either passes through a single engine column or stitches
+     * a subset of engine columns into a nested {@code Map<String,Object>}.
      */
-    public record StitchPlan(RelNode rewrittenPlan, List<OutputColumn> outputs) {
+    public record Stitch(List<Output> outputs) {
 
-        /** True when the plan needs a coordinator-side stitch step. */
-        public boolean needsStitch() {
-            for (OutputColumn col : outputs) {
-                if (col instanceof OutputColumn.Stitch) return true;
+        /** Apply the stitch to engine rows. */
+        public List<Object[]> apply(Iterable<Object[]> engineRows) {
+            List<Object[]> stitched = new ArrayList<>();
+            for (Object[] row : engineRows) {
+                Object[] out = new Object[outputs.size()];
+                for (int i = 0; i < outputs.size(); i++) {
+                    out[i] = outputs.get(i).read(row);
+                }
+                stitched.add(out);
             }
-            return false;
+            return stitched;
         }
 
-        /** User-visible column names, in order. */
-        public List<String> outputNames() {
+        /** Output column names, in order. */
+        public List<String> names() {
             List<String> names = new ArrayList<>(outputs.size());
-            for (OutputColumn col : outputs) names.add(col.name());
+            for (Output col : outputs) names.add(col.name());
             return names;
         }
     }
 
-    /**
-     * Rewrite a plan whose top-level Project may select {@link ObjectType} columns. If no
-     * ObjectType references are present at the topmost Project — including the no-Project
-     * case — the StitchPlan's outputs are all passthroughs and the rewritten plan is the
-     * input plan with ObjectType columns stripped from its TableScans (a no-op when none
-     * are present, e.g. flat-leaf-only schemas).
-     */
-    public static StitchPlan rewrite(RelNode root) {
-        RewriteContext ctx = new RewriteContext(root.getCluster().getRexBuilder(), findTopProject(root));
-        RelNode rewritten = rewriteNode(root, ctx);
-        return new StitchPlan(rewritten, ctx.outputs);
-    }
+    /** Single output column: either a direct passthrough or an object-stitch. */
+    public sealed interface Output permits Output.Passthrough, Output.ObjectMap {
 
-    /**
-     * Apply the {@link StitchPlan} to a single engine-output row. Returns a new row whose
-     * length / column order matches {@link StitchPlan#outputs()}.
-     */
-    public static Object[] stitchRow(Object[] engineRow, List<OutputColumn> outputs) {
-        Object[] out = new Object[outputs.size()];
-        for (int i = 0; i < outputs.size(); i++) {
-            OutputColumn col = outputs.get(i);
-            if (col instanceof OutputColumn.Passthrough p) {
-                out[i] = engineRow[p.engineColumnIndex()];
-            } else {
-                out[i] = buildMap(((OutputColumn.Stitch) col).children(), engineRow);
+        String name();
+
+        /** Read this output's value from an engine row. */
+        Object read(Object[] engineRow);
+
+        /** One engine column passed through unchanged. */
+        record Passthrough(String name, int engineColumnIndex) implements Output {
+            @Override
+            public Object read(Object[] engineRow) {
+                return engineRow[engineColumnIndex];
             }
         }
-        return out;
+
+        /** Build a nested {@code Map} from a recursive child structure rooted at engine columns. */
+        record ObjectMap(String name, Map<String, MapSource> children) implements Output {
+            @Override
+            public Object read(Object[] engineRow) {
+                return buildMap(children, engineRow);
+            }
+        }
     }
 
-    private static Map<String, Object> buildMap(Map<String, OutputColumn.ChildSource> children, Object[] engineRow) {
-        Map<String, Object> result = new LinkedHashMap<>(children.size());
-        for (Map.Entry<String, OutputColumn.ChildSource> entry : children.entrySet()) {
-            OutputColumn.ChildSource src = entry.getValue();
-            Object value;
-            if (src instanceof OutputColumn.ChildSource.LeafColumn leaf) {
-                value = engineRow[leaf.engineColumnIndex()];
-            } else {
-                value = buildMap(((OutputColumn.ChildSource.NestedStitch) src).stitch().children(), engineRow);
+    /** A child of an {@link Output.ObjectMap} — either a leaf engine column or a nested map. */
+    public sealed interface MapSource permits MapSource.Leaf, MapSource.Nested {
+        Object read(Object[] engineRow);
+
+        record Leaf(int engineColumnIndex) implements MapSource {
+            @Override
+            public Object read(Object[] engineRow) {
+                return engineRow[engineColumnIndex];
             }
-            result.put(entry.getKey(), value);
+        }
+
+        record Nested(Map<String, MapSource> children) implements MapSource {
+            @Override
+            public Object read(Object[] engineRow) {
+                return buildMap(children, engineRow);
+            }
+        }
+    }
+
+    private static Map<String, Object> buildMap(Map<String, MapSource> children, Object[] engineRow) {
+        Map<String, Object> result = new LinkedHashMap<>(children.size());
+        for (Map.Entry<String, MapSource> entry : children.entrySet()) {
+            result.put(entry.getKey(), entry.getValue().read(engineRow));
         }
         return result;
     }
 
     /**
-     * Returns the topmost {@link LogicalProject} in {@code root}. ObjectType references can
-     * only appear at the user-visible projection that the SQL plugin emits at the top of the
-     * tree (the {@code | fields ...} step). Wrapping operators like Sort/SystemLimit are
-     * uninteresting — the topmost LogicalProject is the one we may need to expand.
+     * Rewrite the plan if any {@link TableScan} exposes an {@link ObjectType} column. Returns
+     * {@link Optional#empty()} otherwise — the input plan is engine-safe as-is and no
+     * coordinator stitch is needed. This short-circuit also avoids touching multi-input
+     * operators (joins, unions) whose RexInputRef remap rules we don't model.
      */
+    public static Optional<Rewrite> maybeRewrite(RelNode root) {
+        if (!hasObjectTypeColumns(root)) {
+            return Optional.empty();
+        }
+        Rewriter rewriter = new Rewriter(root.getCluster().getRexBuilder(), findTopProject(root));
+        RelNode rewritten = rewriter.visit(root);
+        return Optional.of(new Rewrite(rewritten, new Stitch(rewriter.outputs)));
+    }
+
+    private static boolean hasObjectTypeColumns(RelNode root) {
+        boolean[] found = new boolean[1];
+        new RelVisitor() {
+            @Override
+            public void visit(RelNode node, int ordinal, RelNode parent) {
+                if (found[0]) return;
+                if (node instanceof TableScan scan) {
+                    for (RelDataTypeField field : scan.getRowType().getFieldList()) {
+                        if (field.getType() instanceof ObjectType) {
+                            found[0] = true;
+                            return;
+                        }
+                    }
+                }
+                super.visit(node, ordinal, parent);
+            }
+        }.go(root);
+        return found[0];
+    }
+
+    /** Topmost {@link LogicalProject} reachable through the unique-input chain, or null. */
     private static RelNode findTopProject(RelNode root) {
-        RelNode current = root;
-        while (current != null) {
-            if (current instanceof LogicalProject) {
-                return current;
-            }
-            if (current.getInputs().size() != 1) {
-                return null;
-            }
-            current = current.getInput(0);
+        for (RelNode current = root; current != null; current = current.getInput(0)) {
+            if (current instanceof LogicalProject) return current;
+            if (current.getInputs().size() != 1) return null;
         }
         return null;
     }
 
-    /** Per-rewrite mutable state: leaf-name → engine column index map and the captured outputs. */
-    private static final class RewriteContext {
-        final RexBuilder rexBuilder;
-        // Field name → index in the row type of the synthetic Project we insert just above the
-        // stripped TableScan. The synthetic Project re-introduces every ObjectType column as a
-        // typed-NULL placeholder so upstream operators see the row type they were validated
-        // against. Index positions match the original schema; consequently the leafIndex map's
-        // size and ordering also matches the original.
-        final Map<String, Integer> leafIndex = new LinkedHashMap<>();
-        // Names of columns whose value is a typed-NULL placeholder (the ObjectType parents).
-        // Used by the topmost-Project rewriter to know when an output expression is a
-        // RexInputRef pointing at a synthetic ObjectType column that needs to be expanded into
-        // a Stitch over leaves rather than passed through.
-        final java.util.Set<String> objectColumns = new java.util.HashSet<>();
-        // Column-name → original {@link ObjectType} captured during scan-strip. Calcite may
-        // canonize the ObjectType subclass into a plain MapSqlType inside
-        // {@code RexBuilder.makeNullLiteral}, so the synthetic Project's row type loses the
-        // subclass identity. We keep the descriptor here so the topmost Project's rewriter
-        // can still expand the column into the right child structure.
-        final Map<String, ObjectType> objectTypeByName = new LinkedHashMap<>();
-        List<OutputColumn> outputs = new ArrayList<>();
-        // The topmost LogicalProject in the tree (or null if the plan has no Project at all).
-        // Identity-matched so we know exactly when to expand ObjectType references vs. just
-        // pass through.
-        final RelNode topProject;
+    /** Bottom-up rewrite walker. */
+    private static final class Rewriter {
+        private final RexBuilder rexBuilder;
+        private final RelNode topProject;
+        // Leaf column name → its index in the post-strip scan row type.
+        private final Map<String, Integer> leafIndex = new LinkedHashMap<>();
+        // Stripped object-parent column name → its captured ObjectType descriptor (Calcite may
+        // canonize the subclass to plain MapSqlType, so we keep the descriptor on the side).
+        private final Map<String, ObjectType> objectTypes = new LinkedHashMap<>();
+        // Captured stitch outputs from the top Project rewrite.
+        List<Output> outputs = List.of();
 
-        RewriteContext(RexBuilder rexBuilder, RelNode topProject) {
+        Rewriter(RexBuilder rexBuilder, RelNode topProject) {
             this.rexBuilder = rexBuilder;
             this.topProject = topProject;
         }
+
+        RelNode visit(RelNode node) {
+            if (node instanceof LogicalTableScan scan) return rewriteScan(scan);
+            List<RelNode> newInputs = new ArrayList<>(node.getInputs().size());
+            for (RelNode input : node.getInputs()) newInputs.add(visit(input));
+
+            if (node == topProject && node instanceof LogicalProject project) {
+                return rewriteTopProject(project, newInputs.get(0));
+            }
+
+            // Build oldIdx → newIdx for the (single) input. Stripped columns map to -1.
+            int[] oldToNew = buildIndexMap(node.getInput(0).getRowType(), newInputs.get(0).getRowType());
+            if (node instanceof LogicalProject project) {
+                return rewriteIntermediateProject(project, newInputs.get(0), oldToNew);
+            }
+            // Filter/Sort/etc.: rebuild with new input then sweep RexInputRefs through the remap.
+            return node.copy(node.getTraitSet(), newInputs).accept(new RemapShuttle(oldToNew, newInputs.get(0).getRowType(), rexBuilder));
+        }
+
+        /** Drop ObjectType columns from the scan and capture each parent's descriptor. */
+        private RelNode rewriteScan(LogicalTableScan scan) {
+            RelOptTable origTable = scan.getTable();
+            List<RelDataTypeField> leafFields = new ArrayList<>();
+            boolean stripped = false;
+            for (RelDataTypeField field : origTable.getRowType().getFieldList()) {
+                if (field.getType() instanceof ObjectType objectType) {
+                    objectTypes.put(field.getName(), objectType);
+                    stripped = true;
+                } else {
+                    int idx = leafFields.size();
+                    leafFields.add(new RelDataTypeFieldImpl(field.getName(), idx, field.getType()));
+                    leafIndex.put(field.getName(), idx);
+                }
+            }
+            if (!stripped) return scan;
+            RelOptTable strippedTable = new RelOptAbstractTable(
+                origTable.getRelOptSchema(),
+                origTable.getQualifiedName().getLast(),
+                new RelRecordType(leafFields)
+            ) {};
+            return LogicalTableScan.create(scan.getCluster(), strippedTable, scan.getHints());
+        }
+
+        /**
+         * Drop project items that pass through a stripped column; remap survivors. Computed
+         * expressions over a stripped column throw via the shuttle.
+         */
+        private RelNode rewriteIntermediateProject(LogicalProject project, RelNode newInput, int[] oldToNew) {
+            RemapShuttle remap = new RemapShuttle(oldToNew, newInput.getRowType(), rexBuilder);
+            List<RexNode> newProjects = new ArrayList<>();
+            List<String> newNames = new ArrayList<>();
+            for (int i = 0; i < project.getProjects().size(); i++) {
+                RexNode expr = project.getProjects().get(i);
+                if (expr instanceof RexInputRef ref && oldToNew[ref.getIndex()] < 0) {
+                    continue; // passthrough of stripped column — drop it
+                }
+                newProjects.add(expr.accept(remap));
+                newNames.add(project.getRowType().getFieldList().get(i).getName());
+            }
+            return LogicalProject.create(newInput, project.getHints(), newProjects, newNames, project.getVariablesSet());
+        }
+
+        /**
+         * Top-level Project: emit one engine output + one {@link Output} per user column. A
+         * RexInputRef to an ObjectType produces an {@link Output.ObjectMap} (with leaves added
+         * to the engine plan); everything else is a {@link Output.Passthrough}.
+         */
+        private RelNode rewriteTopProject(LogicalProject project, RelNode newInput) {
+            RemapShuttle remap = new RemapShuttle(buildIndexMap(project.getInput().getRowType(), newInput.getRowType()), newInput.getRowType(), rexBuilder);
+            List<RelDataTypeField> origInput = project.getInput().getRowType().getFieldList();
+            List<RexNode> newProjects = new ArrayList<>();
+            List<String> newNames = new ArrayList<>();
+            List<Output> outputCols = new ArrayList<>();
+
+            for (int i = 0; i < project.getProjects().size(); i++) {
+                RexNode expr = project.getProjects().get(i);
+                String outputName = project.getRowType().getFieldList().get(i).getName();
+                if (expr instanceof RexInputRef ref) {
+                    String name = origInput.get(ref.getIndex()).getName();
+                    if (objectTypes.containsKey(name)) {
+                        outputCols.add(
+                            new Output.ObjectMap(
+                                outputName,
+                                buildChildren(objectTypes.get(name), newProjects, newNames, outputName, newInput.getRowType())
+                            )
+                        );
+                        continue;
+                    }
+                }
+                int idx = newProjects.size();
+                newProjects.add(expr.accept(remap));
+                newNames.add(outputName);
+                outputCols.add(new Output.Passthrough(outputName, idx));
+            }
+
+            this.outputs = outputCols;
+            return LogicalProject.create(newInput, project.getHints(), newProjects, newNames, project.getVariablesSet());
+        }
+
+        /**
+         * Recursively build the child map for an {@link ObjectType}, adding leaf projections
+         * to {@code newProjects} (with synthetic names in {@code newNames} so the engine
+         * Project's row type is well-formed). The synthetic names are prefixed with
+         * {@code __stitch_} to make them unambiguously internal.
+         */
+        private Map<String, MapSource> buildChildren(
+            ObjectType objectType,
+            List<RexNode> newProjects,
+            List<String> newNames,
+            String outputName,
+            RelDataType newInputRowType
+        ) {
+            Map<String, MapSource> children = new LinkedHashMap<>();
+            for (Map.Entry<String, ObjectType.Child> entry : objectType.children().entrySet()) {
+                ObjectType.Child child = entry.getValue();
+                if (child instanceof ObjectType.Child.Leaf leaf) {
+                    Integer idx = leafIndex.get(leaf.path());
+                    if (idx == null) {
+                        throw new IllegalStateException("ObjectType references missing leaf [" + leaf.path() + "]");
+                    }
+                    int outIdx = newProjects.size();
+                    newProjects.add(rexBuilder.makeInputRef(newInputRowType.getFieldList().get(idx).getType(), idx));
+                    newNames.add("__stitch_" + outputName + "_" + leaf.path());
+                    children.put(entry.getKey(), new MapSource.Leaf(outIdx));
+                } else {
+                    children.put(
+                        entry.getKey(),
+                        new MapSource.Nested(
+                            buildChildren(
+                                ((ObjectType.Child.Nested) child).type(),
+                                newProjects,
+                                newNames,
+                                outputName + "." + entry.getKey(),
+                                newInputRowType
+                            )
+                        )
+                    );
+                }
+            }
+            return children;
+        }
     }
 
-    /**
-     * Bottom-up rewrite. Returns the rewritten subtree rooted at {@code node} along with the
-     * shape of the column-index map between the original input and the rewritten input.
-     */
-    private static RelNode rewriteNode(RelNode node, RewriteContext ctx) {
-        if (node instanceof LogicalTableScan scan) {
-            return rewriteScan(scan, ctx);
-        }
-        List<RelNode> newInputs = new ArrayList<>(node.getInputs().size());
-        for (RelNode input : node.getInputs()) {
-            newInputs.add(rewriteNode(input, ctx));
-        }
-        if (node == ctx.topProject && node instanceof LogicalProject project) {
-            return rewriteRootProject(project, newInputs.get(0), ctx);
-        }
-
-        RelNode newInput = newInputs.get(0);
-        RelDataType newInputRowType = newInput.getRowType();
-        // Build oldIdx → newIdx for the input. Any old-input field that's been stripped (because
-        // it was an ObjectType column the scan removed) maps to -1, which causes the index-
-        // remap shuttle to fail fast — non-Project operators with such a reference cannot be
-        // safely rewritten because the column they read no longer exists.
-        int[] oldToNew = buildIndexMap(node.getInput(0).getRowType(), newInputRowType);
-
-        if (node instanceof LogicalProject project) {
-            return rewriteIntermediateProject(project, newInput, oldToNew, ctx);
-        }
-
-        // Non-Project operators: rebuild via copy then sweep RexNodes through the index remap.
-        RexShuttle remap = new IndexRemapShuttle(oldToNew, newInputRowType, ctx.rexBuilder);
-        return node.copy(node.getTraitSet(), newInputs).accept(remap);
-    }
-
-    /**
-     * Map from old input row type's field name → new input row type's field index. Fields whose
-     * old name no longer exists in the new input are mapped to {@code -1} (i.e. stripped).
-     */
+    /** old-input field name → new-input field index, with stripped fields → -1. */
     private static int[] buildIndexMap(RelDataType oldType, RelDataType newType) {
-        List<RelDataTypeField> oldFields = oldType.getFieldList();
-        int[] map = new int[oldFields.size()];
-        Map<String, Integer> newByName = new LinkedHashMap<>();
-        for (RelDataTypeField f : newType.getFieldList()) {
-            newByName.put(f.getName(), f.getIndex());
-        }
-        for (int i = 0; i < oldFields.size(); i++) {
-            Integer newIdx = newByName.get(oldFields.get(i).getName());
+        Map<String, Integer> newByName = new HashMap<>();
+        for (RelDataTypeField f : newType.getFieldList()) newByName.put(f.getName(), f.getIndex());
+        int[] map = new int[oldType.getFieldCount()];
+        for (int i = 0; i < map.length; i++) {
+            Integer newIdx = newByName.get(oldType.getFieldList().get(i).getName());
             map[i] = newIdx == null ? -1 : newIdx;
         }
         return map;
     }
 
-    /**
-     * Rewrite an intermediate {@link LogicalProject} (NOT the topmost). Drop each project
-     * expression that resolves to a stripped column and remap RexInputRef indices for the
-     * survivors. Non-input-ref expressions referencing a stripped column are an error — they
-     * imply a filter/eval/agg uses an ObjectType, which is out of scope.
-     */
-    private static RelNode rewriteIntermediateProject(LogicalProject project, RelNode newInput, int[] oldToNew, RewriteContext ctx) {
-        List<RexNode> origProjects = project.getProjects();
-        List<RelDataTypeField> origFields = project.getRowType().getFieldList();
-        List<RexNode> newProjects = new ArrayList<>();
-        List<String> newNames = new ArrayList<>();
-        RelDataType newInputRowType = newInput.getRowType();
-
-        for (int i = 0; i < origProjects.size(); i++) {
-            RexNode expr = origProjects.get(i);
-            String outputName = origFields.get(i).getName();
-
-            if (expr instanceof RexInputRef ref) {
-                int newIdx = oldToNew[ref.getIndex()];
-                if (newIdx < 0) {
-                    // The referenced input column has been stripped (ObjectType). The Project
-                    // is just passing it through; drop it from the rebuilt project list — the
-                    // topmost-Project rewriter will reconstruct it via Stitch when needed.
-                    continue;
-                }
-                RelDataType refType = newInputRowType.getFieldList().get(newIdx).getType();
-                newProjects.add(ctx.rexBuilder.makeInputRef(refType, newIdx));
-                newNames.add(outputName);
-            } else {
-                // Non-ref expression: walk and remap. If any child RexInputRef points at a
-                // stripped column, the shuttle throws — we don't have a defined semantic for
-                // computing on an opaque ObjectType placeholder.
-                RexShuttle remap = new IndexRemapShuttle(oldToNew, newInputRowType, ctx.rexBuilder);
-                newProjects.add(expr.accept(remap));
-                newNames.add(outputName);
-            }
-        }
-
-        return LogicalProject.create(newInput, project.getHints(), newProjects, newNames, project.getVariablesSet());
-    }
-
-    /** RexShuttle that remaps RexInputRef indices via {@code oldToNew}. */
-    private static final class IndexRemapShuttle extends RexShuttle {
+    /** Shifts {@link RexInputRef} indices via {@code oldToNew}; throws on stripped columns. */
+    private static final class RemapShuttle extends RexShuttle {
         private final int[] oldToNew;
         private final RelDataType newInputRowType;
         private final RexBuilder rexBuilder;
 
-        IndexRemapShuttle(int[] oldToNew, RelDataType newInputRowType, RexBuilder rexBuilder) {
+        RemapShuttle(int[] oldToNew, RelDataType newInputRowType, RexBuilder rexBuilder) {
             this.oldToNew = oldToNew;
             this.newInputRowType = newInputRowType;
             this.rexBuilder = rexBuilder;
@@ -317,173 +380,8 @@ public final class ObjectFieldStitch {
                 );
             }
             RelDataType expected = newInputRowType.getFieldList().get(newIdx).getType();
-            if (newIdx == ref.getIndex() && expected.equals(ref.getType())) {
-                return ref;
-            }
+            if (newIdx == ref.getIndex() && expected.equals(ref.getType())) return ref;
             return rexBuilder.makeInputRef(expected, newIdx);
         }
     }
-
-    /**
-     * Strip every {@link ObjectType} column from the scan. The storage backend never sees
-     * them; their position in the row type is simply removed. {@link RewriteContext} captures
-     * the {@link ObjectType} descriptor for each stripped column so the topmost-Project
-     * rewriter can expand a reference into a {@link OutputColumn.Stitch} over the underlying
-     * leaves; intermediate operators have any RexInputRef-to-stripped-ObjectType silently
-     * dropped (their projection list shrinks).
-     */
-    private static RelNode rewriteScan(LogicalTableScan scan, RewriteContext ctx) {
-        RelOptTable origTable = scan.getTable();
-        RelDataType origRowType = origTable.getRowType();
-        List<RelDataTypeField> leafFields = new ArrayList<>();
-        boolean hasObjectColumns = false;
-        for (RelDataTypeField field : origRowType.getFieldList()) {
-            if (field.getType() instanceof ObjectType objectType) {
-                hasObjectColumns = true;
-                ctx.objectColumns.add(field.getName());
-                ctx.objectTypeByName.put(field.getName(), objectType);
-                continue;
-            }
-            int newIdx = leafFields.size();
-            leafFields.add(new RelDataTypeFieldImpl(field.getName(), newIdx, field.getType()));
-            ctx.leafIndex.put(field.getName(), newIdx);
-        }
-        if (!hasObjectColumns) {
-            return scan;
-        }
-        RelDataType strippedRowType = new RelRecordType(leafFields);
-        RelOptTable strippedTable = new RelOptAbstractTable(
-            origTable.getRelOptSchema(),
-            origTable.getQualifiedName().getLast(),
-            strippedRowType
-        ) {};
-        return LogicalTableScan.create(scan.getCluster(), strippedTable, scan.getHints());
-    }
-
-    /**
-     * Rewrite the topmost Project: each output column becomes either a Passthrough (a leaf
-     * column the SQL plugin asked for, with its RexInputRef index remapped to the post-strip
-     * input), or a Stitch (when the output expression was a RexInputRef to an ObjectType
-     * column the scan removed).
-     */
-    private static RelNode rewriteRootProject(LogicalProject project, RelNode rewrittenInput, RewriteContext ctx) {
-        RexBuilder rexBuilder = project.getCluster().getRexBuilder();
-        List<RexNode> newProjects = new ArrayList<>();
-        List<String> newProjectNames = new ArrayList<>();
-        List<OutputColumn> outputCols = new ArrayList<>();
-
-        // Identify the per-column origin in the topmost Project's input by name. The input may
-        // be the stripped scan (if there are no intermediate operators), or a chain of remapped
-        // upstream operators — but every passthrough RexInputRef ultimately resolves to a name
-        // in the original schema. We use that name for both the leafIndex lookup (passthroughs)
-        // and the objectColumns membership check (Stitch expansion).
-        List<RelDataTypeField> inputFields = project.getInput().getRowType().getFieldList();
-        int[] oldToNew = buildIndexMap(project.getInput().getRowType(), rewrittenInput.getRowType());
-
-        for (int i = 0; i < project.getProjects().size(); i++) {
-            RexNode expr = project.getProjects().get(i);
-            String outputName = project.getRowType().getFieldList().get(i).getName();
-
-            if (expr instanceof RexInputRef ref) {
-                String inputName = inputFields.get(ref.getIndex()).getName();
-                if (ctx.objectColumns.contains(inputName)) {
-                    ObjectType objectType = lookupObjectType(inputFields.get(ref.getIndex()).getType(), ctx, inputName);
-                    OutputColumn.Stitch stitch = buildStitch(
-                        outputName,
-                        objectType,
-                        ctx.leafIndex,
-                        newProjects,
-                        newProjectNames,
-                        rexBuilder,
-                        rewrittenInput
-                    );
-                    outputCols.add(stitch);
-                    continue;
-                }
-                // Passthrough leaf — remap the index to the post-strip position.
-                int newIdx = oldToNew[ref.getIndex()];
-                RelDataType refType = rewrittenInput.getRowType().getFieldList().get(newIdx).getType();
-                int idx = newProjects.size();
-                newProjects.add(rexBuilder.makeInputRef(refType, newIdx));
-                newProjectNames.add(outputName);
-                outputCols.add(new OutputColumn.Passthrough(outputName, idx));
-                continue;
-            }
-
-            // Non-RexInputRef expression: walk it through the index-remap shuttle. References to
-            // ObjectType columns inside computed expressions throw — only direct RexInputRef
-            // selection of an ObjectType is supported.
-            RexShuttle remap = new IndexRemapShuttle(oldToNew, rewrittenInput.getRowType(), rexBuilder);
-            int idx = newProjects.size();
-            newProjects.add(expr.accept(remap));
-            newProjectNames.add(outputName);
-            outputCols.add(new OutputColumn.Passthrough(outputName, idx));
-        }
-
-        ctx.outputs = outputCols;
-        return LogicalProject.create(rewrittenInput, project.getHints(), newProjects, newProjectNames, project.getVariablesSet());
-    }
-
-    /**
-     * Resolve the {@link ObjectType} for an object-parent column. Prefer an exact instance check
-     * — when the row type still carries the {@link ObjectType} subclass, the type already has
-     * the children map. Otherwise fall back to the cached map keyed on column name (the
-     * scan-strip phase recorded the original {@link ObjectType} for each column it stripped).
-     */
-    private static ObjectType lookupObjectType(RelDataType maybeObjectType, RewriteContext ctx, String columnName) {
-        if (maybeObjectType instanceof ObjectType objectType) {
-            return objectType;
-        }
-        ObjectType cached = ctx.objectTypeByName.get(columnName);
-        if (cached == null) {
-            throw new IllegalStateException(
-                "Top-level projection references object column [" + columnName + "] but no ObjectType descriptor is available"
-            );
-        }
-        return cached;
-    }
-
-    private static OutputColumn.Stitch buildStitch(
-        String outputName,
-        ObjectType objectType,
-        Map<String, Integer> leafIdx,
-        List<RexNode> newProjects,
-        List<String> newProjectNames,
-        RexBuilder rexBuilder,
-        RelNode rewrittenInput
-    ) {
-        Map<String, OutputColumn.ChildSource> children = new LinkedHashMap<>();
-        for (Map.Entry<String, ObjectType.Child> entry : objectType.children().entrySet()) {
-            String childName = entry.getKey();
-            ObjectType.Child child = entry.getValue();
-            if (child instanceof ObjectType.Child.Leaf leaf) {
-                Integer idxInRewrittenInput = leafIdx.get(leaf.path());
-                if (idxInRewrittenInput == null) {
-                    throw new IllegalStateException(
-                        "ObjectType references leaf [" + leaf.path() + "] but the rewritten input has no such column"
-                    );
-                }
-                int outIdx = newProjects.size();
-                RelDataType leafType = rewrittenInput.getRowType().getFieldList().get(idxInRewrittenInput).getType();
-                newProjects.add(rexBuilder.makeInputRef(leafType, idxInRewrittenInput));
-                newProjectNames.add("__stitch_" + outputName + "_" + leaf.path());
-                children.put(childName, new OutputColumn.ChildSource.LeafColumn(outIdx));
-            } else {
-                OutputColumn.ChildSource.NestedStitch nested = new OutputColumn.ChildSource.NestedStitch(
-                    buildStitch(
-                        outputName + "." + childName,
-                        ((ObjectType.Child.Nested) child).type(),
-                        leafIdx,
-                        newProjects,
-                        newProjectNames,
-                        rexBuilder,
-                        rewrittenInput
-                    )
-                );
-                children.put(childName, nested);
-            }
-        }
-        return new OutputColumn.Stitch(outputName, children);
-    }
-
 }

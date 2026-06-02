@@ -228,11 +228,11 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
         // TODO: remove the null fallback once every front-end (test-ppl-frontend,
         // dsl-query-executor) threads an EngineContextProvider.getContext() snapshot through.
         ClusterState planningState = queryCtx != null ? queryCtx.clusterState() : clusterService.state();
-        // Strip any synthetic ObjectType columns from the plan so the rest of planning sees
-        // only real leaf columns, and capture the coordinator-side stitch needed to re-shape
-        // the engine output rows back into nested Maps for any | fields parent.object reference.
-        ObjectFieldStitch.StitchPlan stitchPlan = ObjectFieldStitch.rewrite(logicalFragment);
-        RelNode engineFragment = stitchPlan.rewrittenPlan();
+        // Lower any | fields parent.object references onto a leaf-only physical plan plus a
+        // coordinator-side stitch description. Returns Optional.empty() — and we plan the
+        // input as-is — when no ObjectType columns appear in any TableScan.
+        java.util.Optional<ObjectFieldStitch.Rewrite> objectRewrite = ObjectFieldStitch.maybeRewrite(logicalFragment);
+        RelNode engineFragment = objectRewrite.map(ObjectFieldStitch.Rewrite::plan).orElse(logicalFragment);
         RelNode plan = PlannerImpl.createPlan(
             engineFragment,
             new PlannerContext(capabilityRegistry, planningState, indexNameExpressionResolver, false, preferMetadataDriver)
@@ -313,17 +313,15 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
             listener
         );
 
-        // Engine output column order: post-stitch the row will only retain the user-visible
-        // columns, but the engine itself produces the Project's full output (leaves needed by
-        // the stitch + any passthrough columns), so order against the rewritten plan's row
-        // type, not the original plan's.
+        // Order engine columns against the rewritten plan's row type — for ObjectType-bearing
+        // queries this is the leaf-only projection that the coordinator stitch then re-shapes.
         final List<String> outputColumnOrder = engineFragment.getRowType().getFieldNames();
-        final ObjectFieldStitch.StitchPlan capturedStitch = stitchPlan;
+        final ObjectFieldStitch.Stitch stitch = objectRewrite.map(ObjectFieldStitch.Rewrite::stitch).orElse(null);
         // No taskManager.unregister here: the framework (HandledTransportAction) unregisters the
         // task it created for doExecute once this listener settles.
         ActionListener<Iterable<VectorSchemaRoot>> batchesListener = ActionListener.wrap(batches -> {
             Iterable<Object[]> engineRows = batchesToRows(batches, outputColumnOrder);
-            Iterable<Object[]> rows = capturedStitch.needsStitch() ? applyStitch(engineRows, capturedStitch.outputs()) : engineRows;
+            Iterable<Object[]> rows = stitch != null ? stitch.apply(engineRows) : engineRows;
             long totalRows = rows instanceof List ? ((List<?>) rows).size() : 0;
             queryListener.onQueryComplete(dag.queryId(), System.nanoTime() - queryStartNanos, totalRows);
             rowsListener.onResponse(rows);
@@ -449,22 +447,6 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
             }
         }
         return rows;
-    }
-
-    /**
-     * Apply the {@link ObjectFieldStitch.StitchPlan} to engine-output rows. The result
-     * has one cell per user-visible output column; Stitch outputs are assembled into a
-     * nested {@code Map<String,Object>}, Passthrough outputs are forwarded unchanged.
-     */
-    private static Iterable<Object[]> applyStitch(Iterable<Object[]> engineRows, List<ObjectFieldStitch.OutputColumn> outputs) {
-        // Materialize once: engineRows is itself a List built by batchesToRows, but assert the
-        // contract by walking eagerly so any IndexOutOfBoundsException surfaces at the same
-        // call site as the engine response (not lazily on later iteration).
-        List<Object[]> stitched = new ArrayList<>();
-        for (Object[] row : engineRows) {
-            stitched.add(ObjectFieldStitch.stitchRow(row, outputs));
-        }
-        return stitched;
     }
 
     private static List<FieldVector> orderedColumns(VectorSchemaRoot batch, List<String> targetColumnOrder) {

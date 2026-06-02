@@ -14,15 +14,14 @@ import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelOptTable;
 import org.apache.calcite.plan.hep.HepPlanner;
 import org.apache.calcite.plan.hep.HepProgramBuilder;
-import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.RelCollations;
+import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.logical.LogicalProject;
 import org.apache.calcite.rel.logical.LogicalSort;
 import org.apache.calcite.rel.logical.LogicalTableScan;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rex.RexBuilder;
-import org.apache.calcite.rex.RexInputRef;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.opensearch.analytics.schema.ObjectType;
@@ -31,13 +30,11 @@ import org.opensearch.test.OpenSearchTestCase;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 /**
- * Unit tests for {@link ObjectFieldStitch}: confirms the rewriter strips
- * {@link ObjectType} columns from a {@link LogicalTableScan}, expands top-level
- * Project references to leaf-column projections, and yields a {@link
- * ObjectFieldStitch.StitchPlan} that re-assembles nested {@code Map<String,Object>}s
- * from engine-output rows.
+ * Unit tests for {@link ObjectFieldStitch}: confirms scan-strip, leaf-passthrough remap,
+ * top-level ObjectType expansion, and end-to-end row stitching against a synthetic engine row.
  */
 public class ObjectFieldStitchTests extends OpenSearchTestCase {
 
@@ -55,80 +52,66 @@ public class ObjectFieldStitchTests extends OpenSearchTestCase {
     }
 
     /**
-     * `| fields city.name` (the existing leaf path): the schema exposes both the flat leaf
-     * AND the parent ObjectType column. The user-built plan references only the leaf, so
-     * the rewriter strips the ObjectType from the scan but produces a passthrough plan.
+     * `| fields city.name`: schema exposes both the flat leaf AND the parent ObjectType
+     * column, but the user only references the leaf. The rewriter strips ObjectType columns
+     * from the scan and produces a passthrough plan + a passthrough stitch.
      */
     public void testLeafProjectionStripsParentButPassesThrough() {
-        RelOptTable table = buildCityTable();
-        LogicalTableScan scan = LogicalTableScan.create(cluster, table, List.of());
-        // Project city.name (idx 1 in the schema below — see buildCityTable).
+        LogicalTableScan scan = LogicalTableScan.create(cluster, buildCityTable(), List.of());
         RexNode cityNameRef = rexBuilder.makeInputRef(scan.getRowType().getFieldList().get(1).getType(), 1);
         LogicalProject project = LogicalProject.create(scan, List.of(), List.of(cityNameRef), List.of("city.name"), java.util.Set.of());
 
-        ObjectFieldStitch.StitchPlan plan = ObjectFieldStitch.rewrite(project);
-        assertFalse("Leaf-only projection needs no stitch", plan.needsStitch());
-        assertEquals(List.of("city.name"), plan.outputNames());
+        Optional<ObjectFieldStitch.Rewrite> rewrite = ObjectFieldStitch.maybeRewrite(project);
+        assertTrue(rewrite.isPresent());
+        assertEquals(List.of("city.name"), rewrite.get().stitch().names());
+        assertTrue(rewrite.get().stitch().outputs().get(0) instanceof ObjectFieldStitch.Output.Passthrough);
 
-        // Rewritten plan: top Project (passthrough of remapped leaf RexInputRef) → stripped
-        // TableScan (leaf-only row type, ObjectType parents removed).
-        RelNode rewritten = plan.rewrittenPlan();
+        // Top Project (passthrough RexInputRef) → stripped TableScan (leaves only).
+        RelNode rewritten = rewrite.get().plan();
         assertTrue(rewritten instanceof LogicalProject);
         RelNode rewrittenScan = rewritten.getInput(0);
         assertTrue(rewrittenScan instanceof LogicalTableScan);
         for (var f : rewrittenScan.getRowType().getFieldList()) {
-            assertFalse(
-                "ObjectType column [" + f.getName() + "] must be stripped from scan",
-                f.getType() instanceof ObjectType
-            );
+            assertFalse("ObjectType column [" + f.getName() + "] must be stripped from scan", f.getType() instanceof ObjectType);
         }
     }
 
     /**
-     * `| fields city`: top-level Project selects the parent ObjectType column. The rewriter
-     * expands it into leaf projections and emits a Stitch output describing how to
-     * reassemble the nested Map.
+     * `| fields city`: top-level Project selects the parent ObjectType. The rewriter expands
+     * it into leaf projections and emits an ObjectMap output that re-assembles the leaves
+     * into a nested {@code Map<String,Object>}.
      */
     public void testParentProjectionExpandsAndStitches() {
-        RelOptTable table = buildCityTable();
-        LogicalTableScan scan = LogicalTableScan.create(cluster, table, List.of());
-        // The 'city' parent ObjectType is at index 5 (see buildCityTable).
+        LogicalTableScan scan = LogicalTableScan.create(cluster, buildCityTable(), List.of());
         int cityIdx = scan.getRowType().getField("city", true, false).getIndex();
         RexNode cityRef = rexBuilder.makeInputRef(scan.getRowType().getFieldList().get(cityIdx).getType(), cityIdx);
         LogicalProject project = LogicalProject.create(scan, List.of(), List.of(cityRef), List.of("city"), java.util.Set.of());
 
-        ObjectFieldStitch.StitchPlan plan = ObjectFieldStitch.rewrite(project);
-        assertTrue("Parent projection must produce a stitch", plan.needsStitch());
-        assertEquals(List.of("city"), plan.outputNames());
-        assertTrue(plan.outputs().get(0) instanceof ObjectFieldStitch.OutputColumn.Stitch);
+        ObjectFieldStitch.Rewrite rewrite = ObjectFieldStitch.maybeRewrite(project).orElseThrow();
+        assertEquals(List.of("city"), rewrite.stitch().names());
+        assertTrue(rewrite.stitch().outputs().get(0) instanceof ObjectFieldStitch.Output.ObjectMap);
 
-        // Engine row produced by the rewritten project: 3 leaves (name, latitude, longitude)
-        // and 1 nested-object intermediate (location → another stitch).
-        // Apply stitchRow to a synthetic engine row and confirm the nested Map structure.
-        ObjectFieldStitch.OutputColumn.Stitch stitch = (ObjectFieldStitch.OutputColumn.Stitch) plan.outputs().get(0);
-        // The Stitch has children [name, population, location]; location is nested.
+        ObjectFieldStitch.Output.ObjectMap stitch = (ObjectFieldStitch.Output.ObjectMap) rewrite.stitch().outputs().get(0);
         assertEquals(java.util.Set.of("name", "population", "location"), stitch.children().keySet());
-        assertTrue(stitch.children().get("name") instanceof ObjectFieldStitch.OutputColumn.ChildSource.LeafColumn);
-        assertTrue(stitch.children().get("population") instanceof ObjectFieldStitch.OutputColumn.ChildSource.LeafColumn);
-        assertTrue(stitch.children().get("location") instanceof ObjectFieldStitch.OutputColumn.ChildSource.NestedStitch);
+        assertTrue(stitch.children().get("name") instanceof ObjectFieldStitch.MapSource.Leaf);
+        assertTrue(stitch.children().get("population") instanceof ObjectFieldStitch.MapSource.Leaf);
+        assertTrue(stitch.children().get("location") instanceof ObjectFieldStitch.MapSource.Nested);
 
-        // The rewritten Project's row type has exactly the columns it stitches from
-        // (4 leaves: name, population, latitude, longitude).
-        LogicalProject rewrittenProj = (LogicalProject) plan.rewrittenPlan();
-        assertEquals(4, rewrittenProj.getRowType().getFieldCount());
+        // 4 leaves emitted by the rewritten Project (name, population, latitude, longitude).
+        assertEquals(4, ((LogicalProject) rewrite.plan()).getRowType().getFieldCount());
 
-        // Map indices to a simulated engine row and verify the produced Map.
+        // Apply the stitch to a synthetic engine row and verify the produced nested Map.
         Object[] engineRow = new Object[4];
-        engineRow[((ObjectFieldStitch.OutputColumn.ChildSource.LeafColumn) stitch.children().get("name")).engineColumnIndex()] = "Seattle";
-        engineRow[((ObjectFieldStitch.OutputColumn.ChildSource.LeafColumn) stitch.children().get("population")).engineColumnIndex()] = 750000;
-        ObjectFieldStitch.OutputColumn.Stitch loc = ((ObjectFieldStitch.OutputColumn.ChildSource.NestedStitch) stitch.children().get("location")).stitch();
-        engineRow[((ObjectFieldStitch.OutputColumn.ChildSource.LeafColumn) loc.children().get("latitude")).engineColumnIndex()] = 47.6;
-        engineRow[((ObjectFieldStitch.OutputColumn.ChildSource.LeafColumn) loc.children().get("longitude")).engineColumnIndex()] = -122.3;
+        engineRow[((ObjectFieldStitch.MapSource.Leaf) stitch.children().get("name")).engineColumnIndex()] = "Seattle";
+        engineRow[((ObjectFieldStitch.MapSource.Leaf) stitch.children().get("population")).engineColumnIndex()] = 750000;
+        ObjectFieldStitch.MapSource.Nested loc = (ObjectFieldStitch.MapSource.Nested) stitch.children().get("location");
+        engineRow[((ObjectFieldStitch.MapSource.Leaf) loc.children().get("latitude")).engineColumnIndex()] = 47.6;
+        engineRow[((ObjectFieldStitch.MapSource.Leaf) loc.children().get("longitude")).engineColumnIndex()] = -122.3;
 
-        Object[] stitched = ObjectFieldStitch.stitchRow(engineRow, plan.outputs());
-        assertEquals(1, stitched.length);
+        List<Object[]> stitched = rewrite.stitch().apply(java.util.Collections.singletonList(engineRow));
+        assertEquals(1, stitched.size());
         @SuppressWarnings("unchecked")
-        Map<String, Object> city = (Map<String, Object>) stitched[0];
+        Map<String, Object> city = (Map<String, Object>) stitched.get(0)[0];
         Map<String, Object> expectedLocation = new LinkedHashMap<>();
         expectedLocation.put("latitude", 47.6);
         expectedLocation.put("longitude", -122.3);
@@ -140,19 +123,11 @@ public class ObjectFieldStitchTests extends OpenSearchTestCase {
     }
 
     /**
-     * Mixed projection: `| fields city.name, city`. One leaf passthrough + one stitched
-     * parent. The engine row carries (city.name leaf, plus stitch leaves), the stitcher
-     * produces (city.name string, city Map).
-     */
-    /**
-     * `| fields city | head 3` — the topmost Project sits below a LogicalSort. The rewriter
-     * must walk through the Sort, strip the scan, and identify the Project as the topmost
-     * one to expand into a Stitch. Indices in upstream operators (e.g. Sort fetch) need to
-     * remain valid after the strip.
+     * `| fields city | head 3` — top Project sits below a LogicalSort. The walker descends
+     * through the Sort, identifies the Project, and rewrites it to leaf projections.
      */
     public void testParentProjectionUnderSort() {
-        RelOptTable table = buildCityTable();
-        LogicalTableScan scan = LogicalTableScan.create(cluster, table, List.of());
+        LogicalTableScan scan = LogicalTableScan.create(cluster, buildCityTable(), List.of());
         int cityIdx = scan.getRowType().getField("city", true, false).getIndex();
         RexNode cityRef = rexBuilder.makeInputRef(scan.getRowType().getFieldList().get(cityIdx).getType(), cityIdx);
         LogicalProject project = LogicalProject.create(scan, List.of(), List.of(cityRef), List.of("city"), java.util.Set.of());
@@ -163,64 +138,65 @@ public class ObjectFieldStitchTests extends OpenSearchTestCase {
             rexBuilder.makeLiteral(3, typeFactory.createSqlType(SqlTypeName.INTEGER), true)
         );
 
-        ObjectFieldStitch.StitchPlan plan = ObjectFieldStitch.rewrite(sort);
-        assertTrue(plan.needsStitch());
-        assertEquals(List.of("city"), plan.outputNames());
-
-        // The rewritten root must still be a Sort; below it sits the rewritten LogicalProject
-        // that projects leaves; below that, the stripped scan.
-        assertTrue(plan.rewrittenPlan() instanceof LogicalSort);
-        RelNode innerProject = plan.rewrittenPlan().getInput(0);
+        ObjectFieldStitch.Rewrite rewrite = ObjectFieldStitch.maybeRewrite(sort).orElseThrow();
+        assertEquals(List.of("city"), rewrite.stitch().names());
+        // Plan shape: Sort → Project (leaves) → stripped Scan.
+        assertTrue(rewrite.plan() instanceof LogicalSort);
+        RelNode innerProject = rewrite.plan().getInput(0);
         assertTrue(innerProject instanceof LogicalProject);
-        // 4 leaves: name, population, latitude, longitude.
         assertEquals(4, innerProject.getRowType().getFieldCount());
     }
 
+    /** `| fields city.name, city`: one passthrough leaf + one stitched parent. */
     public void testMixedLeafAndParentProjection() {
-        RelOptTable table = buildCityTable();
-        LogicalTableScan scan = LogicalTableScan.create(cluster, table, List.of());
+        LogicalTableScan scan = LogicalTableScan.create(cluster, buildCityTable(), List.of());
         int cityNameIdx = scan.getRowType().getField("city.name", true, false).getIndex();
         int cityIdx = scan.getRowType().getField("city", true, false).getIndex();
         RexNode nameRef = rexBuilder.makeInputRef(scan.getRowType().getFieldList().get(cityNameIdx).getType(), cityNameIdx);
         RexNode cityRef = rexBuilder.makeInputRef(scan.getRowType().getFieldList().get(cityIdx).getType(), cityIdx);
         LogicalProject project = LogicalProject.create(scan, List.of(), List.of(nameRef, cityRef), List.of("city.name", "city"), java.util.Set.of());
 
-        ObjectFieldStitch.StitchPlan plan = ObjectFieldStitch.rewrite(project);
-        assertTrue(plan.needsStitch());
-        assertEquals(List.of("city.name", "city"), plan.outputNames());
-        assertTrue(plan.outputs().get(0) instanceof ObjectFieldStitch.OutputColumn.Passthrough);
-        assertTrue(plan.outputs().get(1) instanceof ObjectFieldStitch.OutputColumn.Stitch);
+        ObjectFieldStitch.Rewrite rewrite = ObjectFieldStitch.maybeRewrite(project).orElseThrow();
+        assertEquals(List.of("city.name", "city"), rewrite.stitch().names());
+        assertTrue(rewrite.stitch().outputs().get(0) instanceof ObjectFieldStitch.Output.Passthrough);
+        assertTrue(rewrite.stitch().outputs().get(1) instanceof ObjectFieldStitch.Output.ObjectMap);
     }
 
-    /**
-     * Build a Calcite RelOptTable mirroring the city_index mapping the schema test exercises,
-     * with both flat-leaf and ObjectType-parent columns laid out in deterministic order.
-     */
+    /** No ObjectType columns anywhere in the plan: rewriter is a no-op via short-circuit. */
+    public void testNoObjectTypeColumnsReturnsEmpty() {
+        RelDataTypeFactory.Builder b = typeFactory.builder();
+        b.add("id", typeFactory.createSqlType(SqlTypeName.VARCHAR));
+        b.add("name", typeFactory.createSqlType(SqlTypeName.VARCHAR));
+        RelOptTable flatTable = new RelOptAbstractTable(null, "flat_index", b.build()) {};
+        LogicalTableScan scan = LogicalTableScan.create(cluster, flatTable, List.of());
+        RexNode nameRef = rexBuilder.makeInputRef(scan.getRowType().getFieldList().get(1).getType(), 1);
+        LogicalProject project = LogicalProject.create(scan, List.of(), List.of(nameRef), List.of("name"), java.util.Set.of());
+
+        assertTrue("Plan with no ObjectType columns should short-circuit", ObjectFieldStitch.maybeRewrite(project).isEmpty());
+    }
+
+    /** Build a Calcite table mirroring the city_index mapping with both flat leaves and ObjectType parents. */
     private RelOptTable buildCityTable() {
         RelDataTypeFactory.Builder b = typeFactory.builder();
-        b.add("id", typeFactory.createSqlType(SqlTypeName.VARCHAR));                      // 0
-        b.add("city.name", typeFactory.createSqlType(SqlTypeName.VARCHAR));               // 1
-        b.add("city.population", typeFactory.createSqlType(SqlTypeName.INTEGER));         // 2
-        b.add("city.location.latitude", typeFactory.createSqlType(SqlTypeName.DOUBLE));   // 3
-        b.add("city.location.longitude", typeFactory.createSqlType(SqlTypeName.DOUBLE));  // 4
+        b.add("id", typeFactory.createSqlType(SqlTypeName.VARCHAR));
+        b.add("city.name", typeFactory.createSqlType(SqlTypeName.VARCHAR));
+        b.add("city.population", typeFactory.createSqlType(SqlTypeName.INTEGER));
+        b.add("city.location.latitude", typeFactory.createSqlType(SqlTypeName.DOUBLE));
+        b.add("city.location.longitude", typeFactory.createSqlType(SqlTypeName.DOUBLE));
 
-        // city.location parent (nested ObjectType)
         Map<String, ObjectType.Child> locChildren = new LinkedHashMap<>();
         locChildren.put("latitude", new ObjectType.Child.Leaf("city.location.latitude"));
         locChildren.put("longitude", new ObjectType.Child.Leaf("city.location.longitude"));
         ObjectType locType = new ObjectType(true, locChildren);
 
-        // city parent (top-level ObjectType)
         Map<String, ObjectType.Child> cityChildren = new LinkedHashMap<>();
         cityChildren.put("name", new ObjectType.Child.Leaf("city.name"));
         cityChildren.put("population", new ObjectType.Child.Leaf("city.population"));
         cityChildren.put("location", new ObjectType.Child.Nested(locType));
         ObjectType cityType = new ObjectType(true, cityChildren);
 
-        b.add("city", cityType);                                                          // 5
-        b.add("city.location", locType);                                                  // 6
-        RelDataType rowType = b.build();
-
-        return new RelOptAbstractTable(null, "city_index", rowType) {};
+        b.add("city", cityType);
+        b.add("city.location", locType);
+        return new RelOptAbstractTable(null, "city_index", b.build()) {};
     }
 }
