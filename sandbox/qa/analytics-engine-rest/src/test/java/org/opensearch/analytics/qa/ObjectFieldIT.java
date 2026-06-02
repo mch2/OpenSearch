@@ -41,7 +41,7 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
 
     public void testSelectSingleObjectField() throws IOException {
         assertRowsEqual(
-            "source=" + DATASET.indexName + " | fields city.name | head 3",
+            "source=" + DATASET.indexName + " | sort id | fields city.name | head 3",
             row("Seattle"),
             row("Portland"),
             row("Austin")
@@ -50,7 +50,7 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
 
     public void testSelectMultipleObjectFields() throws IOException {
         assertRowsEqual(
-            "source=" + DATASET.indexName + " | fields city.name, account.owner | head 3",
+            "source=" + DATASET.indexName + " | sort id | fields city.name, account.owner | head 3",
             row("Seattle", "alice"),
             row("Portland", "bob"),
             row("Austin", "carol")
@@ -59,7 +59,7 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
 
     public void testSelectDeeplyNestedObjectField() throws IOException {
         assertRowsEqual(
-            "source=" + DATASET.indexName + " | fields city.name, city.location.latitude | head 3",
+            "source=" + DATASET.indexName + " | sort id | fields city.name, city.location.latitude | head 3",
             row("Seattle", 47.6062),
             row("Portland", 45.5152),
             row("Austin", 30.2672)
@@ -81,10 +81,8 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
     }
 
     public void testSumOnObjectField() throws IOException {
-        assertRowsEqual(
-            "source=" + DATASET.indexName + " | stats sum(city.population)",
-            row(2380000)
-        );
+        // Sum across all 6 cities: 750000 + 650000 + 980000 + 715000 + 695000 + 1660000.
+        assertRowsEqual("source=" + DATASET.indexName + " | stats sum(city.population)", row(5450000));
     }
 
     public void testFilterOnObjectField() throws IOException {
@@ -95,10 +93,13 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
     }
 
     public void testFilterOnDeeplyNestedObjectField() throws IOException {
+        // Cities at latitude > 40: Seattle (47.6), Portland (45.5), Denver (39.7 — no), Boston (42.3).
+        // Expected: Seattle, Portland, Boston (Denver is at 39.7392, below threshold).
         assertRowsEqual(
-            "source=" + DATASET.indexName + " | where city.location.latitude > 40 | fields city.name",
+            "source=" + DATASET.indexName + " | where city.location.latitude > 40 | sort id | fields city.name",
             row("Seattle"),
-            row("Portland")
+            row("Portland"),
+            row("Boston")
         );
     }
 
@@ -113,21 +114,21 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
 
     public void testSelectIntermediateObjectField() throws IOException {
         assertRowsEqual(
-            "source=" + DATASET.indexName + " | fields city.location | head 1",
+            "source=" + DATASET.indexName + " | sort id | fields city.location | head 1",
             row(Map.of("latitude", 47.6062, "longitude", -122.3321))
         );
     }
 
     public void testSelectTopLevelObjectField() throws IOException {
         assertRowsEqual(
-            "source=" + DATASET.indexName + " | fields city | head 1",
+            "source=" + DATASET.indexName + " | sort id | fields city | head 1",
             row(Map.of("name", "Seattle", "population", 750000, "location", Map.of("latitude", 47.6062, "longitude", -122.3321)))
         );
     }
 
     public void testSelectTopLevelObjectFieldWithSiblings() throws IOException {
         assertRowsEqual(
-            "source=" + DATASET.indexName + " | fields city, account | head 1",
+            "source=" + DATASET.indexName + " | sort id | fields city, account | head 1",
             row(
                 Map.of("name", "Seattle", "population", 750000, "location", Map.of("latitude", 47.6062, "longitude", -122.3321)),
                 Map.of("owner", "alice", "balance", 1000.50)
@@ -137,7 +138,7 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
 
     public void testSelectParentAndLeafMixed() throws IOException {
         assertRowsEqual(
-            "source=" + DATASET.indexName + " | fields city.name, city.location | head 1",
+            "source=" + DATASET.indexName + " | sort id | fields city.name, city.location | head 1",
             row("Seattle", Map.of("latitude", 47.6062, "longitude", -122.3321))
         );
     }
@@ -174,7 +175,7 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
      */
     public void testEvalAssignObjectParentPasses() throws IOException {
         assertRowsEqual(
-            "source=" + DATASET.indexName + " | eval x = city | fields x | head 1",
+            "source=" + DATASET.indexName + " | sort id | eval x = city | fields x | head 1",
             row(Map.of("name", "Seattle", "population", 750000, "location", Map.of("latitude", 47.6062, "longitude", -122.3321)))
         );
     }

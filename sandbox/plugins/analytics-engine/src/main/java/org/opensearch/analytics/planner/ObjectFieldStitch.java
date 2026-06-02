@@ -10,10 +10,14 @@ package org.opensearch.analytics.planner;
 
 import org.apache.calcite.plan.RelOptAbstractTable;
 import org.apache.calcite.plan.RelOptTable;
+import org.apache.calcite.rel.RelCollation;
+import org.apache.calcite.rel.RelCollations;
+import org.apache.calcite.rel.RelFieldCollation;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.RelVisitor;
 import org.apache.calcite.rel.core.TableScan;
 import org.apache.calcite.rel.logical.LogicalProject;
+import org.apache.calcite.rel.logical.LogicalSort;
 import org.apache.calcite.rel.logical.LogicalTableScan;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeField;
@@ -219,8 +223,29 @@ public final class ObjectFieldStitch {
             if (node instanceof LogicalProject project) {
                 return rewriteIntermediateProject(project, newInputs.get(0), oldToNew);
             }
-            // Filter/Sort/etc.: rebuild with new input then sweep RexInputRefs through the remap.
+            if (node instanceof LogicalSort sort) {
+                return rewriteSort(sort, newInputs.get(0), oldToNew);
+            }
+            // Filter/etc.: rebuild with new input then sweep RexInputRefs through the remap.
             return node.copy(node.getTraitSet(), newInputs).accept(new RemapShuttle(oldToNew, newInputs.get(0).getRowType(), rexBuilder));
+        }
+
+        /**
+         * {@link LogicalSort} carries field indices in {@link RelCollation} separately from
+         * RexNodes; RexShuttle.apply does not sweep them. Remap collation indices through the
+         * post-strip leaf positions; sorting on a stripped column would mean sorting on an
+         * ObjectType, which the validator already rejects.
+         */
+        private RelNode rewriteSort(LogicalSort sort, RelNode newInput, int[] oldToNew) {
+            List<RelFieldCollation> remapped = new ArrayList<>(sort.collation.getFieldCollations().size());
+            for (RelFieldCollation fc : sort.collation.getFieldCollations()) {
+                int newIdx = oldToNew[fc.getFieldIndex()];
+                if (newIdx < 0) {
+                    throw new IllegalStateException("Sort references stripped object-parent column; ObjectType cannot be sorted on");
+                }
+                remapped.add(fc.withFieldIndex(newIdx));
+            }
+            return LogicalSort.create(newInput, RelCollations.of(remapped), sort.offset, sort.fetch);
         }
 
         /** Drop ObjectType columns from the scan and capture each parent's descriptor. */
