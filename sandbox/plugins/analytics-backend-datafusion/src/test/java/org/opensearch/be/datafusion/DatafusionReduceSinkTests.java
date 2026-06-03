@@ -29,7 +29,6 @@ import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.calcite.util.ImmutableBitSet;
-import org.apache.lucene.tests.util.LuceneTestCase;
 import org.opensearch.action.support.PlainActionFuture;
 import org.opensearch.analytics.spi.ExchangeSink;
 import org.opensearch.analytics.spi.ExchangeSinkContext;
@@ -61,7 +60,6 @@ import io.substrait.extension.SimpleExtension;
  *       reduced result.</li>
  * </ul>
  */
-@LuceneTestCase.AwaitsFix(bugUrl = "Flaky - muting until fixed")
 public class DatafusionReduceSinkTests extends OpenSearchTestCase {
 
     public void testArrowSchemaIpcEncodesSchema() {
@@ -73,6 +71,25 @@ public class DatafusionReduceSinkTests extends OpenSearchTestCase {
 
     public void testInputIdConstantMatchesDesign() {
         assertEquals("Single-input reduce uses the synthetic id 'input-0'", "input-0", DatafusionReduceSink.INPUT_ID);
+    }
+
+    /**
+     * The benign "consumer finished first" case (a {@code LimitExec} satisfied its fetch and
+     * dropped the receiver while producers were still feeding) is signalled by {@code df_sender_send}
+     * returning the positive sentinel {@link NativeBridge#SENDER_SEND_RECEIVER_DROPPED} rather than a
+     * stringly-typed error — {@code feedToSender} keys off this code. The sentinel must be positive
+     * (so {@code checkResult} passes it through the success half of the return contract instead of
+     * treating it as an error pointer) and distinct from a normal send ({@code 0}). The Rust↔Java
+     * agreement on the value is enforced by the matching {@code SENDER_SEND_RECEIVER_DROPPED} in
+     * {@code ffm.rs}; the structural "only a dropped receiver maps here" guarantee is covered by the
+     * Rust {@code send_blocking_reports_receiver_dropped} unit test.
+     */
+    public void testReceiverDroppedSentinelIsPositiveAndDistinctFromSuccess() {
+        assertTrue(
+            "sentinel must be positive so checkResult treats it as success, not an error pointer",
+            NativeBridge.SENDER_SEND_RECEIVER_DROPPED > 0
+        );
+        assertNotEquals("sentinel must be distinct from a normal send (0)", 0L, NativeBridge.SENDER_SEND_RECEIVER_DROPPED);
     }
 
     /**
@@ -251,26 +268,34 @@ public class DatafusionReduceSinkTests extends OpenSearchTestCase {
     }
 
     /**
-     * Cancel-before-first-batch: drain is parked in stream_next waiting for input.
-     * {@code close()} fires {@code cancel_query} on the registered taskId — the cancellation
-     * token wakes the {@code cancellable_or}'s select, drain returns sentinel, reduce()
-     * unwinds cleanly. No leak.
+     * Regression: {@code close()} while a feeder is parked on a full input channel must NOT
+     * deadlock.
+     *
+     * <p>Old bug: {@code closeImpl} closed {@code session} first, which needed the write lock on
+     * the partition sender's {@code NativeHandle}. But a feeder parked inside {@code sender.send}
+     * (driving a full-channel {@code tx.send().await} via {@code block_on}) held the read lock —
+     * so the write lock blocked forever. Fix: {@code closeImpl} closes {@code outStream} FIRST,
+     * which drops the native receiver; the parked {@code tx.send} then returns immediately
+     * ({@code ReceiverDropped}), the feeder releases the read lock, and {@code close()} proceeds.
+     *
+     * <p>Setup mirrors that race: a blocking downstream sink stalls the reduce drain so the bounded
+     * native input channel (capacity 4) fills and a dedicated feeder thread parks; then we call
+     * {@code close()} and assert it returns well within a timeout.
      */
-    public void testCancelBeforeFirstBatchUnwindsDrain() throws Exception {
+    public void testCloseWhileFeederParkedOnFullChannelDoesNotDeadlock() throws Exception {
         NativeBridge.initTokioRuntimeManager(2);
         Path spillDir = createTempDir("datafusion-spill");
         long runtimePtr = NativeBridge.createGlobalRuntime(64 * 1024 * 1024, 0L, spillDir.toString(), 32 * 1024 * 1024);
         NativeRuntimeHandle runtimeHandle = new NativeRuntimeHandle(runtimePtr);
 
         try (RootAllocator alloc = new RootAllocator(Long.MAX_VALUE)) {
-            byte[] substrait = buildPassthroughSubstraitBytes(DatafusionReduceSink.INPUT_ID);
-            CapturingSink downstream = new CapturingSink();
-            // Non-zero taskId so the Rust QUERY_REGISTRY actually wires cancellation.
+            Schema inputSchema = new Schema(List.of(new Field("x", FieldType.nullable(new ArrowType.Int(64, true)), null)));
+            BlockingCapturingSink downstream = new BlockingCapturingSink();
             ExchangeSinkContext ctx = new ExchangeSinkContext(
-                "q-cancel-pre",
+                "q-close-deadlock",
                 0,
-                4242L,
-                substrait,
+                9999L,
+                buildPassthroughSubstraitBytes(DatafusionReduceSink.INPUT_ID),
                 alloc,
                 List.of(new ExchangeSinkContext.ChildInput(0, buildPassthroughSubstraitBytes(DatafusionReduceSink.INPUT_ID))),
                 downstream
@@ -278,27 +303,41 @@ public class DatafusionReduceSinkTests extends OpenSearchTestCase {
 
             DatafusionReduceSink sink = new DatafusionReduceSink(ctx, runtimeHandle);
             PlainActionFuture<Void> reduceDone = PlainActionFuture.newFuture();
-            CountDownLatch reduceEntered = new CountDownLatch(1);
-            Thread.ofVirtual().start(() -> {
-                reduceEntered.countDown();
-                sink.reduce(reduceDone);
-            });
-            // Ensure reduce() has progressed past its READY→REDUCING CAS before we close —
-            // otherwise close runs inline (READY→DONE) and reduce later fails with
-            // "sink closed before reduce" instead of the cancel-during-drain path we want.
-            assertTrue(reduceEntered.await(5, TimeUnit.SECONDS));
-            Thread.sleep(50);
-            // Drain is parked waiting for first batch. Fire cancel via close().
-            // close() sees state=REDUCING, calls cancelQuery(4242L), returns immediately.
-            sink.close();
-            reduceDone.actionGet(5, TimeUnit.SECONDS);
+            Thread.ofVirtual().start(() -> sink.reduce(reduceDone));
 
-            assertEquals("no rows should be delivered (cancel before any feed)", 0, downstream.totalRows);
-            // Regression: the cancel-during-REDUCING path used to leak outStream/session
-            // because close() set the base's `closed` flag, then reduce()'s finally called
-            // super.close() which short-circuited on that flag — closeImpl never ran a
-            // second time and teardown never happened. reduce() now calls closeImpl directly.
-            assertTrue("teardown must run on the cancel-during-REDUCING path", sink.torndown.get());
+            // Feeder thread: flood the input. The drain is stalled in downstream.feed (blocked on
+            // `release`), so once a batch reaches the output the bounded input channel backs up and
+            // this thread parks inside sink.feed -> sender.send (holding the sender read lock).
+            Thread feeder = new Thread(() -> {
+                for (int i = 0; i < 100; i++) {
+                    sink.feed(makeBatch(alloc, inputSchema, new long[] { (long) i }));
+                }
+            }, "deadlock-feeder");
+            feeder.setDaemon(true);
+            feeder.start();
+
+            // Wait until the drain has produced its first output batch (drain now stalled) and give
+            // the feeder time to fill the channel and park.
+            assertTrue("drain should produce a first batch", downstream.firstBatchLatch.await(10, TimeUnit.SECONDS));
+            Thread.sleep(300);
+
+            // close() from this thread must not deadlock against the parked feeder.
+            Thread closer = new Thread(sink::close, "deadlock-closer");
+            closer.setDaemon(true);
+            closer.start();
+            closer.join(15_000);
+            assertFalse("close() deadlocked against a feeder parked on the full channel", closer.isAlive());
+            assertTrue("teardown must have run", sink.torndown.get());
+
+            // Let everything unwind.
+            downstream.release.countDown();
+            try {
+                reduceDone.actionGet(10, TimeUnit.SECONDS);
+            } catch (Exception expected) {
+                // reduce may complete or fail depending on cancel timing — either is fine here.
+            }
+            feeder.join(10_000);
+            assertFalse("feeder thread should have unparked and exited", feeder.isAlive());
         } finally {
             runtimeHandle.close();
         }
@@ -349,17 +388,12 @@ public class DatafusionReduceSinkTests extends OpenSearchTestCase {
     }
 
     /**
-     * Regression: {@code close()} must fire {@code cancelQuery} when state is REDUCING
-     * even if the prior {@code state.get()} observed READY. The old {@code get()+
-     * compareAndSet(READY,DONE)} pattern silently returned when the CAS failed (because
-     * {@code reduce()} raced and moved state to REDUCING in between), leaving the parked
-     * drain with no cancel signal. The fixed {@code compareAndExchange} returns the prior
-     * state atomically so the REDUCING branch fires unconditionally.
-     *
-     * <p>Simulates the race by pre-setting state to REDUCING via the package-private field
-     * (the same observable end-state the race produces) and verifying the cancel hook fires.
+     * Double-close is idempotent: calling {@code close()} multiple times (including from
+     * different threads, or after {@code reduce()} already tore down) must not throw or
+     * double-free native resources. The {@code torndown} CAS ensures the teardown body
+     * runs exactly once regardless of how many paths call {@code closeImpl}.
      */
-    public void testCloseFiresCancelWhenStateRacedToReducing() throws Exception {
+    public void testDoubleCloseIsIdempotent() throws Exception {
         NativeBridge.initTokioRuntimeManager(2);
         Path spillDir = createTempDir("datafusion-spill");
         long runtimePtr = NativeBridge.createGlobalRuntime(64 * 1024 * 1024, 0L, spillDir.toString(), 32 * 1024 * 1024);
@@ -369,7 +403,7 @@ public class DatafusionReduceSinkTests extends OpenSearchTestCase {
             byte[] substrait = buildPassthroughSubstraitBytes(DatafusionReduceSink.INPUT_ID);
             CapturingSink downstream = new CapturingSink();
             ExchangeSinkContext ctx = new ExchangeSinkContext(
-                "q-race",
+                "q-double-close",
                 0,
                 7777L,
                 substrait,
@@ -377,22 +411,21 @@ public class DatafusionReduceSinkTests extends OpenSearchTestCase {
                 List.of(new ExchangeSinkContext.ChildInput(0, buildPassthroughSubstraitBytes(DatafusionReduceSink.INPUT_ID))),
                 downstream
             );
-            java.util.concurrent.atomic.AtomicInteger cancels = new java.util.concurrent.atomic.AtomicInteger();
-            DatafusionReduceSink sink = new DatafusionReduceSink(ctx, runtimeHandle) {
-                @Override
-                void fireCancelQuery() {
-                    cancels.incrementAndGet();
-                }
-            };
-            // Stand-in for "reduce() won the race to set REDUCING before close()'s CAS ran."
+
+            DatafusionReduceSink sink = new DatafusionReduceSink(ctx, runtimeHandle);
+            // First close tears down.
+            sink.close();
+            assertTrue("teardown must run on first close", sink.torndown.get());
+
+            // Second close must be a no-op (no exception, no double-free).
+            sink.close();
+            assertTrue("torndown still true after second close", sink.torndown.get());
+
+            // Close from REDUCING state: simulate reduce() already set state, then close
+            // arrives concurrently. Teardown already ran so torndown CAS fails — no-op.
             sink.state.set(DatafusionReduceSink.SinkState.REDUCING);
             sink.close();
-            assertEquals("close must fire cancel via compareAndExchange when state is REDUCING", 1, cancels.get());
-            assertEquals(
-                "close must NOT mutate REDUCING state — the in-flight reduce() owns the DONE transition",
-                DatafusionReduceSink.SinkState.REDUCING,
-                sink.state.get()
-            );
+            assertTrue("third close (from REDUCING) is still idempotent", sink.torndown.get());
         } finally {
             runtimeHandle.close();
         }
@@ -492,6 +525,33 @@ public class DatafusionReduceSinkTests extends OpenSearchTestCase {
                 batchCount++;
                 totalRows += batch.getRowCount();
                 firstBatchLatch.countDown();
+            } finally {
+                batch.close();
+            }
+        }
+
+        @Override
+        public void close() {}
+    }
+
+    /**
+     * Downstream sink that blocks the drain thread inside {@code feed} until released. Used to
+     * stall the reduce-output drain so the bounded native input channel fills and a feeder parks
+     * on a full channel — the precondition for the close-vs-parked-feeder deadlock regression.
+     */
+    private static final class BlockingCapturingSink implements ExchangeSink {
+        final CountDownLatch firstBatchLatch = new CountDownLatch(1);
+        final CountDownLatch release = new CountDownLatch(1);
+        volatile int batchCount;
+
+        @Override
+        public void feed(VectorSchemaRoot batch) {
+            try {
+                batchCount++;
+                firstBatchLatch.countDown();
+                release.await(30, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
             } finally {
                 batch.close();
             }
