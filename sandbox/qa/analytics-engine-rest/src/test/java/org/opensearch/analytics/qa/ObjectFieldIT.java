@@ -158,14 +158,6 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
         );
     }
 
-    /** {@code | stats min(city)} — aggregate over an object parent must be rejected. */
-    public void testAggregateOnObjectParentFails() throws IOException {
-        expectFailure(
-            "source=" + DATASET.indexName + " | stats min(city)",
-            "aggregate on object parent should fail"
-        );
-    }
-
     /**
      * {@code | eval x = city | fields x} — assigning the parent to a new alias and projecting
      * it works as if the user had written {@code | fields city} directly. The SQL plugin
@@ -195,6 +187,47 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
             "group-by on object parent should fail"
         );
     }
+
+    /** {@code | stats min(city)} — aggregate over an object parent must be rejected. */
+    public void testAggregateOnObjectParentFails() throws IOException {
+        expectFailure(
+            "source=" + DATASET.indexName + " | stats min(city)",
+            "aggregate on object parent should fail"
+        );
+    }
+
+    /**
+     * {@code | dedup city} — dedup on an object parent. The SQL plugin lowers
+     * {@code | dedup} to {@code ROW_NUMBER OVER (PARTITION BY city)}; the rewriter expands the
+     * partition-by InputRef into the parent's leaf list. Tuple equality on the leaves matches
+     * the user's intent: "two rows with the same city object are duplicates."
+     *
+     * <p>The fixture has 6 cities, each unique by full city object, so dedup yields all 6.
+     */
+    public void testDedupOnObjectParent() throws IOException {
+        Map<String, Object> response = executePpl("source=" + DATASET.indexName + " | dedup city | sort id | fields city.name");
+        @SuppressWarnings("unchecked")
+        List<List<Object>> rows = (List<List<Object>>) response.get("datarows");
+        assertNotNull(rows);
+        assertEquals("All 6 cities are unique by full-tuple equality", 6, rows.size());
+    }
+
+    /**
+     * {@code | where isnotnull(city)} — IS_NOT_NULL on an object parent expands to
+     * {@code OR(IS_NOT_NULL(city.name), IS_NOT_NULL(city.population), …)} matching
+     * OpenSearch's {@code _exists_:city} semantic ("any leaf is non-null"). Every doc in the
+     * fixture populates city, so all 6 rows match.
+     */
+    public void testIsNotNullOnObjectParent() throws IOException {
+        Map<String, Object> response = executePpl(
+            "source=" + DATASET.indexName + " | where isnotnull(city) | sort id | fields city.name"
+        );
+        @SuppressWarnings("unchecked")
+        List<List<Object>> rows = (List<List<Object>>) response.get("datarows");
+        assertNotNull(rows);
+        assertEquals("All 6 docs populate city → all match isnotnull(city)", 6, rows.size());
+    }
+
 
     /**
      * {@code | join} between two indices that both expose ObjectType columns.
