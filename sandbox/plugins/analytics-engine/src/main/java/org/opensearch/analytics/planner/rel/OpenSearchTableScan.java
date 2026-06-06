@@ -121,6 +121,29 @@ public class OpenSearchTableScan extends TableScan implements OpenSearchRelNode 
         return planner.getCostFactory().makeTinyCost();
     }
 
+    /**
+     * Default per-shard row-count estimate when no real statistic is available. Coarse but
+     * non-zero so downstream cost arithmetic differentiates plan alternatives. The actual
+     * value matters less than the order of magnitude — Volcano picks the right plan as
+     * long as scans report "big" and aggregates report "much smaller". Once index-level
+     * statistics are wired in (cluster-state cache or parquet footer), replace this with
+     * a real lookup against {@link #getTable()}'s qualified name.
+     */
+    private static final double DEFAULT_ROWS_PER_SHARD = 10_000_000.0;
+
+    @Override
+    public double estimateRowCount(RelMetadataQuery mq) {
+        Integer shardCount = null;
+        for (int i = 0; i < getTraitSet().size(); i++) {
+            if (getTraitSet().getTrait(i) instanceof OpenSearchDistribution dist && dist.getShardCount() != null) {
+                shardCount = dist.getShardCount();
+                break;
+            }
+        }
+        int shards = shardCount != null ? shardCount : 1;
+        return shards * DEFAULT_ROWS_PER_SHARD;
+    }
+
     @Override
     public RelWriter explainTerms(RelWriter pw) {
         return super.explainTerms(pw).item("viableBackends", viableBackends);
