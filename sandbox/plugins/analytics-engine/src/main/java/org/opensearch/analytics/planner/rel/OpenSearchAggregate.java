@@ -265,6 +265,26 @@ public class OpenSearchAggregate extends Aggregate implements OpenSearchRelNode 
         return planner.getCostFactory().makeTinyCost();
     }
 
+    /**
+     * Without column distinct-value statistics, Calcite's default group-by cardinality estimate
+     * collapses to ~0.1 × input rows or a fixed heuristic that's often wrong by orders of
+     * magnitude. Override with a fixed reduction factor: any aggregation reduces row count by
+     * at least 100×. This is conservative (real workloads typically reduce by 1000-10000×) but
+     * enough to make Volcano prefer the split alternative (PARTIAL/FINAL across an Exchange)
+     * over single-stage aggregate-at-coordinator: the split plan ships group-count rows over the
+     * wire instead of input-count rows, and the cost arithmetic now reflects that savings.
+     */
+    private static final double GROUP_REDUCTION_FACTOR = 100.0;
+
+    @Override
+    public double estimateRowCount(RelMetadataQuery mq) {
+        if (getGroupSet().isEmpty()) {
+            return 1.0;
+        }
+        double inputRows = mq.getRowCount(getInput());
+        return Math.max(1.0, inputRows / GROUP_REDUCTION_FACTOR);
+    }
+
     @Override
     public RelWriter explainTerms(RelWriter pw) {
         return super.explainTerms(pw).item("mode", mode).item("viableBackends", viableBackends);

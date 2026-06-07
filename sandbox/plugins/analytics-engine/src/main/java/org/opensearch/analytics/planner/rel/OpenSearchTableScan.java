@@ -36,7 +36,38 @@ public class OpenSearchTableScan extends TableScan implements OpenSearchRelNode 
      * appended. Null in the default case so {@link TableScan#deriveRowType()} drives.
      */
     private final RelDataType overrideRowType;
+    /**
+     * Aggregated row count across the concrete indices behind this scan (alias / pattern
+     * resolution sums the per-index counts). 0 when no statistics are available; callers
+     * fall back to {@code shards × DEFAULT_ROWS_PER_SHARD} via {@link #estimateRowCount}.
+     */
+    private final long rowCount;
 
+    /**
+     * Canonical constructor. {@code overrideRowType} is non-null only when QTF (or a future
+     * rule) needs to narrow the scan output to fewer columns than the underlying table —
+     * pass null in the default case so {@link TableScan#deriveRowType()} drives. {@code
+     * rowCount} is the aggregated row count across the concrete indices behind this scan;
+     * pass 0 when no statistic is available and {@link #estimateRowCount} falls back to
+     * {@code shards × DEFAULT_ROWS_PER_SHARD}.
+     */
+    public OpenSearchTableScan(
+        RelOptCluster cluster,
+        RelTraitSet traitSet,
+        RelOptTable table,
+        List<String> viableBackends,
+        List<FieldStorageInfo> outputFieldStorage,
+        RelDataType overrideRowType,
+        long rowCount
+    ) {
+        super(cluster, traitSet, List.of(), table);
+        this.viableBackends = viableBackends;
+        this.outputFieldStorage = outputFieldStorage;
+        this.overrideRowType = overrideRowType;
+        this.rowCount = rowCount;
+    }
+
+    /** Convenience for callers without an override row type or known row count. */
     public OpenSearchTableScan(
         RelOptCluster cluster,
         RelTraitSet traitSet,
@@ -44,15 +75,10 @@ public class OpenSearchTableScan extends TableScan implements OpenSearchRelNode 
         List<String> viableBackends,
         List<FieldStorageInfo> outputFieldStorage
     ) {
-        this(cluster, traitSet, table, viableBackends, outputFieldStorage, null);
+        this(cluster, traitSet, table, viableBackends, outputFieldStorage, null, 0L);
     }
 
-    /**
-     * Overload taking an explicit {@code overrideRowType}. Used by the QTF rule to
-     * narrow the scan to {@code [sort/filter cols, ___row_id]} after dropping the fetch
-     * list. {@code outputFieldStorage} must align 1:1 with {@code overrideRowType}'s
-     * fields (helper columns get synthetic {@link FieldStorageInfo} entries).
-     */
+    /** Convenience for callers that narrow the rowType (QTF) but don't have a row-count stat. */
     public OpenSearchTableScan(
         RelOptCluster cluster,
         RelTraitSet traitSet,
@@ -61,10 +87,7 @@ public class OpenSearchTableScan extends TableScan implements OpenSearchRelNode 
         List<FieldStorageInfo> outputFieldStorage,
         RelDataType overrideRowType
     ) {
-        super(cluster, traitSet, List.of(), table);
-        this.viableBackends = viableBackends;
-        this.outputFieldStorage = outputFieldStorage;
-        this.overrideRowType = overrideRowType;
+        this(cluster, traitSet, table, viableBackends, outputFieldStorage, overrideRowType, 0L);
     }
 
     @Override
@@ -85,6 +108,30 @@ public class OpenSearchTableScan extends TableScan implements OpenSearchRelNode 
      * <p>{@code tableId} is derived from the table's qualified name, stable across plans for
      * the same index.
      */
+    /**
+     * Canonical factory. Builds a SHARD distribution trait from {@code shardCount} (SINGLETON
+     * for 1 shard, RANDOM for N>1) and threads {@code rowCount} (aggregated across the concrete
+     * indices behind {@code table}). Pass {@code rowCount=0} when no statistic is available —
+     * {@link #estimateRowCount} falls back to {@code shards × DEFAULT_ROWS_PER_SHARD}.
+     */
+    public static OpenSearchTableScan create(
+        RelOptCluster cluster,
+        RelOptTable table,
+        List<String> viableBackends,
+        List<FieldStorageInfo> outputFieldStorage,
+        int shardCount,
+        long rowCount,
+        OpenSearchDistributionTraitDef distTraitDef
+    ) {
+        int tableId = table.getQualifiedName().hashCode();
+        OpenSearchDistribution distribution = shardCount == 1
+            ? distTraitDef.shardSingleton(tableId, shardCount)
+            : distTraitDef.shardRandom(tableId, shardCount);
+        RelTraitSet traitSet = RelTraitSet.createEmpty().plus(OpenSearchConvention.INSTANCE).plus(distribution);
+        return new OpenSearchTableScan(cluster, traitSet, table, viableBackends, outputFieldStorage, null, rowCount);
+    }
+
+    /** Convenience overload for callers without a row-count stat (defaults to 0 / fallback). */
     public static OpenSearchTableScan create(
         RelOptCluster cluster,
         RelOptTable table,
@@ -93,12 +140,7 @@ public class OpenSearchTableScan extends TableScan implements OpenSearchRelNode 
         int shardCount,
         OpenSearchDistributionTraitDef distTraitDef
     ) {
-        int tableId = table.getQualifiedName().hashCode();
-        OpenSearchDistribution distribution = shardCount == 1
-            ? distTraitDef.shardSingleton(tableId, shardCount)
-            : distTraitDef.shardRandom(tableId, shardCount);
-        RelTraitSet traitSet = RelTraitSet.createEmpty().plus(OpenSearchConvention.INSTANCE).plus(distribution);
-        return new OpenSearchTableScan(cluster, traitSet, table, viableBackends, outputFieldStorage);
+        return create(cluster, table, viableBackends, outputFieldStorage, shardCount, 0L, distTraitDef);
     }
 
     @Override
@@ -113,12 +155,38 @@ public class OpenSearchTableScan extends TableScan implements OpenSearchRelNode 
 
     @Override
     public RelNode copy(RelTraitSet traitSet, List<RelNode> inputs) {
-        return new OpenSearchTableScan(getCluster(), traitSet, getTable(), viableBackends, outputFieldStorage, overrideRowType);
+        return new OpenSearchTableScan(getCluster(), traitSet, getTable(), viableBackends, outputFieldStorage, overrideRowType, rowCount);
     }
 
     @Override
     public org.apache.calcite.plan.RelOptCost computeSelfCost(RelOptPlanner planner, RelMetadataQuery mq) {
         return planner.getCostFactory().makeTinyCost();
+    }
+
+    /**
+     * Per-shard row-count fallback when no real statistic is available. Coarse but non-zero
+     * so downstream cost arithmetic differentiates plan alternatives. The actual value
+     * matters less than the order of magnitude — Volcano picks the right plan as long as
+     * scans report "big" and aggregates report "much smaller". Replaced with a real
+     * {@link org.opensearch.analytics.planner.stats.TableStatistics#rowCount} when populated
+     * by {@code StatisticsCollector}; the IndicesStats integration is a follow-up.
+     */
+    private static final double DEFAULT_ROWS_PER_SHARD = 10_000_000.0;
+
+    @Override
+    public double estimateRowCount(RelMetadataQuery mq) {
+        if (rowCount > 0) {
+            return rowCount;
+        }
+        Integer shardCount = null;
+        for (int i = 0; i < getTraitSet().size(); i++) {
+            if (getTraitSet().getTrait(i) instanceof OpenSearchDistribution dist && dist.getShardCount() != null) {
+                shardCount = dist.getShardCount();
+                break;
+            }
+        }
+        int shards = shardCount != null ? shardCount : 1;
+        return shards * DEFAULT_ROWS_PER_SHARD;
     }
 
     @Override
@@ -128,7 +196,15 @@ public class OpenSearchTableScan extends TableScan implements OpenSearchRelNode 
 
     @Override
     public RelNode copyResolved(String backend, List<RelNode> children, List<OperatorAnnotation> resolvedAnnotations) {
-        return new OpenSearchTableScan(getCluster(), getTraitSet(), getTable(), List.of(backend), outputFieldStorage, overrideRowType);
+        return new OpenSearchTableScan(
+            getCluster(),
+            getTraitSet(),
+            getTable(),
+            List.of(backend),
+            outputFieldStorage,
+            overrideRowType,
+            rowCount
+        );
     }
 
     @Override

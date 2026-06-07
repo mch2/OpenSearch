@@ -21,11 +21,14 @@ import org.opensearch.analytics.planner.FieldStorageResolver;
 import org.opensearch.analytics.planner.IndexResolution;
 import org.opensearch.analytics.planner.PlannerContext;
 import org.opensearch.analytics.planner.rel.OpenSearchTableScan;
+import org.opensearch.analytics.planner.stats.StatisticsCollector;
+import org.opensearch.analytics.planner.stats.TableStatistics;
 import org.opensearch.analytics.spi.DelegationType;
 import org.opensearch.analytics.spi.FieldStorageInfo;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Converts {@link TableScan} → {@link OpenSearchTableScan}.
@@ -164,6 +167,12 @@ public class OpenSearchTableScanRule extends RelOptRule {
 
         RelOptTable indexNameTable = new IndexNameTable(scan.getTable(), tableName);
 
+        // Aggregate row count across the resolved concrete indices. StatisticsCollector
+        // only exposes shard counts today (rowCount=0); when IndicesStats is plumbed,
+        // the sum here automatically picks up real numbers without further changes.
+        Map<String, TableStatistics> stats = StatisticsCollector.collect(context.getClusterState(), resolution.concreteIndexNames());
+        long aggregatedRowCount = stats.values().stream().mapToLong(TableStatistics::rowCount).sum();
+
         call.transformTo(
             OpenSearchTableScan.create(
                 scan.getCluster(),
@@ -171,6 +180,7 @@ public class OpenSearchTableScanRule extends RelOptRule {
                 viableBackends,
                 fieldStorage,
                 resolution.totalShardCount(),
+                aggregatedRowCount,
                 context.getDistributionTraitDef()
             )
         );
