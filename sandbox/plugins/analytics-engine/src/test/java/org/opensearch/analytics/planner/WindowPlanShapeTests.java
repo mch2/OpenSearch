@@ -611,9 +611,8 @@ public class WindowPlanShapeTests extends PlanShapeTestBase {
                   OpenSearchJoin(condition=[=($0, $2)], joinType=[inner], viableBackends=[[mock-parquet]])
                     OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
                       OpenSearchTableScan(table=[[left_idx]], viableBackends=[[mock-parquet]])
-                    OpenSearchProject(status=[$0], viableBackends=[[mock-parquet]])
-                      OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
-                        OpenSearchTableScan(table=[[right_idx]], viableBackends=[[mock-parquet]])
+                    OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
+                      OpenSearchTableScan(table=[[right_idx]], fields=[[status]], viableBackends=[[mock-parquet]])
                 """,
             result
         );

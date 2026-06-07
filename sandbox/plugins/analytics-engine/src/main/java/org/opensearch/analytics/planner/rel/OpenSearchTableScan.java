@@ -153,6 +153,11 @@ public class OpenSearchTableScan extends TableScan implements OpenSearchRelNode 
         return outputFieldStorage;
     }
 
+    /** Aggregated row count across the concrete indices behind this scan, or 0 if unknown. */
+    public long getRowCount() {
+        return rowCount;
+    }
+
     @Override
     public RelNode copy(RelTraitSet traitSet, List<RelNode> inputs) {
         return new OpenSearchTableScan(getCluster(), traitSet, getTable(), viableBackends, outputFieldStorage, overrideRowType, rowCount);
@@ -191,7 +196,15 @@ public class OpenSearchTableScan extends TableScan implements OpenSearchRelNode 
 
     @Override
     public RelWriter explainTerms(RelWriter pw) {
-        return super.explainTerms(pw).item("viableBackends", viableBackends);
+        // When the scan is narrowed (QTF, or the project-into-scan fold) its output is fewer
+        // columns than the underlying table. The default explain shows only the table name, so a
+        // narrowed scan would look identical to a full one. Render the actual output fields when
+        // an overrideRowType is in effect so the narrowing is visible in EXPLAIN and plan-shape tests.
+        RelWriter writer = super.explainTerms(pw);
+        if (overrideRowType != null) {
+            writer = writer.item("fields", getRowType().getFieldNames());
+        }
+        return writer.item("viableBackends", viableBackends);
     }
 
     @Override

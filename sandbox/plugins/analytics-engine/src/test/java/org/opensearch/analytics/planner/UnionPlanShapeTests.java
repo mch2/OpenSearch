@@ -8,6 +8,7 @@
 
 package org.opensearch.analytics.planner;
 
+import org.apache.calcite.plan.RelOptTable;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.logical.LogicalUnion;
 import org.apache.calcite.rel.logical.LogicalValues;
@@ -140,6 +141,50 @@ public class UnionPlanShapeTests extends PlanShapeTestBase {
                 """,
             result
         );
+    }
+
+    /**
+     * Three union arms over three <em>distinct</em> indices, each narrowed to one column. Every
+     * index is scanned exactly once, so the census guard lets the fold narrow all three scans (each
+     * shows {@code fields=[[status]]}). Contrast {@code testUnion_threeArms_sameTable_*}, where the
+     * shared index would force the guard to skip folding.
+     */
+    public void testUnion_threeArms_differentTables_foldEachScan_1shard() {
+        RelNode union = LogicalUnion.create(
+            List.of(
+                narrowToStatus(mockTable("a", "status", "size")),
+                narrowToStatus(mockTable("b", "status", "size")),
+                narrowToStatus(mockTable("c", "status", "size"))
+            ),
+            /* all */ true
+        );
+        RelNode result = runPlanner(union, unionContextThreeIndices(Map.of("a", 1, "b", 1, "c", 1)));
+        assertPlanShape(
+            """
+                OpenSearchUnion(all=[true], viableBackends=[[mock-parquet]])
+                  OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
+                    OpenSearchTableScan(table=[[a]], fields=[[status]], viableBackends=[[mock-parquet]])
+                  OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
+                    OpenSearchTableScan(table=[[b]], fields=[[status]], viableBackends=[[mock-parquet]])
+                  OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
+                    OpenSearchTableScan(table=[[c]], fields=[[status]], viableBackends=[[mock-parquet]])
+                """,
+            result
+        );
+    }
+
+    private RelNode narrowToStatus(RelOptTable table) {
+        RelNode scan = stubScan(table);
+        return org.apache.calcite.rel.logical.LogicalProject.create(
+            scan,
+            List.of(),
+            List.of(rexBuilder.makeInputRef(scan, 0)),
+            List.of("status")
+        );
+    }
+
+    private PlannerContext unionContextThreeIndices(Map<String, Integer> shardsByIndex) {
+        return buildContextPerIndex("parquet", shardsByIndex, intFields(), List.of(new UnionCapableBackend(), LUCENE));
     }
 
     public void testUnion_oneEmptyArm_collapsed() {

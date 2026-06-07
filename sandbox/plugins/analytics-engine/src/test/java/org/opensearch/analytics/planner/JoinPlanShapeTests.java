@@ -157,6 +157,80 @@ public class JoinPlanShapeTests extends PlanShapeTestBase {
         );
     }
 
+    /**
+     * Join over a narrowing projection: the query reads only {@code status} from each side
+     * of a [status, size] index. Field trimming inserts a narrowing Project per side, and the
+     * post-CBO project-into-scan fold collapses each into a scan that declares only [status].
+     * Unlike the aggregate case (where the split pushes the exchange above the narrowing
+     * Project), the join gathers each scan input directly — so without the fold the shard would
+     * still ship [status, size]. The folded scan narrows the native read in the shard fragment.
+     */
+    public void testInnerJoin_narrowingProjectFoldsIntoScan_2shard() {
+        PlannerContext context = perIndexContext(Map.of("left_idx", 2, "right_idx", 2));
+        RelOptTable left = mockTable("left_idx", "status", "size");
+        RelOptTable right = mockTable("right_idx", "status", "size");
+        // Project only the join keys (status from each side) so size is unused and trimmed.
+        RelNode join = buildEquiJoin("left_idx", "right_idx", JoinRelType.INNER);
+        RexNode leftKey = rexBuilder.makeInputRef(join, 0);
+        RexNode rightKey = rexBuilder.makeInputRef(join, 2);
+        RelNode plan = org.apache.calcite.rel.logical.LogicalProject.create(
+            join,
+            List.of(),
+            List.of(leftKey, rightKey),
+            List.of("ls", "rs")
+        );
+        RelNode result = runPlanner(plan, context);
+        // Each scan's fields=[[status]] term (rendered only when the scan is narrowed) shows the fold
+        // reached the scan through the per-side ER — the shard ships one column, not [status, size].
+        assertPlanShape(
+            """
+                OpenSearchProject(ls=[$0], rs=[$1], viableBackends=[[mock-parquet]])
+                  OpenSearchJoin(condition=[=($0, $1)], joinType=[inner], viableBackends=[[mock-parquet]])
+                    OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
+                      OpenSearchTableScan(table=[[left_idx]], fields=[[status]], viableBackends=[[mock-parquet]])
+                    OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
+                      OpenSearchTableScan(table=[[right_idx]], fields=[[status]], viableBackends=[[mock-parquet]])
+                """,
+            result
+        );
+    }
+
+    /**
+     * Self-join with a narrowing projection: both sides scan the <em>same</em> index. The fold must
+     * NOT narrow either scan — DataFusion registers one provider per index name, so the two scans
+     * share a single base schema and narrowing one would break the other's column references (this
+     * is the {@code appendcol}/self-join regression). The census-guard leaves both scans full
+     * (no {@code fields=} term); pruning still happens via the narrowing Project the planner keeps.
+     */
+    public void testSelfJoin_narrowingProjectDoesNotFoldIntoScan_2shard() {
+        PlannerContext context = perIndexContext(Map.of("test_index", 2));
+        RelNode join = buildEquiJoin("test_index", "test_index", JoinRelType.INNER);
+        RexNode leftKey = rexBuilder.makeInputRef(join, 0);
+        RexNode rightKey = rexBuilder.makeInputRef(join, 2);
+        RelNode plan = org.apache.calcite.rel.logical.LogicalProject.create(
+            join,
+            List.of(),
+            List.of(leftKey, rightKey),
+            List.of("ls", "rs")
+        );
+        RelNode result = runPlanner(plan, context);
+        // No fields=[...] on either scan — both stay full because test_index is scanned twice.
+        for (org.opensearch.analytics.planner.rel.OpenSearchTableScan scan : findScans(result)) {
+            assertEquals("self-join scan must stay full (2 cols)", 2, scan.getRowType().getFieldCount());
+        }
+    }
+
+    private static List<org.opensearch.analytics.planner.rel.OpenSearchTableScan> findScans(RelNode root) {
+        List<org.opensearch.analytics.planner.rel.OpenSearchTableScan> scans = new java.util.ArrayList<>();
+        if (root instanceof org.opensearch.analytics.planner.rel.OpenSearchTableScan ts) {
+            scans.add(ts);
+        }
+        for (RelNode child : root.getInputs()) {
+            scans.addAll(findScans(child));
+        }
+        return scans;
+    }
+
     private void runJoinKindShape(JoinRelType joinType, String label) {
         PlannerContext context = perIndexContext(Map.of("left_idx", 2, "right_idx", 2));
         RelNode join = buildEquiJoin("left_idx", "right_idx", joinType);

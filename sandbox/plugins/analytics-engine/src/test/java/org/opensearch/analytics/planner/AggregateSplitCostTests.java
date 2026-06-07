@@ -138,10 +138,7 @@ public class AggregateSplitCostTests extends PlanShapeTestBase {
         // Aggregate output must be strictly smaller than its input — that's the gap that
         // makes the split alternative win on cost. Calcite's metadata query may apply its
         // own dampening, so we don't assert a specific ratio, just monotone shrinkage.
-        assertTrue(
-            "aggregate output (" + partialRows + ") must be < scan rows (" + scanRows + ")",
-            partialRows < scanRows
-        );
+        assertTrue("aggregate output (" + partialRows + ") must be < scan rows (" + scanRows + ")", partialRows < scanRows);
     }
 
     private static OpenSearchTableScan findScan(RelNode root) {
