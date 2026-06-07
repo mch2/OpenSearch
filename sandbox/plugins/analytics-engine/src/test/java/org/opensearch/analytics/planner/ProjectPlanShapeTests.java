@@ -60,6 +60,26 @@ public class ProjectPlanShapeTests extends PlanShapeTestBase {
         );
     }
 
+    /**
+     * Field trimming pushes column selection into the shard fragment. A query that reads only
+     * {@code status} from a wider index ([status, size]) keeps a narrowing
+     * {@code OpenSearchProject(status)} <em>below</em> the exchange, so each shard's native scan
+     * prunes to that column and ships only it, instead of streaming the full row to the coordinator.
+     */
+    public void testProjectSubset_pushesNarrowingProjectIntoShard_2shard() {
+        RelNode scan = stubScan(mockTable("test_index", "status", "size"));
+        RelNode plan = LogicalProject.create(scan, List.of(), List.of(rexBuilder.makeInputRef(scan, 0)), List.of("status"));
+        RelNode result = runPlanner(plan, multiShardContext());
+        assertPlanShape(
+            """
+                OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
+                  OpenSearchProject(status=[$0], viableBackends=[[mock-parquet]])
+                    OpenSearchTableScan(table=[[test_index]], viableBackends=[[mock-parquet]])
+                """,
+            result
+        );
+    }
+
     private RelNode identityFieldsProject() {
         RelNode scan = stubScan(mockTable("test_index", "status", "size"));
         return LogicalProject.create(

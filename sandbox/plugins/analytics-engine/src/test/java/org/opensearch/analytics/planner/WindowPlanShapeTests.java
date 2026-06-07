@@ -558,13 +558,16 @@ public class WindowPlanShapeTests extends PlanShapeTestBase {
                 StubTableScan(table=[[test_index]])
             """, plan);
         RelNode result = runPlanner(plan, perIndexContext(Map.of("test_index", 1)));
+        // The join's right input only supplies the join key, so field trimming narrows it to
+        // status; the left input keeps status + size (size feeds the window SUM).
         assertPlanShape(
             """
                 OpenSearchProject(status=[$0], size=[$1], s=[SUM($1) OVER ()], viableBackends=[[mock-parquet]])
                   OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
                     OpenSearchJoin(condition=[=($0, $2)], joinType=[inner], viableBackends=[[mock-parquet]])
                       OpenSearchTableScan(table=[[test_index]], viableBackends=[[mock-parquet]])
-                      OpenSearchTableScan(table=[[test_index]], viableBackends=[[mock-parquet]])
+                      OpenSearchProject(status=[$0], viableBackends=[[mock-parquet]])
+                        OpenSearchTableScan(table=[[test_index]], viableBackends=[[mock-parquet]])
                 """,
             result
         );
@@ -600,14 +603,17 @@ public class WindowPlanShapeTests extends PlanShapeTestBase {
                 StubTableScan(table=[[right_idx]])
             """, plan);
         RelNode result = runPlanner(plan, perIndexContext(Map.of("left_idx", 2, "right_idx", 2)));
+        // Right input supplies only the join key, so field trimming narrows it to status (below its
+        // ER); the left input keeps status + size (size feeds the window SUM).
         assertPlanShape(
             """
                 OpenSearchProject(status=[$0], size=[$1], s=[SUM($1) OVER ()], viableBackends=[[mock-parquet]])
                   OpenSearchJoin(condition=[=($0, $2)], joinType=[inner], viableBackends=[[mock-parquet]])
                     OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
                       OpenSearchTableScan(table=[[left_idx]], viableBackends=[[mock-parquet]])
-                    OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
-                      OpenSearchTableScan(table=[[right_idx]], viableBackends=[[mock-parquet]])
+                    OpenSearchProject(status=[$0], viableBackends=[[mock-parquet]])
+                      OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
+                        OpenSearchTableScan(table=[[right_idx]], viableBackends=[[mock-parquet]])
                 """,
             result
         );
@@ -628,10 +634,11 @@ public class WindowPlanShapeTests extends PlanShapeTestBase {
                 StubTableScan(table=[[test_index]])
             """, plan);
         RelNode result = runPlanner(plan, singleShardContext());
+        // The windowed column `s` is never read by the aggregate, so field trimming drops the dead
+        // window Project entirely; the aggregate reads status + size directly from the scan.
         assertPlanShape("""
             OpenSearchAggregate(group=[{0}], total_size=[SUM($1)], mode=[SINGLE], viableBackends=[[mock-parquet]])
-              OpenSearchProject(status=[$0], size=[$1], s=[SUM($1) OVER ()], viableBackends=[[mock-parquet]])
-                OpenSearchTableScan(table=[[test_index]], viableBackends=[[mock-parquet]])
+              OpenSearchTableScan(table=[[test_index]], viableBackends=[[mock-parquet]])
             """, result);
     }
 
@@ -652,11 +659,13 @@ public class WindowPlanShapeTests extends PlanShapeTestBase {
                 StubTableScan(table=[[test_index]])
             """, plan);
         RelNode result = runPlanner(plan, multiShardContext());
+        // Field trimming drops the dead window Project (its `s` column is unused). Without the
+        // Project's SINGLETON cost gate, the aggregate now splits PARTIAL/FINAL across the exchange.
         assertPlanShape(
             """
-                OpenSearchAggregate(group=[{0}], total_size=[SUM($1)], mode=[SINGLE], viableBackends=[[mock-parquet]])
-                  OpenSearchProject(status=[$0], size=[$1], s=[SUM($1) OVER ()], viableBackends=[[mock-parquet]])
-                    OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
+                OpenSearchAggregate(group=[{0}], total_size=[SUM($1)], mode=[FINAL], viableBackends=[[mock-parquet]])
+                  OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
+                    OpenSearchAggregate(group=[{0}], total_size=[SUM($1)], mode=[PARTIAL], viableBackends=[[mock-parquet]])
                       OpenSearchTableScan(table=[[test_index]], viableBackends=[[mock-parquet]])
                 """,
             result

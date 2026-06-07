@@ -64,11 +64,17 @@ public class RuleProfilingListenerTests extends BasePlannerRulesTests {
         runAndAssertRules(
             1,
             "SELECT URL FROM hits WHERE CounterID = 100",
+            // Field trimming inserts a narrowing Project, which the pushdown phase normalizes via
+            // FilterProjectTransposeRule + ProjectMergeRule.
             Map.of(
                 "ReduceExpressionsRule(Filter)",
                 0L,
                 "ReduceExpressionsRule(Project)",
                 0L,
+                "FilterProjectTransposeRule",
+                1L,
+                "ProjectMergeRule",
+                1L,
                 "OpenSearchFilterRule",
                 1L,
                 "OpenSearchProjectRule",
@@ -85,10 +91,14 @@ public class RuleProfilingListenerTests extends BasePlannerRulesTests {
         runAndAssertRules(
             5,
             "SELECT CounterID, SUM(ParamPrice) AS total FROM hits WHERE AdvEngineID = 5 GROUP BY CounterID",
+            // Field trimming inserts a narrowing Project, which the pushdown phase normalizes via
+            // FilterProjectTransposeRule + ProjectMergeRule.
             Map.ofEntries(
                 Map.entry("ExtractLiteralAggRule", 0L),
                 Map.entry("ReduceExpressionsRule(Filter)", 0L),
                 Map.entry("ReduceExpressionsRule(Project)", 0L),
+                Map.entry("FilterProjectTransposeRule", 1L),
+                Map.entry("ProjectMergeRule", 1L),
                 Map.entry("OpenSearchFilterRule", 1L),
                 Map.entry("OpenSearchProjectRule", 1L),
                 Map.entry("OpenSearchTableScanRule", 1L),
@@ -105,6 +115,8 @@ public class RuleProfilingListenerTests extends BasePlannerRulesTests {
         runAndAssertRules(
             5,
             "SELECT l.CounterID, COUNT(*) AS cnt FROM hits l JOIN hits r ON l.CounterID = r.CounterID GROUP BY l.CounterID",
+            // Field trimming narrows each join input to the join key via a Project per side, so
+            // OpenSearchProjectRule fires twice; the join condition is pure refs so no transpose.
             Map.of(
                 "ExtractLiteralAggRule",
                 0L,
@@ -113,7 +125,7 @@ public class RuleProfilingListenerTests extends BasePlannerRulesTests {
                 "OpenSearchTableScanRule",
                 1L,
                 "OpenSearchProjectRule",
-                1L,
+                2L,
                 "OpenSearchJoinRule",
                 1L,
                 "OpenSearchAggregateRule",
@@ -122,8 +134,10 @@ public class RuleProfilingListenerTests extends BasePlannerRulesTests {
                 1L,
                 "OpenSearchJoinSplitRule",
                 1L,
+                "OpenSearchDistributionDeriveRule",
+                1L,
                 "ExpandConversionRule",
-                2L
+                3L
             )
         );
     }
