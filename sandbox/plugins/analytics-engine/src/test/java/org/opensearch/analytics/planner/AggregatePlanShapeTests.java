@@ -24,9 +24,12 @@ public class AggregatePlanShapeTests extends PlanShapeTestBase {
         RelNode scan = stubScan(mockTable("test_index", "status", "size"));
         RelNode plan = makeAggregate(scan, countStarCall(scan));
         RelNode result = runPlanner(plan, singleShardContext());
+        // count() references no measure column, so field trimming narrows the scan to the group key
+        // (status) via a Project, dropping the unused size column.
         assertPlanShape("""
             OpenSearchAggregate(group=[{0}], cnt=[COUNT()], mode=[SINGLE], viableBackends=[[mock-parquet]])
-              OpenSearchTableScan(table=[[test_index]], viableBackends=[[mock-parquet]])
+              OpenSearchProject(status=[$0], viableBackends=[[mock-parquet]])
+                OpenSearchTableScan(table=[[test_index]], viableBackends=[[mock-parquet]])
             """, result);
     }
 
@@ -35,12 +38,14 @@ public class AggregatePlanShapeTests extends PlanShapeTestBase {
         RelNode scan = stubScan(mockTable("test_index", "status", "size"));
         RelNode plan = makeAggregate(scan, countStarCall(scan));
         RelNode result = runPlanner(plan, multiShardContext());
+        // count() needs no measure column, so the scan is trimmed to the group key (status).
         assertPlanShape(
             """
                 OpenSearchAggregate(group=[{0}], cnt=[SUM($1)], mode=[FINAL], viableBackends=[[mock-parquet]])
                   OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
                     OpenSearchAggregate(group=[{0}], cnt=[COUNT()], mode=[PARTIAL], viableBackends=[[mock-parquet]])
-                      OpenSearchTableScan(table=[[test_index]], viableBackends=[[mock-parquet]])
+                      OpenSearchProject(status=[$0], viableBackends=[[mock-parquet]])
+                        OpenSearchTableScan(table=[[test_index]], viableBackends=[[mock-parquet]])
                 """,
             result
         );

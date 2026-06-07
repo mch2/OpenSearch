@@ -29,6 +29,7 @@ import org.apache.calcite.rex.RexShuttle;
 import org.apache.calcite.rex.RexSubQuery;
 import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql2rel.RelDecorrelator;
+import org.apache.calcite.sql2rel.RelFieldTrimmer;
 import org.apache.calcite.tools.RelBuilder;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -97,6 +98,7 @@ public class PlannerImpl {
         modifiedRelNode = removeSubQueries(modifiedRelNode, listener);
         modifiedRelNode = extractLiteralAgg(modifiedRelNode, listener);
         modifiedRelNode = reduceExpressions(modifiedRelNode, listener);
+        modifiedRelNode = trimFields(modifiedRelNode);
         modifiedRelNode = pushdownRules(modifiedRelNode, listener);
         modifiedRelNode = decomposeAggregates(modifiedRelNode, listener);
         modifiedRelNode = mark(modifiedRelNode, context, listener);
@@ -267,6 +269,38 @@ public class PlannerImpl {
                 )
             )
             .run(input, listener);
+    }
+
+    /**
+     * Prunes columns no operator above the scan references, narrowing each {@code TableScan}'s row
+     * type down to only the fields the query actually uses. Without this, a {@code | fields a}
+     * over a wide index leaves the scan reading every column; each shard then reads and ships the
+     * full row across the exchange and the coordinator discards the rest.
+     *
+     * <p>Runs on the stock {@code LogicalXxx} tree (after constant folding so it sees final
+     * expressions, before marking/CBO) — Calcite's {@link RelFieldTrimmer} only has trim handlers
+     * for the core rels, and the narrowed scan then flows through marking, the exchange split, and
+     * QTF detection. Trimming removes only unused fields, so columns the query (or QTF) needs
+     * survive; shapes the trimmer doesn't recognize are left untouched.
+     *
+     * <p>The trimmer can collapse a top-level rename-only Project (e.g. {@code transpose}'s output
+     * Project that names the aggregate columns {@code column, row 1, ...}) — its positional mapping
+     * is identity, so the trimmer drops it, but that loses the output column <em>names</em> the
+     * result writer keys on. Guard against it: if trimming changed the root field names, restore the
+     * original output row type with a rename Project on top.
+     */
+    private static RelNode trimFields(RelNode input) {
+        RelBuilder relBuilder = RelBuilder.proto(Contexts.empty()).create(input.getCluster(), null);
+        RelNode trimmed = new RelFieldTrimmer(null, relBuilder).trim(input);
+        List<String> originalNames = input.getRowType().getFieldNames();
+        if (!originalNames.equals(trimmed.getRowType().getFieldNames())) {
+            // Same column count/positions (trim() asserts an identity mapping at the root) but the
+            // names drifted — re-wrap to restore the query's output schema.
+            relBuilder.push(trimmed);
+            relBuilder.rename(originalNames);
+            return relBuilder.build();
+        }
+        return trimmed;
     }
 
     /**
