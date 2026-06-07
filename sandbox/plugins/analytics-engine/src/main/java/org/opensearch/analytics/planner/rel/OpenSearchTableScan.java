@@ -36,6 +36,12 @@ public class OpenSearchTableScan extends TableScan implements OpenSearchRelNode 
      * appended. Null in the default case so {@link TableScan#deriveRowType()} drives.
      */
     private final RelDataType overrideRowType;
+    /**
+     * Aggregated row count across the concrete indices behind this scan (alias / pattern
+     * resolution sums the per-index counts). 0 when no statistics are available; callers
+     * fall back to {@code shards × DEFAULT_ROWS_PER_SHARD} via {@link #estimateRowCount}.
+     */
+    private final long rowCount;
 
     public OpenSearchTableScan(
         RelOptCluster cluster,
@@ -44,7 +50,7 @@ public class OpenSearchTableScan extends TableScan implements OpenSearchRelNode 
         List<String> viableBackends,
         List<FieldStorageInfo> outputFieldStorage
     ) {
-        this(cluster, traitSet, table, viableBackends, outputFieldStorage, null);
+        this(cluster, traitSet, table, viableBackends, outputFieldStorage, null, 0L);
     }
 
     /**
@@ -61,10 +67,28 @@ public class OpenSearchTableScan extends TableScan implements OpenSearchRelNode 
         List<FieldStorageInfo> outputFieldStorage,
         RelDataType overrideRowType
     ) {
+        this(cluster, traitSet, table, viableBackends, outputFieldStorage, overrideRowType, 0L);
+    }
+
+    /**
+     * Full overload threading an aggregated {@code rowCount} for the concrete indices behind
+     * this scan. Pass 0 when no statistic is available — {@link #estimateRowCount} falls back
+     * to {@code shards × DEFAULT_ROWS_PER_SHARD}.
+     */
+    public OpenSearchTableScan(
+        RelOptCluster cluster,
+        RelTraitSet traitSet,
+        RelOptTable table,
+        List<String> viableBackends,
+        List<FieldStorageInfo> outputFieldStorage,
+        RelDataType overrideRowType,
+        long rowCount
+    ) {
         super(cluster, traitSet, List.of(), table);
         this.viableBackends = viableBackends;
         this.outputFieldStorage = outputFieldStorage;
         this.overrideRowType = overrideRowType;
+        this.rowCount = rowCount;
     }
 
     @Override
@@ -93,12 +117,29 @@ public class OpenSearchTableScan extends TableScan implements OpenSearchRelNode 
         int shardCount,
         OpenSearchDistributionTraitDef distTraitDef
     ) {
+        return create(cluster, table, viableBackends, outputFieldStorage, shardCount, 0L, distTraitDef);
+    }
+
+    /**
+     * Overload threading {@code rowCount} (aggregated across concrete indices). Used by
+     * {@code OpenSearchTableScanRule} when {@code StatisticsCollector} populated a row count
+     * for the requested table. 0 means "unknown — fall back to per-shard estimate."
+     */
+    public static OpenSearchTableScan create(
+        RelOptCluster cluster,
+        RelOptTable table,
+        List<String> viableBackends,
+        List<FieldStorageInfo> outputFieldStorage,
+        int shardCount,
+        long rowCount,
+        OpenSearchDistributionTraitDef distTraitDef
+    ) {
         int tableId = table.getQualifiedName().hashCode();
         OpenSearchDistribution distribution = shardCount == 1
             ? distTraitDef.shardSingleton(tableId, shardCount)
             : distTraitDef.shardRandom(tableId, shardCount);
         RelTraitSet traitSet = RelTraitSet.createEmpty().plus(OpenSearchConvention.INSTANCE).plus(distribution);
-        return new OpenSearchTableScan(cluster, traitSet, table, viableBackends, outputFieldStorage);
+        return new OpenSearchTableScan(cluster, traitSet, table, viableBackends, outputFieldStorage, null, rowCount);
     }
 
     @Override
@@ -113,7 +154,7 @@ public class OpenSearchTableScan extends TableScan implements OpenSearchRelNode 
 
     @Override
     public RelNode copy(RelTraitSet traitSet, List<RelNode> inputs) {
-        return new OpenSearchTableScan(getCluster(), traitSet, getTable(), viableBackends, outputFieldStorage, overrideRowType);
+        return new OpenSearchTableScan(getCluster(), traitSet, getTable(), viableBackends, outputFieldStorage, overrideRowType, rowCount);
     }
 
     @Override
@@ -122,17 +163,20 @@ public class OpenSearchTableScan extends TableScan implements OpenSearchRelNode 
     }
 
     /**
-     * Default per-shard row-count estimate when no real statistic is available. Coarse but
-     * non-zero so downstream cost arithmetic differentiates plan alternatives. The actual
-     * value matters less than the order of magnitude — Volcano picks the right plan as
-     * long as scans report "big" and aggregates report "much smaller". Once index-level
-     * statistics are wired in (cluster-state cache or parquet footer), replace this with
-     * a real lookup against {@link #getTable()}'s qualified name.
+     * Per-shard row-count fallback when no real statistic is available. Coarse but non-zero
+     * so downstream cost arithmetic differentiates plan alternatives. The actual value
+     * matters less than the order of magnitude — Volcano picks the right plan as long as
+     * scans report "big" and aggregates report "much smaller". Replaced with a real
+     * {@link org.opensearch.analytics.exec.join.TableStatistics#rowCount} when populated
+     * by {@code StatisticsCollector}; the IndicesStats integration is a follow-up.
      */
     private static final double DEFAULT_ROWS_PER_SHARD = 10_000_000.0;
 
     @Override
     public double estimateRowCount(RelMetadataQuery mq) {
+        if (rowCount > 0) {
+            return rowCount;
+        }
         Integer shardCount = null;
         for (int i = 0; i < getTraitSet().size(); i++) {
             if (getTraitSet().getTrait(i) instanceof OpenSearchDistribution dist && dist.getShardCount() != null) {
@@ -151,7 +195,15 @@ public class OpenSearchTableScan extends TableScan implements OpenSearchRelNode 
 
     @Override
     public RelNode copyResolved(String backend, List<RelNode> children, List<OperatorAnnotation> resolvedAnnotations) {
-        return new OpenSearchTableScan(getCluster(), getTraitSet(), getTable(), List.of(backend), outputFieldStorage, overrideRowType);
+        return new OpenSearchTableScan(
+            getCluster(),
+            getTraitSet(),
+            getTable(),
+            List.of(backend),
+            outputFieldStorage,
+            overrideRowType,
+            rowCount
+        );
     }
 
     @Override
