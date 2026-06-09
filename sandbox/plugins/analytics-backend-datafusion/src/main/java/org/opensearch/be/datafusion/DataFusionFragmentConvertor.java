@@ -131,6 +131,7 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
         FunctionMappings.s(LOCAL_PATTERN_PARSER_GET_TOKENS_OP, "pattern_parser_get_tokens"),
         FunctionMappings.s(ConvertTzAdapter.LOCAL_CONVERT_TZ_OP, "convert_tz"),
         FunctionMappings.s(ParseAdapter.LOCAL_PARSE_OP, "parse"),
+        FunctionMappings.s(GrokAdapter.LOCAL_GROK_OP, "grok"),
         FunctionMappings.s(SqlStdOperatorTable.ITEM, "item"),
         FunctionMappings.s(UnixTimestampAdapter.LOCAL_TO_UNIXTIME_OP, "to_unixtime"),
         FunctionMappings.s(DateTimeAdapters.LOCAL_NOW_OP, "now"),
@@ -147,6 +148,7 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
         FunctionMappings.s(RustUdfDateTimeAdapters.LOCAL_DATE_FORMAT_OP, "date_format"),
         FunctionMappings.s(RustUdfDateTimeAdapters.LOCAL_TIME_FORMAT_OP, "time_format"),
         FunctionMappings.s(RustUdfDateTimeAdapters.LOCAL_STR_TO_DATE_OP, "str_to_date"),
+        FunctionMappings.s(RustUdfDateTimeAdapters.LOCAL_OS_WEEK_OP, "os_week"),
         FunctionMappings.s(SqlLibraryOperators.REGEXP_CONTAINS, "regex_match"),
         FunctionMappings.s(SqlStdOperatorTable.REPLACE, "replace"),
         FunctionMappings.s(SqlLibraryOperators.REGEXP_REPLACE_3, "regexp_replace"),
@@ -454,10 +456,14 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
     }
 
     private byte[] convertToSubstrait(RelNode fragment) {
+        // TODO: move rewriters that don't touch substrait-specific classes up to the analytics-engine
+        // layer so other backends can reuse them.
         RelNode preprocessed = UntypedNullPreprocessor.rewrite(fragment);
         preprocessed = PplAggregateCallRewriter.rewrite(preprocessed);
         preprocessed = PplWindowCallRewriter.rewrite(preprocessed);
         preprocessed = ItemTypeRebuilder.rewrite(preprocessed);
+        preprocessed = CastToVarcharRewriter.rewrite(preprocessed);
+        preprocessed = CastTemporalLiteralValidator.rewrite(preprocessed);
         RelRoot root = RelRoot.of(preprocessed, SqlKind.SELECT);
         SubstraitRelVisitor visitor = createVisitor(preprocessed);
         Rel substraitRel;
@@ -488,6 +494,8 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
         preprocessed = PplAggregateCallRewriter.rewrite(preprocessed);
         preprocessed = PplWindowCallRewriter.rewrite(preprocessed);
         preprocessed = ItemTypeRebuilder.rewrite(preprocessed);
+        preprocessed = CastToVarcharRewriter.rewrite(preprocessed);
+        preprocessed = CastTemporalLiteralValidator.rewrite(preprocessed);
         SubstraitRelVisitor visitor = createVisitor(preprocessed);
         return visitor.apply(preprocessed);
     }
