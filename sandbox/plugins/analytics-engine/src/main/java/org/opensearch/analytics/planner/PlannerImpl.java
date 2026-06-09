@@ -43,6 +43,7 @@ import org.opensearch.analytics.planner.rules.OpenSearchFilterRule;
 import org.opensearch.analytics.planner.rules.OpenSearchJoinRule;
 import org.opensearch.analytics.planner.rules.OpenSearchJoinSplitRule;
 import org.opensearch.analytics.planner.rules.OpenSearchLateMaterializationRewriter;
+import org.opensearch.analytics.planner.rules.OpenSearchProjectIntoScanRewriter;
 import org.opensearch.analytics.planner.rules.OpenSearchProjectRule;
 import org.opensearch.analytics.planner.rules.OpenSearchSortPushdownRewriter;
 import org.opensearch.analytics.planner.rules.OpenSearchSortRule;
@@ -126,6 +127,11 @@ public class PlannerImpl {
         if (sortPushdown.isPresent()) {
             modifiedRelNode = sortPushdown.get();
             LOGGER.debug("After sort pushdown:\n{}", RelOptUtil.toString(modifiedRelNode));
+        }
+        RelNode projectFolded = OpenSearchProjectIntoScanRewriter.rewrite(modifiedRelNode);
+        if (projectFolded != modifiedRelNode) {
+            modifiedRelNode = projectFolded;
+            LOGGER.debug("After project-into-scan fold:\n{}", RelOptUtil.toString(modifiedRelNode));
         }
 
         if (listener != null) {

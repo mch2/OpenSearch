@@ -60,6 +60,34 @@ public class ProjectPlanShapeTests extends PlanShapeTestBase {
         );
     }
 
+    /**
+     * Subset projection ({@code fields status} on a [status, size] index): the narrowing
+     * passthrough Project is folded into the scan, which then declares only {@code [status]}
+     * (rendered as {@code fields=[[status]]}). 1-shard: the fold leaves a bare narrowed scan.
+     */
+    public void testProjectSubset_foldsIntoScan_1shard() {
+        RelNode scan = stubScan(mockTable("test_index", "status", "size"));
+        RelNode plan = LogicalProject.create(scan, List.of(), List.of(rexBuilder.makeInputRef(scan, 0)), List.of("status"));
+        RelNode result = runPlanner(plan, singleShardContext());
+        assertPlanShape("""
+            OpenSearchTableScan(table=[[test_index]], fields=[[status]], viableBackends=[[mock-parquet]])
+            """, result);
+    }
+
+    /** Same subset projection at 2 shards: the fold narrows the scan through the exchange. */
+    public void testProjectSubset_foldsIntoScan_2shard() {
+        RelNode scan = stubScan(mockTable("test_index", "status", "size"));
+        RelNode plan = LogicalProject.create(scan, List.of(), List.of(rexBuilder.makeInputRef(scan, 0)), List.of("status"));
+        RelNode result = runPlanner(plan, multiShardContext());
+        assertPlanShape(
+            """
+                OpenSearchExchangeReducer(viableBackends=[[mock-parquet]], exchange=[ExchangeInfo[distributionType=SINGLETON, partitionKeyIndices=[]]])
+                  OpenSearchTableScan(table=[[test_index]], fields=[[status]], viableBackends=[[mock-parquet]])
+                """,
+            result
+        );
+    }
+
     private RelNode identityFieldsProject() {
         RelNode scan = stubScan(mockTable("test_index", "status", "size"));
         return LogicalProject.create(
