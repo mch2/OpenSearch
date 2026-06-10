@@ -34,9 +34,14 @@ plus datasets under `.../resources/datasets/`. Tracker lives in this `.tracker/`
   Cluster boot is the bottleneck (~2-3 min/run) — batch many `--tests` per invocation.
 
 ## Progress (latest)
-- **82** tests root-caused + bucketed (🔴), **32** pass in sandbox/qa (⚪ — already fixed on this
-  branch, or the upstream failure had a different cause than the asserted query), **115** not yet
-  ported (⬜). **114 of 229 reproduced/resolved; 25 root-cause buckets (A–Y).**
+- **132** tests root-caused + bucketed (🔴), **64** pass in sandbox/qa (⚪), **10** skipped per
+  policy (⏭ geo_point / nested-in-query), **23** not yet ported (⬜).
+  **206 of 229 reproduced/resolved; 32 root-cause buckets (A–AI).**
+- Remaining 23 ⬜ are the bespoke-dataset ones: Nfw/Waf dashboards (100-200 doc nested log
+  datasets), fulltext wildcard (MultiMatch/QueryString/SimpleQueryString — BEER dataset), CsvFormat
+  (bank_csv_sanitize), Patterns brain, MapPath mvcombine, AppendCommand IP-UDT merge, ResourceMonitor
+  (memory_limit + clickbench), FieldsCommandIT calcite-disabled, StatsCommand span-time-null,
+  CaseFunction testCaseWhenInSubquery / testNestedCaseAggWithAutoDateHistogram, LikeQuery explain.
 - See `PROGRESS.tsv` for the per-test table and `FAILURES.md` for full bucket descriptions.
 - Repro ITs authored (all under `.../qa/Calcite*ReproIT.java`): PPLBasic, ConditionBuiltinFunction,
   EvalMaxMinFunction, DataType, EnhancedCoalesce, Operator, ParseRexError, BuiltinFunction,

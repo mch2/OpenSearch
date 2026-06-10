@@ -24,12 +24,12 @@ CalciteLikeQueryIT	test_the_default_3rd_option	⬜
 CalciteMathematicalFunctionIT	testConv	🔴	R	conv unsupported 500
 CalciteMathematicalFunctionIT	testRand	🔴	R	RAND unsupported 400
 CalciteMultiMatchIT	test_wildcard_multi_match	⬜		
-CalciteMultisearchCommandIT	testMultisearchBinAndStats	⬜		
-CalciteMultisearchCommandIT	testMultisearchBinTimestamp	⬜		
-CalciteMultisearchCommandIT	testMultisearchWithComplexAggregation	⬜		
+CalciteMultisearchCommandIT	testMultisearchBinAndStats	🔴	AB	bin+stats multisearch 500
+CalciteMultisearchCommandIT	testMultisearchBinTimestamp	🔴	AB	bin span multisearch 500
+CalciteMultisearchCommandIT	testMultisearchWithComplexAggregation	🔴	AE	multisearch agg wrong split
 CalciteMultisearchCommandIT	testMultisearchWithoutFurtherProcessing	🔴	X	52 vs 51 off-by-one
-CalciteMultisearchCommandIT	testMultisearchWithThreeSubsearches	⬜		
-CalciteMultisearchCommandIT	testMultisearchWithTimestampInterleaving	⬜		
+CalciteMultisearchCommandIT	testMultisearchWithThreeSubsearches	🔴	AE	multisearch groups all 22
+CalciteMultisearchCommandIT	testMultisearchWithTimestampInterleaving	⚪	-	passes (row count+schema)
 CalciteMultiValueStatsIT	testListFunctionWithBoolean	🔴	I	TRUE vs true
 CalciteMultiValueStatsIT	testListFunctionWithNullValues	🔴	K	[1,,,,7] nulls kept
 CalciteMultiValueStatsIT	testValuesFunctionGroupBy	🔴	J	values unsorted
