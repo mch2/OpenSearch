@@ -102,7 +102,7 @@ CalcitePPLCaseFunctionIT	testNestedCaseAggWithAutoDateHistogram	⬜
 CalcitePPLCastFunctionIT	testCastTime	⚪	-	passes in sandbox/qa
 CalcitePPLCastFunctionIT	testCastTimestamp	⚪	-	passes in sandbox/qa
 CalcitePPLCastFunctionIT	testCastToIP	🔴	S	cast IP unsupported 500
-CalcitePPLConditionBuiltinFunctionIT	testEarliestWithEval	⬜		
+CalcitePPLConditionBuiltinFunctionIT	testEarliestWithEval	🔴	AH	earliest('now',now) true vs false
 CalcitePPLConditionBuiltinFunctionIT	testEvalIsNotNullDirect	⚪	-	passes
 CalcitePPLConditionBuiltinFunctionIT	testEvalIsNullInComplexExpression	⚪	-	passes
 CalcitePPLConditionBuiltinFunctionIT	testEvalIsNullWithIf	⚪	-	passes
@@ -200,7 +200,7 @@ CalciteRexCommandIT	testRexErrorInvalidGroupNameSpecialCharacter	🔴	H	500+no s
 CalciteRexCommandIT	testRexErrorInvalidGroupNameStartingWithDigit	🔴	H	500+no suggestion
 CalciteRexCommandIT	testRexErrorInvalidGroupNameUnderscore	🔴	H	500+no suggestion
 CalciteSettingsIT	testQuerySizeLimit	🔴	D	implicit search age>35 ->0 rows
-CalciteSettingsIT	testQuerySizeLimit_NoPushdown	⬜		
+CalciteSettingsIT	testQuerySizeLimit_NoPushdown	🔴	D	implicit search age>35 ->0 rows
 CalciteSimpleQueryStringIT	test_wildcard_simple_query_string	⬜		
 CalciteSortCommandIT	testHeadThenSort	🔴	P	head 2 scan order -> [32] not [28]
 CalciteSortCommandIT	testPushdownSortCastToDoubleExpression	⚪	-	passes (explain-only part dropped)
@@ -215,12 +215,12 @@ CalciteTextFunctionIT	testConcat	🔴	AF	variadic concat type consistency
 CalciteTextFunctionIT	testRegexp	🔴	R	REGEXP scalar unsupported
 CalciteUnionCommandIT	testUnionMidPipeline_SingleExplicitDataset	🔴	AE	union count 1014 vs 1000
 CalciteUnionCommandIT	testUnionThreeSubsearches	🔴	AE	union groups all 22
-CalciteWhereCommandIT	testDoubleEqualWithSpecialCharacters	⬜		
+CalciteWhereCommandIT	testDoubleEqualWithSpecialCharacters	🔴	AI	== on text field ->0 rows
 CalciteWhereCommandIT	testFilterOnComputedNestedFields	⏭	skip-nested	query computes length(projects.name) nested
 CalciteWhereCommandIT	testFilterOnNestedAndRootFields	⏭	skip-nested	query filters city.name + projects.name nested
 CalciteWhereCommandIT	testFilterOnNestedFields	⏭	skip-nested	query filters nested address.city; out of scope per policy
 CalciteWhereCommandIT	testFilterScriptPushDownWithPPLBuiltInFunction	⬜		
-CalciteWhereCommandIT	testScriptFilterOnDifferentNestedHierarchyShouldThrow	⬜		
+CalciteWhereCommandIT	testScriptFilterOnDifferentNestedHierarchyShouldThrow	⏭	skip-nested	queries author.books.reviews.* nested hierarchy
 ppl.dashboard.NfwPplDashboardIT	testTopBlockedDestinationIPs	⬜		
 ppl.dashboard.NfwPplDashboardIT	testTopLongLivedTCPFlows	⬜		
 ppl.dashboard.NfwPplDashboardIT	testTopSourceAndDestinationByBytes	⬜		
