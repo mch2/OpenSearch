@@ -1,9 +1,9 @@
 class	test	status	bucket	notes
 CalciteAnalyticsDatetimeWireFormatIT	testDateRootColumnYmdFormat	🔴	AD	d label=date not timestamp
 CalciteAnalyticsDatetimeWireFormatIT	testTimeRootColumnHmsFormat	🔴	AD	t label=time not timestamp
-CalciteArrayFunctionIT	testExists	⬜		
-CalciteArrayFunctionIT	testFilter	⬜		
-CalciteArrayFunctionIT	testForAll	⬜		
+CalciteArrayFunctionIT	testExists	🔴	R	exists() higher-order unsupported
+CalciteArrayFunctionIT	testFilter	🔴	R	filter() higher-order unsupported
+CalciteArrayFunctionIT	testForAll	🔴	R	forall() higher-order unsupported
 CalciteBinCommandIT	testBinTimestampSpan6Days	🔴	R	bin span uses ADDDATE unsupported
 CalciteBinCommandIT	testBinTimestampSpan7Days	🔴	R	bin span uses ADDDATE unsupported
 CalciteBinCommandIT	testStatsWithBinsOnTimeAndTermField_Avg	🔴	AB	term+time bin stream 500
@@ -38,7 +38,7 @@ CalciteMultiValueStatsIT	testValuesFunctionRespectsConfiguredLimit	🔴	J	limit 
 CalciteMultiValueStatsIT	testValuesFunctionWithBoolean	🔴	I	TRUE vs true
 CalciteMultiValueStatsIT	testValuesFunctionWithDuplicates	🔴	J	no dedup
 CalciteMultiValueStatsIT	testValuesFunctionWithNullValues	🔴	J+K	unsorted+nulls
-CalciteObjectFieldOperateIT	verify_schema_without_fields	⬜		
+CalciteObjectFieldOperateIT	verify_schema_without_fields	⏭	skip-nested	sort city.name on deep_nested; nested in query
 CalciteOperatorIT	testEqualOperator	🔴	D	implicit+where age=32 ->0 rows on bank
 CalciteOperatorIT	testGreaterOperator	🔴	D	implicit age>36 ->0
 CalciteOperatorIT	testGteOperator	🔴	D	implicit age>=36 ->0
@@ -92,12 +92,12 @@ CalcitePPLBuiltinFunctionsNullIT	testDatetimeNullString	🔴	R	convert_tz unsupp
 CalcitePPLBuiltinFunctionsNullIT	testSubdateNull	🔴	R	SUBDATE unsupported 500
 CalcitePPLBuiltinFunctionsNullIT	testTimediffNull	🔴	AA	TIME widened->TIMESTAMP, TIMEDIFF sig fail
 CalcitePPLCaseFunctionIT	testCaseAggWithNullValues	🔴	U	range-case agg keeps null bucket
-CalcitePPLCaseFunctionIT	testCaseCanBePushedDownAsRangeQuery	⬜		
-CalcitePPLCaseFunctionIT	testCaseWhenInFilter	⬜		
+CalcitePPLCaseFunctionIT	testCaseCanBePushedDownAsRangeQuery	⚪	-	passes
+CalcitePPLCaseFunctionIT	testCaseWhenInFilter	🔴	AG	IS NOT TRUE operator unsupported
 CalcitePPLCaseFunctionIT	testCaseWhenInSubquery	⬜		
-CalcitePPLCaseFunctionIT	testCaseWhenNoElse	⬜		
-CalcitePPLCaseFunctionIT	testCaseWhenWithCast	⬜		
-CalcitePPLCaseFunctionIT	testCaseWhenWithIn	⬜		
+CalcitePPLCaseFunctionIT	testCaseWhenNoElse	⚪	-	passes
+CalcitePPLCaseFunctionIT	testCaseWhenWithCast	⚪	-	passes
+CalcitePPLCaseFunctionIT	testCaseWhenWithIn	⚪	-	passes
 CalcitePPLCaseFunctionIT	testNestedCaseAggWithAutoDateHistogram	⬜		
 CalcitePPLCastFunctionIT	testCastTime	⚪	-	passes in sandbox/qa
 CalcitePPLCastFunctionIT	testCastTimestamp	⚪	-	passes in sandbox/qa
@@ -211,8 +211,8 @@ CalciteStatsCommandIT	testStatsPercentileBySpan	🔴	Q	interp double
 CalciteStatsCommandIT	testStatsPercentileWithNull	🔴	Q	interp double 35413
 CalciteStatsCommandIT	testStatsWithLimit	⚪	-	passes (numOfRows=5)
 CalciteSystemFunctionIT	typeof_opensearch_types	⚪	-	numeric typeof passes (nonnumeric needs geo_point=bucket E)
-CalciteTextFunctionIT	testConcat	⬜		
-CalciteTextFunctionIT	testRegexp	⬜		
+CalciteTextFunctionIT	testConcat	🔴	AF	variadic concat type consistency
+CalciteTextFunctionIT	testRegexp	🔴	R	REGEXP scalar unsupported
 CalciteUnionCommandIT	testUnionMidPipeline_SingleExplicitDataset	🔴	AE	union count 1014 vs 1000
 CalciteUnionCommandIT	testUnionThreeSubsearches	🔴	AE	union groups all 22
 CalciteWhereCommandIT	testDoubleEqualWithSpecialCharacters	⬜		
