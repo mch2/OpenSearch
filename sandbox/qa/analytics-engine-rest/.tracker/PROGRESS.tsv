@@ -52,19 +52,19 @@ CalciteParseCommandIT	testParseErrorInvalidGroupNameStartingWithDigit	🔴	H	500
 CalciteParseCommandIT	testParseErrorInvalidGroupNameUnderscore	🔴	H	500+no suggestion
 CalcitePPLAggregationIT	testCountDistinctApprox	🔴	V	APPROX_COUNT_DISTINCT unbound
 CalcitePPLAggregationIT	testCountDistinctApproxWithAlias	🔴	V	approx unbound
-CalcitePPLAggregationIT	testMinMaxWithBooleanNestedField	⬜		
-CalcitePPLAggregationIT	testMixedTypesNestedFieldAggregations	⬜		
-CalcitePPLAggregationIT	testPercentileShortcuts	🔴	V	perc50/p95 stream 500
-CalcitePPLAggregationIT	testPercentileShortcutsEquivalentToStandard	⬜		
-CalcitePPLAggregationIT	testPercentileShortcutsFloatingEquivalence	⬜		
-CalcitePPLAggregationIT	testPercentileShortcutsFloatingPoint	⬜		
-CalcitePPLAggregationIT	testPercentileShortcutsWithDecimals	⬜		
+CalcitePPLAggregationIT	testMinMaxWithBooleanNestedField	⏭	skip-nested	queries resource.attributes.telemetry.sdk.* nested fields
+CalcitePPLAggregationIT	testMixedTypesNestedFieldAggregations	⏭	skip-nested	queries nested resource.attributes.* fields
+CalcitePPLAggregationIT	testPercentileShortcuts	🔴	V	perc shortcut stream 500
+CalcitePPLAggregationIT	testPercentileShortcutsEquivalentToStandard	🔴	V	stream 500
+CalcitePPLAggregationIT	testPercentileShortcutsFloatingEquivalence	🔴	V	stream 500
+CalcitePPLAggregationIT	testPercentileShortcutsFloatingPoint	🔴	V	stream 500
+CalcitePPLAggregationIT	testPercentileShortcutsWithDecimals	🔴	V	perc99.5 stream 500
 CalcitePPLAggregationPaginatingIT	testCountDistinctApprox	🔴	V	approx unbound
 CalcitePPLAggregationPaginatingIT	testCountDistinctApproxWithAlias	🔴	V	approx unbound
-CalcitePPLAggregationPaginatingIT	testMinMaxWithBooleanNestedField	⬜		
-CalcitePPLAggregationPaginatingIT	testMixedTypesNestedFieldAggregations	⬜		
-CalcitePPLAggregationPaginatingIT	testPercentileShortcutsFloatingEquivalence	⬜		
-CalcitePPLAggregationPaginatingIT	testPercentileShortcutsFloatingPoint	⬜		
+CalcitePPLAggregationPaginatingIT	testMinMaxWithBooleanNestedField	⏭	skip-nested	queries nested fields
+CalcitePPLAggregationPaginatingIT	testMixedTypesNestedFieldAggregations	⏭	skip-nested	queries nested fields
+CalcitePPLAggregationPaginatingIT	testPercentileShortcutsFloatingEquivalence	🔴	V	stream 500
+CalcitePPLAggregationPaginatingIT	testPercentileShortcutsFloatingPoint	🔴	V	stream 500
 CalcitePPLAppendCommandIT	testAppendSchemaMergeWithIpUDT	⬜		
 CalcitePPLAppendPipeCommandIT	testDoubleAppendPipeWithFilter	🔴	N	delegation marker leak 500
 CalcitePPLBasicIT	testDecimalLiteral	🔴	A+B	col order + 7.0 float32 vs double
@@ -81,8 +81,8 @@ CalcitePPLBasicIT	testQueryMinusFields	🔴	A	col order alphabetical
 CalcitePPLBasicIT	testQueryMinusFieldsWithFilter	🔴	A	col order alphabetical
 CalcitePPLBasicIT	testRegexpFilter	🔴	A	col order [age,name]
 CalcitePPLBasicIT	testSourceQuery	🔴	A	AE schema alphabetical: got [age,name]
-CalcitePPLBuiltinDatetimeFunctionInvalidIT	testDAYNAMEInvalid	⬜		
-CalcitePPLBuiltinDatetimeFunctionInvalidIT	testMONTHNAMEInvalid	⬜		
+CalcitePPLBuiltinDatetimeFunctionInvalidIT	testDAYNAMEInvalid	🔴	H	streaming error not validation msg
+CalcitePPLBuiltinDatetimeFunctionInvalidIT	testMONTHNAMEInvalid	🔴	H	streaming error not validation msg
 CalcitePPLBuiltinFunctionIT	testDivide	🔴	B	7.0->float32; half_float prec
 CalcitePPLBuiltinFunctionIT	testModFloatAndNegative	🔴	B	float32 precision 0.19999981
 CalcitePPLBuiltinFunctionIT	testModShouldReturnWiderTypes	🔴	B	float32 precision
@@ -216,8 +216,8 @@ CalciteTextFunctionIT	testRegexp	⬜
 CalciteUnionCommandIT	testUnionMidPipeline_SingleExplicitDataset	⬜		
 CalciteUnionCommandIT	testUnionThreeSubsearches	⬜		
 CalciteWhereCommandIT	testDoubleEqualWithSpecialCharacters	⬜		
-CalciteWhereCommandIT	testFilterOnComputedNestedFields	⬜		
-CalciteWhereCommandIT	testFilterOnNestedAndRootFields	⬜		
+CalciteWhereCommandIT	testFilterOnComputedNestedFields	⏭	skip-nested	query computes length(projects.name) nested
+CalciteWhereCommandIT	testFilterOnNestedAndRootFields	⏭	skip-nested	query filters city.name + projects.name nested
 CalciteWhereCommandIT	testFilterOnNestedFields	⏭	skip-nested	query filters nested address.city; out of scope per policy
 CalciteWhereCommandIT	testFilterScriptPushDownWithPPLBuiltInFunction	⬜		
 CalciteWhereCommandIT	testScriptFilterOnDifferentNestedHierarchyShouldThrow	⬜		
