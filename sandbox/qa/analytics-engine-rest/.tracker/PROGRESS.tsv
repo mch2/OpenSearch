@@ -4,12 +4,12 @@ CalciteAnalyticsDatetimeWireFormatIT	testTimeRootColumnHmsFormat	⬜
 CalciteArrayFunctionIT	testExists	⬜		
 CalciteArrayFunctionIT	testFilter	⬜		
 CalciteArrayFunctionIT	testForAll	⬜		
-CalciteBinCommandIT	testBinTimestampSpan6Days	⬜		
-CalciteBinCommandIT	testBinTimestampSpan7Days	⬜		
-CalciteBinCommandIT	testStatsWithBinsOnTimeAndTermField_Avg	⬜		
-CalciteBinCommandIT	testStatsWithBinsOnTimeAndTermField_Count	⬜		
-CalciteBinCommandIT	testStatsWithBinsOnTimeField_Avg	⬜		
-CalciteBinCommandIT	testStatsWithBinsOnTimeField_Count	⬜		
+CalciteBinCommandIT	testBinTimestampSpan6Days	🔴	R	bin span uses ADDDATE unsupported
+CalciteBinCommandIT	testBinTimestampSpan7Days	🔴	R	bin span uses ADDDATE unsupported
+CalciteBinCommandIT	testStatsWithBinsOnTimeAndTermField_Avg	🔴	AB	term+time bin stream 500
+CalciteBinCommandIT	testStatsWithBinsOnTimeAndTermField_Count	🔴	AB	term+time bin stream 500
+CalciteBinCommandIT	testStatsWithBinsOnTimeField_Avg	🔴	AB	@timestamp ->string
+CalciteBinCommandIT	testStatsWithBinsOnTimeField_Count	🔴	AB	@timestamp ->string after bin+stats
 CalciteCsvFormatIT	escapeSanitizeTest	⬜		
 CalciteCsvFormatIT	sanitizeTest	⬜		
 CalciteDataTypeIT	testBooleanFieldFromNumberAcrossWildcardIndices	🔴	C	text vs boolean cross-index 500
@@ -18,7 +18,7 @@ CalciteDataTypeIT	test_nonnumeric_data_types	⏭	skip-geo/nested	has geo_point +
 CalciteDataTypeIT	test_numeric_data_types	🔴	L	scaled_float->bigint
 CalciteDateTimeFunctionIT	testAddDateWithDays	🔴	R	ADDDATE unsupported 500
 CalciteDateTimeFunctionIT	testSubDateDays	🔴	R	SUBDATE unsupported 500
-CalciteDedupCommandIT	testConsecutiveDedup	⬜		
+CalciteDedupCommandIT	testConsecutiveDedup	🔴	AC	consecutive dedup unsupported
 CalciteLikeQueryIT	test_convert_field_text_to_keyword	⬜		
 CalciteLikeQueryIT	test_the_default_3rd_option	⬜		
 CalciteMathematicalFunctionIT	testConv	🔴	R	conv unsupported 500
@@ -115,9 +115,9 @@ CalcitePPLConditionBuiltinFunctionIT	testIsNotNullWithSingleNotEquals	⚪	-	pass
 CalcitePPLConditionBuiltinFunctionIT	testIsPresent	⚪	-	passes
 CalcitePPLConditionBuiltinFunctionIT	testNullIf	⚪	-	passes
 CalcitePPLConditionBuiltinFunctionIT	testNullIfWithExpression	⚪	-	passes
-CalcitePPLDedupIT	testConsecutiveImplicitFallbackV2	⬜		
-CalcitePPLDedupIT	testDedupComplex	⬜		
-CalcitePPLDedupIT	testDedupExpr	⬜		
+CalcitePPLDedupIT	testConsecutiveImplicitFallbackV2	🔴	AC	consecutive dedup unsupported
+CalcitePPLDedupIT	testDedupComplex	🔴	A	col order category,name,id alphabetical
+CalcitePPLDedupIT	testDedupExpr	🔴	A	col order alphabetical
 CalcitePPLEnhancedCoalesceIT	testCoalesceWithAllNonExistentFields	🔴	G	coalesce all-missing 500
 CalcitePPLEnhancedCoalesceIT	testCoalesceWithCompatibleNumericAndTemporalTypes	⚪	-	passes
 CalcitePPLEnhancedCoalesceIT	testCoalesceWithCompatibleNumericTypes	⚪	-	passes
@@ -191,10 +191,10 @@ CalcitePPLStringBuiltinFunctionIT	testRTrim	⚪	-	passes in sandbox/qa
 CalcitePPLStringBuiltinFunctionIT	testTrim	⚪	-	passes in sandbox/qa
 CalciteQueryStringIT	wildcard_test	⬜		
 CalciteResourceMonitorIT	queryExceedResourceLimitShouldFail	⬜		
-CalciteReverseCommandIT	testStreamstatsByWithReverse	⬜		
-CalciteReverseCommandIT	testStreamstatsWindowWithReverse	⬜		
-CalciteReverseCommandIT	testStreamstatsWithReverse	⬜		
-CalciteReverseCommandIT	testStreamstatsWithSortThenReverse	⬜		
+CalciteReverseCommandIT	testStreamstatsByWithReverse	🔴	A	col order alphabetical
+CalciteReverseCommandIT	testStreamstatsWindowWithReverse	🔴	A	col order alphabetical
+CalciteReverseCommandIT	testStreamstatsWithReverse	🔴	A	full-table col order alphabetical
+CalciteReverseCommandIT	testStreamstatsWithSortThenReverse	🔴	A	col order alphabetical
 CalciteRexCommandIT	testRexErrorInvalidGroupNameHyphen	🔴	H	500+no suggestion
 CalciteRexCommandIT	testRexErrorInvalidGroupNameSpecialCharacter	🔴	H	500+no suggestion
 CalciteRexCommandIT	testRexErrorInvalidGroupNameStartingWithDigit	🔴	H	500+no suggestion

@@ -1,0 +1,4 @@
+{ "settings": { "number_of_shards": 1, "number_of_replicas": 0 },
+  "mappings": { "properties": {
+    "@timestamp": { "type": "date" }, "host": { "type": "text" },
+    "cpu_usage": { "type": "double" }, "region": { "type": "keyword" } }}}
