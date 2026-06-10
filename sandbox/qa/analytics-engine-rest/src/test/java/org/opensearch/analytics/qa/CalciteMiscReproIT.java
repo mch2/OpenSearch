@@ -61,7 +61,7 @@ public class CalciteMiscReproIT extends CalciteReproTestCase {
             rows("Jane", "Canada", "Quebec", 4, 2023, 20));
     }
 
-    public void typeof_opensearch_types() throws IOException {
+    public void testTypeofOpensearchTypes() throws IOException {
         Map<String, Object> response = executePpl("source=" + NUM.indexName
             + " | eval `double` = typeof(double_number), `long` = typeof(long_number),"
             + " `integer` = typeof(integer_number), `byte` = typeof(byte_number),"

@@ -1,137 +1,250 @@
 {
-  "settings": {
-    "number_of_shards": 1,
-    "number_of_replicas": 0
-  },
-  "mappings": {
+ "settings": {
+  "number_of_shards": 1,
+  "number_of_replicas": 0
+ },
+ "mappings": {
+  "properties": {
+   "@timestamp": {
+    "type": "date_nanos"
+   },
+   "time": {
+    "type": "date_nanos"
+   },
+   "body": {
+    "type": "text"
+   },
+   "severityNumber": {
+    "type": "long"
+   },
+   "severityText": {
+    "type": "keyword"
+   },
+   "traceId": {
+    "type": "keyword"
+   },
+   "spanId": {
+    "type": "keyword"
+   },
+   "flags": {
+    "type": "long"
+   },
+   "droppedAttributesCount": {
+    "type": "integer"
+   },
+   "instrumentationScope": {
     "properties": {
-      "body": {
-        "type": "text",
-        "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}
-      },
-      "droppedAttributesCount": {"type": "long"},
-      "flags": {"type": "long"},
-      "instrumentationScope": {
-        "properties": {
-          "name": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}},
-          "version": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}}
-        }
-      },
-      "log": {
-        "properties": {
-          "code": {
-            "properties": {
-              "filepath": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}},
-              "function": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}},
-              "lineno": {"type": "long"}
-            }
-          },
-          "db": {
-            "properties": {
-              "statement": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}},
-              "system": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}}
-            }
-          },
-          "exception": {
-            "properties": {
-              "message": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}},
-              "stacktrace": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}},
-              "type": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}}
-            }
-          },
-          "http": {
-            "properties": {
-              "method": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}},
-              "request_id": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}},
-              "status_code": {"type": "long"},
-              "url": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}}
-            }
-          },
-          "thread": {
-            "properties": {
-              "id": {"type": "long"},
-              "name": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}}
-            }
-          }
-        }
-      },
-      "observedTimestamp": {"type": "long"},
-      "resource": {
-        "properties": {
-          "cloud": {
-            "properties": {
-              "account": {
-                "properties": {
-                  "id": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}}
-                }
-              },
-              "availability_zone": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}},
-              "provider": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}},
-              "region": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}}
-            }
-          },
-          "container": {
-            "properties": {
-              "id": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}},
-              "image": {
-                "properties": {
-                  "name": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}}
-                }
-              }
-            }
-          },
-          "deployment": {
-            "properties": {
-              "environment": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}}
-            }
-          },
-          "host": {
-            "properties": {
-              "id": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}},
-              "name": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}}
-            }
-          },
-          "k8s": {
-            "properties": {
-              "deployment": {"properties": {"name": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}}}},
-              "namespace": {"properties": {"name": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}}}},
-              "node": {"properties": {"name": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}}}},
-              "pod": {"properties": {"name": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}}}}
-            }
-          },
-          "os": {
-            "properties": {
-              "type": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}}
-            }
-          },
-          "process": {"properties": {"pid": {"type": "long"}}},
-          "service": {
-            "properties": {
-              "name": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}},
-              "namespace": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}},
-              "version": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}}
-            }
-          },
-          "telemetry": {
-            "properties": {
-              "sdk": {
-                "properties": {
-                  "language": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}},
-                  "name": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}},
-                  "version": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}}
-                }
-              }
-            }
-          }
-        }
-      },
-      "schemaUrl": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}},
-      "serviceName": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}},
-      "severityNumber": {"type": "long"},
-      "severityText": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}},
-      "spanId": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}},
-      "time": {"type": "long"},
-      "traceId": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}}
+     "name": {
+      "type": "keyword"
+     },
+     "version": {
+      "type": "keyword"
+     },
+     "droppedAttributesCount": {
+      "type": "integer"
+     }
     }
+   },
+   "resource": {
+    "properties": {
+     "attributes": {
+      "properties": {
+       "service.name": {
+        "type": "keyword"
+       },
+       "service.namespace": {
+        "type": "keyword"
+       },
+       "service.version": {
+        "type": "keyword"
+       },
+       "host.name": {
+        "type": "keyword"
+       },
+       "container.id": {
+        "type": "keyword"
+       },
+       "k8s.namespace": {
+        "type": "keyword"
+       },
+       "k8s.pod.name": {
+        "type": "keyword"
+       }
+      }
+     },
+     "droppedAttributesCount": {
+      "type": "integer"
+     }
+    }
+   },
+   "attributes": {
+    "properties": {
+     "user.id": {
+      "type": "keyword"
+     },
+     "user.email": {
+      "type": "keyword"
+     },
+     "product.id": {
+      "type": "keyword"
+     },
+     "order.id": {
+      "type": "keyword"
+     },
+     "error.code": {
+      "type": "keyword"
+     },
+     "error.type": {
+      "type": "keyword"
+     },
+     "error.message": {
+      "type": "text"
+     },
+     "http.method": {
+      "type": "keyword"
+     },
+     "http.status_code": {
+      "type": "long"
+     },
+     "http.url": {
+      "type": "keyword"
+     },
+     "client.ip": {
+      "type": "ip",
+      "fields": {
+       "keyword": {
+        "type": "keyword"
+       }
+      }
+     },
+     "db.statement": {
+      "type": "text"
+     },
+     "db.operation": {
+      "type": "keyword"
+     },
+     "db.table": {
+      "type": "keyword"
+     },
+     "email.to": {
+      "type": "keyword"
+     },
+     "email.subject": {
+      "type": "text"
+     },
+     "query.raw": {
+      "type": "text"
+     },
+     "query.type": {
+      "type": "keyword"
+     },
+     "security.threat": {
+      "type": "keyword"
+     },
+     "payment.amount": {
+      "type": "double"
+     },
+     "quantity": {
+      "type": "long"
+     },
+     "kafka.topic": {
+      "type": "keyword"
+     },
+     "kafka.partition": {
+      "type": "long"
+     },
+     "kafka.offset": {
+      "type": "long"
+     },
+     "redis.command": {
+      "type": "keyword"
+     },
+     "redis.key": {
+      "type": "keyword"
+     },
+     "redis.ttl": {
+      "type": "long"
+     },
+     "jwt.algorithm": {
+      "type": "keyword"
+     },
+     "jwt.issuer": {
+      "type": "keyword"
+     },
+     "rate_limit.current": {
+      "type": "long"
+     },
+     "rate_limit.max": {
+      "type": "long"
+     },
+     "graphql.operation": {
+      "type": "keyword"
+     },
+     "graphql.field": {
+      "type": "keyword"
+     },
+     "webhook.url": {
+      "type": "keyword"
+     },
+     "webhook.status": {
+      "type": "keyword"
+     },
+     "mongodb.collection": {
+      "type": "keyword"
+     },
+     "mongodb.operation": {
+      "type": "keyword"
+     },
+     "mongodb.filter": {
+      "type": "text"
+     },
+     "elasticsearch.query": {
+      "type": "text"
+     },
+     "grpc.method": {
+      "type": "keyword"
+     },
+     "grpc.status_code": {
+      "type": "long"
+     },
+     "ssl.domain": {
+      "type": "keyword"
+     },
+     "ssl.days_until_expiry": {
+      "type": "long"
+     },
+     "memory.usage_percent": {
+      "type": "double"
+     },
+     "memory.total_gb": {
+      "type": "long"
+     },
+     "batch.total_records": {
+      "type": "long"
+     },
+     "batch.matched_records": {
+      "type": "long"
+     },
+     "k8s.pod.name": {
+      "type": "keyword"
+     },
+     "k8s.container.restart_count": {
+      "type": "long"
+     },
+     "health.status": {
+      "type": "keyword"
+     },
+     "cors.origin": {
+      "type": "keyword"
+     },
+     "cors.method": {
+      "type": "keyword"
+     },
+     "duration_ms": {
+      "type": "long"
+     }
+    }
+   }
   }
+ }
 }

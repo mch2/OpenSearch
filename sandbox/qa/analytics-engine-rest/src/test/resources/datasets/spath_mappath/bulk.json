@@ -1,0 +1,10 @@
+{"index": {}}
+{"doc":"{\"user\": {\"name\": \"John\",  \"age\": 30, \"city\": \"NYC\"}}"}
+{"index": {}}
+{"doc":"{\"user\": {\"name\": \"Alice\", \"age\": 25, \"city\": \"LA\"}}"}
+{"index": {}}
+{"doc":"{\"user\": {\"name\": \"John\",  \"age\": 35, \"city\": \"SF\"}}"}
+{"index": {}}
+{"doc":"{\"user\": {\"name\": \"Bob\",   \"age\": 40, \"city\": \"NYC\"}}"}
+{"index": {}}
+{"doc":null}

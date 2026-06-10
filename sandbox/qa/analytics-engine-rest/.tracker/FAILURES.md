@@ -1,70 +1,57 @@
-# SQL-plugin → sandbox/qa Failure Reproduction Tracker
+# Root-cause buckets
 
-Goal: For every failing `org.opensearch.sql.calcite.remote.*` (and a few `org.opensearch.sql.ppl.*`)
-test in the upstream `opensearch-project/sql` suite, reproduce the *same* query against our
-sandbox/qa analytics-engine REST suite (`/_plugins/_ppl`, `cluster.pluggable.dataformat=composite`),
-confirm it fails the same way, and root-cause / bucket it.
+39 buckets across 144 confirmed failures (2 tests span two buckets). Counts in `PROGRESS.tsv`. All confirmed by a sandbox/qa repro.
 
-- Upstream repo clone: `/local/home/handalm/opensearch-sql` (branch `ya`, fork `mch2/sql`)
-- Target suite: `/home/handalm/OpenSearch-Alias/sandbox/qa/analytics-engine-rest`
-- Run cmd (JDK 25):
-  `JAVA_HOME=~/.sdkman/candidates/java/25.0.3-amzn ./gradlew :sandbox:qa:analytics-engine-rest:integTest -Dsandbox.enabled=true --tests "<FQN>"`
-- **NO PUSHING. Local iteration only.**
+| Bucket | n | Root cause |
+|--------|---|------------|
+| A | 17 | Full-table `source=idx` (no explicit `\| fields`) returns schema columns **alphabetical**, not mapping-declaration order. Explicit projections are unaffected. |
+| B | 4 | Unsuffixed decimal literal (`7.0`) and `half_float` widen to **float32**, not double → precision loss (`3.14285` vs `3.142857142857143`). |
+| C | 4 | Cross-index `source=a,b` where a field differs in width/type (int vs long, text vs boolean) → 500 "incompatible field types"; no widening. |
+| D | 10 | Implicit post-source filter (no `where` kw): `source=idx age=32` → 0 rows; `not age>32` → unfiltered. Explicit `\| where` works. |
+| F | 8 | Scalar `eval max()/min()` (GREATEST/LEAST) → `undefined` type or 500 "Cannot infer return type". |
+| G | 1 | `coalesce()` of all-missing fields → 500 instead of `undefined` null. |
+| H | 10 | Error message/status divergence: `parse`/`rex` bad capture group and invalid date literals return 500 with a different/missing message vs the expected 4xx validation text. |
+| I | 2 | `list/values(boolean)` renders `TRUE`/`FALSE` not `true`/`false`. |
+| J | 5 | `values()` doesn't dedup / sort / honor `plugins.ppl.values.max.limit`. |
+| K | 2 | `list()/values()` keep null/empty elements instead of dropping. |
+| L | 2 | `scaled_float` typed/`typeof`'d as `bigint`, not `double`. |
+| M | 1 | `DELETE /idx/_doc/N` on a parquet index → 500 (deletes unsupported). |
+| N | 2 | `appendpipe`/`not in` with a filter subpipe → 500 "delegation_possible UDF body invoked" (Lucene delegation marker leaks into execution). |
+| P | 3 | Sort/`head` order differs on equal keys / scan order (possibly nondeterministic). |
+| Q | 5 | `percentile()` is interpolated `double`, not the discrete `bigint` order-statistic; empty bucket `null` vs `0`. |
+| R | 14 | Unsupported scalar fns: `rand`, `conv`, `adddate`/`subdate`, `convert_tz`, `REGEXP`, higher-order `exists`/`filter`/`forall` → 400/500. |
+| S | 1 | `cast(x as IP)` → 500 "No backend supports scalar function [IP]". |
+| T | 3 | Aliased (`as o`/`as i`) and correlated/disjunctive subqueries return wrong/0 rows (plain IN-subquery works). |
+| U | 1 | Range-`case` agg keeps the null/"unknown" bucket that upstream pushdown drops. |
+| V | 11 | Approx/shortcut aggs unsupported: `distinct_count_approx` ("APPROX_COUNT_DISTINCT" unbound), `perc50`/`p95` → 500. |
+| W | 5 | JSON builtins: `json()`/`json_append`/`json_extend` → 500; `json_set`/`json_delete` with `$.path` are no-ops. |
+| X | 1 | `multisearch [A] [B]` plain row count off-by-one (52 vs 51). |
+| Z | 5 | `plugins.ppl.subsearch.maxout` (bounded) not honored — returns all rows or 0. |
+| AA | 1 | No native TIME type: a `time` field widens to TIMESTAMP, so `TIMEDIFF(time,time)` fails its `[TIME,TIME]` signature. |
+| AB | 7 | `bin @timestamp bins=N \| stats by @timestamp`: group key comes back `string` not `timestamp`; term+time variants 500. |
+| AC | 2 | `dedup ... CONSECUTIVE=true` → 500 "Consecutive deduplication is unsupported in Calcite". |
+| AD | 2 | `date`/`time`-mapped columns keep `date`/`time` schema label where the AE wire-format tests expect `timestamp`. |
+| AE | 4 | `union`/`multisearch` + stats miscounts / wrong grouping (1014 vs 1000; every group 22). |
+| AF | 1 | Variadic `concat(field, 'lit', ...)` → 500 "Variadic arguments must have consistent types". |
+| AG | 1 | `where not true = case(...)` lowers to `IS NOT TRUE` → 500 "Unrecognized filter operator". |
+| AH | 1 | `earliest('now', now)` returns `true` vs expected `false` (relative-time eval semantics). |
+| AI | 1 | `==` on a `text` field (no keyword subfield) returns 0 rows; compares analyzed text not exact term. |
+| AJ | 2 | `patterns method=BRAIN show_numbered_token` emits a different `patterns_field`/`tokens` struct. |
+| AK | 1 | `append [...] \| where cidrmatch(host,...)` merging an IP-UDT column → 500 "unsupported object class [B". |
+| AL | 1 | `mvcombine <field>` → 500 "No enum constant AggregateFunction.ARRAY_AGG". |
+| AM | 2 | SQL `?format=csv` ignored — returns JSON, so CSV sanitization/quoting never applied. |
+| AN | 1 | Explain-only test asserts the DSL pushdown plan string (`.keyword`); AE explain is a Calcite/Substrait plan. |
+| AO | 1 | Timestamp sub-seconds padded to nanos (`.95500000`) instead of trimmed (`.955`). |
+| AP | 1 | `plugins.query.memory_limit=1%` not enforced — query succeeds instead of failing with a resource error. |
 
-## Buckets (root-cause categories)
+## ⏭ Skipped (16, out of scope)
+- **geo_point / nested-object-in-query** (per maintainer policy): the field type can't run on the AE
+  parquet route, or the query filters/groups a nested-object subfield. Binary fields are kept
+  (mappings use `store:true`) and DO run.
+- **can't-disable-calcite**: `FieldsCommandIT.testEnhancedFieldsWhenCalciteDisabled` needs
+  `plugins.calcite.enabled=false`; the AE route forces calcite on.
 
-| Bucket | Description | Example tests | Confidence |
-|--------|-------------|---------------|------------|
-| **A — Full-table schema column ordering** | `source=idx` (no explicit `fields`) returns schema/columns in **alphabetical** order, not mapping-declaration order. Upstream Calcite preserves declaration order. Explicit `\| fields a, b` projections are unaffected (they pass). Manifests as "expected row […] not found" where the actual row has the same values in a different column order. | testSourceQuery, testMultipleSourceQuery_SameTable/_DifferentTables, testIndexPatterns, testNumericLiteral, testQueryMinusFields, testQueryMinusFieldsWithFilter | HIGH (confirmed) |
-| **B — Decimal/float literal widens to float32 not double** | `22 / 7.0` yields `3.14285` (float32 precision) instead of `3.142857142857143` (double). AE treats an unsuffixed decimal literal (`7.0`) as float, upstream treats it as double. | testDecimalLiteral (r1, r3 columns) | HIGH (confirmed) |
-| **C — Cross-index numeric type widening rejected** | Querying `source=a, b` where a field is `integer` in one index and `long` in another fails with HTTP 500 "Alias […] resolves to indices with incompatible field types". Upstream Calcite widens integer→long and unions. | testMultipleTables_DifferentTables, testMultipleTables_WithIndexPattern, testMultipleTablesAndFilters_WithIndexPattern | HIGH (confirmed) |
-| **D — Implicit post-source search filter mishandled** | A predicate placed directly after the source with NO `where` keyword (`source=idx age=32`, `source=idx not age>32`, `source=idx (a or b) and c`) is dropped or misapplied on the AE route: equality/comparison forms return **0 rows**; `not age>32` returns **all rows unfiltered**. Explicit `\| where ...` works (see bucket A tests where WHERE filtered correctly). | testFilterQueryWithOr2; CalciteOperatorIT testEqual/NotEqual/Less/Lte/Greater/Gte/Not Operator | HIGH (confirmed) |
-| **E — AE parquet format rejects geo_point (and other) field types** | Creating a parquet-primary index with a `geo_point` field fails at index-creation with HTTP 400 `searchCapability is not supported for field ... of type: geo_point`. So any test whose index includes geo_point cannot run on the AE route at all. | CalciteDataTypeIT test_nonnumeric_data_types (geo_point_value column) | HIGH (confirmed) |
-| **F — Scalar eval max()/min() (GREATEST/LEAST) unsupported** | `eval new = max(1,3,age)` yields schema type `undefined` (numeric args) or HTTP 500 `Cannot infer return type for GREATEST/LEAST; operands ...` (mixed numeric+string args). The variadic scalar max/min lowers to Calcite GREATEST/LEAST which the AE backend can't type-infer / has no backend impl. | CalcitePPLEvalMaxMinFunctionIT testEvalMax/Min Numeric/String/IgnoresNulls/NumericAndString | HIGH (confirmed) |
-| **G — coalesce() of all-missing fields → 500** | `eval result = coalesce(field1, field2, field3)` where every operand is an unknown field returns HTTP 500 `No backend supports scalar function ...` instead of the upstream graceful `undefined`-typed null column. | CalcitePPLEnhancedCoalesceIT testCoalesceWithAllNonExistentFields | HIGH (confirmed) |
-
-| **H — Capture-group error msg/status divergence** | AE *does* reject invalid `parse`/`rex` capture-group names but the error is `"Invalid capture group name 'X'."` returned as **HTTP 500** with no `"capture groups must be alphanumeric"` suggestion. Upstream returns a 4xx with that suggestion text. Behaviorally close; the wire contract (status + message) differs. | CalciteParseCommandIT + CalciteRexCommandIT test*InvalidGroupName{Hyphen,SpecialCharacter,StartingWithDigit,Underscore} | HIGH (confirmed) |
-| **I — Boolean rendered upper-case in array aggregates** | `stats list/values(boolean_field)` returns `"TRUE"`/`"FALSE"` instead of `"true"`/`"false"`. Scalar boolean columns render lower-case; the array-element path upper-cases. | CalciteMultiValueStatsIT testListFunctionWithBoolean, testValuesFunctionWithBoolean | HIGH (confirmed) |
-| **J — values() does not dedup / sort / honor limit** | `stats values(x)` should return **unique, lexicographically-sorted** values (and honor `plugins.ppl.values.max.limit`). AE returns them unsorted (`[15.7,-15.7,3.5]` vs `[-15.7,15.7,3.5]`), not deduped, and ignores the limit setting. | CalciteMultiValueStatsIT testValuesFunctionGroupBy, MultipleFields, WithDuplicates, RespectsConfiguredLimit, WithNullValues | HIGH (confirmed) |
-| **K — list()/values() include null/empty elements** | `stats list(int0)` over rows with nulls returns `[1, , , , 7]` (empty placeholders) instead of dropping nulls → `[1,7]`. | CalciteMultiValueStatsIT testListFunctionWithNullValues, testValuesFunctionWithNullValues | HIGH (confirmed) |
-| **L — scaled_float typed as bigint not double** | `scaled_float` field surfaces as `bigint` in the schema; upstream maps it to `double`. | CalciteDataTypeIT test_numeric_data_types | HIGH (confirmed) |
-| **M — DELETE _doc on parquet index → 500** | `DELETE /idx/_doc/N` against a parquet-primary index returns HTTP 500 `unsupported_operation_exception`. Doc deletes aren't supported by the parquet format. (Affects test teardown, but is a real engine gap.) | CalciteDataTypeIT testBooleanFieldFromString (delete in teardown) | HIGH (confirmed) |
-| **N — appendpipe with filter subpipe → delegation marker bug** | `... | appendpipe [ where gender='F' ]` returns HTTP 500: `delegation_possible UDF body invoked — expr_to_bool_tree did not unwrap the marker; treat as a serious correctness bug`. The Lucene filter-delegation marker leaks into DataFusion execution under appendpipe. | CalcitePPLAppendPipeCommandIT testDoubleAppendPipeWithFilter | HIGH (confirmed) |
-| **O — object/nested field flattened, not kept as array/struct** | A field mapped as bare `object` (`nested_value`) is flattened into dotted leaf columns (`nested_value.first`, `nested_value.last`) instead of surfacing as a single `array`/`struct` column. Inflates the schema column count. | CalciteDataTypeIT test_nonnumeric_data_types | MED (confirmed; also overlaps bucket A ordering) |
-
-| **P — Sort tie-break order differs** | `sort age` / `sort -age` / `sort AUTO(age)` over two rows with equal sort key (age=36: Hattie & Elinor) returns them in the opposite relative order from upstream (Elinor before Hattie). DataFusion's sort isn't stable on the secondary (insertion) order. May be inherently non-deterministic on the AE path. | CalcitePPLSortIT testSortAgeAndFieldsNameAge, testSortWithAutoCast | MED (confirmed; possibly nondeterministic) |
-| **Q — percentile() is interpolated double, not discrete bigint; null empty-bucket** | `stats percentile(balance, 50)` returns an interpolated/continuous value as `double` (e.g. 35413.0, 33194.5) where upstream returns the discrete order-statistic as `bigint` (39225, 32838). Also empty buckets yield `null` not `0`. Three orthogonal diffs: value algorithm, result type, empty-bucket fill. | CalciteStatsCommandIT testStatsPercentileWithNull, BySpan, ByNullValue, ByNullValueNonNullBucket | HIGH (confirmed) |
-| **R — unsupported scalar functions (rand/conv/adddate/subdate)** | `eval f = rand()` → 400 `Unable to convert call RAND(i32)`; `conv(age,10,16)` → 500; `adddate(date('...'),1)`/`subdate(...)` → 500 `No backend supports scalar function [ADDDATE] among [datafusion]`. A general class of PPL scalar UDFs that have no DataFusion lowering / Calcite→Substrait binding. | CalciteMathematicalFunctionIT testRand, testConv; CalciteDateTimeFunctionIT testAddDateWithDays, testSubDateDays | HIGH (confirmed) |
-| **V — approx aggregations unsupported** | `stats distinct_count_approx(x)` → 500 `Unable to find binding for call APPROX_COUNT_DISTINCT(...)`. Percentile-shortcut aggregates (`perc50`, `p95`) → 500 streaming-fragment failure (related to bucket Q percentile path). | CalcitePPLAggregationIT testCountDistinctApprox, testCountDistinctApproxWithAlias, testPercentileShortcuts* (+ Paginating variants) | HIGH (confirmed) |
-
-| **S — cast(... as IP) unsupported** | `eval a = cast(x as IP)` → 500 `No backend supports scalar function [IP] among [datafusion]`. The IP cast/UDF has no DataFusion lowering. (cast to TIME/TIMESTAMP work fine.) | CalcitePPLCastFunctionIT testCastToIP | HIGH (confirmed) |
-| **T — aliased / correlated IN-subquery returns wrong rows** | Subqueries with table aliases (`source=x as o ... where id in [ source=y as i ... ]`) return **0 rows**, and correlated IN-subqueries (`where id = uid and ...`) return too few rows (1 of 3). Plain uncorrelated `where id in [ source=y | fields uid ]` works. Likely alias-qualified field resolution / decorrelation gap on the AE path. | CalcitePPLInSubqueryIT testInSubqueryWithTableAlias, testInCorrelatedSubquery | HIGH (confirmed) |
-
-| **U — range-case agg keeps the null/unknown bucket** | `eval cat = case(age<20,'teenager', age<70,'adult', age>=70,'senior' else 'unknown') | stats avg(age) by cat` returns 4 groups (incl. `(null,'unknown')` for null-age rows); upstream's pushdown range-aggregation drops the null bucket → 3 groups. Documented discrepancy (range aggs ignore nulls); AE behaves like the no-pushdown path. | CalcitePPLCaseFunctionIT testCaseAggWithNullValues | MED (confirmed) |
-| **W — JSON mutation/parse builtins broken** | `json('[...]')` and `json_append(...)` → 500. `json_set('{...}','$.name',v)` and `json_delete('{...}','$.name')` are **no-ops** (return the input JSON unchanged) — the `$.`-prefixed path isn't honored (issue #5167 on AE path). | CalcitePPLJsonBuiltinFunctionIT testJson, testJsonAppend, testJsonExtend, testJsonSetWithDollarPrefixedPath, testJsonDeleteWithDollarPrefixedPath | HIGH (confirmed) |
-| **X — multisearch row count off-by-one** | `\| multisearch [..A..] [..B..]` over 26 + 25 rows returns **52**, not 51. One extra row (interleave/dedup boundary or an empty marker row). | CalciteMultisearchCommandIT testMultisearchWithoutFurtherProcessing | MED (confirmed) |
-| **Y — filter on nested-object subfield returns 0 rows** | `where address.city = 'New york city'` where `address` is a (non-`nested`) `object` array returns **0 rows**; upstream returns the matching row. AE doesn't match a scalar equality against an array-of-objects subfield. | CalciteWhereCommandIT testFilterOnNestedFields | HIGH (confirmed) |
-| **AD — date/time-mapped columns keep `date`/`time` label (test expects `timestamp`)** | A `date`-format (`yyyy-MM-dd`) column surfaces as schema type `date`, and a time-only (`HH:mm:ss`) column as `time` — whereas `CalciteAnalyticsDatetimeWireFormatIT` documents the AE route widening both to `timestamp`. So AE's label here diverges from the test's expected AE behavior (the label is arguably *more* correct, but it's a divergence). | CalciteAnalyticsDatetimeWireFormatIT testDateRootColumnYmdFormat, testTimeRootColumnHmsFormat | HIGH (confirmed) |
-| **AE — union row count / grouping wrong** | `search ... | union [search ...] | stats count()` returns 1014 instead of 1000 (extra rows); three-subsearch `union ... | stats count by region` returns 22 for every region instead of the per-state counts (17/22/25). Union appears to mis-route or duplicate the subsearch rows. | CalciteUnionCommandIT testUnionMidPipeline_SingleExplicitDataset, testUnionThreeSubsearches | HIGH (confirmed) |
-| **AF — variadic `concat` type-consistency error** | `eval f = concat(name, 'there', ...)` → 500 `Variadic arguments must have consistent types when parameterConsistency is CONSISTENT. Argument at index 1 has type Str...`. The Substrait/DataFusion concat binding requires all args the same nullability/type; PPL concat mixes a field + string literals. | CalciteTextFunctionIT testConcat | HIGH (confirmed) |
-| **AG — `IS NOT TRUE` filter operator unsupported** | `where not true = case(...)` lowers to an `IS NOT TRUE` predicate → 500 `Unrecognized filter operator [IS NOT TRUE / IS_NOT_TRUE]`. The Lucene-delegation filter layer doesn't know this operator. | CalcitePPLCaseFunctionIT testCaseWhenInFilter | HIGH (confirmed) |
-| **AH — earliest()/relative-time eval wrong** | `eval a = earliest('now', now)` returns `true` where upstream returns `false` (the relative-time comparison `earliest('now', now)` should be false — 'now' is not strictly earliest of now). Relative-time literal parsing / comparison semantics differ. | CalcitePPLConditionBuiltinFunctionIT testEarliestWithEval | MED (confirmed) |
-| **AI — equality on a `text` field returns 0 rows** | `where email == 'amberduke@pyrami.com'` where `email` is mapped `text` (no keyword subfield) returns 0 rows; upstream matches. AE compares against the analyzed text field instead of an exact term. | CalciteWhereCommandIT testDoubleEqualWithSpecialCharacters | HIGH (confirmed) |
-| **AB — `bin @timestamp bins=N` + stats loses timestamp type / 500** | After `bin @timestamp bins=N \| stats ... by @timestamp`, the `@timestamp` group key comes back typed `string` instead of `timestamp` (auto_date_histogram bucket key not re-typed); the term+time variants 500 on the streaming fragment. | CalciteBinCommandIT testStatsWithBinsOnTimeField_Count/_Avg, testStatsWithBinsOnTimeAndTermField_Count/_Avg | HIGH (confirmed) |
-| **AC — consecutive dedup unsupported** | `dedup ... CONSECUTIVE=true` → 500 `Consecutive deduplication is unsupported in Calcite`. | CalcitePPLDedupIT testConsecutiveImplicitFallbackV2; CalciteDedupCommandIT testConsecutiveDedup | HIGH (confirmed) |
-| **AA — TIME field widened to TIMESTAMP breaks TIME-typed signatures** | AE has no native TIME type; a `time`-mapped field widens to TIMESTAMP at scan. `TIMEDIFF(time, time)` then fails: `TIMEDIFF function expects {[TIME,TIME]}, but got [TIMESTAMP,TIMESTAMP]`. Same root as the datetime wire-format widening. | CalcitePPLBuiltinFunctionsNullIT testTimediffNull | HIGH (confirmed) |
-| **Z — `plugins.ppl.subsearch.maxout` not honored** | Setting the subsearch row cap (1, 2, ...) has no effect / wrong effect on the AE path: `setSubsearchMaxOut(1)` over an exists/in subsearch returns the full 5 rows (limit ignored) or 0 rows (over-applied). The unlimited (0/negative) cases pass; only the *bounded* cases fail. | CalcitePPLInSubqueryIT testSubsearchMaxOut; CalcitePPLExistsSubqueryIT testSubsearchMaxOut1/2/3/4 | HIGH (confirmed) |
-
-> Subquery family: of 33 ported, **24 pass**. Failures: bucket **T** (testInCorrelatedSubquery, testInSubqueryWithTableAlias), bucket **N** (testTwoExpressionsNotInSubquery — delegation marker leak on `(id,name) not in`), bucket **Z** (5 maxout tests), and testTwoUncorrelatedScalarSubqueriesInOr (1 vs 2 rows — disjunction of two uncorrelated scalar subqueries; tentatively its own micro-bug, grouped under T/subquery-correctness).
-
-> Note: CalcitePPLEventstatsIT dc()/distinct_count() tests and CalciteSystemFunctionIT typeof (numeric) PASS in sandbox/qa. CalciteMiscReproIT testRenameFullWildcardExcludesMetadataFields → bucket A (alphabetical cols after rename); testQuerySizeLimit → bucket D (implicit `search ... age>35` → 0 rows). Many subquery tests (testWhereInSubquery, testFilterInSubquery, testTwoExpressionsInSubquery) and most cast tests (TIME/TIMESTAMP) actually PASS in sandbox/qa — only the aliased/correlated subquery and IP-cast variants fail. CalcitePPLConditionBuiltinFunctionIT methods (testIsBlank/testIf/testNullIf/testIfNull/testIsNotNull*/testEvalIsNull*/testIsPresent) all PASSED in sandbox/qa repro — they may already be fixed on this branch, or the upstream failure had a different cause (e.g. BIG5/NESTED_SIMPLE index load in init, not the asserted query). Marked ⚪ pending re-confirmation.
-
-## Status legend
-- ⬜ not started
-- 🟡 reproduced in sandbox/qa, investigating
-- 🔴 reproduced, confirmed failing, root-caused (bucketed)
-- 🟢 fixed & passing in sandbox/qa
-- ⚪ could not reproduce / passes here / N/A
-
-## Test inventory
-_(see PROGRESS.tsv for the machine-readable per-test table)_
+Two further AE behaviors were observed while provisioning but their only upstream test
+(`DataTypeIT.test_nonnumeric_data_types`) is skipped (geo_point + nested), so they have no live test:
+geo_point rejected at index creation, and a bare `object` field flattened to dotted leaf columns
+instead of a single `array`/`struct`.

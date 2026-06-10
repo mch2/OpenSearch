@@ -1,0 +1,20 @@
+{"index": {}}
+{"KeywordBody":"test wildcard", "TextKeywordBody":"test wildcard", "TextBody":"test wildcard"}
+{"index": {}}
+{"KeywordBody":"test wildcard in the end of the text%", "TextKeywordBody":"test wildcard in the end of the text%", "TextBody":"test wildcard in the end of the text%"}
+{"index": {}}
+{"KeywordBody":"%test wildcard in the beginning of the text", "TextKeywordBody":"%test wildcard in the beginning of the text", "TextBody":"%test wildcard in the beginning of the text"}
+{"index": {}}
+{"KeywordBody":"test wildcard in % the middle of the text", "TextKeywordBody":"test wildcard in % the middle of the text", "TextBody":"test wildcard in % the middle of the text"}
+{"index": {}}
+{"KeywordBody":"test wildcard %% beside each other", "TextKeywordBody":"test wildcard %% beside each other", "TextBody":"test wildcard %% beside each other"}
+{"index": {}}
+{"KeywordBody":"test wildcard in the end of the text_", "TextKeywordBody":"test wildcard in the end of the text_", "TextBody":"test wildcard in the end of the text_"}
+{"index": {}}
+{"KeywordBody":"_test wildcard in the beginning of the text", "TextKeywordBody":"_test wildcard in the beginning of the text", "TextBody":"_test wildcard in the beginning of the text"}
+{"index": {}}
+{"KeywordBody":"test wildcard in _ the middle of the text", "TextKeywordBody":"test wildcard in _ the middle of the text", "TextBody":"test wildcard in _ the middle of the text"}
+{"index": {}}
+{"KeywordBody":"test wildcard __ beside each other", "TextKeywordBody":"test wildcard __ beside each other", "TextBody":"test wildcard __ beside each other"}
+{"index": {}}
+{"KeywordBody":"test backslash wildcard \\_", "TextKeywordBody":"test backslash wildcard \\_", "TextBody":"test backslash wildcard \\_"}

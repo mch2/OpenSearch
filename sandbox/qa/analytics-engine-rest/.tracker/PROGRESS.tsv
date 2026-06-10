@@ -10,8 +10,8 @@ CalciteBinCommandIT	testStatsWithBinsOnTimeAndTermField_Avg	🔴	AB	term+time bi
 CalciteBinCommandIT	testStatsWithBinsOnTimeAndTermField_Count	🔴	AB	term+time bin stream 500
 CalciteBinCommandIT	testStatsWithBinsOnTimeField_Avg	🔴	AB	@timestamp ->string
 CalciteBinCommandIT	testStatsWithBinsOnTimeField_Count	🔴	AB	@timestamp ->string after bin+stats
-CalciteCsvFormatIT	escapeSanitizeTest	⬜		
-CalciteCsvFormatIT	sanitizeTest	⬜		
+CalciteCsvFormatIT	escapeSanitizeTest	🔴	AM	format=csv returns JSON
+CalciteCsvFormatIT	sanitizeTest	🔴	AM	format=csv returns JSON
 CalciteDataTypeIT	testBooleanFieldFromNumberAcrossWildcardIndices	🔴	C	text vs boolean cross-index 500
 CalciteDataTypeIT	testBooleanFieldFromString	🔴	M	DELETE _doc ->500
 CalciteDataTypeIT	test_nonnumeric_data_types	⏭	skip-geo/nested	has geo_point + nested_value; out of scope per policy
@@ -19,11 +19,11 @@ CalciteDataTypeIT	test_numeric_data_types	🔴	L	scaled_float->bigint
 CalciteDateTimeFunctionIT	testAddDateWithDays	🔴	R	ADDDATE unsupported 500
 CalciteDateTimeFunctionIT	testSubDateDays	🔴	R	SUBDATE unsupported 500
 CalciteDedupCommandIT	testConsecutiveDedup	🔴	AC	consecutive dedup unsupported
-CalciteLikeQueryIT	test_convert_field_text_to_keyword	⬜		
-CalciteLikeQueryIT	test_the_default_3rd_option	⬜		
+CalciteLikeQueryIT	test_convert_field_text_to_keyword	🔴	AN	explain asserts DSL pushdown string
+CalciteLikeQueryIT	test_the_default_3rd_option	⚪	-	passes (legacy-syntax setting)
 CalciteMathematicalFunctionIT	testConv	🔴	R	conv unsupported 500
 CalciteMathematicalFunctionIT	testRand	🔴	R	RAND unsupported 400
-CalciteMultiMatchIT	test_wildcard_multi_match	⬜		
+CalciteMultiMatchIT	test_wildcard_multi_match	⚪	-	passes (wildcard widens match)
 CalciteMultisearchCommandIT	testMultisearchBinAndStats	🔴	AB	bin+stats multisearch 500
 CalciteMultisearchCommandIT	testMultisearchBinTimestamp	🔴	AB	bin span multisearch 500
 CalciteMultisearchCommandIT	testMultisearchWithComplexAggregation	🔴	AE	multisearch agg wrong split
@@ -65,7 +65,7 @@ CalcitePPLAggregationPaginatingIT	testMinMaxWithBooleanNestedField	⏭	skip-nest
 CalcitePPLAggregationPaginatingIT	testMixedTypesNestedFieldAggregations	⏭	skip-nested	queries nested fields
 CalcitePPLAggregationPaginatingIT	testPercentileShortcutsFloatingEquivalence	🔴	V	stream 500
 CalcitePPLAggregationPaginatingIT	testPercentileShortcutsFloatingPoint	🔴	V	stream 500
-CalcitePPLAppendCommandIT	testAppendSchemaMergeWithIpUDT	⬜		
+CalcitePPLAppendCommandIT	testAppendSchemaMergeWithIpUDT	🔴	AK	append IP-UDT merge 500
 CalcitePPLAppendPipeCommandIT	testDoubleAppendPipeWithFilter	🔴	N	delegation marker leak 500
 CalcitePPLBasicIT	testDecimalLiteral	🔴	A+B	col order + 7.0 float32 vs double
 CalcitePPLBasicIT	testFilterQuery2	🔴	A	col order [age,name]
@@ -94,11 +94,11 @@ CalcitePPLBuiltinFunctionsNullIT	testTimediffNull	🔴	AA	TIME widened->TIMESTAM
 CalcitePPLCaseFunctionIT	testCaseAggWithNullValues	🔴	U	range-case agg keeps null bucket
 CalcitePPLCaseFunctionIT	testCaseCanBePushedDownAsRangeQuery	⚪	-	passes
 CalcitePPLCaseFunctionIT	testCaseWhenInFilter	🔴	AG	IS NOT TRUE operator unsupported
-CalcitePPLCaseFunctionIT	testCaseWhenInSubquery	⬜		
+CalcitePPLCaseFunctionIT	testCaseWhenInSubquery	⚪	-	passes in sandbox/qa
 CalcitePPLCaseFunctionIT	testCaseWhenNoElse	⚪	-	passes
 CalcitePPLCaseFunctionIT	testCaseWhenWithCast	⚪	-	passes
 CalcitePPLCaseFunctionIT	testCaseWhenWithIn	⚪	-	passes
-CalcitePPLCaseFunctionIT	testNestedCaseAggWithAutoDateHistogram	⬜		
+CalcitePPLCaseFunctionIT	testNestedCaseAggWithAutoDateHistogram	🔴	AB	@timestamp->string after bin
 CalcitePPLCastFunctionIT	testCastTime	⚪	-	passes in sandbox/qa
 CalcitePPLCastFunctionIT	testCastTimestamp	⚪	-	passes in sandbox/qa
 CalcitePPLCastFunctionIT	testCastToIP	🔴	S	cast IP unsupported 500
@@ -169,9 +169,9 @@ CalcitePPLJsonBuiltinFunctionIT	testJsonAppend	🔴	W	json_append ->500
 CalcitePPLJsonBuiltinFunctionIT	testJsonDeleteWithDollarPrefixedPath	🔴	W	json_delete $. no-op
 CalcitePPLJsonBuiltinFunctionIT	testJsonExtend	🔴	W	json_extend ->500
 CalcitePPLJsonBuiltinFunctionIT	testJsonSetWithDollarPrefixedPath	🔴	W	json_set $. no-op
-CalcitePPLMapPathIT	testMvcombineOnMapPath	⬜		
-CalcitePPLPatternsIT	testBrainLabelMode_ShowNumberedToken	⬜		
-CalcitePPLPatternsIT	testBrainParseWithUUID_ShowNumberedToken	⬜		
+CalcitePPLMapPathIT	testMvcombineOnMapPath	🔴	AL	mvcombine ARRAY_AGG unsupported
+CalcitePPLPatternsIT	testBrainLabelMode_ShowNumberedToken	🔴	AJ	brain token struct differs
+CalcitePPLPatternsIT	testBrainParseWithUUID_ShowNumberedToken	🔴	AJ	brain token struct differs
 CalcitePPLRenameIT	testRenameFullWildcardExcludesMetadataFields	🔴	A	alphabetical cols after rename
 CalcitePPLScalarSubqueryIT	testCorrelatedScalarSubqueryInFilter	⚪	-	passes in sandbox/qa
 CalcitePPLScalarSubqueryIT	testCorrelatedScalarSubqueryInSelect	⚪	-	passes in sandbox/qa
@@ -189,8 +189,8 @@ CalcitePPLSortIT	testSortWithAutoCast	🔴	P	tie-break order
 CalcitePPLSortIT	testSortWithNullValue	⚪	-	passes in sandbox/qa
 CalcitePPLStringBuiltinFunctionIT	testRTrim	⚪	-	passes in sandbox/qa
 CalcitePPLStringBuiltinFunctionIT	testTrim	⚪	-	passes in sandbox/qa
-CalciteQueryStringIT	wildcard_test	⬜		
-CalciteResourceMonitorIT	queryExceedResourceLimitShouldFail	⬜		
+CalciteQueryStringIT	wildcard_test	⚪	-	passes (testWildcardQueryString)
+CalciteResourceMonitorIT	queryExceedResourceLimitShouldFail	🔴	AP	memory_limit not enforced
 CalciteReverseCommandIT	testStreamstatsByWithReverse	🔴	A	col order alphabetical
 CalciteReverseCommandIT	testStreamstatsWindowWithReverse	🔴	A	col order alphabetical
 CalciteReverseCommandIT	testStreamstatsWithReverse	🔴	A	full-table col order alphabetical
@@ -201,16 +201,16 @@ CalciteRexCommandIT	testRexErrorInvalidGroupNameStartingWithDigit	🔴	H	500+no 
 CalciteRexCommandIT	testRexErrorInvalidGroupNameUnderscore	🔴	H	500+no suggestion
 CalciteSettingsIT	testQuerySizeLimit	🔴	D	implicit search age>35 ->0 rows
 CalciteSettingsIT	testQuerySizeLimit_NoPushdown	🔴	D	implicit search age>35 ->0 rows
-CalciteSimpleQueryStringIT	test_wildcard_simple_query_string	⬜		
+CalciteSimpleQueryStringIT	test_wildcard_simple_query_string	⚪	-	passes
 CalciteSortCommandIT	testHeadThenSort	🔴	P	head 2 scan order -> [32] not [28]
 CalciteSortCommandIT	testPushdownSortCastToDoubleExpression	⚪	-	passes (explain-only part dropped)
-CalciteStatsCommandIT	testStatsBySpanTimeWithNullBucket	⬜	Q?	needs time_date_null ds - deferred
+CalciteStatsCommandIT	testStatsBySpanTimeWithNullBucket	🔴	Q	interp percentile double 8128.25
 CalciteStatsCommandIT	testStatsPercentileByNullValue	🔴	Q	double+null bucket
 CalciteStatsCommandIT	testStatsPercentileByNullValueNonNullBucket	🔴	Q	null vs 0 bucket
 CalciteStatsCommandIT	testStatsPercentileBySpan	🔴	Q	interp double
 CalciteStatsCommandIT	testStatsPercentileWithNull	🔴	Q	interp double 35413
 CalciteStatsCommandIT	testStatsWithLimit	⚪	-	passes (numOfRows=5)
-CalciteSystemFunctionIT	typeof_opensearch_types	⚪	-	numeric typeof passes (nonnumeric needs geo_point=bucket E)
+CalciteSystemFunctionIT	typeof_opensearch_types	🔴	L	scaled_float typeof BIGINT not DOUBLE
 CalciteTextFunctionIT	testConcat	🔴	AF	variadic concat type consistency
 CalciteTextFunctionIT	testRegexp	🔴	R	REGEXP scalar unsupported
 CalciteUnionCommandIT	testUnionMidPipeline_SingleExplicitDataset	🔴	AE	union count 1014 vs 1000
@@ -219,12 +219,12 @@ CalciteWhereCommandIT	testDoubleEqualWithSpecialCharacters	🔴	AI	== on text fi
 CalciteWhereCommandIT	testFilterOnComputedNestedFields	⏭	skip-nested	query computes length(projects.name) nested
 CalciteWhereCommandIT	testFilterOnNestedAndRootFields	⏭	skip-nested	query filters city.name + projects.name nested
 CalciteWhereCommandIT	testFilterOnNestedFields	⏭	skip-nested	query filters nested address.city; out of scope per policy
-CalciteWhereCommandIT	testFilterScriptPushDownWithPPLBuiltInFunction	⬜		
+CalciteWhereCommandIT	testFilterScriptPushDownWithPPLBuiltInFunction	🔴	AO	sub-second trailing zeros .95500000
 CalciteWhereCommandIT	testScriptFilterOnDifferentNestedHierarchyShouldThrow	⏭	skip-nested	queries author.books.reviews.* nested hierarchy
-ppl.dashboard.NfwPplDashboardIT	testTopBlockedDestinationIPs	⬜		
-ppl.dashboard.NfwPplDashboardIT	testTopLongLivedTCPFlows	⬜		
-ppl.dashboard.NfwPplDashboardIT	testTopSourceAndDestinationByBytes	⬜		
-ppl.dashboard.NfwPplDashboardIT	testTopSourceAndDestinationPackets	⬜		
-ppl.dashboard.WafPplDashboardIT	testTopRequestURIs	⬜		
-ppl.dashboard.WafPplDashboardIT	testTotalBlockedRequests	⬜		
-ppl.FieldsCommandIT	testEnhancedFieldsWhenCalciteDisabled	⬜		
+ppl.dashboard.NfwPplDashboardIT	testTopBlockedDestinationIPs	⏭	skip-nested	group by nested event.dest_ip
+ppl.dashboard.NfwPplDashboardIT	testTopLongLivedTCPFlows	⏭	skip-nested	WHERE/stats on nested event.* fields
+ppl.dashboard.NfwPplDashboardIT	testTopSourceAndDestinationByBytes	⏭	skip-nested	stats on nested event.* fields
+ppl.dashboard.NfwPplDashboardIT	testTopSourceAndDestinationPackets	⏭	skip-nested	stats on nested event.* fields
+ppl.dashboard.WafPplDashboardIT	testTopRequestURIs	⏭	skip-nested	group by nested httpRequest.uri
+ppl.dashboard.WafPplDashboardIT	testTotalBlockedRequests	⚪	-	passes (top-level action filter)
+ppl.FieldsCommandIT	testEnhancedFieldsWhenCalciteDisabled	⏭	skip-env	needs plugins.calcite.enabled=false; AE route forces calcite on
