@@ -4,9 +4,20 @@
 our sandbox/qa analytics-engine REST suite (`/_plugins/_ppl`, parquet primary + lucene secondary,
 `cluster.pluggable.dataformat=composite`), confirm each fails the same way, and bucket the root cause.
 
-**No code was pushed anywhere.** All work is local repro ITs under
+All work is local repro ITs under
 `sandbox/qa/analytics-engine-rest/src/test/java/org/opensearch/analytics/qa/Calcite*ReproIT.java`
 plus datasets under `.../resources/datasets/`. Tracker lives in this `.tracker/` dir.
+(Pushed to fork branch `analytics-engine-sql-repro-tests` on a later request.)
+
+## Out-of-scope policy (per maintainer) — mark these ⏭ skip, NOT bugs
+- **geo_point**: skip any test that references a geo field — the AE parquet format rejects geo_point
+  at index creation (bucket E), so the test can't run. Not a divergence to fix.
+- **binary**: the mapping MUST set `"store": true` (already done in our datasets). Binary tests are
+  runnable — port them, don't skip.
+- **nested/object**: skip a test only if the nested/object field is used IN THE QUERY (filter/select).
+  A test that merely has a nested column in the index but doesn't touch it can still run.
+- Re-tagged so far under this policy: CalciteDataTypeIT.test_nonnumeric_data_types (geo+nested),
+  CalciteWhereCommandIT.testFilterOnNestedFields (filters nested address.city).
 
 ## Environment notes (important)
 - Build needs **JDK 25**: `~/.sdkman/candidates/java/25.0.3-amzn`.

@@ -14,7 +14,7 @@ CalciteCsvFormatIT	escapeSanitizeTest	⬜
 CalciteCsvFormatIT	sanitizeTest	⬜		
 CalciteDataTypeIT	testBooleanFieldFromNumberAcrossWildcardIndices	🔴	C	text vs boolean cross-index 500
 CalciteDataTypeIT	testBooleanFieldFromString	🔴	M	DELETE _doc ->500
-CalciteDataTypeIT	test_nonnumeric_data_types	🔴	E+O	geo_point reject; object flattened
+CalciteDataTypeIT	test_nonnumeric_data_types	⏭	skip-geo/nested	has geo_point + nested_value; out of scope per policy
 CalciteDataTypeIT	test_numeric_data_types	🔴	L	scaled_float->bigint
 CalciteDateTimeFunctionIT	testAddDateWithDays	🔴	R	ADDDATE unsupported 500
 CalciteDateTimeFunctionIT	testSubDateDays	🔴	R	SUBDATE unsupported 500
@@ -86,11 +86,11 @@ CalcitePPLBuiltinDatetimeFunctionInvalidIT	testMONTHNAMEInvalid	⬜
 CalcitePPLBuiltinFunctionIT	testDivide	🔴	B	7.0->float32; half_float prec
 CalcitePPLBuiltinFunctionIT	testModFloatAndNegative	🔴	B	float32 precision 0.19999981
 CalcitePPLBuiltinFunctionIT	testModShouldReturnWiderTypes	🔴	B	float32 precision
-CalcitePPLBuiltinFunctionsNullIT	testAdddateNull	⬜		
-CalcitePPLBuiltinFunctionsNullIT	testAddSubDateNull	⬜		
-CalcitePPLBuiltinFunctionsNullIT	testDatetimeNullString	⬜		
-CalcitePPLBuiltinFunctionsNullIT	testSubdateNull	⬜		
-CalcitePPLBuiltinFunctionsNullIT	testTimediffNull	⬜		
+CalcitePPLBuiltinFunctionsNullIT	testAdddateNull	🔴	R	ADDDATE unsupported 500
+CalcitePPLBuiltinFunctionsNullIT	testAddSubDateNull	🔴	R	ADDDATE/SUBDATE unsupported 500
+CalcitePPLBuiltinFunctionsNullIT	testDatetimeNullString	🔴	R	convert_tz unsupported 400
+CalcitePPLBuiltinFunctionsNullIT	testSubdateNull	🔴	R	SUBDATE unsupported 500
+CalcitePPLBuiltinFunctionsNullIT	testTimediffNull	🔴	AA	TIME widened->TIMESTAMP, TIMEDIFF sig fail
 CalcitePPLCaseFunctionIT	testCaseAggWithNullValues	🔴	U	range-case agg keeps null bucket
 CalcitePPLCaseFunctionIT	testCaseCanBePushedDownAsRangeQuery	⬜		
 CalcitePPLCaseFunctionIT	testCaseWhenInFilter	⬜		
@@ -137,32 +137,32 @@ CalcitePPLEventstatsIT	testEventstatsDistinctCount	⚪	-	passes
 CalcitePPLEventstatsIT	testEventstatsDistinctCountByCountry	⚪	-	passes
 CalcitePPLEventstatsIT	testEventstatsDistinctCountFunction	⚪	-	passes
 CalcitePPLEventstatsIT	testEventstatsDistinctCountWithNull	⚪	-	passes
-CalcitePPLExistsSubqueryIT	testExistsSubqueryAndAggregation	⬜		
-CalcitePPLExistsSubqueryIT	testIssue3566	⬜		
-CalcitePPLExistsSubqueryIT	testNestedExistsSubquery	⬜		
-CalcitePPLExistsSubqueryIT	testSimpleExistsSubquery	⬜		
-CalcitePPLExistsSubqueryIT	testSimpleExistsSubqueryInFilter	⬜		
-CalcitePPLExistsSubqueryIT	testSubsearchMaxOut1	⬜		
-CalcitePPLExistsSubqueryIT	testSubsearchMaxOut2	⬜		
-CalcitePPLExistsSubqueryIT	testSubsearchMaxOut3	⬜		
-CalcitePPLExistsSubqueryIT	testSubsearchMaxOut4	⬜		
-CalcitePPLExistsSubqueryIT	testSubsearchMaxOutNegativeMeansUnlimited	⬜		
-CalcitePPLExistsSubqueryIT	testSubsearchMaxOutUncorrelated	⬜		
-CalcitePPLExistsSubqueryIT	testUncorrelatedExistsSubquery	⬜		
-CalcitePPLExistsSubqueryIT	testUncorrelatedExistsSubqueryCheckTheReturnContentOfInnerTableIsEmptyOrNot	⬜		
-CalcitePPLExistsSubqueryIT	testUncorrelatedSubsearchMaxOutZeroMeansUnlimited	⬜		
-CalcitePPLInSubqueryIT	testEmptyInSubquery	⬜		
+CalcitePPLExistsSubqueryIT	testExistsSubqueryAndAggregation	⚪	-	passes in sandbox/qa
+CalcitePPLExistsSubqueryIT	testIssue3566	⚪	-	passes in sandbox/qa
+CalcitePPLExistsSubqueryIT	testNestedExistsSubquery	⚪	-	passes in sandbox/qa
+CalcitePPLExistsSubqueryIT	testSimpleExistsSubquery	⚪	-	passes in sandbox/qa
+CalcitePPLExistsSubqueryIT	testSimpleExistsSubqueryInFilter	⚪	-	passes in sandbox/qa
+CalcitePPLExistsSubqueryIT	testSubsearchMaxOut1	🔴	Z	maxout=1 ->5
+CalcitePPLExistsSubqueryIT	testSubsearchMaxOut2	🔴	Z	maxout=2 ->0
+CalcitePPLExistsSubqueryIT	testSubsearchMaxOut3	🔴	Z	maxout=2 ->0
+CalcitePPLExistsSubqueryIT	testSubsearchMaxOut4	🔴	Z	maxout=2 ->0
+CalcitePPLExistsSubqueryIT	testSubsearchMaxOutNegativeMeansUnlimited	⚪	-	passes in sandbox/qa
+CalcitePPLExistsSubqueryIT	testSubsearchMaxOutUncorrelated	⚪	-	passes in sandbox/qa
+CalcitePPLExistsSubqueryIT	testUncorrelatedExistsSubquery	⚪	-	passes in sandbox/qa
+CalcitePPLExistsSubqueryIT	testUncorrelatedExistsSubqueryCheckTheReturnContentOfInnerTableIsEmptyOrNot	⚪	-	passes in sandbox/qa
+CalcitePPLExistsSubqueryIT	testUncorrelatedSubsearchMaxOutZeroMeansUnlimited	⚪	-	passes in sandbox/qa
+CalcitePPLInSubqueryIT	testEmptyInSubquery	⚪	-	passes in sandbox/qa
 CalcitePPLInSubqueryIT	testFilterInSubquery	⚪	-	passes
 CalcitePPLInSubqueryIT	testInCorrelatedSubquery	🔴	T	correlated ->1 of 3
-CalcitePPLInSubqueryIT	testInSubqueryWithParentheses	⬜		
+CalcitePPLInSubqueryIT	testInSubqueryWithParentheses	⚪	-	passes in sandbox/qa
 CalcitePPLInSubqueryIT	testInSubqueryWithTableAlias	🔴	T	alias subquery ->0 rows
-CalcitePPLInSubqueryIT	testNestedInSubquery	⬜		
-CalcitePPLInSubqueryIT	testNestedInSubquery2	⬜		
-CalcitePPLInSubqueryIT	testSelfInSubquery	⬜		
-CalcitePPLInSubqueryIT	testSubsearchMaxOut	⬜		
-CalcitePPLInSubqueryIT	testSubsearchMaxOutZeroMeansUnlimited	⬜		
+CalcitePPLInSubqueryIT	testNestedInSubquery	⚪	-	passes in sandbox/qa
+CalcitePPLInSubqueryIT	testNestedInSubquery2	⚪	-	passes in sandbox/qa
+CalcitePPLInSubqueryIT	testSelfInSubquery	⚪	-	passes in sandbox/qa
+CalcitePPLInSubqueryIT	testSubsearchMaxOut	🔴	Z	maxout=1 ignored ->5 rows
+CalcitePPLInSubqueryIT	testSubsearchMaxOutZeroMeansUnlimited	⚪	-	passes in sandbox/qa
 CalcitePPLInSubqueryIT	testTwoExpressionsInSubquery	⚪	-	passes
-CalcitePPLInSubqueryIT	testTwoExpressionsNotInSubquery	⬜		
+CalcitePPLInSubqueryIT	testTwoExpressionsNotInSubquery	🔴	N	(id,name) not in -> delegation marker 500
 CalcitePPLInSubqueryIT	testWhereInSubquery	⚪	-	passes
 CalcitePPLJsonBuiltinFunctionIT	testJson	🔴	W	json() ->500
 CalcitePPLJsonBuiltinFunctionIT	testJsonAppend	🔴	W	json_append ->500
@@ -173,17 +173,17 @@ CalcitePPLMapPathIT	testMvcombineOnMapPath	⬜
 CalcitePPLPatternsIT	testBrainLabelMode_ShowNumberedToken	⬜		
 CalcitePPLPatternsIT	testBrainParseWithUUID_ShowNumberedToken	⬜		
 CalcitePPLRenameIT	testRenameFullWildcardExcludesMetadataFields	🔴	A	alphabetical cols after rename
-CalcitePPLScalarSubqueryIT	testCorrelatedScalarSubqueryInFilter	⬜		
-CalcitePPLScalarSubqueryIT	testCorrelatedScalarSubqueryInSelect	⬜		
-CalcitePPLScalarSubqueryIT	testCorrelatedScalarSubqueryInSelectWithNonEqual	⬜		
-CalcitePPLScalarSubqueryIT	testCorrelatedScalarSubqueryInWhere	⬜		
-CalcitePPLScalarSubqueryIT	testDisjunctiveCorrelatedScalarSubquery	⬜		
-CalcitePPLScalarSubqueryIT	testSubsearchMaxOutZeroMeansUnlimited	⬜		
-CalcitePPLScalarSubqueryIT	testTwoCorrelatedScalarSubqueriesInOr	⬜		
-CalcitePPLScalarSubqueryIT	testTwoUncorrelatedScalarSubqueriesInOr	⬜		
-CalcitePPLScalarSubqueryIT	testUncorrelatedScalarSubqueryInSelect	⬜		
-CalcitePPLScalarSubqueryIT	testUncorrelatedScalarSubqueryInSelectAndInFilter	⬜		
-CalcitePPLScalarSubqueryIT	testUncorrelatedScalarSubqueryInSelectAndWhere	⬜		
+CalcitePPLScalarSubqueryIT	testCorrelatedScalarSubqueryInFilter	⚪	-	passes in sandbox/qa
+CalcitePPLScalarSubqueryIT	testCorrelatedScalarSubqueryInSelect	⚪	-	passes in sandbox/qa
+CalcitePPLScalarSubqueryIT	testCorrelatedScalarSubqueryInSelectWithNonEqual	⚪	-	passes in sandbox/qa
+CalcitePPLScalarSubqueryIT	testCorrelatedScalarSubqueryInWhere	⚪	-	passes in sandbox/qa
+CalcitePPLScalarSubqueryIT	testDisjunctiveCorrelatedScalarSubquery	⚪	-	passes in sandbox/qa
+CalcitePPLScalarSubqueryIT	testSubsearchMaxOutZeroMeansUnlimited	⚪	-	passes in sandbox/qa
+CalcitePPLScalarSubqueryIT	testTwoCorrelatedScalarSubqueriesInOr	⚪	-	passes in sandbox/qa
+CalcitePPLScalarSubqueryIT	testTwoUncorrelatedScalarSubqueriesInOr	🔴	T	disj uncorrelated scalar ->1 of 2
+CalcitePPLScalarSubqueryIT	testUncorrelatedScalarSubqueryInSelect	⚪	-	passes in sandbox/qa
+CalcitePPLScalarSubqueryIT	testUncorrelatedScalarSubqueryInSelectAndInFilter	⚪	-	passes in sandbox/qa
+CalcitePPLScalarSubqueryIT	testUncorrelatedScalarSubqueryInSelectAndWhere	⚪	-	passes in sandbox/qa
 CalcitePPLSortIT	testSortAgeAndFieldsNameAge	🔴	P	tie-break Elinor<Hattie
 CalcitePPLSortIT	testSortWithAutoCast	🔴	P	tie-break order
 CalcitePPLSortIT	testSortWithNullValue	⚪	-	passes in sandbox/qa
@@ -218,7 +218,7 @@ CalciteUnionCommandIT	testUnionThreeSubsearches	⬜
 CalciteWhereCommandIT	testDoubleEqualWithSpecialCharacters	⬜		
 CalciteWhereCommandIT	testFilterOnComputedNestedFields	⬜		
 CalciteWhereCommandIT	testFilterOnNestedAndRootFields	⬜		
-CalciteWhereCommandIT	testFilterOnNestedFields	🔴	Y	nested object eq ->0 rows
+CalciteWhereCommandIT	testFilterOnNestedFields	⏭	skip-nested	query filters nested address.city; out of scope per policy
 CalciteWhereCommandIT	testFilterScriptPushDownWithPPLBuiltInFunction	⬜		
 CalciteWhereCommandIT	testScriptFilterOnDifferentNestedHierarchyShouldThrow	⬜		
 ppl.dashboard.NfwPplDashboardIT	testTopBlockedDestinationIPs	⬜		
