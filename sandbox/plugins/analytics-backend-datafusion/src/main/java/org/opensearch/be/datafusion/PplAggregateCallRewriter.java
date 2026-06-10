@@ -40,14 +40,14 @@ import java.util.Set;
 final class PplAggregateCallRewriter {
 
     private static final Set<SqlAggFunction> LOCAL_OPS = Set.of(
-        DataFusionFragmentConvertor.LOCAL_TAKE_OP,
-        DataFusionFragmentConvertor.LOCAL_FIRST_OP,
-        DataFusionFragmentConvertor.LOCAL_LAST_OP,
-        DataFusionFragmentConvertor.LOCAL_ARRAY_AGG_OP,
-        DataFusionFragmentConvertor.LOCAL_LIST_MERGE_OP,
-        DataFusionFragmentConvertor.LOCAL_LIST_MERGE_DISTINCT_OP,
-        DataFusionFragmentConvertor.LOCAL_PERCENTILE_APPROX_OP,
-        DataFusionFragmentConvertor.LOCAL_INTERNAL_PATTERN_OP
+        LocalFunctionOps.LOCAL_TAKE_OP,
+        LocalFunctionOps.LOCAL_FIRST_OP,
+        LocalFunctionOps.LOCAL_LAST_OP,
+        LocalFunctionOps.LOCAL_ARRAY_AGG_OP,
+        LocalFunctionOps.LOCAL_LIST_MERGE_OP,
+        LocalFunctionOps.LOCAL_LIST_MERGE_DISTINCT_OP,
+        LocalFunctionOps.LOCAL_PERCENTILE_APPROX_OP,
+        LocalFunctionOps.LOCAL_INTERNAL_PATTERN_OP
     );
 
     private PplAggregateCallRewriter() {}
@@ -121,9 +121,9 @@ final class PplAggregateCallRewriter {
         boolean targetDistinct = call.isDistinct();
         RelDataType explicitReturnType = call.getType();
         switch (aggregation.getName().toUpperCase(java.util.Locale.ROOT)) {
-            case "TAKE" -> targetOp = DataFusionFragmentConvertor.LOCAL_TAKE_OP;
-            case "FIRST" -> targetOp = DataFusionFragmentConvertor.LOCAL_FIRST_OP;
-            case "LAST" -> targetOp = DataFusionFragmentConvertor.LOCAL_LAST_OP;
+            case "TAKE" -> targetOp = LocalFunctionOps.LOCAL_TAKE_OP;
+            case "FIRST" -> targetOp = LocalFunctionOps.LOCAL_FIRST_OP;
+            case "LAST" -> targetOp = LocalFunctionOps.LOCAL_LAST_OP;
             case "ARG_MIN", "ARG_MAX" -> {
                 // ARG_MIN/ARG_MAX(value, ts) -> first_value/last_value(value) with ts as the agg
                 // ORDER BY key (DataFusion 53 has no arg_min/max UDAF; first/last_value take ordering).
@@ -131,7 +131,7 @@ final class PplAggregateCallRewriter {
                     return call;
                 }
                 boolean isMin = "ARG_MIN".equalsIgnoreCase(aggregation.getName());
-                SqlAggFunction op = isMin ? DataFusionFragmentConvertor.LOCAL_FIRST_OP : DataFusionFragmentConvertor.LOCAL_LAST_OP;
+                SqlAggFunction op = isMin ? LocalFunctionOps.LOCAL_FIRST_OP : LocalFunctionOps.LOCAL_LAST_OP;
                 int valueArg = call.getArgList().get(0);
                 int timeArg = call.getArgList().get(1);
                 RelCollation collation = RelCollations.of(
@@ -164,13 +164,11 @@ final class PplAggregateCallRewriter {
                 RelDataType arg0Type = agg.getInput().getRowType().getFieldList().get(call.getArgList().get(0)).getType();
                 boolean arg0IsList = arg0Type.getComponentType() != null;
                 if (arg0IsList) {
-                    targetOp = isValues
-                        ? DataFusionFragmentConvertor.LOCAL_LIST_MERGE_DISTINCT_OP
-                        : DataFusionFragmentConvertor.LOCAL_LIST_MERGE_OP;
+                    targetOp = isValues ? LocalFunctionOps.LOCAL_LIST_MERGE_DISTINCT_OP : LocalFunctionOps.LOCAL_LIST_MERGE_OP;
                     targetDistinct = false;
                     explicitReturnType = arg0Type;
                 } else {
-                    targetOp = DataFusionFragmentConvertor.LOCAL_ARRAY_AGG_OP;
+                    targetOp = LocalFunctionOps.LOCAL_ARRAY_AGG_OP;
                     targetDistinct = isValues;
                     // PPL list/values is ARRAY<VARCHAR>; the operand is cast to VARCHAR on the
                     // substrait arg (LOCAL_ARRAY_AGG_OP#rewriteDataArg). Nullable array matches the
@@ -183,7 +181,7 @@ final class PplAggregateCallRewriter {
             }
             case "PATTERN" -> {
                 // PPL declares ARRAY<MAP<VARCHAR, ANY>>; substrait can't carry ANY.
-                targetOp = DataFusionFragmentConvertor.LOCAL_INTERNAL_PATTERN_OP;
+                targetOp = LocalFunctionOps.LOCAL_INTERNAL_PATTERN_OP;
                 explicitReturnType = internalPatternReturnType(agg.getCluster().getTypeFactory());
             }
             case "PERCENTILE_APPROX" -> {
@@ -192,7 +190,7 @@ final class PplAggregateCallRewriter {
                 if (call.getArgList().size() < 3) {
                     return call;
                 }
-                targetOp = DataFusionFragmentConvertor.LOCAL_PERCENTILE_APPROX_OP;
+                targetOp = LocalFunctionOps.LOCAL_PERCENTILE_APPROX_OP;
                 List<Integer> trimmedArgList = new ArrayList<>(call.getArgList().subList(0, 2));
                 RelDataType arg0Type = agg.getInput().getRowType().getFieldList().get(call.getArgList().get(0)).getType();
                 RelDataType nullableArg0 = agg.getCluster().getTypeFactory().createTypeWithNullability(arg0Type, true);

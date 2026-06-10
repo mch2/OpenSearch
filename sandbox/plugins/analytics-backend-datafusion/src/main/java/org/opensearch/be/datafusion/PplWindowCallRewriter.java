@@ -122,7 +122,7 @@ final class PplWindowCallRewriter {
         @Override
         public RexNode visitOver(RexOver over) {
             SqlAggFunction op = over.getAggOperator();
-            if (op == DataFusionFragmentConvertor.LOCAL_INTERNAL_PATTERN_WINDOW_OP) {
+            if (op == LocalFunctionOps.LOCAL_INTERNAL_PATTERN_WINDOW_OP) {
                 return over;
             }
             if (!"PATTERN".equalsIgnoreCase(op.getName())) {
@@ -137,7 +137,7 @@ final class PplWindowCallRewriter {
             RexWindow window = recursedOver.getWindow();
             return rexBuilder.makeOver(
                 varcharNullable,
-                DataFusionFragmentConvertor.LOCAL_INTERNAL_PATTERN_WINDOW_OP,
+                LocalFunctionOps.LOCAL_INTERNAL_PATTERN_WINDOW_OP,
                 recursedOver.getOperands(),
                 window.partitionKeys,
                 com.google.common.collect.ImmutableList.copyOf(window.orderKeys),

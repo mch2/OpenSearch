@@ -95,15 +95,15 @@ final class ItemTypeRebuilder {
                 return switch (fieldName) {
                     case "pattern" -> windowResult;
                     case "tokens" -> rexBuilder.makeCall(
-                        DataFusionFragmentConvertor.LOCAL_PATTERN_PARSER_GET_TOKENS_OP,
+                        LocalFunctionOps.LOCAL_PATTERN_PARSER_GET_TOKENS_OP,
                         List.of(windowResult, source)
                     );
                     default -> null;
                 };
             }
             SqlOperator targetOp = switch (fieldName) {
-                case "pattern" -> DataFusionFragmentConvertor.LOCAL_PATTERN_PARSER_GET_PATTERN_OP;
-                case "tokens" -> DataFusionFragmentConvertor.LOCAL_PATTERN_PARSER_GET_TOKENS_OP;
+                case "pattern" -> LocalFunctionOps.LOCAL_PATTERN_PARSER_GET_PATTERN_OP;
+                case "tokens" -> LocalFunctionOps.LOCAL_PATTERN_PARSER_GET_TOKENS_OP;
                 default -> null;
             };
             if (targetOp == null) {
