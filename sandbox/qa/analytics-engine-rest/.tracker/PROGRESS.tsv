@@ -1,6 +1,6 @@
 class	test	status	bucket	notes
-CalciteAnalyticsDatetimeWireFormatIT	testDateRootColumnYmdFormat	⬜		
-CalciteAnalyticsDatetimeWireFormatIT	testTimeRootColumnHmsFormat	⬜		
+CalciteAnalyticsDatetimeWireFormatIT	testDateRootColumnYmdFormat	🔴	AD	d label=date not timestamp
+CalciteAnalyticsDatetimeWireFormatIT	testTimeRootColumnHmsFormat	🔴	AD	t label=time not timestamp
 CalciteArrayFunctionIT	testExists	⬜		
 CalciteArrayFunctionIT	testFilter	⬜		
 CalciteArrayFunctionIT	testForAll	⬜		
@@ -202,8 +202,8 @@ CalciteRexCommandIT	testRexErrorInvalidGroupNameUnderscore	🔴	H	500+no suggest
 CalciteSettingsIT	testQuerySizeLimit	🔴	D	implicit search age>35 ->0 rows
 CalciteSettingsIT	testQuerySizeLimit_NoPushdown	⬜		
 CalciteSimpleQueryStringIT	test_wildcard_simple_query_string	⬜		
-CalciteSortCommandIT	testHeadThenSort	⬜		
-CalciteSortCommandIT	testPushdownSortCastToDoubleExpression	⬜		
+CalciteSortCommandIT	testHeadThenSort	🔴	P	head 2 scan order -> [32] not [28]
+CalciteSortCommandIT	testPushdownSortCastToDoubleExpression	⚪	-	passes (explain-only part dropped)
 CalciteStatsCommandIT	testStatsBySpanTimeWithNullBucket	⬜	Q?	needs time_date_null ds - deferred
 CalciteStatsCommandIT	testStatsPercentileByNullValue	🔴	Q	double+null bucket
 CalciteStatsCommandIT	testStatsPercentileByNullValueNonNullBucket	🔴	Q	null vs 0 bucket
@@ -213,8 +213,8 @@ CalciteStatsCommandIT	testStatsWithLimit	⚪	-	passes (numOfRows=5)
 CalciteSystemFunctionIT	typeof_opensearch_types	⚪	-	numeric typeof passes (nonnumeric needs geo_point=bucket E)
 CalciteTextFunctionIT	testConcat	⬜		
 CalciteTextFunctionIT	testRegexp	⬜		
-CalciteUnionCommandIT	testUnionMidPipeline_SingleExplicitDataset	⬜		
-CalciteUnionCommandIT	testUnionThreeSubsearches	⬜		
+CalciteUnionCommandIT	testUnionMidPipeline_SingleExplicitDataset	🔴	AE	union count 1014 vs 1000
+CalciteUnionCommandIT	testUnionThreeSubsearches	🔴	AE	union groups all 22
 CalciteWhereCommandIT	testDoubleEqualWithSpecialCharacters	⬜		
 CalciteWhereCommandIT	testFilterOnComputedNestedFields	⏭	skip-nested	query computes length(projects.name) nested
 CalciteWhereCommandIT	testFilterOnNestedAndRootFields	⏭	skip-nested	query filters city.name + projects.name nested
