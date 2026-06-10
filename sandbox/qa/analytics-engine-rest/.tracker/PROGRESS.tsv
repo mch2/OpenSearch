@@ -1,0 +1,230 @@
+class	test	status	bucket	notes
+CalciteAnalyticsDatetimeWireFormatIT	testDateRootColumnYmdFormat	⬜		
+CalciteAnalyticsDatetimeWireFormatIT	testTimeRootColumnHmsFormat	⬜		
+CalciteArrayFunctionIT	testExists	⬜		
+CalciteArrayFunctionIT	testFilter	⬜		
+CalciteArrayFunctionIT	testForAll	⬜		
+CalciteBinCommandIT	testBinTimestampSpan6Days	⬜		
+CalciteBinCommandIT	testBinTimestampSpan7Days	⬜		
+CalciteBinCommandIT	testStatsWithBinsOnTimeAndTermField_Avg	⬜		
+CalciteBinCommandIT	testStatsWithBinsOnTimeAndTermField_Count	⬜		
+CalciteBinCommandIT	testStatsWithBinsOnTimeField_Avg	⬜		
+CalciteBinCommandIT	testStatsWithBinsOnTimeField_Count	⬜		
+CalciteCsvFormatIT	escapeSanitizeTest	⬜		
+CalciteCsvFormatIT	sanitizeTest	⬜		
+CalciteDataTypeIT	testBooleanFieldFromNumberAcrossWildcardIndices	🔴	C	text vs boolean cross-index 500
+CalciteDataTypeIT	testBooleanFieldFromString	🔴	M	DELETE _doc ->500
+CalciteDataTypeIT	test_nonnumeric_data_types	🔴	E+O	geo_point reject; object flattened
+CalciteDataTypeIT	test_numeric_data_types	🔴	L	scaled_float->bigint
+CalciteDateTimeFunctionIT	testAddDateWithDays	🔴	R	ADDDATE unsupported 500
+CalciteDateTimeFunctionIT	testSubDateDays	🔴	R	SUBDATE unsupported 500
+CalciteDedupCommandIT	testConsecutiveDedup	⬜		
+CalciteLikeQueryIT	test_convert_field_text_to_keyword	⬜		
+CalciteLikeQueryIT	test_the_default_3rd_option	⬜		
+CalciteMathematicalFunctionIT	testConv	🔴	R	conv unsupported 500
+CalciteMathematicalFunctionIT	testRand	🔴	R	RAND unsupported 400
+CalciteMultiMatchIT	test_wildcard_multi_match	⬜		
+CalciteMultisearchCommandIT	testMultisearchBinAndStats	⬜		
+CalciteMultisearchCommandIT	testMultisearchBinTimestamp	⬜		
+CalciteMultisearchCommandIT	testMultisearchWithComplexAggregation	⬜		
+CalciteMultisearchCommandIT	testMultisearchWithoutFurtherProcessing	🔴	X	52 vs 51 off-by-one
+CalciteMultisearchCommandIT	testMultisearchWithThreeSubsearches	⬜		
+CalciteMultisearchCommandIT	testMultisearchWithTimestampInterleaving	⬜		
+CalciteMultiValueStatsIT	testListFunctionWithBoolean	🔴	I	TRUE vs true
+CalciteMultiValueStatsIT	testListFunctionWithNullValues	🔴	K	[1,,,,7] nulls kept
+CalciteMultiValueStatsIT	testValuesFunctionGroupBy	🔴	J	values unsorted
+CalciteMultiValueStatsIT	testValuesFunctionMultipleFields	🔴	J	values unsorted
+CalciteMultiValueStatsIT	testValuesFunctionRespectsConfiguredLimit	🔴	J	limit ignored
+CalciteMultiValueStatsIT	testValuesFunctionWithBoolean	🔴	I	TRUE vs true
+CalciteMultiValueStatsIT	testValuesFunctionWithDuplicates	🔴	J	no dedup
+CalciteMultiValueStatsIT	testValuesFunctionWithNullValues	🔴	J+K	unsorted+nulls
+CalciteObjectFieldOperateIT	verify_schema_without_fields	⬜		
+CalciteOperatorIT	testEqualOperator	🔴	D	implicit+where age=32 ->0 rows on bank
+CalciteOperatorIT	testGreaterOperator	🔴	D	implicit age>36 ->0
+CalciteOperatorIT	testGteOperator	🔴	D	implicit age>=36 ->0
+CalciteOperatorIT	testLessOperator	🔴	D	implicit age<32 ->0
+CalciteOperatorIT	testLteOperator	🔴	D	implicit age<=32 ->0
+CalciteOperatorIT	testNotEqualOperator	🔴	D	age!=32 ->0 rows
+CalciteOperatorIT	testNotOperator	🔴	D	not age>32 unfiltered ->7 rows
+CalciteParseCommandIT	testParseErrorInvalidGroupNameHyphen	🔴	H	500+no suggestion text
+CalciteParseCommandIT	testParseErrorInvalidGroupNameSpecialCharacter	🔴	H	500+no suggestion
+CalciteParseCommandIT	testParseErrorInvalidGroupNameStartingWithDigit	🔴	H	500+no suggestion
+CalciteParseCommandIT	testParseErrorInvalidGroupNameUnderscore	🔴	H	500+no suggestion
+CalcitePPLAggregationIT	testCountDistinctApprox	🔴	V	APPROX_COUNT_DISTINCT unbound
+CalcitePPLAggregationIT	testCountDistinctApproxWithAlias	🔴	V	approx unbound
+CalcitePPLAggregationIT	testMinMaxWithBooleanNestedField	⬜		
+CalcitePPLAggregationIT	testMixedTypesNestedFieldAggregations	⬜		
+CalcitePPLAggregationIT	testPercentileShortcuts	🔴	V	perc50/p95 stream 500
+CalcitePPLAggregationIT	testPercentileShortcutsEquivalentToStandard	⬜		
+CalcitePPLAggregationIT	testPercentileShortcutsFloatingEquivalence	⬜		
+CalcitePPLAggregationIT	testPercentileShortcutsFloatingPoint	⬜		
+CalcitePPLAggregationIT	testPercentileShortcutsWithDecimals	⬜		
+CalcitePPLAggregationPaginatingIT	testCountDistinctApprox	🔴	V	approx unbound
+CalcitePPLAggregationPaginatingIT	testCountDistinctApproxWithAlias	🔴	V	approx unbound
+CalcitePPLAggregationPaginatingIT	testMinMaxWithBooleanNestedField	⬜		
+CalcitePPLAggregationPaginatingIT	testMixedTypesNestedFieldAggregations	⬜		
+CalcitePPLAggregationPaginatingIT	testPercentileShortcutsFloatingEquivalence	⬜		
+CalcitePPLAggregationPaginatingIT	testPercentileShortcutsFloatingPoint	⬜		
+CalcitePPLAppendCommandIT	testAppendSchemaMergeWithIpUDT	⬜		
+CalcitePPLAppendPipeCommandIT	testDoubleAppendPipeWithFilter	🔴	N	delegation marker leak 500
+CalcitePPLBasicIT	testDecimalLiteral	🔴	A+B	col order + 7.0 float32 vs double
+CalcitePPLBasicIT	testFilterQuery2	🔴	A	col order [age,name]
+CalcitePPLBasicIT	testFilterQueryWithOr2	🔴	D	implicit filter -> 0 rows
+CalcitePPLBasicIT	testIndexPatterns	🔴	A	col order
+CalcitePPLBasicIT	testMultipleSourceQuery_DifferentTables	🔴	A	col order
+CalcitePPLBasicIT	testMultipleSourceQuery_SameTable	🔴	A	col order
+CalcitePPLBasicIT	testMultipleTablesAndFilters_WithIndexPattern	🔴	C	int vs long cross-index 500
+CalcitePPLBasicIT	testMultipleTables_DifferentTables	🔴	C	int vs long cross-index 500
+CalcitePPLBasicIT	testMultipleTables_WithIndexPattern	🔴	C	int vs long cross-index 500
+CalcitePPLBasicIT	testNumericLiteral	🔴	A	col order [age,name,...]
+CalcitePPLBasicIT	testQueryMinusFields	🔴	A	col order alphabetical
+CalcitePPLBasicIT	testQueryMinusFieldsWithFilter	🔴	A	col order alphabetical
+CalcitePPLBasicIT	testRegexpFilter	🔴	A	col order [age,name]
+CalcitePPLBasicIT	testSourceQuery	🔴	A	AE schema alphabetical: got [age,name]
+CalcitePPLBuiltinDatetimeFunctionInvalidIT	testDAYNAMEInvalid	⬜		
+CalcitePPLBuiltinDatetimeFunctionInvalidIT	testMONTHNAMEInvalid	⬜		
+CalcitePPLBuiltinFunctionIT	testDivide	🔴	B	7.0->float32; half_float prec
+CalcitePPLBuiltinFunctionIT	testModFloatAndNegative	🔴	B	float32 precision 0.19999981
+CalcitePPLBuiltinFunctionIT	testModShouldReturnWiderTypes	🔴	B	float32 precision
+CalcitePPLBuiltinFunctionsNullIT	testAdddateNull	⬜		
+CalcitePPLBuiltinFunctionsNullIT	testAddSubDateNull	⬜		
+CalcitePPLBuiltinFunctionsNullIT	testDatetimeNullString	⬜		
+CalcitePPLBuiltinFunctionsNullIT	testSubdateNull	⬜		
+CalcitePPLBuiltinFunctionsNullIT	testTimediffNull	⬜		
+CalcitePPLCaseFunctionIT	testCaseAggWithNullValues	🔴	U	range-case agg keeps null bucket
+CalcitePPLCaseFunctionIT	testCaseCanBePushedDownAsRangeQuery	⬜		
+CalcitePPLCaseFunctionIT	testCaseWhenInFilter	⬜		
+CalcitePPLCaseFunctionIT	testCaseWhenInSubquery	⬜		
+CalcitePPLCaseFunctionIT	testCaseWhenNoElse	⬜		
+CalcitePPLCaseFunctionIT	testCaseWhenWithCast	⬜		
+CalcitePPLCaseFunctionIT	testCaseWhenWithIn	⬜		
+CalcitePPLCaseFunctionIT	testNestedCaseAggWithAutoDateHistogram	⬜		
+CalcitePPLCastFunctionIT	testCastTime	⚪	-	passes in sandbox/qa
+CalcitePPLCastFunctionIT	testCastTimestamp	⚪	-	passes in sandbox/qa
+CalcitePPLCastFunctionIT	testCastToIP	🔴	S	cast IP unsupported 500
+CalcitePPLConditionBuiltinFunctionIT	testEarliestWithEval	⬜		
+CalcitePPLConditionBuiltinFunctionIT	testEvalIsNotNullDirect	⚪	-	passes
+CalcitePPLConditionBuiltinFunctionIT	testEvalIsNullInComplexExpression	⚪	-	passes
+CalcitePPLConditionBuiltinFunctionIT	testEvalIsNullWithIf	⚪	-	passes
+CalcitePPLConditionBuiltinFunctionIT	testIf	⚪	-	passes
+CalcitePPLConditionBuiltinFunctionIT	testIfNull	⚪	-	passes
+CalcitePPLConditionBuiltinFunctionIT	testIsBlank	⚪	-	passes in sandbox/qa
+CalcitePPLConditionBuiltinFunctionIT	testIsNotNull	⚪	-	passes
+CalcitePPLConditionBuiltinFunctionIT	testIsNotNullWithMultipleNotEquals	⚪	-	passes
+CalcitePPLConditionBuiltinFunctionIT	testIsNotNullWithSingleNotEquals	⚪	-	passes
+CalcitePPLConditionBuiltinFunctionIT	testIsPresent	⚪	-	passes
+CalcitePPLConditionBuiltinFunctionIT	testNullIf	⚪	-	passes
+CalcitePPLConditionBuiltinFunctionIT	testNullIfWithExpression	⚪	-	passes
+CalcitePPLDedupIT	testConsecutiveImplicitFallbackV2	⬜		
+CalcitePPLDedupIT	testDedupComplex	⬜		
+CalcitePPLDedupIT	testDedupExpr	⬜		
+CalcitePPLEnhancedCoalesceIT	testCoalesceWithAllNonExistentFields	🔴	G	coalesce all-missing 500
+CalcitePPLEnhancedCoalesceIT	testCoalesceWithCompatibleNumericAndTemporalTypes	⚪	-	passes
+CalcitePPLEnhancedCoalesceIT	testCoalesceWithCompatibleNumericTypes	⚪	-	passes
+CalcitePPLEnhancedCoalesceIT	testCoalesceWithMultipleNonExistentFields	⚪	-	passes
+CalcitePPLEnhancedCoalesceIT	testCoalesceWithNonExistentField	⚪	-	passes in sandbox/qa
+CalcitePPLEnhancedCoalesceIT	testCoalesceWithNullLiteralAndIntegerField	⚪	-	passes
+CalcitePPLEnhancedCoalesceIT	testCoalesceWithSpaceString	⚪	-	passes
+CalcitePPLEvalMaxMinFunctionIT	testEvalMaxIgnoresNulls	🔴	F	max()->undefined
+CalcitePPLEvalMaxMinFunctionIT	testEvalMaxNumeric	🔴	F	max()->undefined type
+CalcitePPLEvalMaxMinFunctionIT	testEvalMaxNumericAndString	🔴	F	GREATEST infer 500
+CalcitePPLEvalMaxMinFunctionIT	testEvalMaxString	🔴	F	max()->undefined
+CalcitePPLEvalMaxMinFunctionIT	testEvalMinIgnoresNulls	🔴	F	min()->undefined
+CalcitePPLEvalMaxMinFunctionIT	testEvalMinNumeric	🔴	F	min()->undefined
+CalcitePPLEvalMaxMinFunctionIT	testEvalMinNumericAndString	🔴	F	LEAST infer 500
+CalcitePPLEvalMaxMinFunctionIT	testEvalMinString	🔴	F	min()->undefined
+CalcitePPLEventstatsIT	testEventstatsDistinctCount	⚪	-	passes
+CalcitePPLEventstatsIT	testEventstatsDistinctCountByCountry	⚪	-	passes
+CalcitePPLEventstatsIT	testEventstatsDistinctCountFunction	⚪	-	passes
+CalcitePPLEventstatsIT	testEventstatsDistinctCountWithNull	⚪	-	passes
+CalcitePPLExistsSubqueryIT	testExistsSubqueryAndAggregation	⬜		
+CalcitePPLExistsSubqueryIT	testIssue3566	⬜		
+CalcitePPLExistsSubqueryIT	testNestedExistsSubquery	⬜		
+CalcitePPLExistsSubqueryIT	testSimpleExistsSubquery	⬜		
+CalcitePPLExistsSubqueryIT	testSimpleExistsSubqueryInFilter	⬜		
+CalcitePPLExistsSubqueryIT	testSubsearchMaxOut1	⬜		
+CalcitePPLExistsSubqueryIT	testSubsearchMaxOut2	⬜		
+CalcitePPLExistsSubqueryIT	testSubsearchMaxOut3	⬜		
+CalcitePPLExistsSubqueryIT	testSubsearchMaxOut4	⬜		
+CalcitePPLExistsSubqueryIT	testSubsearchMaxOutNegativeMeansUnlimited	⬜		
+CalcitePPLExistsSubqueryIT	testSubsearchMaxOutUncorrelated	⬜		
+CalcitePPLExistsSubqueryIT	testUncorrelatedExistsSubquery	⬜		
+CalcitePPLExistsSubqueryIT	testUncorrelatedExistsSubqueryCheckTheReturnContentOfInnerTableIsEmptyOrNot	⬜		
+CalcitePPLExistsSubqueryIT	testUncorrelatedSubsearchMaxOutZeroMeansUnlimited	⬜		
+CalcitePPLInSubqueryIT	testEmptyInSubquery	⬜		
+CalcitePPLInSubqueryIT	testFilterInSubquery	⚪	-	passes
+CalcitePPLInSubqueryIT	testInCorrelatedSubquery	🔴	T	correlated ->1 of 3
+CalcitePPLInSubqueryIT	testInSubqueryWithParentheses	⬜		
+CalcitePPLInSubqueryIT	testInSubqueryWithTableAlias	🔴	T	alias subquery ->0 rows
+CalcitePPLInSubqueryIT	testNestedInSubquery	⬜		
+CalcitePPLInSubqueryIT	testNestedInSubquery2	⬜		
+CalcitePPLInSubqueryIT	testSelfInSubquery	⬜		
+CalcitePPLInSubqueryIT	testSubsearchMaxOut	⬜		
+CalcitePPLInSubqueryIT	testSubsearchMaxOutZeroMeansUnlimited	⬜		
+CalcitePPLInSubqueryIT	testTwoExpressionsInSubquery	⚪	-	passes
+CalcitePPLInSubqueryIT	testTwoExpressionsNotInSubquery	⬜		
+CalcitePPLInSubqueryIT	testWhereInSubquery	⚪	-	passes
+CalcitePPLJsonBuiltinFunctionIT	testJson	🔴	W	json() ->500
+CalcitePPLJsonBuiltinFunctionIT	testJsonAppend	🔴	W	json_append ->500
+CalcitePPLJsonBuiltinFunctionIT	testJsonDeleteWithDollarPrefixedPath	🔴	W	json_delete $. no-op
+CalcitePPLJsonBuiltinFunctionIT	testJsonExtend	🔴	W	json_extend ->500
+CalcitePPLJsonBuiltinFunctionIT	testJsonSetWithDollarPrefixedPath	🔴	W	json_set $. no-op
+CalcitePPLMapPathIT	testMvcombineOnMapPath	⬜		
+CalcitePPLPatternsIT	testBrainLabelMode_ShowNumberedToken	⬜		
+CalcitePPLPatternsIT	testBrainParseWithUUID_ShowNumberedToken	⬜		
+CalcitePPLRenameIT	testRenameFullWildcardExcludesMetadataFields	🔴	A	alphabetical cols after rename
+CalcitePPLScalarSubqueryIT	testCorrelatedScalarSubqueryInFilter	⬜		
+CalcitePPLScalarSubqueryIT	testCorrelatedScalarSubqueryInSelect	⬜		
+CalcitePPLScalarSubqueryIT	testCorrelatedScalarSubqueryInSelectWithNonEqual	⬜		
+CalcitePPLScalarSubqueryIT	testCorrelatedScalarSubqueryInWhere	⬜		
+CalcitePPLScalarSubqueryIT	testDisjunctiveCorrelatedScalarSubquery	⬜		
+CalcitePPLScalarSubqueryIT	testSubsearchMaxOutZeroMeansUnlimited	⬜		
+CalcitePPLScalarSubqueryIT	testTwoCorrelatedScalarSubqueriesInOr	⬜		
+CalcitePPLScalarSubqueryIT	testTwoUncorrelatedScalarSubqueriesInOr	⬜		
+CalcitePPLScalarSubqueryIT	testUncorrelatedScalarSubqueryInSelect	⬜		
+CalcitePPLScalarSubqueryIT	testUncorrelatedScalarSubqueryInSelectAndInFilter	⬜		
+CalcitePPLScalarSubqueryIT	testUncorrelatedScalarSubqueryInSelectAndWhere	⬜		
+CalcitePPLSortIT	testSortAgeAndFieldsNameAge	🔴	P	tie-break Elinor<Hattie
+CalcitePPLSortIT	testSortWithAutoCast	🔴	P	tie-break order
+CalcitePPLSortIT	testSortWithNullValue	⚪	-	passes in sandbox/qa
+CalcitePPLStringBuiltinFunctionIT	testRTrim	⚪	-	passes in sandbox/qa
+CalcitePPLStringBuiltinFunctionIT	testTrim	⚪	-	passes in sandbox/qa
+CalciteQueryStringIT	wildcard_test	⬜		
+CalciteResourceMonitorIT	queryExceedResourceLimitShouldFail	⬜		
+CalciteReverseCommandIT	testStreamstatsByWithReverse	⬜		
+CalciteReverseCommandIT	testStreamstatsWindowWithReverse	⬜		
+CalciteReverseCommandIT	testStreamstatsWithReverse	⬜		
+CalciteReverseCommandIT	testStreamstatsWithSortThenReverse	⬜		
+CalciteRexCommandIT	testRexErrorInvalidGroupNameHyphen	🔴	H	500+no suggestion
+CalciteRexCommandIT	testRexErrorInvalidGroupNameSpecialCharacter	🔴	H	500+no suggestion
+CalciteRexCommandIT	testRexErrorInvalidGroupNameStartingWithDigit	🔴	H	500+no suggestion
+CalciteRexCommandIT	testRexErrorInvalidGroupNameUnderscore	🔴	H	500+no suggestion
+CalciteSettingsIT	testQuerySizeLimit	🔴	D	implicit search age>35 ->0 rows
+CalciteSettingsIT	testQuerySizeLimit_NoPushdown	⬜		
+CalciteSimpleQueryStringIT	test_wildcard_simple_query_string	⬜		
+CalciteSortCommandIT	testHeadThenSort	⬜		
+CalciteSortCommandIT	testPushdownSortCastToDoubleExpression	⬜		
+CalciteStatsCommandIT	testStatsBySpanTimeWithNullBucket	⬜	Q?	needs time_date_null ds - deferred
+CalciteStatsCommandIT	testStatsPercentileByNullValue	🔴	Q	double+null bucket
+CalciteStatsCommandIT	testStatsPercentileByNullValueNonNullBucket	🔴	Q	null vs 0 bucket
+CalciteStatsCommandIT	testStatsPercentileBySpan	🔴	Q	interp double
+CalciteStatsCommandIT	testStatsPercentileWithNull	🔴	Q	interp double 35413
+CalciteStatsCommandIT	testStatsWithLimit	⚪	-	passes (numOfRows=5)
+CalciteSystemFunctionIT	typeof_opensearch_types	⚪	-	numeric typeof passes (nonnumeric needs geo_point=bucket E)
+CalciteTextFunctionIT	testConcat	⬜		
+CalciteTextFunctionIT	testRegexp	⬜		
+CalciteUnionCommandIT	testUnionMidPipeline_SingleExplicitDataset	⬜		
+CalciteUnionCommandIT	testUnionThreeSubsearches	⬜		
+CalciteWhereCommandIT	testDoubleEqualWithSpecialCharacters	⬜		
+CalciteWhereCommandIT	testFilterOnComputedNestedFields	⬜		
+CalciteWhereCommandIT	testFilterOnNestedAndRootFields	⬜		
+CalciteWhereCommandIT	testFilterOnNestedFields	🔴	Y	nested object eq ->0 rows
+CalciteWhereCommandIT	testFilterScriptPushDownWithPPLBuiltInFunction	⬜		
+CalciteWhereCommandIT	testScriptFilterOnDifferentNestedHierarchyShouldThrow	⬜		
+ppl.dashboard.NfwPplDashboardIT	testTopBlockedDestinationIPs	⬜		
+ppl.dashboard.NfwPplDashboardIT	testTopLongLivedTCPFlows	⬜		
+ppl.dashboard.NfwPplDashboardIT	testTopSourceAndDestinationByBytes	⬜		
+ppl.dashboard.NfwPplDashboardIT	testTopSourceAndDestinationPackets	⬜		
+ppl.dashboard.WafPplDashboardIT	testTopRequestURIs	⬜		
+ppl.dashboard.WafPplDashboardIT	testTotalBlockedRequests	⬜		
+ppl.FieldsCommandIT	testEnhancedFieldsWhenCalciteDisabled	⬜		

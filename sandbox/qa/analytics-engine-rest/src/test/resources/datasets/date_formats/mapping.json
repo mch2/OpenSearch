@@ -1,0 +1,4 @@
+{ "settings": { "number_of_shards": 1, "number_of_replicas": 0 },
+  "mappings": { "properties": {
+    "strict_date_optional_time": { "type": "date", "format": "strict_date_optional_time" },
+    "yyyy-MM-dd": { "type": "date", "format": "yyyy-MM-dd" } }}}

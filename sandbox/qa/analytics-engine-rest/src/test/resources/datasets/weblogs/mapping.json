@@ -1,0 +1,4 @@
+{ "settings": { "number_of_shards": 1, "number_of_replicas": 0 },
+  "mappings": { "properties": {
+    "host": { "type": "ip" }, "method": { "type": "text" }, "url": { "type": "text" },
+    "response": { "type": "text" }, "bytes": { "type": "text" }, "message": { "type": "text" } }}}

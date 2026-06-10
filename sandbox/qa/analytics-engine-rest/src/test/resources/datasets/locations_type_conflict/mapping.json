@@ -1,0 +1,3 @@
+{ "settings": { "number_of_shards": 1, "number_of_replicas": 0 },
+  "mappings": { "properties": {
+    "description": { "type": "text" }, "age": { "type": "text" }, "place_id": { "type": "integer" } }}}

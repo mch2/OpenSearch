@@ -1,0 +1,16 @@
+{
+    "settings": { "number_of_shards": 1, "number_of_replicas": 0 },
+    "mappings": { "properties": {
+        "account_number": { "type": "long" },
+        "balance": { "type": "long" },
+        "age": { "type": "integer" },
+        "gender": { "type": "text", "fielddata": true, "fields": { "keyword": { "type": "keyword", "ignore_above": 256 } } },
+        "firstname": { "type": "text", "fields": { "keyword": { "type": "keyword", "ignore_above": 256 } } },
+        "lastname": { "type": "text", "fields": { "keyword": { "type": "keyword", "ignore_above": 256 } } },
+        "address": { "type": "text" },
+        "employer": { "type": "text" },
+        "email": { "type": "text" },
+        "city": { "type": "keyword" },
+        "state": { "type": "text", "fields": { "keyword": { "type": "keyword", "ignore_above": 256 } } }
+    }}
+}

@@ -1,0 +1,11 @@
+{
+    "settings": { "number_of_shards": 1, "number_of_replicas": 0 },
+    "mappings": { "properties": {
+        "name": { "type": "keyword" },
+        "age": { "type": "integer" },
+        "state": { "type": "text", "fields": { "keyword": { "type": "keyword", "ignore_above": 256 } } },
+        "country": { "type": "text" },
+        "year": { "type": "integer" },
+        "month": { "type": "integer" }
+    }}
+}

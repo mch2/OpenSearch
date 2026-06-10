@@ -1,0 +1,8 @@
+{ "settings": { "number_of_shards": 1, "number_of_replicas": 0 },
+  "mappings": { "properties": {
+    "address": { "type": "object", "properties": {
+        "city": { "type": "text", "fields": { "keyword": { "type": "keyword", "ignore_above": 256 } } },
+        "state": { "type": "text", "fields": { "keyword": { "type": "keyword", "ignore_above": 256 } } },
+        "area": { "type": "double" } } },
+    "age": { "type": "long" }, "id": { "type": "long" },
+    "name": { "type": "text", "fields": { "keyword": { "type": "keyword", "ignore_above": 256 } } } }}}
