@@ -22,14 +22,19 @@ import java.util.Locale;
  *       byte-identical legacy. Mixed formats are safe — the inter-stage boundary is
  *       Arrow partition streams either way.</li>
  *   <li>{@link #FULL_PROTO} — all stages, including shard stages, ship proto plans.</li>
+ *   <li>{@link #WHOLE_PLAN} — the whole optimized distributed tree is converted to ONE Substrait
+ *       plan ({@code os_stage_boundary} markers at the cuts), lowered once on the coordinator, and
+ *       cut into per-stage DataFusion physical plans (whole-plan-lowering-spec.md). Supersedes the
+ *       per-stage {@code REDUCE_PROTO}/{@code FULL_PROTO} path; those are removed once it flips.</li>
  * </ul>
  */
 public enum PlanFormat {
     LEGACY,
     REDUCE_PROTO,
-    FULL_PROTO;
+    FULL_PROTO,
+    WHOLE_PLAN;
 
-    /** Parse the lower-case setting token ({@code legacy|reduce_proto|full_proto}). */
+    /** Parse the lower-case setting token ({@code legacy|reduce_proto|full_proto|whole_plan}). */
     public static PlanFormat fromString(String value) {
         if (value == null) {
             return LEGACY;
@@ -38,12 +43,18 @@ public enum PlanFormat {
             case "legacy" -> LEGACY;
             case "reduce_proto" -> REDUCE_PROTO;
             case "full_proto" -> FULL_PROTO;
+            case "whole_plan" -> WHOLE_PLAN;
             default -> throw new IllegalArgumentException(
                 "Invalid analytics.engine.plan_format ["
                     + value
-                    + "]; expected one of legacy, reduce_proto, full_proto"
+                    + "]; expected one of legacy, reduce_proto, full_proto, whole_plan"
             );
         };
+    }
+
+    /** True if this is the whole-plan single-lowering path (whole-plan-lowering-spec.md). */
+    public boolean isWholePlan() {
+        return this == WHOLE_PLAN;
     }
 
     /** The setting token for this format (inverse of {@link #fromString}). */
