@@ -449,6 +449,21 @@ mod tests {
         );
     }
 
+    /// The exact JSON the Java `QueryPlanJson.encodeInput` emits must deserialize into
+    /// `QueryPlanInput` (field-for-field contract, D12). Hand-written to match Java's output
+    /// byte-shape: compact, `delegated` present-but-empty, snake_case keys.
+    #[test]
+    fn deserializes_java_shaped_input_json() {
+        let java_json = r#"{"query_id":"q1","substrait_b64":"AQID","scans":[{"table":"http_logs","tree_shape":2,"requests_row_ids":false,"delegated":[]}]}"#;
+        let input: QueryPlanInput = serde_json::from_str(java_json).expect("parse Java QueryPlanInput");
+        assert_eq!(input.query_id, "q1");
+        assert_eq!(input.scans.len(), 1);
+        assert_eq!(input.scans[0].table, "http_logs");
+        assert_eq!(input.scans[0].tree_shape, 2);
+        assert!(!input.scans[0].requests_row_ids);
+        assert!(input.scans[0].delegated.is_empty());
+    }
+
     #[test]
     fn query_plan_output_json_round_trips() {
         let b64 = base64::engine::general_purpose::STANDARD;
