@@ -2190,6 +2190,49 @@ mod tests {
         set_reduce_target_partitions(4);
         assert_eq!(get_reduce_target_partitions(), 4);
     }
+
+    /// Reproduces the LIST/VALUES (state-expanding) failure under reduce_proto: deriving the
+    /// partition schema from a PARTIAL `array_agg(<middle col>) GROUP BY <other col>` over a
+    /// WIDE multi-column table. The IT surfaced as
+    /// `col.name() == matching_name: binary_value does not match … float_value` during
+    /// finalization of this exact shape. The derivation must succeed and yield a
+    /// `[group_key, List(elem)]` partition schema.
+    #[tokio::test]
+    async fn derive_schema_wide_multicolumn_array_agg_partial() {
+        use arrow_array::RecordBatch;
+        use datafusion::datasource::MemTable;
+        use datafusion::prelude::SessionContext;
+        use datafusion_substrait::logical_plan::producer::to_substrait_plan;
+        use prost::Message;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("float_value", arrow::datatypes::DataType::Float64, true),
+            Field::new("kw", arrow::datatypes::DataType::Utf8, true),
+            Field::new("binary_value", arrow::datatypes::DataType::Utf8, true),
+            Field::new("short_value", arrow::datatypes::DataType::Int32, true),
+        ]));
+        let ctx = SessionContext::new();
+        let table = MemTable::try_new(Arc::clone(&schema), vec![vec![RecordBatch::new_empty(Arc::clone(&schema))]]).unwrap();
+        ctx.register_table("t", Arc::new(table)).unwrap();
+
+        // PARTIAL-shaped fragment: array_agg over a middle column grouped by another column.
+        let df = ctx
+            .sql("SELECT short_value, array_agg(kw) AS l FROM t GROUP BY short_value")
+            .await
+            .unwrap();
+        let logical = df.logical_plan().clone();
+        let substrait = to_substrait_plan(&logical, &ctx.state()).unwrap();
+        let mut bytes = Vec::new();
+        substrait.encode(&mut bytes).unwrap();
+
+        let derived = derive_schema_from_partial_plan(&bytes)
+            .expect("derive_schema_from_partial_plan must handle wide multi-column array_agg");
+        // Expect a group key + a List aggregate state column.
+        assert!(
+            derived.fields().len() >= 2,
+            "derived partition schema should carry group key + list state, got {derived:?}"
+        );
+    }
 }
 
 /// Imports a batch of Arrow C Data structures into a [`Vec<RecordBatch>`] and

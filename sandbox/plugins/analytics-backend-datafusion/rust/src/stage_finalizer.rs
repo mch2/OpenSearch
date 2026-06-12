@@ -738,11 +738,23 @@ pub async fn finalize_query_plan(
         } else {
             None
         };
-        let forced = apply_aggregate_mode(Arc::clone(&lowered), mode)?;
+        let forced = apply_aggregate_mode(Arc::clone(&lowered), mode).map_err(|e| {
+            exec_datafusion_err!(
+                "finalize stage {stage_id} (agg_mode={:?}, leaf_kind={:?}): mode-force: {e}",
+                meta.agg_mode_enum(),
+                meta.leaf_kind_enum()
+            )
+        })?;
 
         // 3. Per-stage finalize: quirk fix-up, leaf rewrite, graft.
         let (plan, _retained_from_finalize) =
-            finalize_stage_plan(meta, forced, &child_outputs)?;
+            finalize_stage_plan(meta, forced, &child_outputs).map_err(|e| {
+                exec_datafusion_err!(
+                    "finalize stage {stage_id} (agg_mode={:?}, leaf_kind={:?}): per-stage finalize: {e}",
+                    meta.agg_mode_enum(),
+                    meta.leaf_kind_enum()
+                )
+            })?;
 
         // CI invariant #2 (§7.2): no marker UDF survives outside a scan node.
         assert_no_marker_udf_outside_scan(&plan)?;
@@ -1439,6 +1451,56 @@ mod tests {
         let mut buf = Vec::new();
         substrait.encode(&mut buf).unwrap();
         buf
+    }
+
+    /// Reproduces the LIST/VALUES (state-expanding, multi-column) failure under
+    /// reduce_proto through the FULL finalizer: a PARTIAL shard stage running
+    /// `array_agg(<middle col>) GROUP BY <other col>` over a WIDE table, plus a FINAL
+    /// reduce stage. The IT surfaced `col.name() == matching_name: binary_value … float_value`
+    /// during finalization of this shape. Both stages must finalize without error.
+    #[tokio::test]
+    async fn finalize_wide_multicolumn_list_agg_dag() {
+        use arrow::datatypes::{DataType, Field};
+        let src_schema: SchemaRef = Arc::new(Schema::new(vec![
+            Field::new("float_value", DataType::Float64, true),
+            Field::new("kw", DataType::Utf8, true),
+            Field::new("binary_value", DataType::Utf8, true),
+            Field::new("short_value", DataType::Int32, true),
+        ]));
+
+        // Shard fragment (stage 1): GLOBAL partial array_agg (no GROUP BY) over a middle
+        // column of a wide table — the exact shape of `stats list(<col>)` that failed in the IT.
+        let shard_bytes = substrait_for(
+            "SELECT array_agg(binary_value) AS l FROM t",
+            "t",
+            &src_schema,
+        )
+        .await;
+        // Finalize the PARTIAL shard stage alone — this is the path that surfaced the
+        // multi-column projection-remap error in the IT. (The FINAL merge uses the
+        // `list_merge` UDAF semantics, exercised separately; here we isolate the shard
+        // PARTIAL finalization over the wide table.)
+        let stage1 = StageInput {
+            substrait_bytes: shard_bytes,
+            meta: StageMeta {
+                stage_id: 1,
+                child_stage_ids: vec![],
+                agg_mode: PAggMode::Partial as i32,
+                leaf_kind: LeafKind::ShardScan as i32,
+                ..Default::default()
+            },
+        };
+
+        let env = RuntimeEnvBuilder::new().build().unwrap();
+        let session = LocalSession::new(&env);
+        session.register_binding_skeleton("t", Arc::clone(&src_schema)).unwrap();
+
+        let outputs = finalize_query_plan(&session, vec![stage1])
+            .await
+            .expect("wide multi-column LIST partial shard stage must finalize without projection-remap error");
+        assert_eq!(outputs.len(), 1);
+        // Global (no-group-by) array_agg partial: one list-state column.
+        assert_eq!(outputs[0].output_schema.fields().len(), 1);
     }
 
     /// End-to-end: a 2-stage aggregate DAG (PARTIAL shard stage 1 → FINAL reduce

@@ -140,4 +140,6 @@ mod tests {
         assert!(!display_after.contains("mode=Final"), "Final should be stripped");
         assert!(display_after.contains("mode=Partial"), "Partial should remain");
     }
+
+
 }

@@ -201,11 +201,18 @@ task integTestReduceProto(type: RestIntegTestTask) {
         includeTestsMatching 'org.opensearch.analytics.qa.MathFunctionIT'
         includeTestsMatching 'org.opensearch.analytics.qa.FilterDelegationIT'
         includeTestsMatching 'org.opensearch.analytics.qa.FilterDelegationGoldenIT'
-        // TODO(df-proto): ListAggregateMultiShardIT excluded — LIST/VALUES (STATE_EXPANDING
-        // engine-native-merge UDAFs) emit List(Binary) partial state for keyword/text columns
-        // while the FINAL list_merge derivation expects List(Utf8); element-type boundary drift
-        // analogous to the Int32/Int64 case, fixed next via D7 binary-state handling in
-        // derive_schema_from_partial_plan / list_merge state_fields.
+        // TODO(df-proto): ListAggregateMultiShardIT excluded — two distinct LIST/VALUES issues
+        // under proto over the 11-column test index (diagnosed, not yet fixed):
+        //  (1) `list(binary_value)` finalize fails: `col.name() == matching_name: binary_value
+        //      does not match projection expression <other col>` — the `binary`/store:true field
+        //      projects through the composite-parquet shard scan at a position the partial-agg
+        //      plan doesn't expect, so a projection column references the wrong index.
+        //  (2) `list(keyword/text)` legacy-fallback fails: `expected List(Utf8) but found
+        //      List(Binary)` — parquet stores keyword/text as Binary/BinaryView (coerced to
+        //      List(Binary)) while Calcite declares List(Utf8); element-type boundary drift,
+        //      the List analogue of the Int32/Int64 case D5 fixed for scalars.
+        // Common scalar/grouped/global array_agg shapes finalize fine (covered by the Rust
+        // finalizer tests). Both need binary/element-type-aware handling in the derivation.
     }
     systemProperty 'tests.security.manager', 'false'
 }
