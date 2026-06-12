@@ -500,7 +500,8 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
         String queryId
     ) {
         // 1. Stitch the per-stage Substrait into one whole-query plan (os_stage_boundary markers).
-        byte[] whole = WholePlanStitcher.stitch(rootStageId, stageSubstrait);
+        //    POJO-level stitch so isthmus re-collects one consistent extension/anchor table.
+        byte[] whole = new WholePlanStitcher(extensions).stitch(rootStageId, stageSubstrait);
 
         // 2. Encode the FFM input JSON (D12).
         java.util.List<QueryPlanJson.ScanInput> scanInputs = scans.stream()
