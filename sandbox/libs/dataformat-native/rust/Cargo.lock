@@ -2903,6 +2903,7 @@ dependencies = [
  "rand 0.8.6",
  "regex",
  "roaring",
+ "serde",
  "serde_json",
  "sha1",
  "substrait",

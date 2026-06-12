@@ -62,6 +62,9 @@ tokio-metrics = { workspace = true }
 # fixed at the type level — `preserve_order` is inert for them, so the
 # feature is additive with no observable blast radius outside this crate.
 serde_json = { workspace = true, features = ["preserve_order"] }
+# serde derive for the whole-plan JSON metadata + stage-boundary detail payload
+# (Java↔Rust JSON contract per whole-plan spec D12).
+serde = { workspace = true }
 # jsonpath-rust 0.7 — JSONPath evaluator for json_extract. Published at
 # https://github.com/besok/jsonpath-rust (crates.io). We pin `0.7` (latest
 # `0.7.5`) rather than tracking the newer `1.0` release line because 0.7's
