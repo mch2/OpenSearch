@@ -40,6 +40,7 @@ import org.opensearch.analytics.planner.dag.PlanAlternativeSelector;
 import org.opensearch.analytics.planner.dag.PlanForker;
 import org.opensearch.analytics.planner.dag.QueryDAG;
 import org.opensearch.analytics.planner.dag.StageConversionDriver;
+import org.opensearch.analytics.planner.dag.WholePlanConversionDriver;
 import org.opensearch.analytics.settings.AnalyticsQuerySettings;
 import org.opensearch.analytics.settings.PlannerSettings;
 import org.opensearch.analytics.stats.AnalyticsStatsCollector;
@@ -261,7 +262,16 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
         // resulting planBytes. Legacy bytes + instructions remain on each stage, so mixed
         // formats are safe — the request builder ships proto where planBytes is present and
         // legacy otherwise. Failures here fall back to the legacy path (planBytes stays null).
-        if (planFormat.reduceStagesProto()) {
+        if (planFormat.isWholePlan()) {
+            // whole-plan-lowering-spec.md: convert the WHOLE distributed tree to one Substrait plan,
+            // lower it once on the coordinator, and cut it into per-stage DataFusion physical plans.
+            // Legacy bytes remain on each stage, so a failure falls back to the legacy path.
+            try {
+                WholePlanConversionDriver.convertAll(dag, capabilityRegistry);
+            } catch (RuntimeException e) {
+                logger.warn("[DefaultPlanExecutor] whole-plan lowering failed; falling back to legacy format", e);
+            }
+        } else if (planFormat.reduceStagesProto()) {
             try {
                 StageConversionDriver.convertAll(dag, capabilityRegistry, planFormat.shardStagesProto());
             } catch (RuntimeException e) {

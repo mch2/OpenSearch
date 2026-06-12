@@ -473,6 +473,54 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
         }
     }
 
+    /**
+     * Coordinator-side whole-plan lowering (whole-plan-lowering-spec.md §5). Opens a native session
+     * over the global runtime and hands the JSON {@code QueryPlanInput} to the native whole-plan
+     * lowerer, which lowers the stitched whole-query Substrait once, cuts it at the
+     * {@code os_stage_boundary} barriers, and returns the per-stage physical plans as JSON.
+     */
+    @Override
+    public byte[] planWholeQuery(byte[] queryPlanInputJson) {
+        if (runtimePtrSupplier == null) {
+            throw new UnsupportedOperationException(
+                "planWholeQuery requires a runtime pointer supplier; this convertor was built for the legacy path only"
+            );
+        }
+        long runtimePtr = runtimePtrSupplier.getAsLong();
+        try (DatafusionLocalSession session = new DatafusionLocalSession(runtimePtr)) {
+            return org.opensearch.be.datafusion.nativelib.NativeBridge.planWholeQuery(session.getPointer(), queryPlanInputJson);
+        }
+    }
+
+    @Override
+    public java.util.List<org.opensearch.analytics.spi.WholePlanStageResult> lowerWholePlan(
+        int rootStageId,
+        java.util.Map<Integer, byte[]> stageSubstrait,
+        java.util.List<org.opensearch.analytics.spi.WholePlanScan> scans,
+        String queryId
+    ) {
+        // 1. Stitch the per-stage Substrait into one whole-query plan (os_stage_boundary markers).
+        byte[] whole = WholePlanStitcher.stitch(rootStageId, stageSubstrait);
+
+        // 2. Encode the FFM input JSON (D12).
+        java.util.List<QueryPlanJson.ScanInput> scanInputs = scans.stream()
+            .map(s -> new QueryPlanJson.ScanInput(s.table(), s.treeShape(), s.requestsRowIds()))
+            .toList();
+        byte[] requestJson = QueryPlanJson.encodeInput(queryId, whole, scanInputs);
+
+        // 3. One native lowering+cut call; parse the per-stage output.
+        byte[] responseJson = planWholeQuery(requestJson);
+        return QueryPlanJson.decodeOutput(responseJson)
+            .stream()
+            .map(o -> new org.opensearch.analytics.spi.WholePlanStageResult(
+                o.boundaryId(),
+                o.childBoundaryIds(),
+                o.planBytes(),
+                o.outputSchemaIpc()
+            ))
+            .toList();
+    }
+
     @Override
     public byte[] convertFragment(RelNode fragment) {
         LOGGER.debug("Converting fragment [{}]", fragment.getClass().getSimpleName());

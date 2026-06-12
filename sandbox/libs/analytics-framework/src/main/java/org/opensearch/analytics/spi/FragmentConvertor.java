@@ -125,4 +125,45 @@ public interface FragmentConvertor {
     default byte[] finalizeStages(byte[] finalizeRequestBytes) {
         throw new UnsupportedOperationException("finalizeStages not implemented for this backend");
     }
+
+    /**
+     * Coordinator-side whole-plan lowering (whole-plan-lowering-spec.md §5, D12). Takes a JSON
+     * {@code QueryPlanInput} ({@code {query_id, substrait_b64, scans:[...]}} — the stitched
+     * whole-query Substrait plus per-scan metadata) and returns a JSON {@code QueryPlanOutput}
+     * ({@code {stages:[{boundary_id, child_boundary_ids, plan_bytes_b64, output_schema_ipc_b64}]}}).
+     * The backend creates a coordinator-local native session, lowers the whole plan once, cuts it
+     * at the {@code os_stage_boundary} barriers, and returns one DataFusion physical plan per stage.
+     *
+     * <p>Only DataFusion backends implement this; the default throws.
+     * {@code analytics.engine.plan_format=whole_plan} gates whether the engine calls it.
+     *
+     * @param queryPlanInputJson UTF-8 JSON {@code QueryPlanInput}
+     * @return UTF-8 JSON {@code QueryPlanOutput}
+     */
+    default byte[] planWholeQuery(byte[] queryPlanInputJson) {
+        throw new UnsupportedOperationException("planWholeQuery not implemented for this backend");
+    }
+
+    /**
+     * High-level whole-plan lowering (whole-plan-lowering-spec.md §5): stitch the per-stage Substrait
+     * plans into one whole-query plan ({@code os_stage_boundary} markers at the cuts), lower it once,
+     * and return one finalized DataFusion physical plan per stage. The backend owns the
+     * backend-specific stitch + JSON encode + {@link #planWholeQuery} FFM call + parse; the engine's
+     * {@code WholePlanConversionDriver} supplies only backend-agnostic inputs.
+     *
+     * @param rootStageId    the id of the root (coordinator) stage
+     * @param stageSubstrait each stage's own converted Substrait bytes, keyed by stage id (child
+     *                       stages appear inside their parent as {@code input-<childId>} reads)
+     * @param scans          per base-table-scan metadata
+     * @param queryId        opaque query id (diagnostics)
+     * @return one {@link WholePlanStageResult} per cut stage (boundary), keyed by {@code boundaryId}
+     */
+    default java.util.List<WholePlanStageResult> lowerWholePlan(
+        int rootStageId,
+        java.util.Map<Integer, byte[]> stageSubstrait,
+        java.util.List<WholePlanScan> scans,
+        String queryId
+    ) {
+        throw new UnsupportedOperationException("lowerWholePlan not implemented for this backend");
+    }
 }
