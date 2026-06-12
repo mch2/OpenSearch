@@ -45,6 +45,7 @@ pub mod proto;
 pub mod schema_ipc;
 pub mod stage_boundary;
 pub mod stage_finalizer;
+pub mod whole_plan;
 pub mod patterns;
 pub mod phantom_corrector;
 pub mod project_row_id_analyzer;

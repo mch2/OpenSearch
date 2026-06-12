@@ -1431,6 +1431,18 @@ fn collect_reads(rel: &substrait::proto::Rel, out: &mut Vec<substrait::proto::Re
                 collect_reads(input, out);
             }
         }
+        // Whole-plan stage boundaries (`os_stage_boundary`) are emitted as extension
+        // relations; recurse through them so scans below a boundary are still found.
+        Some(RelType::ExtensionSingle(e)) => {
+            if let Some(input) = &e.input {
+                collect_reads(input, out);
+            }
+        }
+        Some(RelType::ExtensionMulti(e)) => {
+            for input in &e.inputs {
+                collect_reads(input, out);
+            }
+        }
         _ => {}
     }
 }
@@ -1493,6 +1505,27 @@ pub fn base_schema_to_arrow(
     let df_schema = from_substrait_named_struct(&consumer, &base_schema).ok()?;
     let arrow = df_schema.as_arrow().clone();
     Some(crate::schema_coerce::coerce_inferred_schema(std::sync::Arc::new(arrow)))
+}
+
+/// All distinct NamedTable leaf names referenced in `plan_bytes` (whole-plan
+/// lowering: the scans whose pushdown-stub providers must be registered).
+pub fn named_table_names(plan_bytes: &[u8]) -> Vec<String> {
+    use substrait::proto::read_rel::ReadType;
+    let plan: substrait::proto::Plan = match prost::Message::decode(plan_bytes) {
+        Ok(p) => p,
+        Err(_) => return Vec::new(),
+    };
+    let mut names = Vec::new();
+    for read in collect_plan_reads(&plan) {
+        if let Some(ReadType::NamedTable(nt)) = read.read_type.as_ref() {
+            if let Some(name) = nt.names.last() {
+                if !names.contains(name) {
+                    names.push(name.clone());
+                }
+            }
+        }
+    }
+    names
 }
 
 // ---------------------------------------------------------------------------

@@ -298,6 +298,94 @@ mod tests {
         assert_eq!(rows_sorted(&result), expected, "whole-plan cut result must equal single-node");
     }
 
+    /// §6 barrier hygiene (load-bearing). For a whole tree with a `Filter` ABOVE a
+    /// boundary, after full physical optimization:
+    ///   (a) the barrier survives (not eliminated),
+    ///   (b) the filter stays ABOVE the barrier — not pushed through the fence,
+    ///   (c) no `RepartitionExec`/`CoalescePartitionsExec` is wedged BELOW the
+    ///       barrier (as its input child) — that would change the cut-out stage's
+    ///       output partitioning out from under the network transport, which owns
+    ///       the gather. (An exchange ABOVE the barrier is benign — it parallelizes
+    ///       the consuming stage on the coordinator and is allowed.)
+    ///   (d) post-cut, zero `StageBoundaryExec` remain and the barrier's input
+    ///       schema equals the cut stage's output schema (passthrough).
+    #[tokio::test]
+    async fn barrier_is_an_optimization_fence() {
+        use datafusion::logical_expr::{col, lit, LogicalPlanBuilder};
+
+        let ctx = boundary_ctx().await;
+
+        // scan t → boundary(0) → filter(v > 1). The filter sits above the fence.
+        let scan = ctx.sql("SELECT k, v FROM t").await.unwrap().logical_plan().clone();
+        let wrapped = stage_boundary_logical(0, ExchangeType::Gather, scan);
+        let filtered = LogicalPlanBuilder::from(wrapped)
+            .filter(col("v").gt(lit(1i64)))
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let physical = ctx.state().create_physical_plan(&filtered).await.unwrap();
+        let rendered = displayable(physical.as_ref()).indent(true).to_string();
+
+        // (a) barrier survives.
+        assert!(has_barrier(&physical), "barrier eliminated by optimizer:\n{rendered}");
+
+        // (b) the filter is an ANCESTOR of the barrier (above the fence), and no
+        //     FilterExec appears in the barrier's input subtree (not pushed through).
+        let barrier = find_barrier(&physical).expect("barrier present");
+        assert!(
+            !subtree_contains_name(barrier.input(), "FilterExec"),
+            "filter was pushed BELOW the boundary fence:\n{rendered}"
+        );
+        assert!(
+            ancestor_of_name_contains_barrier(&physical, "FilterExec"),
+            "filter is not above the barrier:\n{rendered}"
+        );
+
+        // (c) no exchange wedged directly BELOW the barrier (its input child).
+        assert!(
+            !matches!(barrier.input().name(), "RepartitionExec" | "CoalescePartitionsExec"),
+            "an exchange (Repartition/Coalesce) was inserted directly below the barrier — \
+             it would re-partition the cut-out stage's output under the transport:\n{rendered}"
+        );
+
+        // (d) cut → no surviving barriers; passthrough schema preserved.
+        let stages = cut_plan(physical, &HashMap::new()).unwrap();
+        for s in &stages {
+            assert!(!has_barrier(&s.plan), "post-cut barrier survived in stage {}", s.boundary_id);
+        }
+        let b0 = stages.iter().find(|s| s.boundary_id == 0).unwrap();
+        assert_eq!(b0.output_schema.fields().len(), 2, "passthrough [k, v]");
+    }
+
+    fn find_barrier(plan: &Arc<dyn ExecutionPlan>) -> Option<&StageBoundaryExec> {
+        if let Some(b) = plan.downcast_ref::<StageBoundaryExec>() {
+            return Some(b);
+        }
+        for c in plan.children() {
+            if let Some(b) = find_barrier(c) {
+                return Some(b);
+            }
+        }
+        None
+    }
+
+    fn subtree_contains_name(plan: &Arc<dyn ExecutionPlan>, name: &str) -> bool {
+        if plan.name() == name {
+            return true;
+        }
+        plan.children().iter().any(|c| subtree_contains_name(c, name))
+    }
+
+    /// True if some node named `name` has a `StageBoundaryExec` somewhere in its
+    /// subtree (i.e. `name` is above the barrier).
+    fn ancestor_of_name_contains_barrier(plan: &Arc<dyn ExecutionPlan>, name: &str) -> bool {
+        if plan.name() == name && plan.children().iter().any(|c| subtree_contains_name(c, "StageBoundaryExec")) {
+            return true;
+        }
+        plan.children().iter().any(|c| ancestor_of_name_contains_barrier(c, name))
+    }
+
     fn rows_sorted(batches: &[arrow_array::RecordBatch]) -> Vec<(String, i64)> {
         use arrow_array::{Int64Array, StringArray};
         let mut out = Vec::new();
