@@ -31,6 +31,9 @@ datafusion-common = "=54.0.0"
 datafusion-execution = "=54.0.0"
 datafusion-physical-expr = "=54.0.0"
 datafusion-substrait = "=54.0.0"
+# datafusion-proto: stage-boundary wire format (PhysicalPlanNode + custom codec).
+# Pinned to the workspace DataFusion version per df-proto-migration spec D1.
+datafusion-proto = "=54.0.0"
 
 # Async
 tokio = { version = "=1.52.3", features = ["full"] }

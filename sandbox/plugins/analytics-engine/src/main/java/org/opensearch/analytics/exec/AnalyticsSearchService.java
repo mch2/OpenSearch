@@ -471,6 +471,15 @@ public class AnalyticsSearchService implements AutoCloseable {
     }
 
     private ResolvedFragment resolveFragment(FragmentExecutionRequest request, IndexShard shard) {
+        // df-proto migration D8/D14: a DF_PROTO shard request carries one finalized DataFusion
+        // physical plan instead of PlanAlternatives. Validate the version handshake (and the
+        // node's proto-shard-execution capability) in one place; a mismatch throws the typed
+        // PlanFormatMismatchException so the coordinator re-plans on legacy rather than failing.
+        if (request.isProtoFormat()) {
+            org.opensearch.analytics.exec.action.PlanFormatCompatibility.checkShardRequest(request);
+            // (When SHARD_PROTO_EXECUTION_SUPPORTED flips true, dispatch to the proto shard
+            // route here instead of falling through to the legacy PlanAlternative resolution.)
+        }
         IndexReaderProvider readerProvider = shard.getReaderProvider();
         if (readerProvider == null) {
             throw new IllegalStateException("No ReaderProvider on " + shard.shardId());

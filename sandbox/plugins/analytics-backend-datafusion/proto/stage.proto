@@ -1,0 +1,74 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// The OpenSearch Contributors require contributions made to
+// this file be licensed under the Apache-2.0 license or a
+// compatible open source license.
+//
+// Canonical wire definition for the datafusion-proto stage-boundary migration
+// (df-proto-migration-implementation-spec.md §5). This file is the source of
+// truth for the StageMeta message shared between the Java coordinator and the
+// Rust finalizer.
+//
+// NOTE ON CODE GENERATION: the Brazil build does not run protoc, so the Rust
+// side hand-maintains prost-annotated structs in `src/proto.rs` that are
+// byte-for-byte compatible with what `prost-build` would emit from this file.
+// Any change here MUST be mirrored there (and on the Java side once Phase 2a
+// wires the Java encoder). The round-trip CI test in `proto.rs` guards the
+// wire format. Keep field numbers stable.
+
+syntax = "proto3";
+
+package opensearch.analytics.df_proto;
+
+// Per-stage metadata that travels alongside the stage's Substrait fragment into
+// `finalize_query_plan`. Everything the finalizer needs to lower, mode-force,
+// fix-up, and leaf-rewrite a single stage without re-deriving anything from the
+// data node.
+message StageMeta {
+  int32 stage_id = 1;
+  repeated int32 child_stage_ids = 2;
+
+  AggMode agg_mode = 3;     // NONE | PARTIAL | FINAL (D4)
+  LeafKind leaf_kind = 4;   // SHARD_SCAN | STAGE_INPUT | VALUES | LM_OUTPUT
+
+  int32 tree_shape = 5;     // FilterTreeShape.ordinal() (DO-NOT-TOUCH §3)
+  bool requests_row_ids = 6;
+
+  repeated DelegatedExpr delegated = 7;
+
+  // Calcite's declared input rowType per child edge — assertion targets for the
+  // D6 schema-mismatch policy, NOT the source of truth.
+  repeated SerializedSchema declared_input_row_types = 8;
+
+  // Set iff leaf_kind references a late-materialization child (D10) — the one
+  // boundary where the declared type IS the source of truth.
+  SerializedSchema lm_output_row_type = 9;
+}
+
+enum AggMode {
+  AGG_MODE_NONE = 0;
+  AGG_MODE_PARTIAL = 1;
+  AGG_MODE_FINAL = 2;
+}
+
+enum LeafKind {
+  LEAF_KIND_SHARD_SCAN = 0;
+  LEAF_KIND_STAGE_INPUT = 1;
+  LEAF_KIND_VALUES = 2;
+  LEAF_KIND_LM_OUTPUT = 3;
+}
+
+// One correctness- or performance-delegated predicate payload. The bytes are
+// QueryBuilder named-writeables owned by the Lucene backend (DO-NOT-TOUCH §3);
+// the finalizer carries them opaquely onto OpenSearchShardScanExec.
+message DelegatedExpr {
+  int32 annotation_id = 1;
+  string backend_id = 2;
+  bytes payload = 3;
+}
+
+// Arrow IPC schema bytes (stream format, schema message + EOS). Mirrors how
+// register_partition_stream already ships schemas across FFM.
+message SerializedSchema {
+  bytes ipc = 1;
+}

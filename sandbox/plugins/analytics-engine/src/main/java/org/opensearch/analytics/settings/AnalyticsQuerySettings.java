@@ -79,8 +79,23 @@ public final class AnalyticsQuerySettings {
         Setting.Property.Dynamic
     );
 
+    /**
+     * Stage-boundary plan format (df-proto migration spec D12). Selects, per stage kind,
+     * whether a stage ships the legacy Substrait fragment + side channels or a serialized
+     * DataFusion physical plan ({@code datafusion-proto}). One of {@code legacy},
+     * {@code reduce_proto}, {@code full_proto}. Default {@code legacy}; mixed formats are
+     * safe because the inter-stage boundary is Arrow partition streams either way.
+     */
+    public static final Setting<PlanFormat> PLAN_FORMAT = new Setting<>(
+        "analytics.engine.plan_format",
+        PlanFormat.LEGACY.token(),
+        PlanFormat::fromString,
+        Setting.Property.NodeScope,
+        Setting.Property.Dynamic
+    );
+
     public static List<Setting<?>> all() {
-        return List.of(DELEGATION_BLOCKED_PREDICATES, MAX_SHARDS_PER_QUERY, MAX_CONCURRENT_SHARD_REQUESTS_PER_NODE);
+        return List.of(DELEGATION_BLOCKED_PREDICATES, MAX_SHARDS_PER_QUERY, MAX_CONCURRENT_SHARD_REQUESTS_PER_NODE, PLAN_FORMAT);
     }
 
     private AnalyticsQuerySettings() {}

@@ -434,9 +434,43 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
     private static final TypeProtoConverter SCHEMA_ONLY_TYPE_PROTO_CONVERTER = new TypeProtoConverter(new ExtensionCollector());
 
     private final SimpleExtension.ExtensionCollection extensions;
+    /**
+     * Supplies the global native runtime pointer for coordinator-side stage finalization
+     * (df-proto migration §5). Null when this convertor instance is used only for the legacy
+     * Substrait-conversion path (no finalization); {@link #finalizeStages} then throws.
+     */
+    private final java.util.function.LongSupplier runtimePtrSupplier;
 
     public DataFusionFragmentConvertor(SimpleExtension.ExtensionCollection extensions) {
+        this(extensions, null);
+    }
+
+    public DataFusionFragmentConvertor(
+        SimpleExtension.ExtensionCollection extensions,
+        java.util.function.LongSupplier runtimePtrSupplier
+    ) {
         this.extensions = extensions;
+        this.runtimePtrSupplier = runtimePtrSupplier;
+    }
+
+    /**
+     * Coordinator-side stage finalization (df-proto migration §5). Creates a coordinator-local
+     * native session over the global runtime, hands the encoded {@code FinalizeRequest} to the
+     * native finalizer (which orders stages child-first, lowers each Substrait fragment through
+     * DataFusion's planner, applies mode-force / leaf-swap / graft, and encodes the resulting
+     * physical plans), and returns the encoded {@code FinalizeResponse}.
+     */
+    @Override
+    public byte[] finalizeStages(byte[] finalizeRequestBytes) {
+        if (runtimePtrSupplier == null) {
+            throw new UnsupportedOperationException(
+                "finalizeStages requires a runtime pointer supplier; this convertor was built for the legacy path only"
+            );
+        }
+        long runtimePtr = runtimePtrSupplier.getAsLong();
+        try (DatafusionLocalSession session = new DatafusionLocalSession(runtimePtr)) {
+            return org.opensearch.be.datafusion.nativelib.NativeBridge.finalizeQueryPlan(session.getPointer(), finalizeRequestBytes);
+        }
     }
 
     @Override

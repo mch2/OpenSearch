@@ -676,6 +676,85 @@ pub unsafe extern "C" fn df_execute_local_plan(
         .map_err(|e| e.to_string())
 }
 
+/// Coordinator-side stage finalization (df-proto spec §5). Decodes a
+/// `FinalizeRequest` (all stages + StageMeta) from `req_ptr/req_len`, finalizes
+/// bottom-up on the session, and writes the encoded `FinalizeResponse` into the
+/// caller-allocated `out_ptr/out_cap` buffer (byte count via `out_len`).
+/// Returns 0 on success (negated error pointer on failure). If the response
+/// exceeds `out_cap`, returns the required size negated-as-error so Java can
+/// retry with a larger buffer.
+#[ffm_safe]
+#[no_mangle]
+pub unsafe extern "C" fn df_finalize_query_plan(
+    session_ptr: i64,
+    req_ptr: *const u8,
+    req_len: i64,
+    out_ptr: *mut u8,
+    out_cap: i64,
+    out_len: *mut i64,
+) -> i64 {
+    let mgr = get_rt_manager()?;
+    let req = slice::from_raw_parts(req_ptr, req_len as usize).to_vec();
+    let mgr_for_spawn = Arc::clone(&mgr);
+    let response = timed_block_on(&mgr.io_runtime, "finalize_query_plan", async move {
+        let inner = async move {
+            unsafe { api::finalize_query_plan(session_ptr, &req).await }
+        };
+        match mgr_for_spawn.cpu_executor().spawn(inner).await {
+            Ok(r) => r,
+            Err(e) => Err(datafusion::error::DataFusionError::Execution(format!(
+                "finalize_query_plan: CPU spawn failed: {e:?}"
+            ))),
+        }
+    })
+    .map_err(|e| e.to_string())?;
+    write_out_buffer(&response, out_ptr, out_cap, out_len, "finalize_query_plan response")?;
+    Ok(0)
+}
+
+/// Data-node entry: execute a finalized stage plan (df-proto spec §5). Mirrors
+/// `df_execute_local_plan` but takes `datafusion-proto` `PhysicalPlanNode` bytes
+/// instead of Substrait and routes through `execute_stage_task`. Returns the
+/// `QueryStreamHandle` pointer (negated error pointer on failure).
+#[ffm_safe]
+#[no_mangle]
+pub unsafe extern "C" fn df_execute_stage_task(
+    session_ptr: i64,
+    plan_ptr: *const u8,
+    plan_len: i64,
+    context_id: i64,
+) -> i64 {
+    let mgr = get_rt_manager()?;
+    let bytes_vec = slice::from_raw_parts(plan_ptr, plan_len as usize).to_vec();
+    let mgr_for_inner = Arc::clone(&mgr);
+    let mgr_for_spawn = Arc::clone(&mgr);
+    timed_block_on(
+        &mgr.io_runtime,
+        "execute_stage_task",
+        crate::task_monitors::coordinator_reduce_monitor().instrument(async move {
+            let inner_fut = async move {
+                unsafe {
+                    api::execute_stage_task(
+                        session_ptr,
+                        &bytes_vec,
+                        &mgr_for_inner,
+                        context_id,
+                        None,
+                    )
+                    .await
+                }
+            };
+            match mgr_for_spawn.cpu_executor().spawn(inner_fut).await {
+                Ok(inner_result) => inner_result,
+                Err(e) => Err(datafusion::error::DataFusionError::Execution(format!(
+                    "execute_stage_task: CPU spawn failed: {e:?}"
+                ))),
+            }
+        }),
+    )
+    .map_err(|e| e.to_string())
+}
+
 #[ffm_safe]
 #[no_mangle]
 pub unsafe extern "C" fn df_sender_send(sender_ptr: i64, array_ptr: i64, schema_ptr: i64) -> i64 {

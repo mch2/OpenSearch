@@ -188,6 +188,34 @@ testClusters.integTestStreaming {
     configureAnalyticsCluster(delegate)
 }
 
+// ── reduce_proto variant: 2 nodes, analytics.engine.plan_format=reduce_proto ─────────
+// df-proto migration D12: re-runs a representative slice of the PPL/SQL functional suite
+// with reduce/coordinator stages finalized to DataFusion proto plans (shard stages stay
+// legacy). Validates that proto finalization + execution is result-identical to legacy
+// across real corpus queries — NOT opted into `check` yet (kept explicit during rollout).
+task integTestReduceProto(type: RestIntegTestTask) {
+    description = 'Runs core PPL functional ITs under analytics.engine.plan_format=reduce_proto'
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    filter {
+        includeTestsMatching 'org.opensearch.analytics.qa.MathFunctionIT'
+        includeTestsMatching 'org.opensearch.analytics.qa.FilterDelegationIT'
+        includeTestsMatching 'org.opensearch.analytics.qa.FilterDelegationGoldenIT'
+        // TODO(df-proto): ListAggregateMultiShardIT excluded — LIST/VALUES (STATE_EXPANDING
+        // engine-native-merge UDAFs) emit List(Binary) partial state for keyword/text columns
+        // while the FINAL list_merge derivation expects List(Utf8); element-type boundary drift
+        // analogous to the Int32/Int64 case, fixed next via D7 binary-state handling in
+        // derive_schema_from_partial_plan / list_merge state_fields.
+    }
+    systemProperty 'tests.security.manager', 'false'
+}
+
+testClusters.integTestReduceProto {
+    numberOfNodes = 2
+    configureAnalyticsCluster(delegate)
+    setting 'analytics.engine.plan_format', 'reduce_proto'
+}
+
 // ── Spill-enabled variant: 2 nodes, datafusion.spill_directory + spill_memory_limit ──
 // Use the Gradle build directory so each clean build starts with a fresh empty spill
 // directory and no stale state can leak between runs (`./gradlew clean` wipes build/).

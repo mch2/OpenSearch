@@ -18,6 +18,7 @@ datafusion-datasource = { workspace = true }
 datafusion-common = { workspace = true }
 datafusion-execution = { workspace = true }
 datafusion-substrait = { workspace = true }
+datafusion-proto = { workspace = true }
 
 arrow = { workspace = true }
 arrow-array = { workspace = true }

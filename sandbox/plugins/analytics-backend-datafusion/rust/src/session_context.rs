@@ -60,6 +60,73 @@ pub struct SessionContextHandle {
     pub(crate) phantom_reservation: Option<datafusion::execution::memory_pool::MemoryReservation>,
 }
 
+/// Conventional table/registry key for a child stage's input partition stream.
+/// Both the finalizer (registration) and `StageReadExec` (lookup) call this so
+/// the `input-<child_stage_id>` convention lives in exactly one place.
+pub fn stage_input_table_name(child_stage_id: i32) -> String {
+    format!("input-{child_stage_id}")
+}
+
+/// Per-session registry mapping a child stage id to the `PartitionStream` that
+/// feeds this stage's `StageReadExec` leaf.
+///
+/// Registered as a typed `SessionConfig` extension (keyed by `TypeId`) so it
+/// rides along on every `TaskContext` the plan executes against. The data-node
+/// `execute_stage_task` FFM entry populates this from the Java-driven partition
+/// senders before executing the decoded stage plan; the coordinator's
+/// child-first finalize loop populates it with each finalized child's output
+/// stream (df-proto spec §4, D5).
+#[derive(Default)]
+pub struct StageInputRegistry {
+    streams: std::sync::Mutex<
+        std::collections::HashMap<
+            i32,
+            Arc<dyn datafusion::physical_plan::streaming::PartitionStream>,
+        >,
+    >,
+}
+
+impl StageInputRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register the partition stream for a child stage. Last write wins.
+    pub fn register(
+        &self,
+        child_stage_id: i32,
+        stream: Arc<dyn datafusion::physical_plan::streaming::PartitionStream>,
+    ) {
+        self.streams
+            .lock()
+            .expect("StageInputRegistry mutex poisoned")
+            .insert(child_stage_id, stream);
+    }
+
+    /// Look up the partition stream for a child stage.
+    pub fn get(
+        &self,
+        child_stage_id: i32,
+    ) -> Option<Arc<dyn datafusion::physical_plan::streaming::PartitionStream>> {
+        self.streams
+            .lock()
+            .expect("StageInputRegistry mutex poisoned")
+            .get(&child_stage_id)
+            .map(Arc::clone)
+    }
+}
+
+impl std::fmt::Debug for StageInputRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let n = self
+            .streams
+            .lock()
+            .map(|m| m.len())
+            .unwrap_or(0);
+        f.debug_struct("StageInputRegistry").field("stages", &n).finish()
+    }
+}
+
 /// Configuration for indexed execution with filter delegation, provided by Java.
 pub struct IndexedExecutionConfig {
     pub tree_shape: i32,

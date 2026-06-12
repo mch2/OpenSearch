@@ -47,7 +47,29 @@ import java.util.List;
  * @opensearch.internal
  */
 public record ExchangeSinkContext(String queryId, int stageId, long taskId, byte[] fragmentBytes, BufferAllocator allocator, List<
-    ChildInput> childInputs, ExchangeSink downstream) implements CommonExecutionContext {
+    ChildInput> childInputs, ExchangeSink downstream, byte[] planBytes) implements CommonExecutionContext {
+
+    /**
+     * Backward-compatible constructor for the legacy (Substrait) path: no finalized
+     * {@code planBytes}. Existing call sites use this; the proto path uses the canonical
+     * 8-arg constructor with non-null {@code planBytes}.
+     */
+    public ExchangeSinkContext(
+        String queryId,
+        int stageId,
+        long taskId,
+        byte[] fragmentBytes,
+        BufferAllocator allocator,
+        List<ChildInput> childInputs,
+        ExchangeSink downstream
+    ) {
+        this(queryId, stageId, taskId, fragmentBytes, allocator, childInputs, downstream, null);
+    }
+
+    /** True if this stage was finalized to a DataFusion proto plan (df-proto migration). */
+    public boolean hasProtoPlan() {
+        return planBytes != null && planBytes.length > 0;
+    }
 
     /**
      * Per-child input descriptor: the child stage id and the producer-side plan bytes the

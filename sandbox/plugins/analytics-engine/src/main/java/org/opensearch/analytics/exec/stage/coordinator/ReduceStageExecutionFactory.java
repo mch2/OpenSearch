@@ -51,7 +51,10 @@ public final class ReduceStageExecutionFactory implements StageExecutionFactory 
             chosenBytes(stage),
             config.bufferAllocator(),
             buildChildInputs(stage),
-            sink
+            sink,
+            // df-proto migration: when the stage was finalized to a DataFusion proto plan,
+            // the sink executes it via executeStageTask instead of the Substrait fragment.
+            chosenPlanBytes(stage)
         );
 
         // Apply instruction handlers for the reduce stage.
@@ -125,6 +128,15 @@ public final class ReduceStageExecutionFactory implements StageExecutionFactory 
             + " expected exactly one plan alternative, got "
             + stage.getPlanAlternatives().size();
         return stage.getPlanAlternatives().getFirst().convertedBytes();
+    }
+
+    /**
+     * The finalized DataFusion proto plan bytes for this stage, or {@code null} under the
+     * legacy format / before finalization (df-proto migration). When non-null, the reduce
+     * sink executes this instead of the Substrait fragment.
+     */
+    private static byte[] chosenPlanBytes(Stage stage) {
+        return stage.getPlanAlternatives().getFirst().planBytes();
     }
 
     /**

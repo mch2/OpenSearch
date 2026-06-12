@@ -152,6 +152,30 @@ pub fn expr_to_bool_tree(
     Ok(ExtractionResult { tree })
 }
 
+/// D13 second classifier entry point (df-proto migration): build the same
+/// `BoolNode` tree from a **serialized** filter expression instead of a live
+/// Substrait-decoded `Expr`. The bytes are a `datafusion-proto`-serialized
+/// logical `Expr` (via [`datafusion_proto::bytes::Serializeable`]) carried on
+/// `OpenSearchShardScanExec`. This deserializes the `Expr` and delegates to
+/// [`expr_to_bool_tree`] — it **shares all classification logic** and never
+/// forks the classifier (the substrait→tree contract becomes a transport
+/// change, not a classifier change: the spec's DO-NOT-TOUCH constraint).
+///
+/// The differential test (Phase 2b) asserts the tree produced here is
+/// structurally identical to the substrait path across the fuzz corpus.
+pub fn expr_to_bool_tree_from_bytes(
+    expr_bytes: &[u8],
+    schema: &SchemaRef,
+    ctx: &datafusion::execution::context::SessionContext,
+) -> Result<ExtractionResult, String> {
+    use datafusion_proto::bytes::Serializeable;
+
+    let task_ctx = ctx.task_ctx();
+    let expr = Expr::from_bytes_with_ctx(expr_bytes, &task_ctx)
+        .map_err(|e| format!("expr_to_bool_tree_from_bytes: deserialize Expr: {e}"))?;
+    expr_to_bool_tree(&expr, schema, &ctx.state())
+}
+
 fn convert_expr(
     expr: &Expr,
     schema: &Schema,
@@ -779,5 +803,44 @@ mod tests {
             ]),
         ]);
         assert_eq!(classify_filter(&tree), FilterClass::Tree);
+    }
+
+    // ── D13: second classifier entry point differential parity ───────────
+
+    /// CI invariant #4 (§7.4): the BoolNode tree from the serialized-Expr entry
+    /// point (`expr_to_bool_tree_from_bytes`, the proto transport path) is
+    /// structurally identical to the one from the live-Expr path
+    /// (`expr_to_bool_tree`, the substrait path) for the same expression. Asserts
+    /// across a small corpus of representative shapes; the full fuzz-corpus
+    /// version runs in `indexed_table/tests_e2e` (Phase 2b).
+    #[test]
+    fn d13_serialized_expr_tree_matches_live_expr_tree() {
+        use datafusion_proto::bytes::Serializeable;
+
+        let ctx = SessionContext::new();
+        // Markers must be registered so the serialized form round-trips by name.
+        ctx.register_udf(create_index_filter_udf());
+        ctx.register_udf(create_delegation_possible_udf());
+        let schema = test_schema();
+
+        let corpus: Vec<Expr> = vec![
+            col("price").gt(lit(100i32)),
+            col("price").gt(lit(100i32)).and(col("qty").lt(lit(50i32))),
+            col("price").gt(lit(1i32)).or(col("qty").eq(lit(2i32))),
+            Expr::Not(Box::new(col("active").eq(lit(true)))),
+            col("price").in_list(vec![lit(5i32), lit(10i32)], false),
+            col("price").between(lit(10i32), lit(50i32)),
+        ];
+
+        for expr in corpus {
+            let live = expr_to_bool_tree(&expr, &schema, &ctx.state()).unwrap();
+            let bytes = expr.to_bytes().expect("serialize Expr");
+            let from_bytes = expr_to_bool_tree_from_bytes(&bytes, &schema, &ctx).unwrap();
+            assert_eq!(
+                format!("{:?}", live.tree),
+                format!("{:?}", from_bytes.tree),
+                "D13 differential mismatch for expr: {expr:?}"
+            );
+        }
     }
 }

@@ -72,6 +72,12 @@ impl LocalSession {
         let runtime_env = Arc::new(runtime_env.clone());
         let mut config = SessionConfig::new();
         config.options_mut().execution.target_partitions = crate::api::get_reduce_target_partitions();
+        // Attach a StageInputRegistry so a decoded `StageReadExec` (proto reduce
+        // execution) can resolve its child partition stream — populated by
+        // `register_partition` alongside the legacy named StreamingTable, so both
+        // the substrait path (table lookup) and the proto path (registry lookup)
+        // work from the same registration call (df-proto migration).
+        config = config.with_extension(Arc::new(crate::session_context::StageInputRegistry::new()));
         let state = SessionStateBuilder::new()
             .with_config(config)
             .with_runtime_env(runtime_env)
@@ -133,8 +139,13 @@ impl LocalSession {
         schema: SchemaRef,
     ) -> Result<PartitionStreamSender, DataFusionError> {
         let (sender, receiver) = channel(Arc::clone(&schema));
+        // One shared partition behind an Arc. The legacy path reaches it via the
+        // named StreamingTable; the proto path (`StageReadExec`) reaches it via the
+        // StageInputRegistry. Exactly one path executes per stage, and
+        // `SingleReceiverPartition` guards the take-once contract, so sharing the
+        // Arc across both registration surfaces is safe.
         let partition: Arc<dyn PartitionStream> = Arc::new(SingleReceiverPartition::new(receiver));
-        let table = StreamingTable::try_new(schema, vec![partition])?;
+        let table = StreamingTable::try_new(Arc::clone(&schema), vec![Arc::clone(&partition)])?;
         self.ctx
             .register_table(name, Arc::new(table))
             .map_err(|e| {
@@ -143,6 +154,18 @@ impl LocalSession {
                     name, e
                 ))
             })?;
+        // Also register into the StageInputRegistry keyed by child stage id, so a
+        // decoded `StageReadExec` resolves the same partition stream. The name is
+        // `input-<childStageId>`; parse the id back out.
+        if let Some(child_stage_id) = name.strip_prefix("input-").and_then(|s| s.parse::<i32>().ok()) {
+            if let Some(reg) = self
+                .ctx
+                .copied_config()
+                .get_extension::<crate::session_context::StageInputRegistry>()
+            {
+                reg.register(child_stage_id, partition);
+            }
+        }
         Ok(sender)
     }
 
@@ -191,6 +214,75 @@ impl LocalSession {
         let physical_plan = crate::relabel_exec::wrap_if_relabel_needed(physical_plan, target_schema)?;
         datafusion::physical_plan::execute_stream(physical_plan, self.ctx.task_ctx())
             .map_err(|e| DataFusionError::Execution(format!("execute_substrait: {}", e)))
+    }
+
+    /// Lowers a whole-fragment Substrait plan to a DataFusion physical plan
+    /// **without executing it** — the coordinator-side finalizer hop (df-proto
+    /// spec §4). Mirrors [`Self::execute_substrait`]'s lowering (consumer →
+    /// logical → physical) but stops before `execute_stream`, returning the plan
+    /// for mode-force / leaf-swap / graft / encode.
+    pub async fn lower_fragment(
+        &self,
+        bytes: &[u8],
+    ) -> Result<Arc<dyn datafusion::physical_plan::ExecutionPlan>, DataFusionError> {
+        let plan = Plan::decode(bytes).map_err(|e| {
+            DataFusionError::Execution(format!("lower_fragment: decode Substrait: {}", e))
+        })?;
+        let logical_plan = from_substrait_plan(&self.ctx.state(), &plan).await?;
+        let dataframe = self.ctx.execute_logical_plan(logical_plan).await?;
+        dataframe.create_physical_plan().await
+    }
+
+    /// Borrow the session's `SessionContext` (for finalizer registration of
+    /// child binding skeletons and task-context construction).
+    pub fn ctx(&self) -> &SessionContext {
+        &self.ctx
+    }
+
+    /// Register an empty `MemTable` under `name` as a **binding skeleton** for
+    /// the finalizer (df-proto spec §4.1): its only job is to let
+    /// `from_substrait_plan` bind a parent fragment that reads `input-<childId>`.
+    /// It never produces rows — the actual data flows through `StageReadExec` at
+    /// execution time. Takes `&self` (catalog registration is interior-mutable)
+    /// so it composes with the `&self` finalizer loop. Last registration wins, so
+    /// re-registering a name (e.g. a tighter schema) is safe.
+    pub fn register_binding_skeleton(
+        &self,
+        name: &str,
+        schema: SchemaRef,
+    ) -> Result<(), DataFusionError> {
+        let table = MemTable::try_new(schema, vec![vec![]])?;
+        // Idempotent / last-write-wins: a binding skeleton may be registered more
+        // than once for the same `input-<N>` (e.g. once from Calcite's declared
+        // rowType, once from the substrait base_schema fallback). De-register any
+        // prior table first so `register_table` doesn't error on a duplicate name.
+        let _ = self.ctx.deregister_table(name);
+        self.ctx.register_table(name, Arc::new(table)).map_err(|e| {
+            DataFusionError::Execution(format!(
+                "register_binding_skeleton '{}': {}",
+                name, e
+            ))
+        })?;
+        Ok(())
+    }
+
+    /// Register the pushdown-faithful stub `TableProvider` for a shard-scan table
+    /// (df-proto migration §4, full_proto). It claims `Exact` pushdown for every
+    /// filter — exactly as the real `IndexedTableProvider` does — so when the
+    /// finalizer lowers the shard fragment, DataFusion routes the whole WHERE into
+    /// the scan and emits no `FilterExec`. The resulting scan leaf is replaced by
+    /// `OpenSearchShardScanExec` after planning; the stub is never executed.
+    pub fn register_pushdown_stub(
+        &self,
+        name: &str,
+        schema: SchemaRef,
+    ) -> Result<(), DataFusionError> {
+        let provider = Arc::new(crate::os_exec::PushdownStubProvider::new(schema));
+        let _ = self.ctx.deregister_table(name);
+        self.ctx.register_table(name, provider).map_err(|e| {
+            DataFusionError::Execution(format!("register_pushdown_stub '{}': {}", name, e))
+        })?;
+        Ok(())
     }
 
     /// Returns the memory pool the session's `RuntimeEnv` was built with.
@@ -297,6 +389,47 @@ mod tests {
             .await
             .expect("sql parses");
         assert_eq!(df.schema().fields().len(), 1);
+    }
+
+    /// register_partition also populates the StageInputRegistry (proto reduce
+    /// execution): a decoded `StageReadExec` for the same child stage id resolves
+    /// the registered partition stream and yields the pushed batches.
+    #[tokio::test]
+    async fn register_partition_populates_stage_input_registry() {
+        use crate::os_exec::StageReadExec;
+        use datafusion::physical_plan::ExecutionPlan;
+        use futures::StreamExt;
+
+        let env = test_runtime_env();
+        let mut session = LocalSession::new(&env);
+        let schema = i64_schema("x");
+        let sender = session
+            .register_partition("input-5", Arc::clone(&schema))
+            .expect("register succeeds");
+
+        // Push one batch and close.
+        let producer_schema = Arc::clone(&schema);
+        let handle = Handle::current();
+        let producer = std::thread::spawn(move || {
+            sender.send_blocking(Ok(i64_batch(&producer_schema, &[10, 20, 30])), &handle);
+            drop(sender);
+        });
+
+        // A StageReadExec for child stage 5 must resolve the registered stream
+        // from the session's StageInputRegistry extension and emit the batch.
+        let read: Arc<dyn ExecutionPlan> = Arc::new(StageReadExec::new(5, Arc::clone(&schema)));
+        let task_ctx = session.ctx().task_ctx();
+        let mut stream = read.execute(0, task_ctx).expect("StageReadExec executes");
+        let mut total = 0i64;
+        while let Some(b) = stream.next().await {
+            let b = b.expect("batch ok");
+            let col = b.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+            for i in 0..col.len() {
+                total += col.value(i);
+            }
+        }
+        producer.join().unwrap();
+        assert_eq!(total, 60, "StageReadExec must read the partition stream via the registry");
     }
 
     #[tokio::test]

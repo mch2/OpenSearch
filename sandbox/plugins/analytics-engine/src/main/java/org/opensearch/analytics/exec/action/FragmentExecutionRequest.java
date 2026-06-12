@@ -36,16 +36,64 @@ import java.util.Map;
  */
 public class FragmentExecutionRequest extends ActionRequest implements ShardInvocationRequest {
 
+    /** Sentinel for {@link #planFormatVersion} on a legacy (Substrait + side-channel) request. */
+    public static final int PLAN_FORMAT_VERSION_LEGACY = 0;
+
+    /**
+     * Current DF_PROTO plan format version (df-proto migration D8). Bumped when the
+     * {@code datafusion-proto} wire encoding or codec changes incompatibly. The data node
+     * compares this against its own and throws {@link PlanFormatMismatchException} on skew.
+     */
+    public static final int PLAN_FORMAT_VERSION_CURRENT = 1;
+
+    /**
+     * The workspace DataFusion version the proto plans are encoded against (D8). Must match
+     * the Rust crate's pinned `datafusion = "=54.0.0"`. Carried in DF_PROTO requests so the
+     * data node can reject a plan from a coordinator on a different DataFusion.
+     */
+    public static final String DATAFUSION_VERSION = "54.0.0";
+
     private final String queryId;
     private final int stageId;
     private final ShardId shardId;
     private final List<PlanAlternative> planAlternatives;
 
+    // DF_PROTO form (df-proto migration D8/D14). When {@code planFormatVersion > 0} this request
+    // carries one finalized DataFusion physical plan instead of {@code planAlternatives}.
+    private final int planFormatVersion;
+    private final String dataFusionVersion;
+    private final byte[] planBytes;
+
+    /** Legacy constructor: Substrait fragment alternatives + side channels. */
     public FragmentExecutionRequest(String queryId, int stageId, ShardId shardId, List<PlanAlternative> planAlternatives) {
         this.queryId = queryId;
         this.stageId = stageId;
         this.shardId = shardId;
         this.planAlternatives = planAlternatives;
+        this.planFormatVersion = PLAN_FORMAT_VERSION_LEGACY;
+        this.dataFusionVersion = null;
+        this.planBytes = null;
+    }
+
+    /**
+     * DF_PROTO constructor (D14): exactly one finalized plan for this stage — no
+     * {@code PlanAlternative} list, no instructions, no delegation descriptor.
+     */
+    public FragmentExecutionRequest(
+        String queryId,
+        int stageId,
+        ShardId shardId,
+        int planFormatVersion,
+        String dataFusionVersion,
+        byte[] planBytes
+    ) {
+        this.queryId = queryId;
+        this.stageId = stageId;
+        this.shardId = shardId;
+        this.planAlternatives = List.of();
+        this.planFormatVersion = planFormatVersion;
+        this.dataFusionVersion = dataFusionVersion;
+        this.planBytes = planBytes;
     }
 
     public FragmentExecutionRequest(StreamInput in) throws IOException {
@@ -57,6 +105,16 @@ public class FragmentExecutionRequest extends ActionRequest implements ShardInvo
         this.planAlternatives = new ArrayList<>(numAlternatives);
         for (int i = 0; i < numAlternatives; i++) {
             planAlternatives.add(new PlanAlternative(in));
+        }
+        // DF_PROTO trailer (backward-compatible: a legacy peer writes false).
+        if (in.readBoolean()) {
+            this.planFormatVersion = in.readVInt();
+            this.dataFusionVersion = in.readString();
+            this.planBytes = in.readByteArray();
+        } else {
+            this.planFormatVersion = PLAN_FORMAT_VERSION_LEGACY;
+            this.dataFusionVersion = null;
+            this.planBytes = null;
         }
     }
 
@@ -70,6 +128,32 @@ public class FragmentExecutionRequest extends ActionRequest implements ShardInvo
         for (PlanAlternative alt : planAlternatives) {
             alt.writeTo(out);
         }
+        // DF_PROTO trailer.
+        if (planFormatVersion != PLAN_FORMAT_VERSION_LEGACY) {
+            out.writeBoolean(true);
+            out.writeVInt(planFormatVersion);
+            out.writeString(dataFusionVersion != null ? dataFusionVersion : "");
+            out.writeByteArray(planBytes != null ? planBytes : new byte[0]);
+        } else {
+            out.writeBoolean(false);
+        }
+    }
+
+    /** True if this is a DF_PROTO request carrying one finalized physical plan (D14). */
+    public boolean isProtoFormat() {
+        return planFormatVersion != PLAN_FORMAT_VERSION_LEGACY;
+    }
+
+    public int getPlanFormatVersion() {
+        return planFormatVersion;
+    }
+
+    public String getDataFusionVersion() {
+        return dataFusionVersion;
+    }
+
+    public byte[] getPlanBytes() {
+        return planBytes;
     }
 
     public String getQueryId() {

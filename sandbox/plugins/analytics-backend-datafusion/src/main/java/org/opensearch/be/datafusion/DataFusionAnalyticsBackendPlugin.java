@@ -834,7 +834,13 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
 
     @Override
     public FragmentConvertor getFragmentConvertor() {
-        return new DataFusionFragmentConvertor(plugin.getSubstraitExtensions());
+        // Supply the global native runtime pointer lazily so coordinator-side stage
+        // finalization (df-proto migration §5) can open a local session on demand.
+        // The supplier resolves at call time — the runtime is initialized by then.
+        return new DataFusionFragmentConvertor(
+            plugin.getSubstraitExtensions(),
+            () -> plugin.getDataFusionService().getNativeRuntime().get()
+        );
     }
 
     @Override

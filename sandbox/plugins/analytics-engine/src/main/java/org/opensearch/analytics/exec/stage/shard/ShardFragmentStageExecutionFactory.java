@@ -53,21 +53,64 @@ public final class ShardFragmentStageExecutionFactory implements StageExecutionF
         if (stage.getTargetResolver() instanceof ShardTargetResolver shardResolver) {
             shardResolver.setMaxShardsPerQuery(config.maxShardsPerQuery());
         }
-        List<FragmentExecutionRequest.PlanAlternative> planAlternatives = buildPlanAlternatives(stage);
         final String queryId = config.queryId();
         final int stageId = stage.getStageId();
-        Function<ShardExecutionTarget, FragmentExecutionRequest> requestBuilder = target -> new FragmentExecutionRequest(
-            queryId,
-            stageId,
-            target.shardId(),
-            planAlternatives
-        );
+        // df-proto migration D14: when the shard stage was finalized to a DataFusion proto
+        // plan (full_proto), ship one DF_PROTO request carrying {planFormatVersion,
+        // dataFusionVersion, planBytes} — no PlanAlternative list, no instructions, no
+        // delegation descriptor. Otherwise ship the legacy PlanAlternative form.
+        byte[] protoPlanBytes = protoPlanBytes(stage);
+        Function<ShardExecutionTarget, FragmentExecutionRequest> requestBuilder;
+        if (protoPlanBytes != null) {
+            requestBuilder = target -> new FragmentExecutionRequest(
+                queryId,
+                stageId,
+                target.shardId(),
+                FragmentExecutionRequest.PLAN_FORMAT_VERSION_CURRENT,
+                FragmentExecutionRequest.DATAFUSION_VERSION,
+                protoPlanBytes
+            );
+        } else {
+            List<FragmentExecutionRequest.PlanAlternative> planAlternatives = buildPlanAlternatives(stage);
+            requestBuilder = target -> new FragmentExecutionRequest(queryId, stageId, target.shardId(), planAlternatives);
+        }
         // Execution pulls the resolver off `stage` and calls resolve() lazily at start().
         // This keeps target resolution out of the build phase so cancellation before
         // dispatch doesn't pay for cluster-state routing, and leaves room for shuffle
         // reads whose targets depend on child manifests only available at dispatch time.
         return new ShardFragmentStageExecution(stage, config, sink, clusterService, requestBuilder, transport);
     }
+
+    /**
+     * The finalized DataFusion proto plan bytes for this shard stage, or {@code null} when the
+     * stage was not finalized to proto (legacy / reduce_proto). Returns the first alternative's
+     * {@code planBytes} — shard stages carry exactly one alternative post-selection.
+     *
+     * <p>GATING (df-proto migration Phase 2b): shipping a DF_PROTO shard request requires the
+     * data-node {@code execute_stage_task} route that builds the indexed session from a
+     * {@code ShardBindings} TaskContext extension and runs {@code OpenSearchShardScanExec}. Until
+     * that lands, we do NOT ship proto to shards even under {@code full_proto} — the stage is still
+     * finalized (validating the finalizer end to end) but ships the legacy PlanAlternative form, so
+     * {@code full_proto} degrades safely to the working shard path rather than failing the query.
+     */
+    private static byte[] protoPlanBytes(Stage stage) {
+        if (!SHARD_PROTO_EXECUTION_READY) {
+            return null;
+        }
+        if (stage.getPlanAlternatives().isEmpty()) {
+            return null;
+        }
+        byte[] bytes = stage.getPlanAlternatives().getFirst().planBytes();
+        return (bytes != null && bytes.length > 0) ? bytes : null;
+    }
+
+    /**
+     * Flips to {@code true} when the data-node DF_PROTO shard execution route
+     * ({@code execute_stage_task} + {@code OpenSearchShardScanExec} session build from
+     * {@code ShardBindings}) is implemented. Keeping it {@code false} makes {@code full_proto}
+     * ship the working legacy shard request while the reduce stages still go proto.
+     */
+    private static final boolean SHARD_PROTO_EXECUTION_READY = false;
 
     private static List<FragmentExecutionRequest.PlanAlternative> buildPlanAlternatives(Stage stage) {
         List<FragmentExecutionRequest.PlanAlternative> alternatives = new ArrayList<>();

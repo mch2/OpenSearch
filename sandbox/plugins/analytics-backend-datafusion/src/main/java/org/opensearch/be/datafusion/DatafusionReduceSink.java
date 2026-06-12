@@ -125,8 +125,17 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
                     );
                     childSchemas.put(childStageId, ArrowSchemaIpc.fromBytes(registered.schemaIpc()));
                 }
-                streamPtr = NativeBridge.executeLocalPlan(session.getPointer(), ctx.fragmentBytes(), ctx.taskId());
-                logger.debug("[reduce-sink] ALLOC localPlan stream taskId={} streamPtr={}", ctx.taskId(), streamPtr);
+                if (ctx.hasProtoPlan()) {
+                    // df-proto migration: stage finalized to a DataFusion physical plan. Partition
+                    // streams are registered above (data still flows through them; the decoded
+                    // StageReadExec resolves them via the session's StageInputRegistry, which
+                    // register_partition populates). Execute the proto plan, not the Substrait fragment.
+                    streamPtr = NativeBridge.executeStageTask(session.getPointer(), ctx.planBytes(), ctx.taskId());
+                    logger.debug("[reduce-sink] ALLOC protoPlan stream taskId={} streamPtr={}", ctx.taskId(), streamPtr);
+                } else {
+                    streamPtr = NativeBridge.executeLocalPlan(session.getPointer(), ctx.fragmentBytes(), ctx.taskId());
+                    logger.debug("[reduce-sink] ALLOC localPlan stream taskId={} streamPtr={}", ctx.taskId(), streamPtr);
+                }
             }
             outStreamLocal = new StreamHandle(streamPtr, runtimeHandle);
             success = true;

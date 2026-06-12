@@ -93,6 +93,8 @@ public final class NativeBridge {
     private static final MethodHandle CLOSE_LOCAL_SESSION;
     private static final MethodHandle REGISTER_PARTITION_STREAM;
     private static final MethodHandle EXECUTE_LOCAL_PLAN;
+    private static final MethodHandle FINALIZE_QUERY_PLAN;
+    private static final MethodHandle EXECUTE_STAGE_TASK;
     private static final MethodHandle SENDER_SEND;
     private static final MethodHandle SENDER_CLOSE;
     private static final MethodHandle REGISTER_MEMTABLE;
@@ -308,6 +310,32 @@ public final class NativeBridge {
         // i64 df_execute_local_plan(session_ptr, substrait_ptr, substrait_len, context_id)
         EXECUTE_LOCAL_PLAN = linker.downcallHandle(
             lib.find("df_execute_local_plan").orElseThrow(),
+            FunctionDescriptor.of(
+                ValueLayout.JAVA_LONG,
+                ValueLayout.JAVA_LONG,
+                ValueLayout.ADDRESS,
+                ValueLayout.JAVA_LONG,
+                ValueLayout.JAVA_LONG
+            )
+        );
+
+        // i64 df_finalize_query_plan(session_ptr, req_ptr, req_len, out_ptr, out_cap, out_len)
+        FINALIZE_QUERY_PLAN = linker.downcallHandle(
+            lib.find("df_finalize_query_plan").orElseThrow(),
+            FunctionDescriptor.of(
+                ValueLayout.JAVA_LONG,
+                ValueLayout.JAVA_LONG,
+                ValueLayout.ADDRESS,
+                ValueLayout.JAVA_LONG,
+                ValueLayout.ADDRESS,
+                ValueLayout.JAVA_LONG,
+                ValueLayout.ADDRESS
+            )
+        );
+
+        // i64 df_execute_stage_task(session_ptr, plan_ptr, plan_len, context_id)
+        EXECUTE_STAGE_TASK = linker.downcallHandle(
+            lib.find("df_execute_stage_task").orElseThrow(),
             FunctionDescriptor.of(
                 ValueLayout.JAVA_LONG,
                 ValueLayout.JAVA_LONG,
@@ -1167,6 +1195,53 @@ public final class NativeBridge {
         NativeHandle.validatePointer(sessionPtr, "session");
         try (var call = new NativeCall()) {
             return call.invoke(EXECUTE_LOCAL_PLAN, sessionPtr, call.bytes(substrait), (long) substrait.length, contextId);
+        }
+    }
+
+    /**
+     * Coordinator-side stage finalization (df-proto migration §5). Encodes a {@code FinalizeRequest}
+     * (all stages + their {@code StageMeta}) into {@code requestBytes}; the native finalizer orders
+     * the stages child-first in one session, lowers each Substrait fragment through DataFusion's
+     * planner, applies mode-force / leaf-swap / graft, and returns an encoded {@code FinalizeResponse}
+     * ({@code {stage_id, plan_bytes}} per stage). The response is the natural plan-cache value (D15).
+     *
+     * @param sessionPtr   pointer returned by {@link #createLocalSession}
+     * @param requestBytes encoded {@code FinalizeRequest} protobuf
+     * @return encoded {@code FinalizeResponse} protobuf
+     */
+    public static byte[] finalizeQueryPlan(long sessionPtr, byte[] requestBytes) {
+        NativeHandle.validatePointer(sessionPtr, "session");
+        try (var call = new NativeCall()) {
+            // 1 MiB initial out-buffer; finalized plans are small relative to data.
+            var out = call.outBuffer(1024 * 1024);
+            call.invoke(
+                FINALIZE_QUERY_PLAN,
+                sessionPtr,
+                call.bytes(requestBytes),
+                (long) requestBytes.length,
+                out.data(),
+                (long) out.capacity(),
+                out.lenOut()
+            );
+            return out.toByteArray();
+        }
+    }
+
+    /**
+     * Data-node execution of a finalized stage plan (df-proto migration §5). Decodes the
+     * {@code datafusion-proto} {@code PhysicalPlanNode} bytes against the session, registers child
+     * partition streams (already done via {@link #registerPartitionStream}) so {@code StageReadExec}
+     * leaves resolve, and executes — returning an opaque stream pointer drained via {@link #streamNext}
+     * and freed by {@link #streamClose}.
+     *
+     * @param sessionPtr pointer returned by {@link #createLocalSession}
+     * @param planBytes  finalized DataFusion physical plan bytes
+     * @param contextId  parent task id for cancellation registration (0 disables tracking)
+     */
+    public static long executeStageTask(long sessionPtr, byte[] planBytes, long contextId) {
+        NativeHandle.validatePointer(sessionPtr, "session");
+        try (var call = new NativeCall()) {
+            return call.invoke(EXECUTE_STAGE_TASK, sessionPtr, call.bytes(planBytes), (long) planBytes.length, contextId);
         }
     }
 

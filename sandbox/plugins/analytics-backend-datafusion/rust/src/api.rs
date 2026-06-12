@@ -1232,7 +1232,7 @@ pub unsafe fn sql_to_substrait(
 /// [`crate::relabel_exec::RelabelExec`] (zero-copy bit-tag flip per mismatched
 /// column), so runtime batches arrive with the same type tags the consumer
 /// registers here — no per-batch cast needed at the partition-stream feed.
-fn derive_schema_from_partial_plan(
+pub fn derive_schema_from_partial_plan(
     substrait_bytes: &[u8],
 ) -> Result<arrow::datatypes::SchemaRef, DataFusionError> {
     use datafusion::datasource::MemTable;
@@ -1469,6 +1469,32 @@ pub(crate) fn base_schema_for_table(plan: &substrait::proto::Plan, table_name: &
     None
 }
 
+/// Convert the `base_schema` the substrait `plan_bytes` declares for `table_name`
+/// into an Arrow `SchemaRef` (df-proto migration §4.1, D5 reduce_proto fallback).
+///
+/// Used by the stage finalizer to register an `input-<childId>` binding skeleton
+/// when the child stage is legacy (not finalized in-session) and Calcite supplied
+/// no declared rowType — the reduce fragment's own substrait carries the schema,
+/// exactly as the legacy reduce sink derives it via `widen_schema_from_plan`.
+/// Returns `None` when the table or its base_schema is absent or unconvertible.
+pub fn base_schema_to_arrow(
+    plan_bytes: &[u8],
+    table_name: &str,
+    ctx: &SessionContext,
+) -> Option<arrow::datatypes::SchemaRef> {
+    use datafusion_substrait::extensions::Extensions;
+    use datafusion_substrait::logical_plan::consumer::{from_substrait_named_struct, DefaultSubstraitConsumer};
+
+    let plan: substrait::proto::Plan = prost::Message::decode(plan_bytes).ok()?;
+    let base_schema = base_schema_for_table(&plan, table_name)?;
+    let extensions = Extensions::default();
+    let state = ctx.state();
+    let consumer = DefaultSubstraitConsumer::new(&extensions, &state);
+    let df_schema = from_substrait_named_struct(&consumer, &base_schema).ok()?;
+    let arrow = df_schema.as_arrow().clone();
+    Some(crate::schema_coerce::coerce_inferred_schema(std::sync::Arc::new(arrow)))
+}
+
 // ---------------------------------------------------------------------------
 // Coordinator-reduce local execution API
 //
@@ -1604,6 +1630,107 @@ pub async unsafe fn execute_local_plan(
     }
     let wrapped = RecordBatchStreamAdapter::new(cross_rt_stream.schema(), cross_rt_stream);
 
+    let handle = QueryStreamHandle::new(wrapped, query_context, permit);
+    Ok(Box::into_raw(Box::new(handle)) as i64)
+}
+
+/// Coordinator-side stage finalization entry (df-proto spec §5, D3).
+///
+/// Decodes a [`crate::proto::FinalizeRequest`] (all stages + their `StageMeta`),
+/// drives [`crate::stage_finalizer::finalize_query_plan`] bottom-up on the given
+/// `LocalSession` (reusing its planner / UDF registry / runtime), and returns an
+/// encoded [`crate::proto::FinalizeResponse`] of `{stage_id, plan_bytes}`.
+///
+/// # Safety
+/// `session_ptr` must be a valid, non-zero pointer returned by
+/// `create_local_session`.
+pub async unsafe fn finalize_query_plan(
+    session_ptr: i64,
+    request_bytes: &[u8],
+) -> Result<Vec<u8>, DataFusionError> {
+    use prost::Message;
+
+    let session = &*(session_ptr as *const LocalSession);
+    let request = crate::proto::FinalizeRequest::decode(request_bytes).map_err(|e| {
+        DataFusionError::Execution(format!("finalize_query_plan: decode request: {e}"))
+    })?;
+
+    let stages: Vec<crate::stage_finalizer::StageInput> = request
+        .stages
+        .into_iter()
+        .map(|s| crate::stage_finalizer::StageInput {
+            substrait_bytes: s.substrait_bytes,
+            meta: s.meta.unwrap_or_default(),
+        })
+        .collect();
+
+    let outputs = crate::stage_finalizer::finalize_query_plan(session, stages).await?;
+
+    let response = crate::proto::FinalizeResponse {
+        plans: outputs
+            .into_iter()
+            .map(|o| crate::proto::FinalizedStageProto {
+                stage_id: o.stage_id,
+                plan_bytes: o.plan_bytes,
+            })
+            .collect(),
+    };
+    Ok(response.encode_to_vec())
+}
+
+/// Data-node entry: execute a finalized stage plan (df-proto spec §5).
+///
+/// Decodes the `datafusion-proto` `PhysicalPlanNode` bytes against a fresh
+/// `LocalSession`'s `TaskContext` (standard UDF/UDAF registry, so name-resolved
+/// functions and embedded marker UDFs bind), registers the provided child
+/// partition streams in a `StageInputRegistry` extension so `StageReadExec`
+/// leaves resolve their inputs, and executes — reusing the same
+/// `CrossRtStream` + handle plumbing as [`execute_local_plan`].
+///
+/// `shard_bindings_ptr` (Phase 2b) will carry the `ShardBindings` for
+/// `OpenSearchShardScanExec` leaves; for reduce stages it is 0 (unused).
+///
+/// # Safety
+/// `session_ptr` must be a valid, non-zero pointer returned by
+/// `create_local_session`.
+pub async unsafe fn execute_stage_task(
+    session_ptr: i64,
+    plan_bytes: &[u8],
+    manager: &RuntimeManager,
+    context_id: i64,
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
+) -> Result<i64, DataFusionError> {
+    let session = &*(session_ptr as *const LocalSession);
+
+    let query_context = QueryTrackingContext::new(
+        context_id,
+        session.memory_pool(),
+        query_tracker::QueryType::Coordinator,
+    );
+    let token = query_tracker::get_cancellation_token(context_id);
+
+    // Decode against the session's task context so built-in UDAFs (e.g. `sum`)
+    // and OpenSearch UDFs/UDAFs resolve by name from its registry.
+    let task_ctx = session.ctx().task_ctx();
+    let plan = crate::stage_finalizer::decode_stage_plan(plan_bytes, task_ctx.as_ref())?;
+
+    let target_schema = crate::schema_coerce::coerce_inferred_schema(plan.schema());
+    let plan = crate::relabel_exec::wrap_if_relabel_needed(plan, target_schema)?;
+
+    let exec_fut = async move {
+        datafusion::physical_plan::execute_stream(plan, task_ctx)
+            .map_err(|e| format!("execute_stage_task: {e}"))
+    };
+    let df_stream = cancellation::cancellable(token.as_ref(), context_id, exec_fut)
+        .await
+        .map_err(DataFusionError::Execution)?;
+
+    let (cross_rt_stream, abort_handle) =
+        CrossRtStream::new_with_df_error_stream_cancellable(df_stream, manager.cpu_executor());
+    if let Some(h) = abort_handle {
+        query_tracker::set_abort_handle(context_id, h);
+    }
+    let wrapped = RecordBatchStreamAdapter::new(cross_rt_stream.schema(), cross_rt_stream);
     let handle = QueryStreamHandle::new(wrapped, query_context, permit);
     Ok(Box::into_raw(Box::new(handle)) as i64)
 }

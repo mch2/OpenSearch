@@ -107,4 +107,22 @@ public interface FragmentConvertor {
     default WireFormat wireFormat() {
         return WireFormat.SELF_DESCRIBING;
     }
+
+    /**
+     * Coordinator-side stage finalization (df-proto migration §5). Takes an encoded
+     * {@code FinalizeRequest} protobuf (all stages, each carrying its whole-fragment
+     * Substrait bytes + {@code StageMeta}) and returns an encoded {@code FinalizeResponse}
+     * protobuf ({@code {stage_id, plan_bytes}} per stage). The backend creates a
+     * coordinator-local native session, drives the native finalizer bottom-up, and returns
+     * the serialized DataFusion physical plans that ship.
+     *
+     * <p>Only backends that produce DataFusion physical plans implement this; the default
+     * throws. {@code analytics.engine.plan_format} gates whether the engine calls it.
+     *
+     * @param finalizeRequestBytes encoded {@code FinalizeRequest}
+     * @return encoded {@code FinalizeResponse}
+     */
+    default byte[] finalizeStages(byte[] finalizeRequestBytes) {
+        throw new UnsupportedOperationException("finalizeStages not implemented for this backend");
+    }
 }

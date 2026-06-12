@@ -39,6 +39,7 @@ import org.opensearch.analytics.planner.dag.FragmentConversionDriver;
 import org.opensearch.analytics.planner.dag.PlanAlternativeSelector;
 import org.opensearch.analytics.planner.dag.PlanForker;
 import org.opensearch.analytics.planner.dag.QueryDAG;
+import org.opensearch.analytics.planner.dag.StageConversionDriver;
 import org.opensearch.analytics.settings.AnalyticsQuerySettings;
 import org.opensearch.analytics.settings.PlannerSettings;
 import org.opensearch.analytics.stats.AnalyticsStatsCollector;
@@ -95,6 +96,7 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
     private volatile int maxShardsPerQuery;
     private volatile int maxConcurrentShardRequestsPerNode;
     private volatile boolean preferMetadataDriver;
+    private volatile org.opensearch.analytics.settings.PlanFormat planFormat;
     private final PlannerSettings plannerSettings;
     private final IndexNameExpressionResolver indexNameExpressionResolver;
     private final AnalyticsSearchSlowLog analyticsSearchSlowLog;
@@ -149,6 +151,10 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
         this.preferMetadataDriver = AnalyticsPlugin.PREFER_METADATA_DRIVER.get(clusterService.getSettings());
         clusterService.getClusterSettings()
             .addSettingsUpdateConsumer(AnalyticsPlugin.PREFER_METADATA_DRIVER, v -> preferMetadataDriver = v);
+        // Stage-boundary plan format (df-proto migration D12). Default legacy; live-updatable.
+        this.planFormat = AnalyticsQuerySettings.PLAN_FORMAT.get(clusterService.getSettings());
+        clusterService.getClusterSettings()
+            .addSettingsUpdateConsumer(AnalyticsQuerySettings.PLAN_FORMAT, v -> planFormat = v);
         // Planner settings (oversampling factor + delegation block-list); self-registers update
         // consumers for live changes.
         this.plannerSettings = PlannerSettings.create(
@@ -250,6 +256,18 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
         // so the convertor runs once per stage and the wire request carries one PlanAlternative.
         PlanAlternativeSelector.selectAll(dag, capabilityRegistry, preferMetadataDriver);
         FragmentConversionDriver.convertAll(dag, capabilityRegistry);
+        // df-proto migration D12: when the plan format selects proto for reduce/coordinator
+        // stages, additionally finalize stages to DataFusion physical plans and attach the
+        // resulting planBytes. Legacy bytes + instructions remain on each stage, so mixed
+        // formats are safe — the request builder ships proto where planBytes is present and
+        // legacy otherwise. Failures here fall back to the legacy path (planBytes stays null).
+        if (planFormat.reduceStagesProto()) {
+            try {
+                StageConversionDriver.convertAll(dag, capabilityRegistry, planFormat.shardStagesProto());
+            } catch (RuntimeException e) {
+                logger.warn("[DefaultPlanExecutor] proto finalization failed; falling back to legacy format", e);
+            }
+        }
         final long planningTimeNanos = System.nanoTime() - planStartNanos;
         final long planningTimeMs = profile ? java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(planningTimeNanos) : 0;
         logger.debug("[DefaultPlanExecutor] QueryDAG:\n{}", dag);
