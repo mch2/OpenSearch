@@ -712,6 +712,40 @@ pub unsafe extern "C" fn df_finalize_query_plan(
     Ok(0)
 }
 
+/// Coordinator-side whole-plan lowering (whole-plan-lowering-spec.md §5, D12).
+/// Decodes a JSON `QueryPlanInput` from `req_ptr/req_len`, lowers the whole-query
+/// Substrait into one physical plan, cuts it at the `os_stage_boundary` barriers,
+/// and writes the JSON `QueryPlanOutput` into the caller-allocated
+/// `out_ptr/out_cap` buffer (byte count via `out_len`). Returns 0 on success; if
+/// the response exceeds `out_cap`, returns the required size negated-as-error so
+/// Java can retry with a larger buffer.
+#[ffm_safe]
+#[no_mangle]
+pub unsafe extern "C" fn df_plan_whole_query(
+    session_ptr: i64,
+    req_ptr: *const u8,
+    req_len: i64,
+    out_ptr: *mut u8,
+    out_cap: i64,
+    out_len: *mut i64,
+) -> i64 {
+    let mgr = get_rt_manager()?;
+    let req = slice::from_raw_parts(req_ptr, req_len as usize).to_vec();
+    let mgr_for_spawn = Arc::clone(&mgr);
+    let response = timed_block_on(&mgr.io_runtime, "plan_whole_query", async move {
+        let inner = async move { unsafe { api::plan_whole_query(session_ptr, &req) } };
+        match mgr_for_spawn.cpu_executor().spawn(inner).await {
+            Ok(r) => r,
+            Err(e) => Err(datafusion::error::DataFusionError::Execution(format!(
+                "plan_whole_query: CPU spawn failed: {e:?}"
+            ))),
+        }
+    })
+    .map_err(|e| e.to_string())?;
+    write_out_buffer(&response, out_ptr, out_cap, out_len, "plan_whole_query response")?;
+    Ok(0)
+}
+
 /// Data-node entry: execute a finalized stage plan (df-proto spec §5). Mirrors
 /// `df_execute_local_plan` but takes `datafusion-proto` `PhysicalPlanNode` bytes
 /// instead of Substrait and routes through `execute_stage_task`. Returns the

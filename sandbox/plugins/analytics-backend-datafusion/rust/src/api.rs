@@ -1667,6 +1667,34 @@ pub async unsafe fn execute_local_plan(
     Ok(Box::into_raw(Box::new(handle)) as i64)
 }
 
+/// Coordinator-side whole-plan lowering entry (whole-plan-lowering-spec.md §5, D12).
+///
+/// Decodes a JSON [`crate::whole_plan::QueryPlanInput`] (the whole-query Substrait
+/// plus per-scan metadata), lowers it into ONE physical plan, cuts it at the
+/// `os_stage_boundary` barriers, and returns a JSON
+/// [`crate::whole_plan::QueryPlanOutput`] of one entry per cut stage. Uses the
+/// given `LocalSession`'s `RuntimeEnv` so the lowering shares its object store /
+/// memory pool, but builds a dedicated whole-plan session (the stage-boundary
+/// query planner + serializer registry) internally.
+///
+/// # Safety
+/// `session_ptr` must be a valid, non-zero pointer returned by
+/// `create_local_session`.
+pub unsafe fn plan_whole_query(
+    session_ptr: i64,
+    request_json: &[u8],
+) -> Result<Vec<u8>, DataFusionError> {
+    let session = &*(session_ptr as *const LocalSession);
+    let input: crate::whole_plan::QueryPlanInput = serde_json::from_slice(request_json)
+        .map_err(|e| DataFusionError::Execution(format!("plan_whole_query: decode JSON input: {e}")))?;
+
+    let runtime_env = session.ctx().runtime_env();
+    let output = crate::whole_plan::plan_whole_query(&input, runtime_env.as_ref())?;
+
+    serde_json::to_vec(&output)
+        .map_err(|e| DataFusionError::Execution(format!("plan_whole_query: encode JSON output: {e}")))
+}
+
 /// Coordinator-side stage finalization entry (df-proto spec §5, D3).
 ///
 /// Decodes a [`crate::proto::FinalizeRequest`] (all stages + their `StageMeta`),

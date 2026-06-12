@@ -94,6 +94,7 @@ public final class NativeBridge {
     private static final MethodHandle REGISTER_PARTITION_STREAM;
     private static final MethodHandle EXECUTE_LOCAL_PLAN;
     private static final MethodHandle FINALIZE_QUERY_PLAN;
+    private static final MethodHandle PLAN_WHOLE_QUERY;
     private static final MethodHandle EXECUTE_STAGE_TASK;
     private static final MethodHandle SENDER_SEND;
     private static final MethodHandle SENDER_CLOSE;
@@ -322,6 +323,20 @@ public final class NativeBridge {
         // i64 df_finalize_query_plan(session_ptr, req_ptr, req_len, out_ptr, out_cap, out_len)
         FINALIZE_QUERY_PLAN = linker.downcallHandle(
             lib.find("df_finalize_query_plan").orElseThrow(),
+            FunctionDescriptor.of(
+                ValueLayout.JAVA_LONG,
+                ValueLayout.JAVA_LONG,
+                ValueLayout.ADDRESS,
+                ValueLayout.JAVA_LONG,
+                ValueLayout.ADDRESS,
+                ValueLayout.JAVA_LONG,
+                ValueLayout.ADDRESS
+            )
+        );
+
+        // i64 df_plan_whole_query(session_ptr, req_ptr, req_len, out_ptr, out_cap, out_len)
+        PLAN_WHOLE_QUERY = linker.downcallHandle(
+            lib.find("df_plan_whole_query").orElseThrow(),
             FunctionDescriptor.of(
                 ValueLayout.JAVA_LONG,
                 ValueLayout.JAVA_LONG,
@@ -1219,6 +1234,37 @@ public final class NativeBridge {
                 sessionPtr,
                 call.bytes(requestBytes),
                 (long) requestBytes.length,
+                out.data(),
+                (long) out.capacity(),
+                out.lenOut()
+            );
+            return out.toByteArray();
+        }
+    }
+
+    /**
+     * Coordinator-side whole-plan lowering (whole-plan-lowering-spec.md §5, D12). Encodes a JSON
+     * {@code QueryPlanInput} ({@code {query_id, substrait_b64, scans:[...]}}) into {@code requestJson};
+     * the native side lowers the whole-query Substrait into one DataFusion physical plan, cuts it at
+     * the {@code os_stage_boundary} barriers Calcite placed, and returns a JSON {@code QueryPlanOutput}
+     * ({@code {stages:[{boundary_id, child_boundary_ids, plan_bytes_b64, output_schema_ipc_b64}]}}) —
+     * one finalized DataFusion physical plan per stage. Nothing is re-derived or schema-reconciled:
+     * boundary schemas are read off the one tree at the cut point.
+     *
+     * @param sessionPtr  pointer returned by {@link #createLocalSession}
+     * @param requestJson UTF-8 JSON {@code QueryPlanInput}
+     * @return UTF-8 JSON {@code QueryPlanOutput}
+     */
+    public static byte[] planWholeQuery(long sessionPtr, byte[] requestJson) {
+        NativeHandle.validatePointer(sessionPtr, "session");
+        try (var call = new NativeCall()) {
+            // 1 MiB initial out-buffer; finalized plans are small relative to data.
+            var out = call.outBuffer(1024 * 1024);
+            call.invoke(
+                PLAN_WHOLE_QUERY,
+                sessionPtr,
+                call.bytes(requestJson),
+                (long) requestJson.length,
                 out.data(),
                 (long) out.capacity(),
                 out.lenOut()
