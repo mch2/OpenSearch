@@ -65,6 +65,7 @@ use crate::custom_cache_manager::CustomCacheManager;
 use crate::local_executor::LocalSession;
 use crate::memory::{DynamicLimitHandle, DynamicLimitPool};
 use crate::partition_stream::PartitionStreamSender;
+use tokio::sync::mpsc::error::TrySendError;
 use crate::query_tracker::{self, QueryTrackingContext};
 use crate::runtime_manager::RuntimeManager;
 use crate::shard_table_provider::{ShardTableConfig, ShardTableProvider};
@@ -1828,29 +1829,47 @@ pub unsafe fn execute_local_prepared_plan(
     Ok(Box::into_raw(Box::new(handle)) as i64)
 }
 
-/// Imports an Arrow C Data batch and pushes it through the partition
+/// Outcome of initiating a send. `Sent` and `ReceiverDropped` resolve
+/// synchronously (no upcall follows); `Pending` means the channel was full and
+/// the send completes later via the completion upcall under the given call id.
+#[must_use]
+pub enum SendInitOutcome {
+    Sent,
+    ReceiverDropped,
+    Pending,
+}
+
+/// Imports an Arrow C Data batch and initiates a push through the partition
 /// stream's mpsc. The Rust side takes ownership of the
-/// `FFI_ArrowArray` / `FFI_ArrowSchema` structs on success — the Java side
-/// must not release them after a successful send. On error ownership is
-/// released back to Rust's drop impls (the imported structs go out of scope
-/// without being forgotten).
+/// `FFI_ArrowArray` / `FFI_ArrowSchema` structs at **initiation** (the
+/// `from_raw` / `from_ffi` consumption below is byte-for-byte the historical
+/// blocking path) — the Java side must not release them after a non-error
+/// return.
 ///
-/// The `io_handle` is the Tokio handle used to drive the blocking send;
-/// typically the `io_runtime` handle from the global `RuntimeManager`.
+/// Fast path: when the channel has capacity the batch is sent inline and the
+/// function returns [`SendInitOutcome::Sent`] with no spawn and no upcall. When
+/// the channel is full the inner `mpsc::Sender` is **cloned** into a spawned
+/// task that awaits capacity and fires the completion upcall under `call_id`;
+/// the function returns [`SendInitOutcome::Pending`]. Cloning (rather than
+/// borrowing the boxed sender across the `await`) ends the borrow before this
+/// function returns, which is what makes `sender_close` safe against an
+/// in-flight send.
 ///
 /// # Safety
 /// - `sender_ptr` must be a valid, non-zero pointer returned by
 ///   `register_partition_stream`.
 /// - `array_ptr` must point to a populated `FFI_ArrowArray` struct owned by
-///   the caller; ownership transfers to Rust on success.
+///   the caller; ownership transfers to Rust on initiation.
 /// - `schema_ptr` must point to a populated `FFI_ArrowSchema` struct owned
-///   by the caller; ownership transfers to Rust on success.
-pub unsafe fn sender_send(
+///   by the caller; ownership transfers to Rust on initiation.
+pub unsafe fn sender_send_async(
     sender_ptr: i64,
     array_ptr: i64,
     schema_ptr: i64,
-    io_handle: &tokio::runtime::Handle,
-) -> Result<crate::partition_stream::SendOutcome, DataFusionError> {
+    mgr: &Arc<crate::runtime_manager::RuntimeManager>,
+    cb: crate::completion::OnNativeCompleteFn,
+    call_id: i64,
+) -> Result<SendInitOutcome, DataFusionError> {
     let sender = &*(sender_ptr as *const PartitionStreamSender);
 
     // Take ownership of the Java-allocated FFI structs. `from_raw` reads
@@ -1871,10 +1890,27 @@ pub unsafe fn sender_send(
     array_data.align_buffers();
 
     let struct_array = StructArray::from(array_data);
-    // Zero-copy: from_ffi BORROWS the Java buffers, keeping them alive until DataFusion drops the
-    // batch. stream_close's teardown barrier releases that borrow before the allocator closes.
-    let borrowed_batch = RecordBatch::from(struct_array);
-    Ok(sender.send_blocking(Ok(borrowed_batch), io_handle))
+    let batch = RecordBatch::from(struct_array);
+
+    match sender.try_send(Ok(batch)) {
+        Ok(()) => Ok(SendInitOutcome::Sent),
+        Err(TrySendError::Closed(_)) => Ok(SendInitOutcome::ReceiverDropped),
+        Err(TrySendError::Full(batch)) => {
+            // KEY OWNERSHIP MOVE: clone the mpsc::Sender into the task instead of
+            // borrowing the boxed PartitionStreamSender across the await. The
+            // borrow ends HERE, before this function returns — which is what makes
+            // sender_close safe against in-flight sends.
+            let tx = sender.clone_tx();
+            mgr.io_runtime.spawn(async move {
+                let value = match tx.send(batch).await {
+                    Ok(()) => 0,                                  // Sent
+                    Err(_) => crate::ffm::SENDER_SEND_RECEIVER_DROPPED, // benign
+                };
+                crate::completion::complete(cb, call_id, Ok(value), /*owned_batch=*/ false);
+            });
+            Ok(SendInitOutcome::Pending)
+        }
+    }
 }
 
 /// Closes a partition stream sender. Dropping the sender closes the mpsc,
@@ -2458,6 +2494,106 @@ mod tests {
         // Restore the default so test ordering can't leak state into other tests.
         set_reduce_target_partitions(4);
         assert_eq!(get_reduce_target_partitions(), 4);
+    }
+
+    // ── sender_send_async: fast-path vs full-channel deferral ─────────────────
+
+    use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering as AtomicOrdering};
+
+    static SEND_UPCALLS: AtomicUsize = AtomicUsize::new(0);
+    static SEND_LAST_VALUE: AtomicI64 = AtomicI64::new(-1);
+
+    /// Test completion callback for sender_send_async: counts upcalls and records the
+    /// last delivered value. Send completions are never owned batches, so consumed=1.
+    unsafe extern "C" fn counting_complete(
+        _call_id: i64,
+        value: i64,
+        _err_ptr: *const u8,
+        err_len: i64,
+    ) -> i32 {
+        SEND_UPCALLS.fetch_add(1, AtomicOrdering::SeqCst);
+        if err_len == 0 {
+            SEND_LAST_VALUE.store(value, AtomicOrdering::SeqCst);
+        }
+        1
+    }
+
+    fn i64_send_batch(schema: &arrow_schema::SchemaRef, v: i64) -> RecordBatch {
+        RecordBatch::try_new(Arc::clone(schema), vec![Arc::new(Int64Array::from(vec![v]))]).unwrap()
+    }
+
+    fn export_ptrs(batch: RecordBatch) -> (i64, i64) {
+        let schema = batch.schema();
+        let ffi_schema = FFI_ArrowSchema::try_from(schema.as_ref()).unwrap();
+        let struct_array: StructArray = batch.into();
+        let ffi_array = FFI_ArrowArray::new(&struct_array.into_data());
+        (
+            Box::into_raw(Box::new(ffi_array)) as i64,
+            Box::into_raw(Box::new(ffi_schema)) as i64,
+        )
+    }
+
+    #[test]
+    fn sender_send_async_fast_path_then_full_defers() {
+        let schema: arrow_schema::SchemaRef =
+            Arc::new(Schema::new(vec![Field::new("x", arrow_schema::DataType::Int64, false)]));
+        let (sender, _receiver) = crate::partition_stream::channel(Arc::clone(&schema));
+        let sender_ptr = Box::into_raw(Box::new(sender)) as i64;
+        let mgr = Arc::new(crate::runtime_manager::RuntimeManager::new(1, 1.5, 1.5));
+
+        SEND_UPCALLS.store(0, AtomicOrdering::SeqCst);
+
+        // Channel capacity is 4: the first four sends take the fast path (no upcall).
+        for i in 0..4 {
+            let (a, s) = export_ptrs(i64_send_batch(&schema, i));
+            let outcome = unsafe {
+                sender_send_async(sender_ptr, a, s, &mgr, counting_complete, i)
+            }
+            .expect("send initiates");
+            assert!(matches!(outcome, SendInitOutcome::Sent), "send {i} should be Sent");
+        }
+        assert_eq!(
+            SEND_UPCALLS.load(AtomicOrdering::SeqCst),
+            0,
+            "fast-path sends must not fire upcalls"
+        );
+
+        // Fifth send finds the channel full → deferred on the IO runtime.
+        let (a, s) = export_ptrs(i64_send_batch(&schema, 99));
+        let outcome = unsafe {
+            sender_send_async(sender_ptr, a, s, &mgr, counting_complete, 99)
+        }
+        .expect("send initiates");
+        assert!(matches!(outcome, SendInitOutcome::Pending), "full channel should defer");
+
+        // _receiver still alive but not draining: the spawned task is parked on capacity.
+        // Drain one batch so the deferred send completes, then await its upcall.
+        {
+            let mut receiver = _receiver;
+            mgr.io_runtime.block_on(async {
+                use futures::StreamExt;
+                let _ = receiver.next().await; // free one capacity slot
+                // Give the deferred send task a moment to complete the upcall.
+                for _ in 0..100 {
+                    if SEND_UPCALLS.load(AtomicOrdering::SeqCst) > 0 {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            });
+        }
+        assert_eq!(
+            SEND_UPCALLS.load(AtomicOrdering::SeqCst),
+            1,
+            "the deferred send must fire exactly one completion"
+        );
+        assert_eq!(
+            SEND_LAST_VALUE.load(AtomicOrdering::SeqCst),
+            0,
+            "deferred send completes as Sent (value 0)"
+        );
+
+        unsafe { sender_close(sender_ptr) };
     }
 }
 
