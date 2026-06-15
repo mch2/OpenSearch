@@ -1649,6 +1649,28 @@ pub(crate) fn base_schema_for_table(plan: &substrait::proto::Plan, table_name: &
     None
 }
 
+/// Resolves the Arrow SCAN schema (the columns a ReadRel reads, e.g. `SearchPhrase`) for
+/// `table_name` from the substrait plan's `base_schema`. Used by the empty-shard guards to
+/// register a zero-row MemTable that the plan's scan resolves against — distinct from the plan's
+/// OUTPUT schema (aggregate result columns). `ctx` supplies the consumer's session state.
+pub(crate) fn scan_schema_from_plan(
+    plan: &substrait::proto::Plan,
+    table_name: &str,
+    ctx: &datafusion::prelude::SessionContext,
+) -> Result<arrow::datatypes::SchemaRef, DataFusionError> {
+    use datafusion_substrait::extensions::Extensions;
+    use datafusion_substrait::logical_plan::consumer::{from_substrait_named_struct, DefaultSubstraitConsumer};
+    let base_schema = base_schema_for_table(plan, table_name).ok_or_else(|| {
+        DataFusionError::Execution(format!("no ReadRel base_schema for table '{}'", table_name))
+    })?;
+    let extensions = Extensions::default();
+    let session_state = ctx.state();
+    let consumer = DefaultSubstraitConsumer::new(&extensions, &session_state);
+    let df_schema = from_substrait_named_struct(&consumer, &base_schema)?;
+    let arrow_schema = Arc::new(df_schema.as_arrow().clone());
+    Ok(crate::schema_coerce::coerce_inferred_schema(arrow_schema))
+}
+
 // ---------------------------------------------------------------------------
 // Coordinator-reduce local execution API
 //

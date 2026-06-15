@@ -353,6 +353,48 @@ public class MultiIndexQueryShapesIT extends AnalyticsRestTestCase {
         }
     }
 
+    // ── Empty-index aggregation: a no-group-by aggregate over a shard with zero parquet
+    //    files must still emit exactly one grand-total row (count()=0, dc()=0, sum()=null) —
+    //    the same as DataFusion's ungrouped AggregateExec over empty input. The empty-shard
+    //    short-circuit in indexed_executor.rs replaces the whole plan (incl. the aggregate)
+    //    with an EmptyExec, dropping that row; count() escapes via the Lucene metadata
+    //    fast-path, but datafusion-only aggregates (dc/sum/avg/max) return zero rows. ──
+
+    public void testEmptyIndexCountEmitsZeroRow() throws IOException {
+        String empty = "empty_agg_count";
+        createParquetIndex(empty, "{\"properties\":{\"SearchPhrase\":{\"type\":\"keyword\"}}}");
+        // no bulk(): zero docs, zero parquet files
+        assertEquals("count() over empty index is 0", 0L, singleCount("source=" + empty + " | stats count() as c"));
+    }
+
+    public void testEmptyIndexDistinctCountEmitsZeroRow() throws IOException {
+        String empty = "empty_agg_dc";
+        createParquetIndex(empty, "{\"properties\":{\"SearchPhrase\":{\"type\":\"keyword\"}}}");
+        // dc() is datafusion-only — must still emit one row with 0, not zero rows.
+        assertEquals("dc() over empty index is 0", 0L, singleCount("source=" + empty + " | stats dc(SearchPhrase) as d"));
+    }
+
+    public void testEmptyIndexSumEmitsOneNullRow() throws IOException {
+        String empty = "empty_agg_sum";
+        createParquetIndex(empty, "{\"properties\":{\"val\":{\"type\":\"long\"}}}");
+        Map<String, Object> body = executePpl("source=" + empty + " | stats sum(val) as s");
+        @SuppressWarnings("unchecked")
+        List<List<Object>> rows = (List<List<Object>>) body.get("datarows");
+        assertEquals("sum() over empty index must emit exactly one row", 1, rows.size());
+        assertNull("sum() over empty index is null", rows.get(0).get(0));
+    }
+
+    public void testMultiIndexDistinctCountWithEmptyMember() throws IOException {
+        String a = "empty_member_a";
+        String b = "empty_member_b";
+        createParquetIndex(a, "{\"properties\":{\"SearchPhrase\":{\"type\":\"keyword\"}}}");
+        createParquetIndex(b, "{\"properties\":{\"SearchPhrase\":{\"type\":\"keyword\"}}}");
+        bulk(a, "{\"SearchPhrase\":\"alpha\"}\n{\"SearchPhrase\":\"beta\"}\n");
+        // b left empty (zero parquet files) — same mapping, only docs differ.
+        long d = singleCount("source=" + a + "," + b + " | stats dc(SearchPhrase) as d");
+        assertEquals("dc() across populated + empty member counts only real values", 2L, d);
+    }
+
     private static void assertContains(String haystack, String needle) {
         assertTrue("expected to contain [" + needle + "] but was: " + haystack, haystack.contains(needle));
     }

@@ -98,6 +98,53 @@ pub async fn execute_query(
     crate::udf::register_all(&ctx);
     crate::udaf::register_all(&ctx);
 
+    // Empty shard: zero parquet files. The non-empty path below calls infer_schema, which errors
+    // on zero files. Register the table provider first (it carries the scan schema), then run the
+    // plan over a zero-row MemTable so an ungrouped aggregate (dc/sum/avg/max) emits its required
+    // single grand-total row (dc()=0, sum()=null, …) instead of zero rows.
+    //
+    // NOTE: this `execute_query` is the deprecated benchmark/non-decomposed path. Production
+    // single-index queries go through `execute_with_context` and the indexed path through
+    // `execute_indexed_with_context` — both fixed with the provider-schema approach and covered
+    // by MultiIndexQueryShapesIT. Here we resolve the scan schema from the plan's ReadRel
+    // base_schema (no provider is registered yet at this point).
+    if object_metas.is_empty() {
+        let substrait_plan = Plan::decode(plan_bytes.as_slice()).map_err(|e| {
+            DataFusionError::Execution(format!("Failed to decode Substrait: {}", e))
+        })?;
+        let scan_name = crate::api::first_named_table_name(plan_bytes.as_slice())
+            .unwrap_or_else(|| table_name.clone());
+        let plan_schema = crate::api::scan_schema_from_plan(&substrait_plan, &scan_name, &ctx)
+            .map_err(|e| DataFusionError::Execution(format!("empty shard: scan schema from plan: {}", e)))?;
+        let empty_table =
+            datafusion::datasource::MemTable::try_new(Arc::clone(&plan_schema), vec![vec![]])?;
+        ctx.register_table(&scan_name, Arc::new(empty_table))?;
+
+        let logical_plan = from_substrait_plan(&ctx.state(), &substrait_plan).await?;
+        let dataframe = ctx.execute_logical_plan(logical_plan).await?;
+        let physical_plan = dataframe.create_physical_plan().await?;
+        let target_schema = crate::schema_coerce::coerce_inferred_schema(physical_plan.schema());
+        let physical_plan = crate::relabel_exec::wrap_if_relabel_needed(physical_plan, target_schema)?;
+        let df_stream = execute_stream(physical_plan, ctx.task_ctx()).map_err(|e| {
+            error!("execute_query: failed to create empty-shard stream: {}", e);
+            e
+        })?;
+        let (cross_rt_stream, abort_handle, _task_done) =
+            CrossRtStream::new_with_df_error_stream_cancellable(df_stream, cpu_executor);
+        if let Some(h) = abort_handle {
+            crate::query_tracker::set_abort_handle(context_id, h);
+        }
+        let cross_rt_stream = match phantom_corrector {
+            Some(corrector) => cross_rt_stream.with_phantom_corrector(corrector),
+            None => cross_rt_stream,
+        };
+        let wrapped = datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
+            cross_rt_stream.schema(),
+            cross_rt_stream,
+        );
+        return Ok(Box::into_raw(Box::new(wrapped)) as i64);
+    }
+
     // Register table provider based on strategy.
     //
     // Note: api::execute_query only routes to this function when the plan does NOT
@@ -245,6 +292,64 @@ pub async fn execute_with_context(
 
     let query_strategy = handle.query_config.query_strategy;
 
+    // Empty shard (zero parquet files): handle FIRST, before the strategy branch below runs
+    // infer_schema (which can't infer from zero files) or registers a ShardTableProvider. The
+    // plan must still run over empty input so a no-group-by aggregate emits its single
+    // grand-total row (count()=0, dc()=0, sum()=null); the old EmptyExec short-circuit dropped
+    // that row, so dc()/sum()/avg()/max() over an empty shard returned zero rows. Register a
+    // zero-row MemTable (plan input schema) for the scan and run the real plan.
+    if handle.object_metas.is_empty() {
+        let substrait_plan = Plan::decode(plan_bytes).map_err(|e| {
+            DataFusionError::Execution(format!("Failed to decode Substrait: {}", e))
+        })?;
+        // Replace the registered table with a zero-row MemTable carrying the SAME SCAN schema —
+        // the columns the substrait plan reads (e.g. `val`), NOT the plan's OUTPUT schema. The
+        // table is registered under the plan's NamedTable name (alias/pattern for multi-index,
+        // concrete name otherwise), resolved via first_named_table_name — using handle.table_name
+        // fails on multi-index aliases ("No table named ..."), and logical_plan.schema() would be
+        // the aggregate's output columns (scan fails "No field named <scan col>").
+        let register_name = crate::api::first_named_table_name(plan_bytes)
+            .unwrap_or_else(|| handle.table_name.clone());
+        let scan_schema: arrow::datatypes::SchemaRef = handle.ctx
+            .table_provider(register_name.as_str())
+            .await
+            .map_err(|e| DataFusionError::Execution(format!("empty shard: table provider lookup '{}': {}", register_name, e)))?
+            .schema();
+        handle.ctx.deregister_table(register_name.as_str())?;
+        let empty_table =
+            datafusion::datasource::MemTable::try_new(Arc::clone(&scan_schema), vec![vec![]])?;
+        handle.ctx.register_table(register_name.as_str(), Arc::new(empty_table))?;
+
+        let logical_plan = from_substrait_plan(&handle.ctx.state(), &substrait_plan).await?;
+        let dataframe = handle.ctx.execute_logical_plan(logical_plan).await?;
+        let physical_plan = dataframe.create_physical_plan().await?;
+        let target_schema = crate::schema_coerce::coerce_inferred_schema(physical_plan.schema());
+        let physical_plan = crate::relabel_exec::wrap_if_relabel_needed(physical_plan, target_schema)?;
+        let df_stream = execute_stream(physical_plan, handle.ctx.task_ctx()).map_err(|e| {
+            error!("execute_with_context: failed to create empty-shard stream: {}", e);
+            e
+        })?;
+        let (cross_rt_stream, abort_handle, _task_done) =
+            CrossRtStream::new_with_df_error_stream_cancellable(df_stream, cpu_executor);
+        if let Some(h) = abort_handle {
+            crate::query_tracker::set_abort_handle(context_id, h);
+        }
+        let wrapped = datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
+            cross_rt_stream.schema(),
+            cross_rt_stream,
+        );
+        // Wrap in a QueryStreamHandle exactly like the normal exit below — the FFM layer treats
+        // the returned pointer as a *QueryStreamHandle, so returning a bare stream pointer here
+        // would make stream_get_schema read the wrong struct and segfault.
+        let stream_handle = crate::api::QueryStreamHandle::with_session_context(
+            wrapped,
+            handle.query_context,
+            handle.ctx,
+            Some(permit),
+        );
+        return Ok(Box::into_raw(Box::new(stream_handle)) as i64);
+    }
+
     // If ListingTable strategy: replace the default ListingTable with ShardTableProvider
     // that adds row_base partition column for ProjectRowIdOptimizer.
     // Also register the ProjectRowIdAnalyzer to ensure __row_id__ survives logical optimization.
@@ -316,32 +421,6 @@ pub async fn execute_with_context(
         let logical_plan = from_substrait_plan(&handle.ctx.state(), &substrait_plan).await?;
         log_debug!("DataFusion logical plan:\n{}", logical_plan.display_indent());
 
-        // Empty shard: skip physical planning (ParquetExec errors on zero files)
-        // and emit an EmptyExec stream with the logical plan's output schema.
-        if handle.object_metas.is_empty() {
-            use datafusion::physical_plan::empty::EmptyExec;
-            use datafusion::physical_plan::ExecutionPlan;
-            let plan_schema: arrow::datatypes::SchemaRef =
-                Arc::new(logical_plan.schema().as_arrow().clone());
-            let plan_schema =
-                crate::schema_coerce::coerce_inferred_schema(plan_schema);
-            let empty_exec = EmptyExec::new(Arc::clone(&plan_schema));
-            let df_stream = empty_exec.execute(0, handle.ctx.task_ctx()).map_err(|e| {
-                error!("execute_with_context: failed to create empty stream: {}", e);
-                e
-            })?;
-
-            let (cross_rt_stream, abort_handle, _task_done) =
-                CrossRtStream::new_with_df_error_stream_cancellable(df_stream, cpu_executor);
-            if let Some(h) = abort_handle {
-                crate::query_tracker::set_abort_handle(context_id, h);
-            }
-            let wrapped = datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
-                cross_rt_stream.schema(),
-                cross_rt_stream,
-            );
-            return Ok::<(i64, Option<Arc<dyn datafusion::physical_plan::ExecutionPlan>>), DataFusionError>((Box::into_raw(Box::new(wrapped)) as i64, None));
-        }
 
         let dataframe = handle.ctx.execute_logical_plan(logical_plan).await?;
         // create_physical_plan runs all registered physical optimizer rules including

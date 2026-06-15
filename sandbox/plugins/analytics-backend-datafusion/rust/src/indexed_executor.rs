@@ -739,20 +739,60 @@ async unsafe fn execute_indexed_with_context_inner(
     // spawning on the CPU runtime, so the Java search thread blocks at the
     // gate when it is full — creating backpressure at the Java threadpool level.
 
-    // Empty shard: skip build_segments (errors on zero files) and emit an
-    // empty stream. Mirrors the guard in query_executor::execute_with_context.
+    // Empty shard: zero parquet files, so build_segments can't run (it errors on zero
+    // files). But we must still execute the REAL plan over empty input — a no-group-by
+    // aggregate emits exactly one grand-total row (count()=0, dc()=0, sum()=null) even on
+    // empty input, and in engine-native-merge that row must carry the Partial-mode schema
+    // (e.g. Binary HLL state for dc()) so it reduces against populated shards. Replacing the
+    // plan with an EmptyExec dropped both: the aggregate's grand-total row AND the
+    // aggregate_mode stripping, so empty members emitted zero rows (single-index) or a
+    // mode-mismatched batch that broke the coordinator reduce (multi-index). Register a
+    // zero-row MemTable for the scan and run the full plan instead.
+    // Mirrors the guard in query_executor::execute_with_context.
     if handle.object_metas.is_empty() {
-        use datafusion::physical_plan::empty::EmptyExec;
-        use datafusion::physical_plan::ExecutionPlan;
         let context_id_early = handle.query_context.context_id();
+        let aggregate_mode = handle.aggregate_mode;
+        let table_name = handle.table_name.clone();
+        let ctx = handle.ctx;
+
         let plan = Plan::decode(substrait_bytes.as_slice())
             .map_err(|e| DataFusionError::Execution(format!("decode substrait: {}", e)))?;
-        let logical_plan = from_substrait_plan(&handle.ctx.state(), &plan).await?;
-        let plan_schema: arrow::datatypes::SchemaRef =
-            Arc::new(logical_plan.schema().as_arrow().clone());
-        let plan_schema = crate::schema_coerce::coerce_inferred_schema(plan_schema);
-        let empty_exec = EmptyExec::new(Arc::clone(&plan_schema));
-        let df_stream = empty_exec.execute(0, handle.ctx.task_ctx())?;
+        // Replace the registered ListingTable (which would error in build_segments on zero
+        // files) with a zero-row MemTable carrying the SAME SCAN schema — i.e. the columns the
+        // substrait plan expects to read (e.g. SearchPhrase), NOT the plan's output schema.
+        // The table is registered under the plan's NamedTable name (an alias/pattern for
+        // multi-index, the concrete name otherwise) — NOT necessarily `table_name`. Resolve it
+        // via first_named_table_name so the lookup + re-registration target the right table;
+        // using logical_plan.schema() would give the aggregate's OUTPUT columns (scan fails with
+        // "No field named <scan col>"), and using `table_name` fails on multi-index aliases
+        // with "No table named ...".
+        let register_name = crate::api::first_named_table_name(substrait_bytes.as_slice())
+            .unwrap_or_else(|| table_name.clone());
+        let scan_schema: arrow::datatypes::SchemaRef = ctx
+            .table_provider(register_name.as_str())
+            .await
+            .map_err(|e| DataFusionError::Execution(format!("empty shard: table provider lookup '{}': {}", register_name, e)))?
+            .schema();
+        ctx.deregister_table(register_name.as_str())?;
+        let empty_table = datafusion::datasource::MemTable::try_new(Arc::clone(&scan_schema), vec![vec![]])?;
+        ctx.register_table(register_name.as_str(), Arc::new(empty_table))?;
+
+        // Decode against the empty table, then build + execute the physical plan exactly as the
+        // non-empty path does, including aggregate_mode stripping so empty members emit
+        // Partial-mode state that matches populated shards.
+        let logical_plan = from_substrait_plan(&ctx.state(), &plan).await?;
+        let dataframe = ctx.execute_logical_plan(logical_plan).await?;
+        let physical_plan = dataframe.create_physical_plan().await?;
+        let physical_plan = if aggregate_mode != crate::agg_mode::Mode::Default {
+            crate::agg_mode::apply_aggregate_mode(physical_plan, aggregate_mode)?
+        } else {
+            physical_plan
+        };
+        let target_schema = crate::schema_coerce::coerce_inferred_schema(physical_plan.schema());
+        let physical_plan = crate::relabel_exec::wrap_if_relabel_needed(physical_plan, target_schema)?;
+        let df_stream = execute_stream(physical_plan, ctx.task_ctx())
+            .map_err(|e| DataFusionError::Execution(format!("execute_stream (empty shard): {}", e)))?;
+
         let (cross_rt_stream, abort_handle, _task_done) =
             CrossRtStream::new_with_df_error_stream_cancellable(df_stream, cpu_executor);
         if let Some(h) = abort_handle {
@@ -765,7 +805,7 @@ async unsafe fn execute_indexed_with_context_inner(
         let stream_handle = crate::api::QueryStreamHandle::with_session_context(
             wrapped,
             handle.query_context,
-            handle.ctx,
+            ctx,
             Some(permit),
         );
         return Ok(Box::into_raw(Box::new(stream_handle)) as i64);
