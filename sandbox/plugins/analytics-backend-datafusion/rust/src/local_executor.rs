@@ -191,8 +191,44 @@ impl LocalSession {
         let target_schema = crate::schema_coerce::coerce_inferred_schema(physical_plan.schema());
         let physical_plan = crate::relabel_exec::wrap_if_relabel_needed(physical_plan, target_schema)?;
         log_debug!("DataFusion physical plan:\n{}", displayable(physical_plan.as_ref()).indent(true));
-        datafusion::physical_plan::execute_stream(physical_plan, self.ctx.task_ctx())
-            .map_err(|e| DataFusionError::Execution(format!("execute_substrait: {}", e)))
+        let (stream, _plan) = self.execute_substrait_with_plan_inner(physical_plan)?;
+        Ok(stream)
+    }
+
+    /// Like [`Self::execute_substrait`] but also returns the physical plan `Arc` so the caller
+    /// can stash it on the stream handle for post-drain EXPLAIN ANALYZE (metrics are only
+    /// populated once the stream is drained). The plan shares the same `ExecutionPlanMetricsSet`
+    /// as the executing stream, so its metrics fill in as the stream runs.
+    pub async fn execute_substrait_with_plan(
+        &self,
+        bytes: &[u8],
+    ) -> Result<(SendableRecordBatchStream, Arc<dyn datafusion::physical_plan::ExecutionPlan>), DataFusionError> {
+        let plan = Plan::decode(bytes).map_err(|e| {
+            DataFusionError::Execution(format!("Failed to decode Substrait plan: {}", e))
+        })?;
+        let logical_plan = from_substrait_plan(&self.ctx.state(), &plan).await?;
+        log_debug!("DataFusion logical plan:\n{}", logical_plan.display_indent());
+        let dataframe = self.ctx.execute_logical_plan(logical_plan).await?;
+        let physical_plan = dataframe.create_physical_plan().await?;
+        let target_schema = crate::schema_coerce::coerce_inferred_schema(physical_plan.schema());
+        let physical_plan = crate::relabel_exec::wrap_if_relabel_needed(physical_plan, target_schema)?;
+        log_debug!("DataFusion physical plan:\n{}", displayable(physical_plan.as_ref()).indent(true));
+        self.execute_substrait_with_plan_inner(physical_plan)
+    }
+
+    fn execute_substrait_with_plan_inner(
+        &self,
+        physical_plan: Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+    ) -> Result<(SendableRecordBatchStream, Arc<dyn datafusion::physical_plan::ExecutionPlan>), DataFusionError> {
+        let stream = datafusion::physical_plan::execute_stream(Arc::clone(&physical_plan), self.ctx.task_ctx())
+            .map_err(|e| DataFusionError::Execution(format!("execute_substrait: {}", e)))?;
+        Ok((stream, physical_plan))
+    }
+
+    /// The prepared physical plan, if one was set via [`Self::prepare_final_plan`]. Used by the
+    /// bridge to stash it on the stream handle for post-drain EXPLAIN ANALYZE.
+    pub fn prepared_plan(&self) -> Option<Arc<dyn datafusion::physical_plan::ExecutionPlan>> {
+        self.prepared_plan.clone()
     }
 
     /// Returns the memory pool the session's `RuntimeEnv` was built with.

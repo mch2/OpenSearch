@@ -160,6 +160,27 @@ impl QueryStreamHandle {
         }
     }
 
+    /// Coordinator-reduce variant: stashes the physical plan for post-drain EXPLAIN ANALYZE
+    /// without owning a SessionContext (the reduce `LocalSession` is kept alive by its own
+    /// raw pointer on the Java side, so no `_session_ctx` is needed here).
+    pub fn with_physical_plan_local(
+        stream: RecordBatchStreamAdapter<CrossRtStream>,
+        query_context: QueryTrackingContext,
+        permit: Option<tokio::sync::OwnedSemaphorePermit>,
+        plan: Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+    ) -> Self {
+        let has_views = Self::schema_has_views(&stream.schema());
+        Self {
+            stream,
+            _query_tracking_context: query_context,
+            _session_ctx: None,
+            has_views,
+            _concurrency_permit: permit,
+            physical_plan: Some(plan),
+            task_done: None,
+        }
+    }
+
     /// Returns execution metrics from ALL operators in the physical plan tree as JSON bytes.
     /// Walks the tree recursively, collecting metrics from every node.
     pub fn get_metrics_json(&self) -> Option<Vec<u8>> {
@@ -174,15 +195,27 @@ impl QueryStreamHandle {
 
     fn collect_metrics(plan: &dyn datafusion::physical_plan::ExecutionPlan, map: &mut serde_json::Map<String, serde_json::Value>) {
         if let Some(metrics) = plan.metrics() {
-            for m in metrics.iter() {
-                let name = m.value().name().to_string();
-                let value = m.value().as_usize() as i64;
-                // Later operators override earlier ones if same name — leaf (scan) metrics take priority
-                map.insert(name, serde_json::Value::Number(serde_json::Number::from(value)));
-            }
+            Self::merge_metrics_set(&metrics, map);
         }
         for child in plan.children() {
             Self::collect_metrics(child.as_ref(), map);
+        }
+    }
+
+    /// Merge one operator's metrics into `map`, summing each metric across its partitions —
+    /// the same aggregation EXPLAIN ANALYZE applies via `aggregate_by_name`. Without this, a
+    /// metric recorded per-partition (e.g. output_rows on a 4-partition scan) would be inserted
+    /// once per partition and the map would keep only the last partition's value, undercounting
+    /// by the partition factor. Later operators still override earlier ones for the same name
+    /// (leaf/scan metrics take priority), matching the original flat-map contract.
+    fn merge_metrics_set(
+        metrics: &datafusion::physical_plan::metrics::MetricsSet,
+        map: &mut serde_json::Map<String, serde_json::Value>,
+    ) {
+        for m in metrics.aggregate_by_name().iter() {
+            let name = m.value().name().to_string();
+            let value = m.value().as_usize() as i64;
+            map.insert(name, serde_json::Value::Number(serde_json::Number::from(value)));
         }
     }
 }
@@ -1282,6 +1315,16 @@ pub unsafe fn stream_close(stream_ptr: i64) {
         return;
     }
     let mut handle = Box::from_raw(stream_ptr as *mut QueryStreamHandle);
+    // EXPLAIN ANALYZE: the stream is fully drained by close time, so the plan's
+    // ExecutionPlanMetricsSet is now populated (output_rows, elapsed_compute, per-operator
+    // metrics). Logged here — not at build time — because metrics are zero until the stream runs.
+    // Read before the teardown barrier below drops the handle.
+    if let Some(plan) = handle.physical_plan.as_ref() {
+        native_bridge_common::log_debug!(
+            "EXPLAIN ANALYZE (post-drain):\n{}",
+            datafusion::physical_plan::display::DisplayableExecutionPlan::with_metrics(plan.as_ref()).indent(true)
+        );
+    }
     // Dropping the handle aborts the CPU task but does not wait for it; on the coordinator-reduce
     // path that task still holds Java-borrowed input batches. Wait for it to fully unwind (signal
     // fires once its batches drop) before returning, so the caller's allocator close is safe.
@@ -1761,10 +1804,10 @@ pub async unsafe fn execute_local_plan(
     // a `cancel_query(context_id)` call from Java interrupts even before the
     // first batch is produced (planning, from_substrait_plan, repartition
     // setup, etc. can all take non-trivial time on a wide reduce).
-    let df_stream = cancellation::cancellable(
+    let (df_stream, physical_plan) = cancellation::cancellable(
         token.as_ref(),
         context_id,
-        session.execute_substrait(substrait_bytes),
+        session.execute_substrait_with_plan(substrait_bytes),
     )
     .await
     .map_err(DataFusionError::Execution)?;
@@ -1780,8 +1823,11 @@ pub async unsafe fn execute_local_plan(
     }
     let wrapped = RecordBatchStreamAdapter::new(cross_rt_stream.schema(), cross_rt_stream);
 
-    // Attach the teardown signal so stream_close releases borrowed input batches before allocator close.
-    let handle = QueryStreamHandle::new(wrapped, query_context, permit).with_task_done(task_done);
+    // Stash the physical plan so stream_close can emit post-drain EXPLAIN ANALYZE for the
+    // COORDINATOR reduce fragment (mirrors the data-node execute_query path), and attach the
+    // teardown signal so stream_close releases borrowed input batches before allocator close.
+    let handle = QueryStreamHandle::with_physical_plan_local(wrapped, query_context, permit, physical_plan)
+        .with_task_done(task_done);
     Ok(Box::into_raw(Box::new(handle)) as i64)
 }
 
@@ -1816,6 +1862,7 @@ pub unsafe fn execute_local_prepared_plan(
     // context so those operators can register with the reactor.
     let _guard = manager.io_runtime.enter();
     let df_stream = session.execute_prepared()?;
+    let physical_plan = session.prepared_plan();
 
     let (cross_rt_stream, abort_handle, task_done) =
         CrossRtStream::new_with_df_error_stream_cancellable(df_stream, manager.cpu_executor());
@@ -1824,8 +1871,13 @@ pub unsafe fn execute_local_prepared_plan(
     }
     let wrapped = RecordBatchStreamAdapter::new(cross_rt_stream.schema(), cross_rt_stream);
 
-    // Same teardown signal as execute_local_plan.
-    let handle = QueryStreamHandle::new(wrapped, query_context, permit).with_task_done(task_done);
+    // Stash the prepared physical plan for post-drain EXPLAIN ANALYZE of the COORDINATOR
+    // final-aggregate reduce fragment, and attach the same teardown signal as execute_local_plan.
+    let handle = match physical_plan {
+        Some(plan) => QueryStreamHandle::with_physical_plan_local(wrapped, query_context, permit, plan),
+        None => QueryStreamHandle::new(wrapped, query_context, permit),
+    }
+    .with_task_done(task_done);
     Ok(Box::into_raw(Box::new(handle)) as i64)
 }
 
@@ -1951,6 +2003,29 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         predicate()
+    }
+
+    #[test]
+    fn collect_metrics_sums_same_metric_across_partitions() {
+        // A scan operator records one metric entry PER PARTITION. EXPLAIN ANALYZE renders the
+        // sum (via aggregate_by_name); the FragmentMetrics JSON must match. Build a MetricsSet
+        // with output_rows on two partitions (100 + 50) and assert the JSON reports 150, not
+        // whichever partition was visited last.
+        use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilder};
+
+        let set = ExecutionPlanMetricsSet::new();
+        MetricBuilder::new(&set).output_rows(0).add(100);
+        MetricBuilder::new(&set).output_rows(1).add(50);
+
+        let mut map = serde_json::Map::new();
+        QueryStreamHandle::merge_metrics_set(&set.clone_inner(), &mut map);
+
+        assert_eq!(
+            map.get("output_rows").and_then(|v| v.as_i64()),
+            Some(150),
+            "output_rows must be summed across partitions (100 + 50), got {:?}",
+            map.get("output_rows")
+        );
     }
 
     #[test]

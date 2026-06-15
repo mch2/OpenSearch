@@ -10,6 +10,8 @@ package org.opensearch.analytics.exec;
 
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.opensearch.analytics.backend.EngineResultBatch;
 import org.opensearch.analytics.exec.action.FetchByRowIdsAction;
@@ -53,6 +55,8 @@ import java.io.IOException;
  */
 @Singleton
 public class AnalyticsSearchTransportService {
+
+    private static final Logger logger = LogManager.getLogger(AnalyticsSearchTransportService.class);
 
     private final StreamTransportService transportService;
     private final ClusterService clusterService;
@@ -288,6 +292,14 @@ public class AnalyticsSearchTransportService {
                 // the cursor, not claimed roots).
                 FragmentExecutionArrowResponse last = null;
                 FragmentExecutionArrowResponse next = null;
+                // Per-shard receive accounting (coordinator side): counts the real data batches/rows
+                // that actually crossed the wire from this shard's fragment, excluding the 0-row
+                // profiling sentinel. Distinct from the data-node-emitted FragmentMetrics.
+                long batchesRecv = 0;
+                long rowsRecv = 0;
+                String recvLabel = (request instanceof FragmentExecutionRequest fer)
+                    ? "queryId=" + fer.getQueryId() + " stageId=" + fer.getStageId() + " shard=" + fer.getShardId()
+                    : actionName;
                 try {
                     last = stream.nextResponse();
                     while (last != null) {
@@ -296,7 +308,14 @@ public class AnalyticsSearchTransportService {
                             listener.onStreamComplete(last.getMetadata());
                             last.getRoot().close();
                             last = null;
+                            logger.debug("[CoordRecv] {} batches={} rows={} (ended on sentinel)", recvLabel, batchesRecv, rowsRecv);
                             return;
+                        }
+
+                        // Count this real data batch received from the shard.
+                        batchesRecv++;
+                        if (last.getRoot() != null) {
+                            rowsRecv += last.getRoot().getRowCount();
                         }
 
                         next = stream.nextResponse();
@@ -326,11 +345,13 @@ public class AnalyticsSearchTransportService {
                                 next = null;
                                 stream.cancel("reduce input satisfied (downstream consumer finished)", null);
                             }
+                            logger.debug("[CoordRecv] {} batches={} rows={}", recvLabel, batchesRecv, rowsRecv);
                             return;
                         }
                         last = next;
                         next = null;
                     }
+                    logger.debug("[CoordRecv] {} batches={} rows={} (stream drained)", recvLabel, batchesRecv, rowsRecv);
                 } catch (Exception e) {
                     listener.onFailure(e);
                 } finally {

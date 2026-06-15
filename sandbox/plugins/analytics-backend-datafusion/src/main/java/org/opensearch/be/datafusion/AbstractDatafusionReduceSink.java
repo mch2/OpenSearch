@@ -12,6 +12,8 @@ import org.apache.arrow.c.CDataDictionaryProvider;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.types.pojo.Schema;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.spi.CancellableExchangeSink;
 import org.opensearch.analytics.spi.ExchangeSinkContext;
 import org.opensearch.analytics.spi.ReducingExchangeSink;
@@ -44,6 +46,8 @@ import java.util.Map;
  * @opensearch.internal
  */
 abstract class AbstractDatafusionReduceSink implements ReducingExchangeSink, CancellableExchangeSink {
+
+    private static final Logger logger = LogManager.getLogger(AbstractDatafusionReduceSink.class);
 
     /** Single-input shortcut for the per-child table id; multi-input uses {@link #inputIdFor(int)}. */
     static final String INPUT_ID = "input-0";
@@ -160,24 +164,52 @@ abstract class AbstractDatafusionReduceSink implements ReducingExchangeSink, Can
      */
     protected final void drainOutputIntoDownstream(StreamHandle outStream) {
         BufferAllocator alloc = ctx.allocator();
+        // Coordinator-reduce drain profiling. Separates the three things that can bottleneck a
+        // reduce so we can tell them apart:
+        //   waitNanos  — time blocked in hasNext()/stream_next() waiting for the NEXT reduced batch
+        //                (this absorbs both shard-input arrival latency AND the reduce compute that
+        //                produces the batch, since the native stream is pulled lazily).
+        //   feedNanos  — time spent feeding the imported batch downstream (transfer/serialize).
+        //   batches/rows — output volume of the reduce, as it streams.
+        long drainStartNanos = System.nanoTime();
+        long waitNanos = 0;
+        long feedNanos = 0;
+        long batches = 0;
+        long rows = 0;
         try (CDataDictionaryProvider dictProvider = new CDataDictionaryProvider()) {
             DatafusionResultStream.BatchIterator it = new DatafusionResultStream.BatchIterator(outStream, alloc, dictProvider);
-            while (it.hasNext()) {
+            while (true) {
+                long t0 = System.nanoTime();
+                boolean hasNext = it.hasNext();
+                waitNanos += System.nanoTime() - t0;
+                if (!hasNext) {
+                    break;
+                }
                 // next() transfers ownership of the imported VSR to us. feed() takes ownership only
                 // on success; if it throws (e.g. the downstream sink was torn down on a concurrent
                 // cancel), the imported batch would otherwise leak in the per-query allocator —
                 // close it ourselves on the failure path.
                 VectorSchemaRoot batch = it.next().getArrowRoot();
+                batches++;
+                rows += batch.getRowCount();
                 boolean fed = false;
+                long f0 = System.nanoTime();
                 try {
                     ctx.downstream().feed(batch);
                     fed = true;
                 } finally {
+                    feedNanos += System.nanoTime() - f0;
                     if (!fed) {
                         batch.close();
                     }
                 }
             }
+        } finally {
+            long totalMs = (System.nanoTime() - drainStartNanos) / 1_000_000;
+            logger.debug(
+                "[ReduceDrain] taskId={} batches={} rows={} totalMs={} waitForBatchMs={} feedDownstreamMs={}",
+                ctx.taskId(), batches, rows, totalMs, waitNanos / 1_000_000, feedNanos / 1_000_000
+            );
         }
     }
 
