@@ -93,6 +93,9 @@ testClusters {
         if (p.equals("parquet-data-format") || p.equals("analytics-backend-datafusion")) {
           // Composite engine / DataFusion requires pluggable dataformat feature flag
           systemProperty 'opensearch.experimental.feature.pluggable.dataformat.enabled', 'true'
+          // DIAGNOSTIC (leak hunt): per-buffer allocation ledger so allocator.toVerboseString()
+          // names each outstanding buffer + its allocation stack. Remove after debugging.
+          systemProperty 'arrow.memory.debug.allocator', 'true'
           // Native lib path for DataFusion FFM bridge
           def nativeLibDir = new File(project(':sandbox:libs:dataformat-native').projectDir, 'rust/target/release').absolutePath
           systemProperty 'java.library.path', nativeLibDir

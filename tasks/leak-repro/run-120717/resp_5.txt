@@ -1,0 +1,8 @@
+{
+  "error": {
+    "reason": "Error occurred in OpenSearch engine: query cancelled",
+    "details": "TaskCancelledException[query cancelled]\nFor more details, please send request for Json format to see the raw response from OpenSearch engine.",
+    "type": "TaskCancelledException"
+  },
+  "status": 500
+}

@@ -243,6 +243,18 @@ public class AnalyticsSearchService implements AutoCloseable {
                 } catch (Exception e) {
                     // Query phase failed: no fetch will follow, so free the reader eagerly (no-op if already freed).
                     readerContextStore.freeContext(request.getQueryId(), shard.shardId());
+                    // DIAGNOSTIC (leak hunt): on failure, dump any outstanding buffers on the service
+                    // allocator with their allocation stacks (requires arrow.memory.debug.allocator).
+                    long outstanding = allocator.getAllocatedMemory();
+                    if (outstanding > 0) {
+                        LOGGER.warn(
+                            "[leak-diag] fragment failed query={} shard={} outstanding={}B\n{}",
+                            request.getQueryId(),
+                            shard.shardId(),
+                            outstanding,
+                            allocator.toVerboseString()
+                        );
+                    }
                     responseHandler.onFailure(e);
                 }
             });

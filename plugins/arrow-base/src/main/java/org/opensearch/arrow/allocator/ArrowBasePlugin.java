@@ -161,6 +161,24 @@ public class ArrowBasePlugin extends Plugin implements ExtensiblePlugin, ActionP
         Setting.Property.Dynamic
     );
 
+    /** Minimum guaranteed bytes for the coordinator reduce pool. Default is 2% of budget. */
+    public static final Setting<Long> REDUCE_MIN_SETTING = new Setting<>(
+        NativeAllocatorPoolConfig.SETTING_REDUCE_MIN,
+        s -> derivePoolMinDefault(s, 2),
+        s -> parseNonNegativeLong(s, NativeAllocatorPoolConfig.SETTING_REDUCE_MIN),
+        Setting.Property.NodeScope,
+        Setting.Property.Dynamic
+    );
+
+    /** Maximum bytes the coordinator reduce pool can allocate. Default is 5% of budget. */
+    public static final Setting<Long> REDUCE_MAX_SETTING = new Setting<>(
+        NativeAllocatorPoolConfig.SETTING_REDUCE_MAX,
+        s -> derivePoolMaxDefault(s, 5),
+        s -> parseNonNegativeLong(s, NativeAllocatorPoolConfig.SETTING_REDUCE_MAX),
+        Setting.Property.NodeScope,
+        Setting.Property.Dynamic
+    );
+
     // ─── Instance state ──────────────────────────────────────────────────────────
 
     private volatile ArrowNativeAllocator allocator;
@@ -207,6 +225,8 @@ public class ArrowBasePlugin extends Plugin implements ExtensiblePlugin, ActionP
             INGEST_MAX_SETTING,
             QUERY_MIN_SETTING,
             QUERY_MAX_SETTING,
+            REDUCE_MIN_SETTING,
+            REDUCE_MAX_SETTING,
             REBALANCE_INTERVAL_SETTING,
             REBALANCER_ENABLED_SETTING,
             PRESSURE_THRESHOLD_SETTING,
@@ -258,6 +278,7 @@ public class ArrowBasePlugin extends Plugin implements ExtensiblePlugin, ActionP
         validateMinMax(NativeAllocatorPoolConfig.POOL_FLIGHT, FLIGHT_MIN_SETTING.get(settings), FLIGHT_MAX_SETTING.get(settings));
         validateMinMax(NativeAllocatorPoolConfig.POOL_INGEST, INGEST_MIN_SETTING.get(settings), INGEST_MAX_SETTING.get(settings));
         validateMinMax(NativeAllocatorPoolConfig.POOL_QUERY, QUERY_MIN_SETTING.get(settings), QUERY_MAX_SETTING.get(settings));
+        validateMinMax(NativeAllocatorPoolConfig.POOL_REDUCE, REDUCE_MIN_SETTING.get(settings), REDUCE_MAX_SETTING.get(settings));
 
         // Create pools (always start at max)
         allocator.getOrCreatePool(
@@ -278,6 +299,12 @@ public class ArrowBasePlugin extends Plugin implements ExtensiblePlugin, ActionP
             QUERY_MAX_SETTING.get(settings),
             PoolGroup.SEARCH
         );
+        allocator.getOrCreatePool(
+            NativeAllocatorPoolConfig.POOL_REDUCE,
+            REDUCE_MIN_SETTING.get(settings),
+            REDUCE_MAX_SETTING.get(settings),
+            PoolGroup.SEARCH
+        );
 
         // Register dynamic setting consumers for min/max changes
         cs.addSettingsUpdateConsumer(FLIGHT_MIN_SETTING, newMin -> allocator.setPoolMin(NativeAllocatorPoolConfig.POOL_FLIGHT, newMin));
@@ -286,6 +313,8 @@ public class ArrowBasePlugin extends Plugin implements ExtensiblePlugin, ActionP
         cs.addSettingsUpdateConsumer(INGEST_MAX_SETTING, newMax -> allocator.setPoolLimit(NativeAllocatorPoolConfig.POOL_INGEST, newMax));
         cs.addSettingsUpdateConsumer(QUERY_MIN_SETTING, newMin -> allocator.setPoolMin(NativeAllocatorPoolConfig.POOL_QUERY, newMin));
         cs.addSettingsUpdateConsumer(QUERY_MAX_SETTING, newMax -> allocator.setPoolLimit(NativeAllocatorPoolConfig.POOL_QUERY, newMax));
+        cs.addSettingsUpdateConsumer(REDUCE_MIN_SETTING, newMin -> allocator.setPoolMin(NativeAllocatorPoolConfig.POOL_REDUCE, newMin));
+        cs.addSettingsUpdateConsumer(REDUCE_MAX_SETTING, newMax -> allocator.setPoolLimit(NativeAllocatorPoolConfig.POOL_REDUCE, newMax));
 
         // Register dynamic consumer for rebalancer enable/disable
         cs.addSettingsUpdateConsumer(REBALANCER_ENABLED_SETTING, enabled -> {

@@ -54,7 +54,8 @@ import java.io.IOException;
  *         <li>{@code POOL_FLIGHT} — transport-layer producers/consumers (arrow-flight-rpc and
  *             plugins built on top of {@code StreamTransportService}).</li>
  *         <li>{@code POOL_INGEST} — ingest-path producers (parquet-data-format VSR allocators).</li>
- *         <li>{@code POOL_QUERY} — query-execution producers (analytics-engine fragments and
+ *         <li>{@code POOL_QUERY} — data-node query-execution producers (analytics-engine shard fragments).</li>
+ *         <li>{@code POOL_REDUCE} — coordinator reduce-stage producers (analytics-engine
  *             coordinator-side intermediate batches).</li>
  *       </ul>
  *       All allocators must share the same root so zero-copy transfers pass Arrow's

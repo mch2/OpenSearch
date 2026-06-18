@@ -201,7 +201,7 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
         // it via the handle without taking on close responsibility — mirroring how
         // AnalyticsSearchService's allocator is owned and closed by this plugin.
         coordinatorAllocatorHandle = new CoordinatorAllocatorHandle(
-            nativeAllocator.getPoolAllocator(NativeAllocatorPoolConfig.POOL_QUERY).newChildAllocator("coordinator", 0, Long.MAX_VALUE)
+            nativeAllocator.getPoolAllocator(NativeAllocatorPoolConfig.POOL_REDUCE).newChildAllocator("coordinator", 0, Long.MAX_VALUE)
         );
 
         return List.of(searchService, ctx, capabilityRegistry, coordinatorAllocatorHandle, analyticsSearchSlowLog, statsCollector);
