@@ -133,9 +133,9 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
         // parquet.native.pool.query.max take effect immediately via Arrow's parent-cap check
         // at allocateBytes — no listener needed.
         this.coordinatorAllocator = coordinatorAllocatorHandle.getAllocator();
-        this.perQueryBufferLimit = AnalyticsPlugin.COORDINATOR_BUFFER_LIMIT.get(clusterService.getSettings());
+        this.perQueryBufferLimit = AnalyticsPlugin.COORDINATOR_BUFFER_LIMIT.get(clusterService.getSettings()).getBytes();
         clusterService.getClusterSettings()
-            .addSettingsUpdateConsumer(AnalyticsPlugin.COORDINATOR_BUFFER_LIMIT, v -> perQueryBufferLimit = v);
+            .addSettingsUpdateConsumer(AnalyticsPlugin.COORDINATOR_BUFFER_LIMIT, v -> perQueryBufferLimit = v.getBytes());
 
         // TODO: These should be honored as query params, but requires front-end changes to pass request options.
         this.maxShardsPerQuery = AnalyticsQuerySettings.MAX_SHARDS_PER_QUERY.get(clusterService.getSettings());

@@ -1303,6 +1303,7 @@ pub unsafe fn stream_close(stream_ptr: i64) {
         return;
     }
     let mut handle = Box::from_raw(stream_ptr as *mut QueryStreamHandle);
+    let context_id = handle._query_tracking_context.context_id();
     // Dropping the handle aborts the CPU task but does not wait for it; on the coordinator-reduce
     // path that task still holds Java-borrowed input batches. Wait for it to fully unwind (signal
     // fires once its batches drop) before returning, so the caller's allocator close is safe.
@@ -1325,6 +1326,11 @@ pub unsafe fn stream_close(stream_ptr: i64) {
             }
         }
     }
+    // After dropping the QueryStreamHandle (which drops CrossRtStream → JoinSet →
+    // aborts the CPU task), flush the runtime so the cascading abort of
+    // pull_from_input tasks (holding GroupValues buffers) is processed now rather
+    // than lingering in tokio's deferred drop queue on an idle runtime.
+    query_tracker::flush_cpu_runtime(context_id);
 }
 
 /// Fires the cancellation token for the given context_id.
@@ -1794,10 +1800,14 @@ pub async unsafe fn execute_local_plan(
     // shape as `execute_query`, so existing `stream_next` / `stream_close`
     // drain this handle unchanged. Use the cancellable variant so the CPU
     // task can be aborted mid-execution when cancel_query fires.
+    let cpu_exec = manager.cpu_executor();
     let (cross_rt_stream, abort_handle, task_done) =
-        CrossRtStream::new_with_df_error_stream_cancellable(df_stream, manager.cpu_executor());
+        CrossRtStream::new_with_df_error_stream_cancellable(df_stream, cpu_exec.clone());
     if let Some(h) = abort_handle {
         query_tracker::set_abort_handle(context_id, h);
+    }
+    if let Some(rt) = cpu_exec.handle() {
+        query_tracker::set_cpu_runtime_handle(context_id, rt);
     }
     let wrapped = RecordBatchStreamAdapter::new(cross_rt_stream.schema(), cross_rt_stream);
 
@@ -1838,10 +1848,14 @@ pub unsafe fn execute_local_prepared_plan(
     let _guard = manager.io_runtime.enter();
     let df_stream = session.execute_prepared()?;
 
+    let cpu_exec = manager.cpu_executor();
     let (cross_rt_stream, abort_handle, task_done) =
-        CrossRtStream::new_with_df_error_stream_cancellable(df_stream, manager.cpu_executor());
+        CrossRtStream::new_with_df_error_stream_cancellable(df_stream, cpu_exec.clone());
     if let Some(h) = abort_handle {
         query_tracker::set_abort_handle(context_id, h);
+    }
+    if let Some(rt) = cpu_exec.handle() {
+        query_tracker::set_cpu_runtime_handle(context_id, rt);
     }
     let wrapped = RecordBatchStreamAdapter::new(cross_rt_stream.schema(), cross_rt_stream);
 

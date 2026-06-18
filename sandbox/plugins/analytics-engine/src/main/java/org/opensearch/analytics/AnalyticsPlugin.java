@@ -49,6 +49,7 @@ import org.opensearch.common.settings.Settings;
 import org.opensearch.common.settings.SettingsFilter;
 import org.opensearch.core.action.ActionResponse;
 import org.opensearch.core.common.io.stream.NamedWriteableRegistry;
+import org.opensearch.core.common.unit.ByteSizeValue;
 import org.opensearch.core.xcontent.NamedXContentRegistry;
 import org.opensearch.env.Environment;
 import org.opensearch.env.NodeEnvironment;
@@ -99,10 +100,11 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
     private static final int REDUCE_POOL_SIZE = Math.max(8, Runtime.getRuntime().availableProcessors() * 4);
     private static final int REDUCE_QUEUE_SIZE = 200;
 
-    public static final Setting<Long> COORDINATOR_BUFFER_LIMIT = Setting.longSetting(
+    // Per-query coordinator allocator cap. 0 (default) → no per-query child allocator; queries
+    // share the coordinator allocator (no per-query cap).
+    public static final Setting<ByteSizeValue> COORDINATOR_BUFFER_LIMIT = Setting.byteSizeSetting(
         "analytics.coordinator.buffer_limit",
-        256L * 1024 * 1024,
-        0L,
+        ByteSizeValue.ZERO,
         Setting.Property.NodeScope,
         Setting.Property.Dynamic
     );
