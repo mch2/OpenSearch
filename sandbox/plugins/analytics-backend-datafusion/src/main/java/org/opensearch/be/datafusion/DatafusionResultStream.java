@@ -137,6 +137,12 @@ public class DatafusionResultStream implements EngineResultStream, FragmentResou
             VectorSchemaRoot freshRoot = VectorSchemaRoot.create(schema, allocator);
             try (ArrowArray arrowArray = ArrowArray.wrap(arrayAddr)) {
                 Data.importIntoVectorSchemaRoot(allocator, arrowArray, freshRoot, dictionaryProvider);
+            } catch (RuntimeException e) {
+                // Import allocates buffers field-by-field; if one fails (e.g. the per-node buffer
+                // limit is hit mid-import), close the partially-populated root so the buffers
+                // already allocated for earlier fields are released rather than stranded.
+                freshRoot.close();
+                throw e;
             }
             nextBatch = freshRoot;
             batchEmitted = true;
