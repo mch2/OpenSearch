@@ -109,6 +109,15 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
         Setting.Property.Dynamic
     );
 
+    // Node-wide cap on the data-node fragment allocator (shared by all shard fragments on the node).
+    // 0 (default) → unbounded. Dynamic: applied to the live allocator via BufferAllocator.setLimit.
+    public static final Setting<ByteSizeValue> DATANODE_BUFFER_LIMIT = Setting.byteSizeSetting(
+        "analytics.datanode.buffer_limit",
+        ByteSizeValue.ZERO,
+        Setting.Property.NodeScope,
+        Setting.Property.Dynamic
+    );
+
     /**
      * Controls the metadata-only driver vs. value-producing peer choice when both are viable
      * for a stage:
@@ -183,7 +192,8 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
             List.of(analyticsFragmentSlowLog),
             nativeAllocator,
             namedWriteableRegistry,
-            readerContextStore
+            readerContextStore,
+            clusterService
         );
         DefaultEngineContextProvider ctx = new DefaultEngineContextProvider(clusterService, indexNameExpressionResolver, backEndsByName);
         // Build the coordinator allocator under POOL_QUERY here, in the plugin, so that the
@@ -238,6 +248,7 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
     public List<Setting<?>> getSettings() {
         List<Setting<?>> settings = new java.util.ArrayList<>();
         settings.add(COORDINATOR_BUFFER_LIMIT);
+        settings.add(DATANODE_BUFFER_LIMIT);
         settings.add(PREFER_METADATA_DRIVER);
         settings.add(ReaderContextStore.READER_CONTEXT_KEEP_ALIVE);
         settings.addAll(org.opensearch.analytics.settings.AnalyticsApproximationSettings.all());
