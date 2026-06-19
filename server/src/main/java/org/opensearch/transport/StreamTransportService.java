@@ -80,6 +80,12 @@ public class StreamTransportService extends TransportService {
         this.streamTransportReqTimeout = STREAM_TRANSPORT_REQ_TIMEOUT_SETTING.get(settings);
         if (clusterSettings != null) {
             clusterSettings.addSettingsUpdateConsumer(STREAM_TRANSPORT_REQ_TIMEOUT_SETTING, this::setStreamTransportReqTimeout);
+            // The stream-transport super-constructor does not register the tracer settings-update
+            // consumers (it has no ClusterSettings), so wire them here — otherwise runtime changes to
+            // transport.tracer.include/exclude never reach this service and the request/response
+            // trace paths keep using the startup snapshot.
+            clusterSettings.addSettingsUpdateConsumer(TransportSettings.TRACE_LOG_INCLUDE_SETTING, this::setTracerLogInclude);
+            clusterSettings.addSettingsUpdateConsumer(TransportSettings.TRACE_LOG_EXCLUDE_SETTING, this::setTracerLogExclude);
         }
     }
 

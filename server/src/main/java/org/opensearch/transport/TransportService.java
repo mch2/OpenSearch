@@ -286,6 +286,11 @@ public class TransportService extends AbstractLifecycleComponent
         this.localNodeFactory = localNodeFactory;
         this.connectionManager = connectionManager;
         this.clusterName = ClusterName.CLUSTER_NAME_SETTING.get(settings);
+        // Initialize the tracer include/exclude arrays from settings (mirrors the other constructor).
+        // Without this they stay null, and once transport.tracer.include is set, shouldTraceAction()
+        // on the request/response paths NPEs on include.length — breaking every traced action.
+        setTracerLogInclude(TransportSettings.TRACE_LOG_INCLUDE_SETTING.get(settings));
+        setTracerLogExclude(TransportSettings.TRACE_LOG_EXCLUDE_SETTING.get(settings));
         tracerLog = Loggers.getLogger(logger, ".tracer");
         this.taskManager = taskManager;
         this.interceptor = transportInterceptor;
