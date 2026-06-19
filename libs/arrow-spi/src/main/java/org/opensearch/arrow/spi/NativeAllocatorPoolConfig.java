@@ -32,6 +32,8 @@ public final class NativeAllocatorPoolConfig {
     public static final String POOL_INGEST = "ingest";
     /** Pool name for query-execution memory (analytics-engine fragments and per-query allocators). */
     public static final String POOL_QUERY = "query";
+    /** Pool name for coordinator reduce-stage memory (analytics-engine reduce/gather allocators). */
+    public static final String POOL_REDUCE = "reduce";
 
     /** Setting key for the Flight pool minimum. */
     public static final String SETTING_FLIGHT_MIN = "native.allocator.pool.flight.min";
@@ -45,6 +47,10 @@ public final class NativeAllocatorPoolConfig {
     public static final String SETTING_QUERY_MIN = "native.allocator.pool.query.min";
     /** Setting key for the query pool maximum. */
     public static final String SETTING_QUERY_MAX = "native.allocator.pool.query.max";
+    /** Setting key for the reduce pool minimum. */
+    public static final String SETTING_REDUCE_MIN = "native.allocator.pool.reduce.min";
+    /** Setting key for the reduce pool maximum. */
+    public static final String SETTING_REDUCE_MAX = "native.allocator.pool.reduce.max";
 
     private NativeAllocatorPoolConfig() {}
 }

@@ -9,10 +9,12 @@
 package org.opensearch.analytics.exec;
 
 import org.apache.arrow.memory.BufferAllocator;
+import org.apache.arrow.memory.BufferLimitAllocationListener;
 import org.apache.arrow.vector.BigIntVector;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.OpenSearchException;
+import org.opensearch.analytics.AnalyticsPlugin;
 import org.opensearch.analytics.backend.AnalyticsOperationListener;
 import org.opensearch.analytics.backend.EngineResultBatch;
 import org.opensearch.analytics.backend.EngineResultStream;
@@ -33,6 +35,7 @@ import org.opensearch.analytics.spi.InstructionNode;
 import org.opensearch.analytics.spi.ShardScanInstructionNode;
 import org.opensearch.arrow.allocator.ArrowNativeAllocator;
 import org.opensearch.arrow.spi.NativeAllocatorPoolConfig;
+import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.concurrent.GatedCloseable;
 import org.opensearch.core.common.io.stream.NamedWriteableRegistry;
 import org.opensearch.core.tasks.TaskCancelledException;
@@ -82,7 +85,7 @@ public class AnalyticsSearchService implements AutoCloseable {
     private final ArrowNativeAllocator nativeAllocator;
 
     public AnalyticsSearchService(Map<String, AnalyticsSearchBackendPlugin> backends, ArrowNativeAllocator nativeAllocator) {
-        this(backends, List.of(), nativeAllocator, null, null);
+        this(backends, List.of(), nativeAllocator, null, null, null);
     }
 
     public AnalyticsSearchService(
@@ -91,7 +94,7 @@ public class AnalyticsSearchService implements AutoCloseable {
         NamedWriteableRegistry namedWriteableRegistry,
         ReaderContextStore readerContextStore
     ) {
-        this(backends, List.of(), nativeAllocator, namedWriteableRegistry, readerContextStore);
+        this(backends, List.of(), nativeAllocator, namedWriteableRegistry, readerContextStore, null);
     }
 
     public AnalyticsSearchService(
@@ -99,7 +102,8 @@ public class AnalyticsSearchService implements AutoCloseable {
         List<AnalyticsOperationListener> listeners,
         ArrowNativeAllocator nativeAllocator,
         NamedWriteableRegistry namedWriteableRegistry,
-        ReaderContextStore readerContextStore
+        ReaderContextStore readerContextStore,
+        ClusterService clusterService
     ) {
         this.backends = backends;
         this.listener = new AnalyticsOperationListener.CompositeListener(listeners);
@@ -109,13 +113,27 @@ public class AnalyticsSearchService implements AutoCloseable {
         // the framework is missing — silently falling back to a separate root would break
         // Arrow's same-root invariant for cross-plugin handoff.
         //
-        // Child uses Long.MAX_VALUE so dynamic resizes of parquet.native.pool.query.max take
-        // effect immediately via Arrow's parent-cap check at allocateBytes — no listener needed.
+        // The allocator caps node-wide fragment allocation (analytics.datanode.buffer_limit;
+        // 0 → unbounded) and tracks the dynamic setting live via setLimit.
         BufferAllocator queryPool = nativeAllocator.getPoolAllocator(NativeAllocatorPoolConfig.POOL_QUERY);
-        this.allocator = queryPool.newChildAllocator("analytics-search-service", 0, Long.MAX_VALUE);
+        // Import C Data fragment batches into a stock child allocator capped by a
+        // BufferLimitAllocationListener enforcing analytics.datanode.buffer_limit. The cap is checked
+        // in onPreAllocation (before any buffer is allocated), so a limit hit can't strand a partial
+        // allocation the way the allocator's own maxAllocation would (the import/export-leak class).
+        // 0 → unbounded.
+        long initialLimit = clusterService == null
+            ? 0
+            : AnalyticsPlugin.DATANODE_BUFFER_LIMIT.get(clusterService.getSettings()).getBytes();
+        BufferLimitAllocationListener datanodeLimit = new BufferLimitAllocationListener("analytics-search-service", initialLimit);
+        this.allocator = queryPool.newChildAllocator("analytics-search-service", datanodeLimit, 0, Long.MAX_VALUE);
+        if (clusterService != null) {
+            clusterService.getClusterSettings()
+                .addSettingsUpdateConsumer(AnalyticsPlugin.DATANODE_BUFFER_LIMIT, v -> datanodeLimit.updateLimit(v.getBytes()));
+        }
         this.namedWriteableRegistry = namedWriteableRegistry;
         this.readerContextStore = readerContextStore;
     }
+
 
     @Override
     public void close() {

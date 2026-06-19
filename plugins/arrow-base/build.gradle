@@ -34,6 +34,12 @@ dependencies {
     api "com.fasterxml.jackson.datatype:jackson-datatype-jsr310:${versions.jackson}"
     api "commons-codec:commons-codec:${versions.commonscodec}"
     compileOnly 'org.checkerframework:checker-qual:3.44.0'
+    // Annotations only: LimitAwareAllocator uses BaseAllocator.configBuilder() (ImmutableConfig),
+    // whose generated class references org.immutables.value.Generated. Without this, javac emits a
+    // "Cannot find annotation method" classfile warning that -Werror promotes to an error.
+    compileOnly 'org.immutables:value:2.10.1'
+    // C Data import path under test for LimitAwareAllocator (real multi-buffer partial-import).
+    testImplementation "org.apache.arrow:arrow-c-data:${versions.arrow}"
 }
 
 test {

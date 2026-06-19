@@ -167,8 +167,11 @@ abstract class AbstractDatafusionReduceSink implements ReducingExchangeSink, Can
      */
     protected final void drainOutputIntoDownstream(StreamHandle outStream) {
         BufferAllocator alloc = ctx.allocator();
+        DatafusionResultStream.BatchIterator it = null;
         try (CDataDictionaryProvider dictProvider = new CDataDictionaryProvider()) {
-            DatafusionResultStream.BatchIterator it = new DatafusionResultStream.BatchIterator(outStream, alloc, dictProvider);
+            // Coordinator-reduce drain runs on a virtual thread: use the async pull so each
+            // CompletableFuture.join park unmounts its carrier (see DatafusionResultStream).
+            it = new DatafusionResultStream.BatchIterator(outStream, alloc, dictProvider, true);
             while (it.hasNext()) {
                 // next() transfers ownership of the imported VSR to us. feed() takes ownership only
                 // on success; if it throws (e.g. the downstream sink was torn down on a concurrent
@@ -184,6 +187,12 @@ abstract class AbstractDatafusionReduceSink implements ReducingExchangeSink, Can
                         batch.close();
                     }
                 }
+            }
+        } finally {
+            // A batch loaded by hasNext() but never handed out via next() is held in the iterator's
+            // nextBatch and would leak if the loop exited early (cancel/throw).
+            if (it != null) {
+                it.closeLastBatch();
             }
         }
     }

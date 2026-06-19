@@ -34,6 +34,12 @@ import java.util.concurrent.Executors;
  */
 public class QueryContext {
 
+    private static final org.apache.logging.log4j.Logger logger = org.apache.logging.log4j.LogManager.getLogger(QueryContext.class);
+
+    /** Bounded best-effort wait for in-flight teardown to release Arrow batches before close. */
+    private static final long ALLOCATOR_DRAIN_TIMEOUT_NANOS = java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+    private static final long ALLOCATOR_DRAIN_POLL_MILLIS = 5;
+
     /** Setting defaults for {@code analytics.query.*}; used by test contexts and as the baseline. */
     private static final int DEFAULT_MAX_CONCURRENT_SHARD_REQUESTS_PER_NODE = AnalyticsQuerySettings.MAX_CONCURRENT_SHARD_REQUESTS_PER_NODE
         .get(Settings.EMPTY);
@@ -105,10 +111,6 @@ public class QueryContext {
 
     public Executor schedulerExecutor() {
         return threadPool != null ? threadPool.executor(AnalyticsPlugin.SCHEDULER_THREAD_POOL_NAME) : Runnable::run;
-    }
-
-    public Executor reduceExecutor() {
-        return threadPool != null ? threadPool.executor(AnalyticsPlugin.REDUCE_THREAD_POOL_NAME) : Runnable::run;
     }
 
     public AnalyticsQueryTask parentTask() {
@@ -196,12 +198,39 @@ public class QueryContext {
             if (closed) return;
             closed = true;
             if (ownsAllocator) {
+                awaitAllocatorDrained();
                 allocator.close();
             }
             if (localTaskExecutor != null) {
                 localTaskExecutor.shutdown();
                 localTaskExecutor = null;
             }
+        }
+    }
+
+    /**
+     * Safety net for close-vs-teardown races: a concurrent path (e.g. a cancelled reduce drain)
+     * may still be releasing Arrow batches when close() runs. Poll briefly for outstanding bytes
+     * to reach 0 so allocator.close() doesn't throw a spurious "Memory was leaked". Bounded and
+     * best-effort — if bytes don't drain in time (e.g. a genuine leak that no thread will release),
+     * we log and let close() surface it rather than stalling teardown.
+     */
+    private void awaitAllocatorDrained() {
+        long outstanding = allocator.getAllocatedMemory();
+        if (outstanding == 0) {
+            return;
+        }
+        final long deadlineNanos = System.nanoTime() + ALLOCATOR_DRAIN_TIMEOUT_NANOS;
+        while ((outstanding = allocator.getAllocatedMemory()) > 0 && System.nanoTime() < deadlineNanos) {
+            try {
+                Thread.sleep(ALLOCATOR_DRAIN_POLL_MILLIS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        if (outstanding > 0) {
+            logger.warn("[query-{}] allocator still holds {}B at close after drain wait", dag.queryId(), outstanding);
         }
     }
 

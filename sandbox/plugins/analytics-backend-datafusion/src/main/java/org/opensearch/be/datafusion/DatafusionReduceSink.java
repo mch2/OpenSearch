@@ -12,6 +12,8 @@ import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
 import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
+import org.apache.arrow.memory.BufferLimitAllocationListener;
+import org.apache.arrow.vector.ValueVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
@@ -24,6 +26,8 @@ import org.opensearch.analytics.spi.MultiInputExchangeSink;
 import org.opensearch.be.datafusion.nativelib.NativeBridge;
 import org.opensearch.be.datafusion.nativelib.StreamHandle;
 import org.opensearch.core.action.ActionListener;
+import org.opensearch.core.common.breaker.CircuitBreaker;
+import org.opensearch.core.common.breaker.CircuitBreakingException;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -56,6 +60,14 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
     private static final Logger logger = LogManager.getLogger(DatafusionReduceSink.class);
 
     /**
+     * Slack added to a batch's data footprint when admitting an export: covers the C-Data plumbing
+     * (ArrowArray/ArrowSchema structs, per-field name/format strings) that exportVectorSchemaRoot
+     * allocates on top of the data buffers. Generous — the goal is only to keep the export from
+     * tripping the limit mid-sequence, not to account exactly.
+     */
+    private static final long EXPORT_OVERHEAD_BYTES = 16 * 1024;
+
+    /**
      * Per-child senders keyed by childStageId, populated in declaration order so the
      * single-input case can pick the sole entry without an explicit lookup.
      */
@@ -80,6 +92,10 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
 
     /** Guards the teardown body so concurrent + sequential close paths don't run it twice. */
     final java.util.concurrent.atomic.AtomicBoolean torndown = new java.util.concurrent.atomic.AtomicBoolean();
+
+    /** Signalled when reduce's finally completes teardown. closeImpl awaits this
+     *  when cancelled during REDUCING state so the allocator isn't closed prematurely. */
+    private final java.util.concurrent.CountDownLatch reduceDone = new java.util.concurrent.CountDownLatch(1);
 
     public DatafusionReduceSink(ExchangeSinkContext ctx, NativeRuntimeHandle runtimeHandle) {
         this(ctx, runtimeHandle, null);
@@ -222,6 +238,25 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
                     + batch.getSchema()
             );
         }
+        // Atomic up-front admission (ES|QL reserve-before-allocate shape): Data.exportVectorSchemaRoot
+        // allocates many buffers (schema field-name/format strings, per-child array/schema structs) in
+        // sequence on `alloc` with NO internal cleanup. If the per-query limit is hit MID-export,
+        // arrow-java strands everything allocated before the failure. So reserve the whole export
+        // footprint atomically BEFORE starting; reserve() either admits it all or throws having
+        // reserved nothing — the export then runs on an unbounded allocator and can't trip the limit
+        // partway. The reservation is released in the finally once the export wrappers are torn down.
+        // The footprint is EXACT (the built batch's buffer sizes) plus fixed C-Data plumbing slack.
+        BufferLimitAllocationListener limitListener = alloc.getListener() instanceof BufferLimitAllocationListener l ? l : null;
+        long reservedFootprint = 0;
+        if (limitListener != null) {
+            reservedFootprint = batch.getFieldVectors().stream().mapToLong(ValueVector::getBufferSize).sum() + EXPORT_OVERHEAD_BYTES;
+            try {
+                limitListener.reserve(reservedFootprint);
+            } catch (RuntimeException reserveFailed) {
+                batch.close();
+                throw reserveFailed;
+            }
+        }
         ArrowArray array = ArrowArray.allocateNew(alloc);
         ArrowSchema arrowSchema = ArrowSchema.allocateNew(alloc);
         try {
@@ -230,18 +265,26 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
             } finally {
                 batch.close();
             }
-            // sender.send acquires its read lock so the native borrow outlives concurrent
-            // close — see DatafusionPartitionSender. Throws IllegalStateException via
-            // NativeHandle.getPointer() if the sender was closed (the close-race path).
+            // sender.send initiates under its read lock so the pointer can't be reclaimed by a
+            // concurrent close mid-initiation — see DatafusionPartitionSender. A full channel parks
+            // the feeder outside the lock (on a virtual thread, the carrier unmounts). Throws
+            // IllegalStateException via NativeHandle.getPointer() if the sender was closed before
+            // initiation (the close-race path).
             try {
                 long rc = sender.send(array.memoryAddress(), arrowSchema.memoryAddress());
                 if (rc == NativeBridge.SENDER_SEND_RECEIVER_DROPPED) {
                     // Consumer finished first (e.g. a LimitExec satisfied its fetch) and dropped the
-                    // receiver while shards were still feeding. api::sender_send already consumed the
-                    // FFI structs via from_raw, so the buffers are Rust's to drop — do NOT release()
-                    // here (double-free). The sender latched the drop (see DatafusionPartitionSender),
-                    // so subsequent feeds for this input short-circuit and the producer stream is
-                    // cancelled by the shard listener via isConsumerDone().
+                    // receiver while shards were still feeding. Explicitly release the exported FFI
+                    // structs: exportVectorSchemaRoot retained the batch's DATA buffers into the
+                    // ArrowArray's private data (zero-copy, refcount bumped), and the finally below only
+                    // close()s the wrapper struct — it does NOT invoke the C release callback that frees
+                    // those retained data buffers. release() is safe here regardless of whether Rust's
+                    // sender_send_async already consumed the structs: from_raw nulls the original
+                    // struct's release callback, so release() is a no-op if Rust took ownership, or
+                    // frees the ~256KB data buffer if it did not (the receiver-dropped leak, proven via
+                    // alloc-trace: a 262144-byte buffer from exportVectorSchemaRoot stranding here).
+                    array.release();
+                    arrowSchema.release();
                     logger.debug("[ReduceSink] receiver dropped before send (consumer finished), discarding batch");
                     return;
                 }
@@ -266,6 +309,12 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
             // release explicitly above.
             array.close();
             arrowSchema.close();
+            // Release the admission reservation: the export wrappers are now torn down and the data
+            // buffers' ownership has been resolved (sent to Rust, or released above). Balances the
+            // reserve() taken before the export.
+            if (limitListener != null) {
+                limitListener.release(reservedFootprint);
+            }
         }
     }
 
@@ -359,9 +408,17 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
     protected Exception closeImpl() {
         SinkState before = state.compareAndExchange(SinkState.READY, SinkState.DONE);
         if (before == SinkState.REDUCING) {
-            // Drain parked — dropping senders/outStream now would panic in drop_in_place.
+            // Drain in flight — fire cancel so it unblocks, then wait for reduce's
+            // finally to complete teardown (releases Arrow batches from the allocator).
             fireCancelQuery();
-            return null;  // reduce()'s finally calls closeImpl directly to tear down.
+            try {
+                if (!reduceDone.await(5, java.util.concurrent.TimeUnit.SECONDS)) {
+                    logger.warn("[reduce-sink] timed out waiting for reduce teardown: taskId={}", ctx.taskId());
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            return null;
         }
         // before == READY (we just won) or DONE (reduce's finally calling us, or duplicate close).
         if (torndown.compareAndSet(false, true) == false) {
@@ -369,12 +426,31 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
         }
         Exception failure = null;
         try {
-            // Close outStream first: drops the native receiver, which unblocks any sender
-            // parked in send_blocking (waiting for channel capacity). This releases the
-            // sender's read lock so session.close() can acquire the write lock without deadlock.
+            // Close outStream first: dropping the native receiver promptly resolves any pending
+            // send (a Full send parked on capacity completes as ReceiverDropped once the receiver
+            // is gone). The sender no longer holds a native borrow across an await — initiation is
+            // synchronous and a pending send owns a cloned mpsc::Sender — so this ordering is about
+            // resolving in-flight sends quickly, not defusing a read/write-lock conflict.
             outStream.close();
         } catch (Exception t) {
             failure = accumulate(failure, t);
+        }
+        // LEAK FIX: explicitly close every input sender here. Closing a sender drops the native
+        // PartitionStreamSender, which closes the mpsc and signals EOF to the reduce plan's
+        // StreamingTable input. Without this, a GroupedHashAggregateStream parked on
+        // PartitionStreamReceiver::poll_next never sees end-of-input, never completes, and its
+        // GroupValues hash table leaks (native memory stays allocated with alive_tasks=0).
+        // The streaming (non-prepared) path previously closed only the session (= the receivers,
+        // which the running aggregate task already took ownership of), leaving the senders to the
+        // GC Cleaner — which does not run promptly under native memory pressure. close() is
+        // idempotent (NativeHandle guards double-close), so this is safe even when
+        // preparedState.close() below also closes the same senders.
+        for (DatafusionPartitionSender sender : sendersByChildStageId.values()) {
+            try {
+                sender.close();
+            } catch (Exception t) {
+                failure = accumulate(failure, t);
+            }
         }
         try {
             if (preparedState != null) {
@@ -419,6 +495,9 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
             } catch (Exception t) {
                 failure = accumulate(failure, t);
             }
+            // Signal that teardown is complete — unblocks any concurrent closeImpl()
+            // waiting on REDUCING state (cancel path) so the allocator can close safely.
+            reduceDone.countDown();
         }
         if (failure == null) {
             listener.onResponse(null);

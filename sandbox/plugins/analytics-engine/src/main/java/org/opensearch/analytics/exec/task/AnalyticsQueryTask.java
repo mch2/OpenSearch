@@ -81,11 +81,22 @@ public class AnalyticsQueryTask extends SearchTask {
         if (onCancelCallback.compareAndSet(null, callback) == false) {
             throw new IllegalStateException("onCancelCallback already set for AnalyticsQueryTask " + queryId);
         }
+        // Cancel can race the install: the framework registers the task before doExecute forks
+        // to the search executor, so a cancel from a timeout, HTTP disconnect, or parent cascade
+        // can fire onCancelled() before this method runs and find no callback. Re-check and
+        // fire inline. Mirrors AnalyticsShardTask.setCancellationListener.
+        if (isCancelled()) {
+            runCallbackOnce();
+        }
     }
 
     @Override
     protected void onCancelled() {
-        Runnable cb = onCancelCallback.get();
+        runCallbackOnce();
+    }
+
+    private void runCallbackOnce() {
+        Runnable cb = onCancelCallback.getAndSet(null);
         if (cb != null) {
             try {
                 cb.run();

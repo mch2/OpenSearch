@@ -138,10 +138,11 @@ public class DataFusionPlugin extends Plugin
         if (nativeLimit.getBytes() <= 0) {
             return Long.toString(Long.MAX_VALUE);
         }
-        // 74% of node.native_memory.limit. DataFusion is the dominant native consumer for
+        // 69% of node.native_memory.limit. DataFusion is the dominant native consumer for
         // analytics workloads; operators tune via the dynamic setting once they characterize
-        // their workload.
-        long pool = Math.max(0L, nativeLimit.getBytes() * 74 / 100);
+        // their workload. (Was 74%; 5% was carved out for the coordinator POOL_REDUCE so the
+        // sum of pool maxes stays within the native budget.)
+        long pool = Math.max(0L, nativeLimit.getBytes() * 69 / 100);
         return Long.toString(pool);
     }
 

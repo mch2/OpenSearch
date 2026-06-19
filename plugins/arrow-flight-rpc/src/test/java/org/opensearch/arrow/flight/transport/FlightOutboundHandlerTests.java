@@ -215,7 +215,7 @@ public class FlightOutboundHandlerTests extends OpenSearchTestCase {
 
     // --- Native Arrow branch in processBatchTask ---
 
-    public void testProcessBatchTaskNativeArrowFirstBatch() throws Exception {
+    public void testProcessBatchTaskNativeArrowDelegatesToChannel() throws Exception {
         try (RootAllocator allocator = new RootAllocator()) {
             Schema schema = new Schema(List.of(new Field("val", FieldType.nullable(new ArrowType.Int(32, true)), null)));
             VectorSchemaRoot producerRoot = VectorSchemaRoot.create(schema, allocator);
@@ -225,28 +225,22 @@ public class FlightOutboundHandlerTests extends OpenSearchTestCase {
             vec.setValueCount(1);
             producerRoot.setRowCount(1);
 
-            // First batch: streamRoot is null, so it should be created
-            when(mockFlightChannel.getRoot()).thenReturn(null);
-
             CountDownLatch latch = new CountDownLatch(1);
-            AtomicReference<Exception> error = new AtomicReference<>();
 
             doAnswer(invocation -> {
                 latch.countDown();
                 return null;
             }).when(mockListener).onResponseSent(anyLong(), anyString(), any(TransportResponse.class));
 
+            // The handler hands the producer's root straight to the channel, which owns the
+            // transfer-and-send under its own lock (atomic with close()). The channel consumes the
+            // root, so the test must not close it.
             doAnswer(invocation -> {
-                // Verify the output has a root with transferred data
-                VectorStreamOutput out = invocation.getArgument(1);
-                VectorSchemaRoot sentRoot = out.getRoot();
-                assertNotNull(sentRoot);
-                assertEquals(1, sentRoot.getRowCount());
-                assertEquals(42, ((IntVector) sentRoot.getVector("val")).get(0));
-                // Clean up the stream root created by the handler
-                sentRoot.close();
+                VectorSchemaRoot src = invocation.getArgument(1);
+                assertSame(producerRoot, src);
+                src.close();
                 return null;
-            }).when(mockFlightChannel).sendBatch(any(), any(VectorStreamOutput.class), any());
+            }).when(mockFlightChannel).sendNativeBatch(any(), any(VectorSchemaRoot.class), any());
 
             TestArrowResponse response = new TestArrowResponse(producerRoot);
             handler.sendResponseBatch(
@@ -262,57 +256,7 @@ public class FlightOutboundHandlerTests extends OpenSearchTestCase {
             );
 
             assertTrue("Task should complete", latch.await(5, TimeUnit.SECONDS));
-            assertNull("No error expected", error.get());
-        }
-    }
-
-    public void testProcessBatchTaskNativeArrowWithExistingStreamRoot() throws Exception {
-        try (RootAllocator allocator = new RootAllocator()) {
-            Schema schema = new Schema(List.of(new Field("val", FieldType.nullable(new ArrowType.Int(32, true)), null)));
-
-            // Simulate existing stream root (second batch scenario)
-            VectorSchemaRoot streamRoot = VectorSchemaRoot.create(schema, allocator);
-            when(mockFlightChannel.getRoot()).thenReturn(streamRoot);
-
-            VectorSchemaRoot producerRoot = VectorSchemaRoot.create(schema, allocator);
-            IntVector vec = (IntVector) producerRoot.getVector("val");
-            vec.allocateNew();
-            vec.setSafe(0, 99);
-            vec.setValueCount(1);
-            producerRoot.setRowCount(1);
-
-            CountDownLatch latch = new CountDownLatch(1);
-
-            doAnswer(invocation -> {
-                VectorStreamOutput out = invocation.getArgument(1);
-                VectorSchemaRoot sentRoot = out.getRoot();
-                // Should reuse the existing stream root
-                assertSame(streamRoot, sentRoot);
-                assertEquals(1, sentRoot.getRowCount());
-                assertEquals(99, ((IntVector) sentRoot.getVector("val")).get(0));
-                return null;
-            }).when(mockFlightChannel).sendBatch(any(), any(VectorStreamOutput.class), any());
-
-            doAnswer(invocation -> {
-                latch.countDown();
-                return null;
-            }).when(mockListener).onResponseSent(anyLong(), anyString(), any(TransportResponse.class));
-
-            TestArrowResponse response = new TestArrowResponse(producerRoot);
-            handler.sendResponseBatch(
-                Version.CURRENT,
-                Collections.emptySet(),
-                mockFlightChannel,
-                mock(FlightTransportChannel.class),
-                1L,
-                "test-action",
-                response,
-                false,
-                false
-            );
-
-            assertTrue("Task should complete", latch.await(5, TimeUnit.SECONDS));
-            streamRoot.close();
+            verify(mockFlightChannel).sendNativeBatch(any(), any(VectorSchemaRoot.class), any());
         }
     }
 

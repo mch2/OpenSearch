@@ -9,6 +9,7 @@
 package org.opensearch.analytics.exec;
 
 import org.apache.arrow.memory.BufferAllocator;
+import org.apache.arrow.memory.BufferLimitAllocationListener;
 import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.calcite.plan.RelOptUtil;
@@ -43,7 +44,6 @@ import org.opensearch.analytics.planner.dag.QueryDAG;
 import org.opensearch.analytics.settings.AnalyticsQuerySettings;
 import org.opensearch.analytics.settings.PlannerSettings;
 import org.opensearch.analytics.stats.AnalyticsStatsCollector;
-import org.opensearch.arrow.allocator.AllocationRejection;
 import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
 import org.opensearch.cluster.service.ClusterService;
@@ -133,9 +133,9 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
         // parquet.native.pool.query.max take effect immediately via Arrow's parent-cap check
         // at allocateBytes — no listener needed.
         this.coordinatorAllocator = coordinatorAllocatorHandle.getAllocator();
-        this.perQueryBufferLimit = AnalyticsPlugin.COORDINATOR_BUFFER_LIMIT.get(clusterService.getSettings());
+        this.perQueryBufferLimit = AnalyticsPlugin.COORDINATOR_BUFFER_LIMIT.get(clusterService.getSettings()).getBytes();
         clusterService.getClusterSettings()
-            .addSettingsUpdateConsumer(AnalyticsPlugin.COORDINATOR_BUFFER_LIMIT, v -> perQueryBufferLimit = v);
+            .addSettingsUpdateConsumer(AnalyticsPlugin.COORDINATOR_BUFFER_LIMIT, v -> perQueryBufferLimit = v.getBytes());
 
         // TODO: These should be honored as query params, but requires front-end changes to pass request options.
         this.maxShardsPerQuery = AnalyticsQuerySettings.MAX_SHARDS_PER_QUERY.get(clusterService.getSettings());
@@ -284,14 +284,16 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
             queryAllocator = coordinatorAllocator;
             ownsAllocator = false;
         } else {
-            // Per-request allocation: a failure here means the QUERY pool is exhausted, not
-            // a framework misconfiguration. Translate Arrow's OutOfMemoryException into
-            // OpenSearchRejectedExecutionException so the REST layer maps it to HTTP 429
-            // and the client sees a proper backpressure signal rather than a generic 500.
-            queryAllocator = AllocationRejection.wrap(
+            // Per-request cap enforced by a BufferLimitAllocationListener on a stock child allocator.
+            // The cap is checked in onPreAllocation (before any buffer is allocated), so a limit hit
+            // throws CircuitBreakingException without stranding a partially-exported/imported batch the
+            // way the allocator's own maxAllocation would (e.g. SchemaExporter allocating field buffers
+            // before its release callback is installed). The child allocator stays unbounded.
+            BufferLimitAllocationListener perQueryLimit = new BufferLimitAllocationListener(
                 "query-" + dag.queryId(),
-                () -> coordinatorAllocator.newChildAllocator("query-" + dag.queryId(), 0, perQueryBufferLimit)
+                perQueryBufferLimit
             );
+            queryAllocator = coordinatorAllocator.newChildAllocator("query-" + dag.queryId(), perQueryLimit, 0, Long.MAX_VALUE);
             ownsAllocator = true;
         }
         logger.debug("[query-{}] Arrow allocator created, limit={}B", dag.queryId(), perQueryBufferLimit);

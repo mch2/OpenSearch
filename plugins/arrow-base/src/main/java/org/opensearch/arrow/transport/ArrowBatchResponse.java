@@ -36,9 +36,23 @@ import java.io.IOException;
  * <pre>{@code
  * VectorSchemaRoot producerRoot = VectorSchemaRoot.create(schema, allocator);
  * // populate producerRoot...
- * channel.sendResponseBatch(new MyResponse(producerRoot));
- * // producerRoot is now owned by the transport — don't reuse or close it
+ * try {
+ *     channel.sendResponseBatch(new MyResponse(producerRoot));
+ *     // SUCCESS: producerRoot is now owned by the transport — don't reuse or close it
+ * } catch (Exception e) {
+ *     // FAILURE: the transport did NOT take ownership (e.g. the stream was already
+ *     // cancelled/closed, so sendResponseBatch threw before adopting the root). The
+ *     // producer still owns producerRoot and MUST close it, or its buffers leak.
+ *     producerRoot.close();
+ *     throw e;
+ * }
  * }</pre>
+ *
+ * <p><b>Ownership contract:</b> {@code sendResponseBatch} takes ownership of the root
+ * <em>only on a normal return</em>. If it throws — which happens when the stream has been
+ * cancelled or closed (the call raises a stream-cancellation exception before adopting the
+ * root) — ownership is NOT transferred and the caller must close the root itself. Callers that
+ * skip this leak the root's off-heap buffers on every failed/cancelled send.
  *
  * <p><b>Receive side:</b> The transport calls {@code handler.read(in)} with a
  * {@link StreamInput} that also implements {@link ArrowStreamInput}, carrying vectors
@@ -54,7 +68,8 @@ import java.io.IOException;
  *         <li>{@code POOL_FLIGHT} — transport-layer producers/consumers (arrow-flight-rpc and
  *             plugins built on top of {@code StreamTransportService}).</li>
  *         <li>{@code POOL_INGEST} — ingest-path producers (parquet-data-format VSR allocators).</li>
- *         <li>{@code POOL_QUERY} — query-execution producers (analytics-engine fragments and
+ *         <li>{@code POOL_QUERY} — data-node query-execution producers (analytics-engine shard fragments).</li>
+ *         <li>{@code POOL_REDUCE} — coordinator reduce-stage producers (analytics-engine
  *             coordinator-side intermediate batches).</li>
  *       </ul>
  *       All allocators must share the same root so zero-copy transfers pass Arrow's

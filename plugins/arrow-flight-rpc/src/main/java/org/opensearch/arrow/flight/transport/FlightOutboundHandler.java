@@ -11,6 +11,9 @@ package org.opensearch.arrow.flight.transport;
 import org.apache.arrow.flight.FlightRuntimeException;
 import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.apache.logging.log4j.message.ParameterizedMessage;
 import org.opensearch.Version;
 import org.opensearch.arrow.transport.ArrowBatchResponse;
 import org.opensearch.arrow.transport.VectorTransfer;
@@ -40,6 +43,7 @@ import java.util.Set;
  * @opensearch.internal
  */
 class FlightOutboundHandler extends ProtocolOutboundHandler {
+    private static final Logger logger = LogManager.getLogger(FlightOutboundHandler.class);
     private volatile TransportMessageListener messageListener = TransportMessageListener.NOOP_LISTENER;
     private final String nodeName;
     private final Version version;
@@ -153,39 +157,107 @@ class FlightOutboundHandler extends ProtocolOutboundHandler {
             return;
         }
 
+        // First-frame root the handler allocates; closed in failStream only if the channel never adopted it.
+        VectorSchemaRoot handlerCreatedRoot = null;
         try {
             VectorStreamOutput out;
             byte[] metadata = null;
-            if (task.response() instanceof ArrowBatchResponse arrowResponse) {
-                metadata = arrowResponse.getMetadata();
-                // Native Arrow path: zero-copy transfer producer's vectors into stream root
-                VectorSchemaRoot streamRoot = flightChannel.getRoot();
-                if (streamRoot == null) {
-                    // Create stream root using the producer's allocator for same-allocator transfer.
-                    // This avoids an Arrow bug where cross-allocator transferOwnership of foreign-backed
-                    // buffers (from C data import) doesn't properly free the ArrowArray C struct.
-                    // The producer's allocator must be long-lived (not closed per-request).
-                    List<FieldVector> fieldVectors = arrowResponse.getRoot().getFieldVectors();
-                    if (fieldVectors.isEmpty()) {
-                        throw new IllegalStateException("Native Arrow batch has no field vectors");
+            // Hold the channel monitor across the native transfer AND the sendBatch: the transfer
+            // refills the channel's reused stream root, and close() (on the gRPC cancel thread) frees
+            // that same root. Without this lock the producer can refill the root AFTER close() already
+            // freed it, stranding the refilled buffers in the per-query allocator — the data-node leak
+            // (StreamException[CANCELLED] from sendBatch with the root already adopted, so failStream
+            // can't reclaim it). close() takes the same monitor, so transfer and free are mutually
+            // exclusive. Re-check isOpen() inside the lock to bail cleanly if close() ran first.
+            synchronized (flightChannel) {
+                if (task.response() instanceof ArrowBatchResponse arrowResponse) {
+                    metadata = arrowResponse.getMetadata();
+                    if (!flightChannel.isOpen()) {
+                        // close() won the race: free the import here (the channel won't), then bail.
+                        arrowResponse.getRoot().close();
+                        throw StreamException.cancelled("stream closed before native batch transfer");
                     }
-                    streamRoot = VectorSchemaRoot.create(arrowResponse.getRoot().getSchema(), fieldVectors.getFirst().getAllocator());
+                    // Native Arrow path: zero-copy transfer producer's vectors into stream root
+                    VectorSchemaRoot streamRoot = flightChannel.getRoot();
+                    if (streamRoot == null) {
+                        // Create stream root using the producer's allocator for same-allocator transfer.
+                        // This avoids an Arrow bug where cross-allocator transferOwnership of foreign-backed
+                        // buffers (from C data import) doesn't properly free the ArrowArray C struct.
+                        // The producer's allocator must be long-lived (not closed per-request).
+                        List<FieldVector> fieldVectors = arrowResponse.getRoot().getFieldVectors();
+                        if (fieldVectors.isEmpty()) {
+                            throw new IllegalStateException("Native Arrow batch has no field vectors");
+                        }
+                        streamRoot = VectorSchemaRoot.create(arrowResponse.getRoot().getSchema(), fieldVectors.getFirst().getAllocator());
+                        handlerCreatedRoot = streamRoot;
+                    }
+                    VectorTransfer.transferRoot(arrowResponse.getRoot(), streamRoot);
+                    arrowResponse.getRoot().close();
+                    out = VectorStreamOutput.forNativeArrow(streamRoot);
+                } else {
+                    out = VectorStreamOutput.create(flightChannel.getAllocator(), flightChannel.getRoot());
+                    task.response().writeTo(out);
                 }
-                VectorTransfer.transferRoot(arrowResponse.getRoot(), streamRoot);
-                arrowResponse.getRoot().close();
-                out = VectorStreamOutput.forNativeArrow(streamRoot);
-            } else {
-                out = VectorStreamOutput.create(flightChannel.getAllocator(), flightChannel.getRoot());
-                task.response().writeTo(out);
+                try (out) {
+                    flightChannel.sendBatch(getHeaderBuffer(task.requestId(), task.nodeVersion(), task.features()), out, metadata);
+                    // Channel has adopted the root; it owns the close from here on.
+                    handlerCreatedRoot = null;
+                }
             }
-            try (out) {
-                flightChannel.sendBatch(getHeaderBuffer(task.requestId(), task.nodeVersion(), task.features()), out, metadata);
-                messageListener.onResponseSent(task.requestId(), task.action(), task.response());
-            }
+            // Notify outside the channel lock — the listener path must not be held under the monitor
+            // that close() also takes.
+            messageListener.onResponseSent(task.requestId(), task.action(), task.response());
         } catch (FlightRuntimeException e) {
+            // Fail the stream before notifying the listener so a throwing listener can't leave it un-terminated.
+            failStream(flightChannel, task, handlerCreatedRoot, e);
             messageListener.onResponseSent(task.requestId(), task.action(), FlightErrorMapper.fromFlightException(e));
         } catch (Exception e) {
+            failStream(flightChannel, task, handlerCreatedRoot, e);
             messageListener.onResponseSent(task.requestId(), task.action(), e);
+        }
+    }
+
+    /**
+     * Fails the stream after a batch send error: sends the error so the consumer's
+     * {@code FlightStream.getRoot()} surfaces an exception instead of hanging on a never-arriving first
+     * frame, then releases the channel so a later {@code completeStream} can't double-terminate the gRPC
+     * listener. Closes the handler-created first-frame root only if the channel never adopted it (to avoid
+     * a leak), but never when the channel did adopt it (to avoid a double-close). Best-effort and
+     * idempotent; runs inline on the channel executor.
+     */
+    private void failStream(FlightServerChannel flightChannel, BatchTask task, VectorSchemaRoot unownedRoot, Exception cause) {
+        try {
+            Exception flightError = cause instanceof StreamException se ? FlightErrorMapper.toFlightException(se) : cause;
+            flightChannel.sendError(getHeaderBuffer(task.requestId(), task.nodeVersion(), task.features()), flightError);
+        } catch (Exception suppressed) {
+            // Channel already closed/cancelled, or header serialization failed — nothing left to fail.
+            logger.debug(new ParameterizedMessage("failStream: could not send error for requestId [{}]", task.requestId()), suppressed);
+        } finally {
+            // Close our first-frame root only if the channel never adopted it (NativeArrow.close() is a
+            // no-op, so an un-adopted root would otherwise leak); if adopted, the channel owns the close.
+            if (unownedRoot != null) {
+                // Resolve adoption defensively: on a throwing probe, treat as adopted — a rare leak on an
+                // unreachable path beats freeing a root the channel still holds.
+                boolean adopted;
+                try {
+                    adopted = flightChannel.getRoot() == unownedRoot;
+                } catch (Exception probeFailed) {
+                    adopted = true;
+                    logger.debug(
+                        new ParameterizedMessage("failStream: could not resolve root adoption for requestId [{}]", task.requestId()),
+                        probeFailed
+                    );
+                }
+                if (!adopted) {
+                    try {
+                        unownedRoot.close();
+                    } catch (Exception ignore) {}
+                }
+            }
+            // Make the channel terminal so a later completeStream can't double-terminate the listener. Idempotent.
+            if (task.transportChannel() != null) {
+                task.transportChannel().releaseChannel(true);
+            }
         }
     }
 

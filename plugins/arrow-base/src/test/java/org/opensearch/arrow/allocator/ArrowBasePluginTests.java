@@ -103,10 +103,11 @@ public class ArrowBasePluginTests extends OpenSearchTestCase {
         ArrowNativeAllocator allocator = plugin.buildAllocator(nodeSettings, cs, () -> budget);
         try {
             Set<String> poolNames = allocator.getPoolNames();
-            assertEquals("buildAllocator must register exactly the framework's three pools", 3, poolNames.size());
+            assertEquals("buildAllocator must register exactly the framework's four pools", 4, poolNames.size());
             assertTrue(poolNames.contains(NativeAllocatorPoolConfig.POOL_FLIGHT));
             assertTrue(poolNames.contains(NativeAllocatorPoolConfig.POOL_INGEST));
             assertTrue(poolNames.contains(NativeAllocatorPoolConfig.POOL_QUERY));
+            assertTrue(poolNames.contains(NativeAllocatorPoolConfig.POOL_REDUCE));
 
             // Pool maxes match the operator-set values (rebalancer disabled,
             // so initial limit == max).

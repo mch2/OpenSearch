@@ -49,6 +49,7 @@ import org.opensearch.common.settings.Settings;
 import org.opensearch.common.settings.SettingsFilter;
 import org.opensearch.core.action.ActionResponse;
 import org.opensearch.core.common.io.stream.NamedWriteableRegistry;
+import org.opensearch.core.common.unit.ByteSizeValue;
 import org.opensearch.core.xcontent.NamedXContentRegistry;
 import org.opensearch.env.Environment;
 import org.opensearch.env.NodeEnvironment;
@@ -88,21 +89,25 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
     public static final String SCHEDULER_THREAD_POOL_NAME = "analytics_scheduler";
     private static final int SCHEDULER_QUEUE_SIZE = 200;
 
-    public static final String REDUCE_THREAD_POOL_NAME = "analytics_reduce";
+    // The dedicated coordinator-reduce thread pool was removed: reduces now run on the
+    // per-query virtual-thread executor (QueryContext.localTaskExecutor()). The drain's
+    // data-flow waits are CompletableFuture parks that unmount the carrier on a virtual
+    // thread, so there is no platform pool to isolate from SEARCH and no deadlock to defuse.
 
-    // The reduce pool exists to isolate coordinator-reduce drains from the SEARCH
-    // pool, preventing deadlock when reduces and local shard fragments compete for
-    // the same threads. Each reduce thread blocks on a synchronous FFM call
-    // (streamNext) with negligible CPU usage — memory is the real constraint,
-    // bounded by the DataFusion pool and phantom reservations. Size is generous
-    // so the thread pool isn't the throughput bottleneck.
-    private static final int REDUCE_POOL_SIZE = Math.max(8, Runtime.getRuntime().availableProcessors() * 4);
-    private static final int REDUCE_QUEUE_SIZE = 200;
-
-    public static final Setting<Long> COORDINATOR_BUFFER_LIMIT = Setting.longSetting(
+    // Per-query coordinator allocator cap. 0 (default) → no per-query child allocator; queries
+    // share the coordinator allocator (no per-query cap).
+    public static final Setting<ByteSizeValue> COORDINATOR_BUFFER_LIMIT = Setting.byteSizeSetting(
         "analytics.coordinator.buffer_limit",
-        256L * 1024 * 1024,
-        0L,
+        ByteSizeValue.ZERO,
+        Setting.Property.NodeScope,
+        Setting.Property.Dynamic
+    );
+
+    // Node-wide cap on the data-node fragment allocator (shared by all shard fragments on the node).
+    // 0 (default) → unbounded. Dynamic: applied to the live allocator via BufferAllocator.setLimit.
+    public static final Setting<ByteSizeValue> DATANODE_BUFFER_LIMIT = Setting.byteSizeSetting(
+        "analytics.datanode.buffer_limit",
+        ByteSizeValue.ZERO,
         Setting.Property.NodeScope,
         Setting.Property.Dynamic
     );
@@ -181,7 +186,8 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
             List.of(analyticsFragmentSlowLog),
             nativeAllocator,
             namedWriteableRegistry,
-            readerContextStore
+            readerContextStore,
+            clusterService
         );
         DefaultEngineContextProvider ctx = new DefaultEngineContextProvider(clusterService, indexNameExpressionResolver, backEndsByName);
         // Build the coordinator allocator under POOL_QUERY here, in the plugin, so that the
@@ -189,7 +195,7 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
         // it via the handle without taking on close responsibility — mirroring how
         // AnalyticsSearchService's allocator is owned and closed by this plugin.
         coordinatorAllocatorHandle = new CoordinatorAllocatorHandle(
-            nativeAllocator.getPoolAllocator(NativeAllocatorPoolConfig.POOL_QUERY).newChildAllocator("coordinator", 0, Long.MAX_VALUE)
+            nativeAllocator.getPoolAllocator(NativeAllocatorPoolConfig.POOL_REDUCE).newChildAllocator("coordinator", 0, Long.MAX_VALUE)
         );
 
         return List.of(searchService, ctx, capabilityRegistry, coordinatorAllocatorHandle, analyticsSearchSlowLog, statsCollector);
@@ -236,6 +242,7 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
     public List<Setting<?>> getSettings() {
         List<Setting<?>> settings = new java.util.ArrayList<>();
         settings.add(COORDINATOR_BUFFER_LIMIT);
+        settings.add(DATANODE_BUFFER_LIMIT);
         settings.add(PREFER_METADATA_DRIVER);
         settings.add(ReaderContextStore.READER_CONTEXT_KEEP_ALIVE);
         settings.addAll(org.opensearch.analytics.settings.AnalyticsApproximationSettings.all());
@@ -246,10 +253,7 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
     @Override
     public List<ExecutorBuilder<?>> getExecutorBuilders(Settings settings) {
         int poolSize = schedulerPoolSize();
-        return List.of(
-            new FixedExecutorBuilder(settings, SCHEDULER_THREAD_POOL_NAME, poolSize, SCHEDULER_QUEUE_SIZE, "analytics"),
-            new FixedExecutorBuilder(settings, REDUCE_THREAD_POOL_NAME, REDUCE_POOL_SIZE, REDUCE_QUEUE_SIZE, "analytics_reduce")
-        );
+        return List.of(new FixedExecutorBuilder(settings, SCHEDULER_THREAD_POOL_NAME, poolSize, SCHEDULER_QUEUE_SIZE, "analytics"));
     }
 
     static int schedulerPoolSize() {

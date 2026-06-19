@@ -1,0 +1,8 @@
+{
+  "error": {
+    "reason": "Error occurred in OpenSearch engine: CircuitBreakingException[Execution error: Resources exhausted: Memory Exhausted while SpillPool (DiskManager is disabled)]; nested: RuntimeException[Execution error: Resources exhausted: Memory Exhausted while SpillPool (DiskManager is disabled)];",
+    "details": "CircuitBreakingException[CircuitBreakingException[Execution error: Resources exhausted: Memory Exhausted while SpillPool (DiskManager is disabled)]; nested: RuntimeException[Execution error: Resources exhausted: Memory Exhausted while SpillPool (DiskManager is disabled)];]; nested: RuntimeException[Stage 0 failed]; nested: StreamException[CircuitBreakingException[Execution error: Resources exhausted: Memory Exhausted while SpillPool (DiskManager is disabled)]; nested: RuntimeException[Execution error: Resources exhausted: Memory Exhausted while SpillPool (DiskManager is disabled)];];; java.lang.RuntimeException: Stage 0 failed\nFor more details, please send request for Json format to see the raw response from OpenSearch engine.",
+    "type": "CircuitBreakingException"
+  },
+  "status": 429
+}

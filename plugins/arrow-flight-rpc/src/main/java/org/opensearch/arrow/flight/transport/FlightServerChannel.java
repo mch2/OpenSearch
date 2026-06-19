@@ -291,11 +291,19 @@ class FlightServerChannel implements TcpChannel, ArrowFlightChannel {
     }
 
     @Override
-    public void close() {
-        if (!open.get()) {
+    public synchronized void close() {
+        // synchronized(this): mutually exclusive with FlightOutboundHandler's native transfer+sendBatch
+        // (which holds the same monitor). Without it, a producer can refill the reused stream root AFTER
+        // this close() frees it, stranding the refilled buffers — the data-node leak.
+        //
+        // Atomic fire-once: the gRPC OnCancel path (onChannelCancelled) and the send-failure path
+        // (FlightOutboundHandler.failStream -> releaseChannel) can both reach close() concurrently.
+        // A non-atomic get()-then-set() lets both pass the open check and run notifyCloseListeners()
+        // twice, double-firing the TaskManager cancellable-channel-task untrack listener -> fatal
+        // AssertionError (with -ea) that kills the node. CAS guarantees exactly one caller proceeds.
+        if (!open.compareAndSet(true, false)) {
             return;
         }
-        open.set(false);
         if (root != null) {
             root.close();
         }
