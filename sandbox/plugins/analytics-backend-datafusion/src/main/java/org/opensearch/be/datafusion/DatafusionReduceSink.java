@@ -388,23 +388,6 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
         } catch (Exception t) {
             failure = accumulate(failure, t);
         }
-        // LEAK FIX: explicitly close every input sender here. Closing a sender drops the native
-        // PartitionStreamSender, which closes the mpsc and signals EOF to the reduce plan's
-        // StreamingTable input. Without this, a GroupedHashAggregateStream parked on
-        // PartitionStreamReceiver::poll_next never sees end-of-input, never completes, and its
-        // GroupValues hash table leaks (native memory stays allocated with alive_tasks=0).
-        // The streaming (non-prepared) path previously closed only the session (= the receivers,
-        // which the running aggregate task already took ownership of), leaving the senders to the
-        // GC Cleaner — which does not run promptly under native memory pressure. close() is
-        // idempotent (NativeHandle guards double-close), so this is safe even when
-        // preparedState.close() below also closes the same senders.
-        for (DatafusionPartitionSender sender : sendersByChildStageId.values()) {
-            try {
-                sender.close();
-            } catch (Exception t) {
-                failure = accumulate(failure, t);
-            }
-        }
         try {
             if (preparedState != null) {
                 preparedState.close();

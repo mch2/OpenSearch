@@ -127,16 +127,8 @@ public class DatafusionResultStream implements EngineResultStream, FragmentResou
                 // Streaming Flight requires ≥1 schema-bearing frame before completeStream;
                 // synthesise a zero-row batch carrying the schema for empty native streams.
                 if (!batchEmitted) {
-                    // create() allocates per-field; if the per-query buffer limit is hit mid-create,
-                    // close the partially-built root so its buffers are released, not stranded.
-                    VectorSchemaRoot emptyRoot = VectorSchemaRoot.create(schema, allocator);
-                    try {
-                        emptyRoot.setRowCount(0);
-                    } catch (RuntimeException e) {
-                        emptyRoot.close();
-                        throw e;
-                    }
-                    nextBatch = emptyRoot;
+                    nextBatch = VectorSchemaRoot.create(schema, allocator);
+                    nextBatch.setRowCount(0);
                     batchEmitted = true;
                     return true;
                 }
@@ -145,12 +137,6 @@ public class DatafusionResultStream implements EngineResultStream, FragmentResou
             VectorSchemaRoot freshRoot = VectorSchemaRoot.create(schema, allocator);
             try (ArrowArray arrowArray = ArrowArray.wrap(arrayAddr)) {
                 Data.importIntoVectorSchemaRoot(allocator, arrowArray, freshRoot, dictionaryProvider);
-            } catch (RuntimeException e) {
-                // Import allocates buffers field-by-field; if one fails (e.g. the per-node buffer
-                // limit is hit mid-import), close the partially-populated root so the buffers
-                // already allocated for earlier fields are released rather than stranded.
-                freshRoot.close();
-                throw e;
             }
             nextBatch = freshRoot;
             batchEmitted = true;
