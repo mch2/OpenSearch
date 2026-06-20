@@ -189,8 +189,17 @@ public interface StageExecution {
                                 : new RuntimeException("child stage " + child.getStageId() + " failed without recorded cause")
                         );
                     }
+                    case CANCELLED -> {
+                        // A cancelled child must still close this parent's input for that child so a
+                        // parent reduce drain blocked on streamNext sees EOF and unwinds — otherwise the
+                        // reduce thread hangs forever (the QTF nested-reduce leak: a mid-flight shard
+                        // scan is cancelled, never EOFs its sender, and the COORDINATOR_REDUCE above it
+                        // is stranded). We do NOT propagate cancel to the parent's state (cancel remains
+                        // owner-driven, per the original cascade design); we only release the input.
+                        closeChildInput(childId);
+                    }
                     default -> {
-                    }  // CANCELLED intentionally not propagated
+                    }
                 }
             });
         }
