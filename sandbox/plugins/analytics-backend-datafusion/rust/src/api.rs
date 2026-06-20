@@ -1338,15 +1338,26 @@ pub unsafe fn stream_close(stream_ptr: i64) {
     // the registry, making it unreachable for flush_cpu_runtime.
     let cpu_rt_handle = query_tracker::take_cpu_runtime_handle(context_id);
     // Dropping the handle aborts the CPU task but does not wait for it; on the coordinator-reduce
-    // path that task still holds Java-borrowed input batches. Wait for it to fully unwind (signal
-    // fires once its batches drop) before returning, so the caller's allocator close is safe.
+    // path that task still holds Java-borrowed input batches.
     let task_done = handle.task_done.take();
     drop(handle);
+    // Flush the CPU runtime BEFORE waiting on task_done. The abort scheduled by drop(handle) only
+    // takes effect when a worker polls the aborted task — and under load every worker is busy, so on
+    // a saturated runtime the task would never get cycles and the wait below would burn its full
+    // backstop. The flush spawns yielding tasks across several workers, handing the aborted reduce
+    // task (and the pull_from_input tasks holding GroupValues) scheduling opportunities to run their
+    // cooperative break + drop(stream)+drain and fire task_done. Without this ordering the wait
+    // routinely times out (observed: 30s stalls + "possible leak") even though the task drains fine
+    // once polled. The flush is itself bounded (see flush_cpu_runtime_with_handle).
+    if let Some(rt) = cpu_rt_handle {
+        query_tracker::flush_cpu_runtime_with_handle(&rt, context_id);
+    }
+    // Now wait for the task to confirm it fully unwound (signal fires once its borrowed batches
+    // drop), so the caller's allocator close is safe. After the flush this normally resolves
+    // immediately; the timeout is a backstop against a genuinely wedged task. If it fires we proceed
+    // anyway and may leak the borrow — log it so a recurring timeout is visible rather than silent.
     if let Some(rx) = task_done {
         if let Some(mgr) = crate::ffm::try_get_rt_manager() {
-            // Already aborted, so this resolves as soon as the task unwinds; 30s is a backstop
-            // against a wedged task hanging the reduce thread. If it fires we proceed anyway and
-            // may leak the borrow — log it so a recurring timeout is visible rather than silent.
             let timed_out = mgr
                 .io_runtime
                 .block_on(async { tokio::time::timeout(std::time::Duration::from_secs(30), rx).await })
@@ -1358,13 +1369,6 @@ pub unsafe fn stream_close(stream_ptr: i64) {
                 );
             }
         }
-    }
-    // After dropping the QueryStreamHandle (which drops CrossRtStream → JoinSet →
-    // aborts the CPU task), flush the runtime so the cascading abort of
-    // pull_from_input tasks (holding GroupValues buffers) is processed now rather
-    // than lingering in tokio's deferred drop queue on an idle runtime.
-    if let Some(rt) = cpu_rt_handle {
-        query_tracker::flush_cpu_runtime_with_handle(&rt, context_id);
     }
 }
 
