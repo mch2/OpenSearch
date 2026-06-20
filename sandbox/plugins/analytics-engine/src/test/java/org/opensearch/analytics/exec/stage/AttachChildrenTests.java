@@ -92,12 +92,17 @@ public class AttachChildrenTests extends OpenSearchTestCase {
     }
 
     /**
-     * Early-termination contract: when a parent cancels its own child (e.g. coordinator-side
-     * LIMIT satisfied, stop the shard stream), the child transitions to CANCELLED. The
-     * cascade must NOT propagate that cancel back to the parent — the parent is the one
-     * who issued the cancel and must stay RUNNING.
+     * Cancelled-child contract. The cascade must NOT propagate a child's CANCELLED state back to
+     * the parent (the parent is RUNNING and, on the cancel-initiator path, owns its own lifecycle;
+     * the sibling sweep / external cancel reaches it independently). It must NOT schedule the parent
+     * either.
+     *
+     * <p>But it MUST still close the parent's per-child input — same as SUCCEEDED/FAILED — so a
+     * parent reduce drain blocked on {@code streamNext} sees EOF and unwinds. Without this, a
+     * mid-flight shard scan that is cancelled never EOFs its sender and the COORDINATOR_REDUCE above
+     * it hangs forever (the QTF nested-reduce leak).
      */
-    public void testCancelledChildIsNotPropagatedToParent() {
+    public void testCancelledChildClosesInputButDoesNotPropagateToParent() {
         StageExecution parent = mock(StageExecution.class, CALLS_REAL_METHODS);
         FakeChild cancelled = new FakeChild(5);  // no failure recorded
 
@@ -106,6 +111,9 @@ public class AttachChildrenTests extends OpenSearchTestCase {
         parent.attachChildren(List.of(cancelled), scheduler);
         cancelled.fire(StageExecution.State.CANCELLED);
 
+        // EOF released to the reduce input (the leak fix).
+        verify(parent).closeChildInput(eq(5));
+        // State is NOT propagated and the parent is NOT scheduled.
         verify(parent, never()).cancel(any());
         verify(parent, never()).failWithCause(any());
         verify(parent, never()).consumeChildMetadata(any());
