@@ -1022,6 +1022,17 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
         return new DatafusionResultStream(streamHandle, allocator);
     }
 
+    @Override
+    public void cancelByContext(long contextId) {
+        // Fire the per-context cancellation token in the Rust QUERY_REGISTRY. The fetch stream's
+        // cross_rt task selects on it (see wrap_stream_as_handle) and breaks cooperatively, so the
+        // native fetch unwinds without a cross-thread stream close racing the in-flight pull.
+        // No-op for an unknown contextId (already completed/cancelled).
+        if (contextId != 0) {
+            NativeBridge.cancelQuery(contextId);
+        }
+    }
+
     public Exception convertException(Exception original) {
         return NativeErrorConverter.convert(original);
     }

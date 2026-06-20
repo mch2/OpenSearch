@@ -168,6 +168,21 @@ public interface AnalyticsSearchBackendPlugin {
     }
 
     /**
+     * Cooperatively cancels in-flight backend work registered under {@code contextId}.
+     *
+     * <p>The engine layer (which owns the {@code AnalyticsShardTask}) calls this from a task
+     * cancellation listener — e.g. when a {@code fetchByRowIds} is cancelled via client disconnect
+     * or parent-task cancel. The query path registers its listener inside the backend's
+     * {@code SearchExecEngine}, but the fetch path returns an opaque {@link EngineResultStream}, so
+     * the engine needs this hook to reach the backend's native cancellation (the task type is not
+     * visible to this SPI module). Implementations should signal their native execution to unwind
+     * (e.g. fire the per-context cancellation token), NOT close the stream from this thread — a
+     * cross-thread close can race the in-flight native pull (use-after-free). No-op for an unknown
+     * {@code contextId}; the default is a no-op for backends without cancellable native state.
+     */
+    default void cancelByContext(long contextId) {}
+
+    /**
      * Converts a backend-specific exception into an appropriate OpenSearch exception type.
      *
      * <p>Called by the engine when a fragment execution fails. If the backend recognizes

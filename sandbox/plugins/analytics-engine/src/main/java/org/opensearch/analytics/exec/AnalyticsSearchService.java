@@ -354,6 +354,18 @@ public class AnalyticsSearchService implements AutoCloseable {
             responseHandler.onFailure(new RuntimeException("Failed to execute fetch-by-row-ids on " + shard.shardId(), e));
             return;
         }
+        // Cancel hook: a fetch over streaming transport can be parked in the native pull
+        // (stream_next / hasNext) when the task is cancelled — client disconnect closes the Flight
+        // channel, or a parent-task cancel propagates to this child task. The query path registers
+        // this inside its backend SearchExecEngine; the fetch path returns an opaque stream, so wire
+        // it here where both the task and the backend are in scope. Fire the backend's cooperative
+        // cancellation (the per-context token), NOT stream.close() — a cross-thread close races the
+        // in-flight native pull (use-after-free). Without this the native fetch stream's cross_rt
+        // task and its DataFusion pool reservation are stranded on cancel.
+        final long fetchContextId = task != null ? task.getId() : 0L;
+        if (task != null) {
+            task.setCancellationListener(() -> backend.cancelByContext(fetchContextId));
+        }
         try (FragmentResources ctx = resources) {
             Iterator<EngineResultBatch> it = ctx.stream().iterator();
             while (it.hasNext()) {
@@ -362,6 +374,10 @@ public class AnalyticsSearchService implements AutoCloseable {
             responseHandler.onComplete();
         } catch (Exception e) {
             responseHandler.onFailure(e);
+        } finally {
+            if (task != null) {
+                task.clearCancellationListener();
+            }
         }
     }
 
