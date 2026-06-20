@@ -487,21 +487,41 @@ pub fn store_url_from_table_path(table_path: &ListingTableUrl) -> Result<datafus
 }
 
 /// Wrap a DataFusion stream in CrossRtStream and package as a QueryStreamHandle pointer.
+///
+/// Cancellation is wired exactly like the shard-query path ([`execute_query`]): the
+/// QueryTrackingContext is created FIRST so its cancellation token is registered under
+/// `context_id`, then the cross_rt task is built with the cancellable variant and its abort
+/// handle + CPU runtime handle are registered. Without this the QTF fetch-by-rowid stream was
+/// built with the non-cancellable variant, so a `cancel_query` (e.g. parent-task cancel
+/// propagating to the fetch) could neither cooperatively break nor abort the cross_rt task —
+/// the `stream_next` future was abandoned mid-poll and its memory-pool reservation never
+/// released (the climbing datafusion-pool reservation observed under QTF cancel soaks).
 pub fn wrap_stream_as_handle(
     df_stream: datafusion::execution::SendableRecordBatchStream,
     cpu_executor: DedicatedExecutor,
     runtime: &DataFusionRuntime,
     context_id: i64,
 ) -> i64 {
-    let cross_rt_stream = CrossRtStream::new_with_df_error_stream(df_stream, cpu_executor);
-    let wrapped = datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
-        cross_rt_stream.schema(),
-        cross_rt_stream,
-    );
+    // Create the tracking context first so the cancellation token is registered before the
+    // cross_rt task starts (a cancel firing between here and registration still lands).
     let query_context = crate::query_tracker::QueryTrackingContext::new(
         context_id,
         runtime.runtime_env.memory_pool.clone(),
         crate::query_tracker::QueryType::Shard,
+    );
+
+    let (cross_rt_stream, abort_handle, _task_done) =
+        CrossRtStream::new_with_df_error_stream_cancellable(df_stream, cpu_executor.clone(), None);
+    if let Some(h) = abort_handle {
+        crate::query_tracker::set_abort_handle(context_id, h);
+    }
+    if let Some(rt) = cpu_executor.handle() {
+        crate::query_tracker::set_cpu_runtime_handle(context_id, rt);
+    }
+
+    let wrapped = datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
+        cross_rt_stream.schema(),
+        cross_rt_stream,
     );
     let handle = crate::api::QueryStreamHandle::new(wrapped, query_context, None);
     Box::into_raw(Box::new(handle)) as i64
