@@ -55,10 +55,15 @@ class FlightErrorMapper {
                 // TODO insert all entries and not just the first one
                 flightMetadata.insert(entry.getKey(), entry.getValue().getFirst());
             }
-            status.withMetadata(flightMetadata);
+            status = status.withMetadata(flightMetadata);
         }
-        status.withDescription(exception.getMessage());
-        status.withCause(exception.getCause());
+        // CallStatus is an immutable builder — withDescription/withCause return NEW instances. Reassign,
+        // otherwise the description + cause are silently dropped and the caller sees gRPC's placeholder
+        // ("Internal error [task_id=N]") with no message.
+        status = status.withDescription(exception.getMessage() != null ? exception.getMessage() : "Stream error");
+        if (exception.getCause() != null) {
+            status = status.withCause(exception.getCause());
+        }
         return status.toRuntimeException();
     }
 
