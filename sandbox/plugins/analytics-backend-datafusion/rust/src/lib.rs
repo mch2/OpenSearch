@@ -28,6 +28,7 @@ pub mod cross_rt_stream;
 pub mod datafusion_query_config;
 pub mod executor;
 pub mod ffm;
+pub mod helper;
 pub mod indexed_executor;
 pub mod indexed_table;
 pub mod io;
@@ -66,3 +67,11 @@ pub use cache::page_index as parquet_page_cache;
 
 #[cfg(test)]
 mod spill_e2e_test;
+
+// End-to-end TieredObjectStore + TieredBlockCache integration tests. Located here
+// (not in the lower-level `opensearch-tiered-storage` crate) because they drive a
+// real DataFusion session + Parquet I/O, and DataFusion/Parquet/Arrow are already
+// normal dependencies of this crate — keeping the storage-primitive crate's test
+// build free of the DataFusion stack.
+#[cfg(test)]
+mod tiered_storage_integration_tests;
