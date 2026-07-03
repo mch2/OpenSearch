@@ -56,6 +56,14 @@ public class DataFusionService extends AbstractLifecycleComponent {
     /** Cache manager for pre-warming and managing native caches. */
     private volatile CacheManager cacheManager;
 
+    /**
+     * Handle to the data-node {@code datafusion-distributed} Worker gRPC server, started in
+     * {@link #doStart()} when the native lib supports it. 0 when not running. The bound port is
+     * advertised so coordinators can dial this node directly (rust↔rust data plane).
+     */
+    private volatile long workerHandle;
+    private volatile int workerPort = -1;
+
     private DataFusionService(Builder builder) {
         this.memoryPoolLimit = builder.memoryPoolLimit;
         this.spillMemoryLimit = builder.spillMemoryLimit;
@@ -114,7 +122,56 @@ public class DataFusionService extends AbstractLifecycleComponent {
             this.cacheManager = new CacheManager(runtimeHandle);
         }
 
+        // NOTE: the distributed Worker gRPC server is no longer started here — it is owned by
+        // DataFusionWorkerAuxTransport (an OpenSearch AuxTransport) so it gets the standard
+        // bind-port-range + lifecycle contract. The aux transport calls startWorker()/stopWorker()
+        // below. The runtime is created here first (aux transports start after createComponents), so
+        // the worker can safely share it.
+
         logger.debug("DataFusion service started — memory pool {}B, spill limit {}B", memoryPoolLimit, spillMemoryLimit);
+    }
+
+    /**
+     * Starts the datafusion-distributed Worker gRPC server bound to {@code bindPort} (0 = ephemeral),
+     * sharing this node's native runtime. Idempotent-ish: a second call while running is a no-op.
+     * Best-effort — returns the bound port, or -1 if the native lib lacks the distributed entries.
+     * Called by {@link org.opensearch.be.datafusion.distributed.DataFusionWorkerAuxTransport}.
+     */
+    public synchronized int startWorker(int bindPort) {
+        if (workerHandle != 0) {
+            return workerPort; // already running
+        }
+        if (!NativeBridge.isDistributedEngineAvailable()) {
+            logger.debug("distributed engine not available in native lib; Worker server not started");
+            return -1;
+        }
+        long[] hp = NativeBridge.createWorker(getNativeRuntime().get(), bindPort);
+        this.workerHandle = hp[0];
+        this.workerPort = (int) hp[1];
+        logger.info("DataFusion distributed Worker gRPC server started on port {}", workerPort);
+        return workerPort;
+    }
+
+    /** Stops the Worker gRPC server if running. Called by the aux transport's doStop. */
+    public synchronized void stopWorker() {
+        long wh = workerHandle;
+        if (wh != 0) {
+            try {
+                NativeBridge.closeWorker(wh);
+            } catch (Exception e) {
+                logger.warn("Failed to stop DataFusion distributed Worker server", e);
+            }
+            workerHandle = 0;
+            workerPort = -1;
+        }
+    }
+
+    /**
+     * The bound gRPC port of this node's distributed Worker server, or {@code -1} if not running.
+     * The coordinator discovers this via the {@code GetWorkerPort} transport action.
+     */
+    public int getWorkerPort() {
+        return workerPort;
     }
 
     @Override
@@ -297,6 +354,10 @@ public class DataFusionService extends AbstractLifecycleComponent {
     }
 
     private void releaseRuntime() {
+        // Stop the Worker gRPC server BEFORE freeing the runtime it shares (the worker's sessions
+        // hold an Arc on the runtime env; graceful shutdown drains in-flight tasks first). Normally
+        // the aux transport's doStop already did this; this is the safety net on runtime teardown.
+        stopWorker();
         NativeRuntimeHandle handle = runtimeHandle;
         if (handle != null) {
             handle.close();

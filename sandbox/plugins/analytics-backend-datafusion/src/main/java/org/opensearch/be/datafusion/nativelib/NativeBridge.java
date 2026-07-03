@@ -151,6 +151,14 @@ public final class NativeBridge {
     private static final MethodHandle EXECUTE_LOCAL_PREPARED_PLAN;
     private static final MethodHandle FETCH_BY_ROW_IDS;
     private static final MethodHandle UPDATE_CONCURRENCY_GATE;
+    // datafusion-distributed integration (optional symbols — bound only if present in the .so so an
+    // older native lib still class-loads; gated like SET_SPILL_LIMIT).
+    private static final MethodHandle DISTRIBUTED_EXECUTE;
+    private static final MethodHandle CREATE_WORKER;
+    private static final MethodHandle CLOSE_WORKER;
+    private static final MethodHandle WORKER_PUT_SHARDS;
+    private static final MethodHandle WORKER_CLEAR_SHARDS;
+    private static final MethodHandle REGISTER_LEAF_BRIDGE;
 
     static {
         SymbolLookup lib = NativeLibraryLoader.symbolLookup();
@@ -565,6 +573,9 @@ public final class NativeBridge {
         // caller step required — as soon as this class is loaded, callbacks
         // are installed and `df_execute_indexed_query` can dispatch into Java.
         installFilterTreeCallbacks(linker);
+        // NOTE: installLeafBridge is invoked at the END of this static block — it needs
+        // REGISTER_LEAF_BRIDGE (assigned far below), so calling it here would early-return on a null
+        // handle and silently leave the Rust leaf-bridge slots unset.
 
         CLOSE_SESSION_CONTEXT = linker.downcallHandle(
             lib.find("df_close_session_context").orElseThrow(),
@@ -635,9 +646,158 @@ public final class NativeBridge {
             lib.find("df_update_concurrency_gate").orElseThrow(),
             FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG, ValueLayout.JAVA_INT)
         );
+
+        // ── datafusion-distributed entries (optional: bound only if present, like SET_SPILL_LIMIT) ──
+        // i64 df_distributed_execute(runtime, substrait*, len, worker_urls*, len, shard_map*, len, uuid*, len, context_id)
+        DISTRIBUTED_EXECUTE = lib.find("df_distributed_execute")
+            .map(
+                addr -> linker.downcallHandle(
+                    addr,
+                    FunctionDescriptor.of(
+                        ValueLayout.JAVA_LONG,
+                        ValueLayout.JAVA_LONG,
+                        ValueLayout.ADDRESS,
+                        ValueLayout.JAVA_LONG,
+                        ValueLayout.ADDRESS,
+                        ValueLayout.JAVA_LONG,
+                        ValueLayout.ADDRESS,
+                        ValueLayout.JAVA_LONG,
+                        ValueLayout.ADDRESS,
+                        ValueLayout.JAVA_LONG,
+                        ValueLayout.JAVA_LONG,
+                        ValueLayout.ADDRESS, // delegation bytes ptr
+                        ValueLayout.JAVA_LONG, // delegation bytes len
+                        ValueLayout.JAVA_INT, // tree_shape
+                        ValueLayout.JAVA_INT, // predicate_count
+                        ValueLayout.ADDRESS, // leaf fragment ptr
+                        ValueLayout.JAVA_LONG, // leaf fragment len
+                        ValueLayout.JAVA_INT, // partial_reduce (0/1)
+                        ValueLayout.JAVA_DOUBLE, // cardinality_task_count_factor (0 = default)
+                        ValueLayout.JAVA_INT // max_tasks_per_stage (0 = inherit)
+                    )
+                )
+            )
+            .orElse(null);
+        // i64 df_create_worker(runtime, bind_port, out_port*)
+        CREATE_WORKER = lib.find("df_create_worker")
+            .map(
+                addr -> linker.downcallHandle(
+                    addr,
+                    FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ValueLayout.JAVA_INT, ValueLayout.ADDRESS)
+                )
+            )
+            .orElse(null);
+        // void df_close_worker(handle)
+        CLOSE_WORKER = lib.find("df_close_worker")
+            .map(addr -> linker.downcallHandle(addr, FunctionDescriptor.ofVoid(ValueLayout.JAVA_LONG)))
+            .orElse(null);
+        // i64 df_worker_put_shards(query_id, shards*, len, store_prefix*, len)
+        WORKER_PUT_SHARDS = lib.find("df_worker_put_shards")
+            .map(
+                addr -> linker.downcallHandle(
+                    addr,
+                    FunctionDescriptor.of(
+                        ValueLayout.JAVA_LONG,
+                        ValueLayout.JAVA_LONG,
+                        ValueLayout.ADDRESS,
+                        ValueLayout.JAVA_LONG,
+                        ValueLayout.ADDRESS,
+                        ValueLayout.JAVA_LONG
+                    )
+                )
+            )
+            .orElse(null);
+        // void df_worker_clear_shards(query_id)
+        WORKER_CLEAR_SHARDS = lib.find("df_worker_clear_shards")
+            .map(addr -> linker.downcallHandle(addr, FunctionDescriptor.ofVoid(ValueLayout.JAVA_LONG)))
+            .orElse(null);
+        // void df_register_leaf_bridge(open_fragment, leaf_next, leaf_close)  [Model B pull-based leaf]
+        REGISTER_LEAF_BRIDGE = lib.find("df_register_leaf_bridge")
+            .map(
+                addr -> linker.downcallHandle(
+                    addr,
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+                )
+            )
+            .orElse(null);
+
+        // Now that REGISTER_LEAF_BRIDGE is bound, hand the three leaf-bridge upcall stubs to Rust.
+        installLeafBridge(linker);
     }
 
     private NativeBridge() {}
+
+    /**
+     * Installs the Model-B pull-based leaf bridge: registers
+     * {@link org.opensearch.be.datafusion.distributed.LeafBridgeCallbacks}'s
+     * {@code openFragment}/{@code leafNext}/{@code leafClose} as the {@code df_register_leaf_bridge}
+     * callbacks so the data-node Rust {@code ShardScanExec} can open a fragment (unchanged
+     * AnalyticsSearchService setup) and pull batches. No-op if the native lib doesn't export the
+     * symbol (older lib) — the distributed engine is opt-in.
+     */
+    private static void installLeafBridge(Linker linker) {
+        if (REGISTER_LEAF_BRIDGE == null) {
+            return;
+        }
+        try {
+            java.lang.foreign.Arena arena = java.lang.foreign.Arena.global();
+            Class<?> cb = org.opensearch.be.datafusion.distributed.LeafBridgeCallbacks.class;
+            var lookup = java.lang.invoke.MethodHandles.lookup();
+            var seg = java.lang.foreign.MemorySegment.class;
+
+            MethodHandle openFragment = lookup.findStatic(
+                cb,
+                "openFragment",
+                java.lang.invoke.MethodType.methodType(
+                    int.class, long.class, seg, long.class, int.class, seg, long.class, seg, long.class,
+                    int.class, int.class, seg, seg
+                )
+            );
+            MethodHandle leafNext = lookup.findStatic(
+                cb,
+                "leafNext",
+                java.lang.invoke.MethodType.methodType(int.class, long.class, seg)
+            );
+            MethodHandle leafClose = lookup.findStatic(
+                cb,
+                "leafClose",
+                java.lang.invoke.MethodType.methodType(void.class, long.class)
+            );
+
+            java.lang.foreign.MemorySegment openStub = linker.upcallStub(
+                openFragment,
+                FunctionDescriptor.of(
+                    ValueLayout.JAVA_INT,
+                    ValueLayout.JAVA_LONG,
+                    ValueLayout.ADDRESS,
+                    ValueLayout.JAVA_LONG,
+                    ValueLayout.JAVA_INT,
+                    ValueLayout.ADDRESS,
+                    ValueLayout.JAVA_LONG,
+                    ValueLayout.ADDRESS, // descriptor ptr
+                    ValueLayout.JAVA_LONG, // descriptor len
+                    ValueLayout.JAVA_INT, // tree_shape
+                    ValueLayout.JAVA_INT, // predicate_count
+                    ValueLayout.ADDRESS, // out_mode
+                    ValueLayout.ADDRESS // out_handle
+                ),
+                arena
+            );
+            java.lang.foreign.MemorySegment nextStub = linker.upcallStub(
+                leafNext,
+                FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG, ValueLayout.ADDRESS),
+                arena
+            );
+            java.lang.foreign.MemorySegment closeStub = linker.upcallStub(
+                leafClose,
+                FunctionDescriptor.ofVoid(ValueLayout.JAVA_LONG),
+                arena
+            );
+            NativeCall.invokeVoid(REGISTER_LEAF_BRIDGE, openStub, nextStub, closeStub);
+        } catch (Throwable t) {
+            throw new ExceptionInInitializerError(t);
+        }
+    }
 
     private static void installFilterTreeCallbacks(Linker linker) {
         try {
@@ -1307,6 +1467,139 @@ public final class NativeBridge {
             return call.invoke(EXECUTE_LOCAL_PLAN, sessionPtr, call.bytes(substrait), (long) substrait.length, contextId);
         } catch (RuntimeException e) {
             throw rethrowConverted(e);
+        }
+    }
+
+    // ───────────────────────── datafusion-distributed wrappers ─────────────────────────
+
+    /** True when the loaded native lib exports the datafusion-distributed entries. */
+    public static boolean isDistributedEngineAvailable() {
+        return DISTRIBUTED_EXECUTE != null && CREATE_WORKER != null && WORKER_PUT_SHARDS != null;
+    }
+
+    /**
+     * Coordinator-side distributed execution. Hands whole-query Substrait + the worker URL list +
+     * the shard→worker routing map to the Rust distributed engine and returns a stream handle that
+     * drains through {@link #streamGetSchema}/{@link #streamNext}/{@link #streamClose} (i.e. via
+     * {@code DatafusionResultStream}).
+     *
+     * @param runtimePtr the per-node global DataFusion runtime pointer
+     * @param substrait whole-query Substrait proto bytes (single logical aggregate, NOT pre-split)
+     * @param workerUrlsCsv newline-joined worker gRPC URLs (resolved via {@code GetWorkerPort})
+     * @param shardMapCsv newline-joined {@code shardId:workerIdx} lines ({@code DfShardRouting.shardMapCsv()})
+     * @param indexUuid single-table index uuid (diagnostics)
+     * @param contextId query id, for cancellation propagation
+     * @return stream handle pointer
+     */
+    public static long distributedExecute(
+        long runtimePtr,
+        byte[] substrait,
+        String workerUrlsCsv,
+        String shardMapCsv,
+        String indexUuid,
+        long contextId,
+        byte[] delegationBytes,
+        int treeShape,
+        int predicateCount,
+        byte[] leafFragmentBytes,
+        boolean partialReduce,
+        double cardinalityTaskCountFactor,
+        int maxTasksPerStage
+    ) {
+        NativeHandle.validatePointer(runtimePtr, "runtime");
+        try (var call = new NativeCall()) {
+            var urls = call.str(workerUrlsCsv);
+            var map = call.str(shardMapCsv);
+            var uuid = call.str(indexUuid);
+            boolean hasDelegation = delegationBytes != null && delegationBytes.length > 0;
+            MemorySegment delSeg = hasDelegation ? call.bytes(delegationBytes) : MemorySegment.NULL;
+            long delLen = hasDelegation ? delegationBytes.length : 0L;
+            boolean hasLeaf = leafFragmentBytes != null && leafFragmentBytes.length > 0;
+            MemorySegment leafSeg = hasLeaf ? call.bytes(leafFragmentBytes) : MemorySegment.NULL;
+            long leafLen = hasLeaf ? leafFragmentBytes.length : 0L;
+            return call.invoke(
+                DISTRIBUTED_EXECUTE,
+                runtimePtr,
+                call.bytes(substrait),
+                (long) substrait.length,
+                urls.segment(),
+                urls.len(),
+                map.segment(),
+                map.len(),
+                uuid.segment(),
+                uuid.len(),
+                contextId,
+                delSeg,
+                delLen,
+                treeShape,
+                predicateCount,
+                leafSeg,
+                leafLen,
+                partialReduce ? 1 : 0,
+                cardinalityTaskCountFactor,
+                maxTasksPerStage
+            );
+        } catch (RuntimeException e) {
+            throw rethrowConverted(e);
+        }
+    }
+
+    /**
+     * Starts the data-node Worker gRPC server on the node IO runtime, binding {@code bindPort}
+     * (0 = ephemeral). Returns {@code [handlePtr, boundPort]}; the handle is freed by
+     * {@link #closeWorker}.
+     */
+    public static long[] createWorker(long runtimePtr, int bindPort) {
+        NativeHandle.validatePointer(runtimePtr, "runtime");
+        try (var arena = Arena.ofConfined()) {
+            var outPort = arena.allocate(ValueLayout.JAVA_INT, 1);
+            try (var call = new NativeCall()) {
+                long handle = call.invoke(CREATE_WORKER, runtimePtr, bindPort, outPort);
+                return new long[] { handle, outPort.getAtIndex(ValueLayout.JAVA_INT, 0) };
+            }
+        } catch (RuntimeException e) {
+            throw rethrowConverted(e);
+        }
+    }
+
+    /** Stops + frees a Worker gRPC server handle. */
+    public static void closeWorker(long handlePtr) {
+        if (handlePtr == 0 || CLOSE_WORKER == null) {
+            return;
+        }
+        try {
+            CLOSE_WORKER.invokeExact(handlePtr);
+        } catch (Throwable t) {
+            logger.warn("df_close_worker failed", t);
+        }
+    }
+
+    /**
+     * Publishes a query's shard files into the worker-side registry before execution.
+     *
+     * @param queryId the query id (matches {@code contextId} in {@link #distributedExecute})
+     * @param shardsTsv newline-joined {@code shardId\tfilename\trowBase\tnumRows} lines
+     * @param storePrefix local filesystem prefix the filenames are relative to
+     */
+    public static void workerPutShards(long queryId, String shardsTsv, String storePrefix) {
+        try (var call = new NativeCall()) {
+            var shards = call.str(shardsTsv);
+            var prefix = call.str(storePrefix);
+            call.invoke(WORKER_PUT_SHARDS, queryId, shards.segment(), shards.len(), prefix.segment(), prefix.len());
+        } catch (RuntimeException e) {
+            throw rethrowConverted(e);
+        }
+    }
+
+    /** Clears a query's worker-side shard registry entry. */
+    public static void workerClearShards(long queryId) {
+        if (WORKER_CLEAR_SHARDS == null) {
+            return;
+        }
+        try {
+            WORKER_CLEAR_SHARDS.invokeExact(queryId);
+        } catch (Throwable t) {
+            logger.warn("df_worker_clear_shards failed", t);
         }
     }
 

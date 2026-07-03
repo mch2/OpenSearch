@@ -165,7 +165,7 @@ public class DataFusionServiceTests extends OpenSearchTestCase {
     }
 
     public void testPluginRegistersAllCacheSettings() {
-        List<Setting<?>> settings = new DataFusionPlugin().getSettings();
+        List<Setting<?>> settings = new DataFusionPlugin(Settings.EMPTY).getSettings();
         assertTrue(settings.contains(CacheSettings.METADATA_CACHE_EVICTION_TYPE));
         assertTrue(settings.contains(CacheSettings.STATISTICS_CACHE_EVICTION_TYPE));
         assertTrue(settings.contains(CacheSettings.COLUMN_INDEX_CACHE_EVICTION_TYPE));

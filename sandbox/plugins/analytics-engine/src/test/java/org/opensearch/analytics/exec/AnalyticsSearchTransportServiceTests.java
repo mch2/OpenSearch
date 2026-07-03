@@ -63,7 +63,14 @@ public class AnalyticsSearchTransportServiceTests extends OpenSearchTestCase {
         ClusterService clusterService = mock(ClusterService.class);
         TaskResourceTrackingService taskResourceTrackingService = mock(TaskResourceTrackingService.class);
 
-        new AnalyticsSearchTransportService(transportService, clusterService, searchService, indicesService, taskResourceTrackingService);
+        new AnalyticsSearchTransportService(
+            transportService,
+            clusterService,
+            searchService,
+            indicesService,
+            taskResourceTrackingService,
+            mock(org.opensearch.analytics.planner.CapabilityRegistry.class)
+        );
 
         verify(transportService).registerRequestHandler(
             eq(FragmentExecutionAction.NAME),
@@ -135,7 +142,8 @@ public class AnalyticsSearchTransportServiceTests extends OpenSearchTestCase {
             clusterService,
             searchService,
             indicesService,
-            taskResourceTrackingService
+            taskResourceTrackingService,
+            mock(org.opensearch.analytics.planner.CapabilityRegistry.class)
         );
 
         @SuppressWarnings("unchecked")
@@ -188,7 +196,8 @@ public class AnalyticsSearchTransportServiceTests extends OpenSearchTestCase {
             clusterService,
             searchService,
             indicesService,
-            taskResourceTrackingService
+            taskResourceTrackingService,
+            mock(org.opensearch.analytics.planner.CapabilityRegistry.class)
         );
 
         Exception thrown = expectThrows(ConnectTransportException.class, () -> service.getConnection(null));

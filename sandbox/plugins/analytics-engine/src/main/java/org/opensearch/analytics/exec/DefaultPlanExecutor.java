@@ -42,6 +42,9 @@ import org.opensearch.analytics.planner.dag.FragmentConversionDriver;
 import org.opensearch.analytics.planner.dag.PlanAlternativeSelector;
 import org.opensearch.analytics.planner.dag.PlanForker;
 import org.opensearch.analytics.planner.dag.QueryDAG;
+import org.opensearch.analytics.planner.dag.DfShardRouting;
+import org.opensearch.analytics.backend.EngineResultStream;
+import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
 import org.opensearch.analytics.settings.AnalyticsQuerySettings;
 import org.opensearch.analytics.settings.PlannerSettings;
 import org.opensearch.analytics.stats.AnalyticsStatsCollector;
@@ -101,6 +104,7 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
     private volatile int maxShardsPerQuery;
     private volatile int maxConcurrentShardRequestsPerNode;
     private volatile boolean preferMetadataDriver;
+    private volatile boolean distributedEngine;
     private final PlannerSettings plannerSettings;
     private final IndexNameExpressionResolver indexNameExpressionResolver;
     private final AnalyticsSearchSlowLog analyticsSearchSlowLog;
@@ -155,6 +159,9 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
         this.preferMetadataDriver = AnalyticsPlugin.PREFER_METADATA_DRIVER.get(clusterService.getSettings());
         clusterService.getClusterSettings()
             .addSettingsUpdateConsumer(AnalyticsPlugin.PREFER_METADATA_DRIVER, v -> preferMetadataDriver = v);
+        this.distributedEngine = AnalyticsQuerySettings.DISTRIBUTED_ENGINE.get(clusterService.getSettings());
+        clusterService.getClusterSettings()
+            .addSettingsUpdateConsumer(AnalyticsQuerySettings.DISTRIBUTED_ENGINE, v -> distributedEngine = v);
         // Planner settings (oversampling factor + delegation block-list); self-registers update
         // consumers for live changes.
         this.plannerSettings = PlannerSettings.create(
@@ -261,6 +268,15 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
             preferMetadataDriver
         );
         plannerContext.setPlannerSettings(plannerSettings);
+
+        // datafusion-distributed path: bypass the Java DAG/fork/scheduler entirely and execute the
+        // whole query through the Rust distributed engine (direct rust↔rust data plane). Gated by the
+        // dynamic analytics.query.distributed_engine setting.
+        if (distributedEngine) {
+            executeInternalDistributed(logicalFragment, plannerContext, planningState, queryTask, queryStartNanos, listener);
+            return;
+        }
+
         RelNode plan = PlannerImpl.createPlan(logicalFragment, plannerContext);
         final String fullPlan = profile ? RelOptUtil.toString(plan) : null;
         QueryDAG dag = DAGBuilder.build(plan, capabilityRegistry, clusterService, indexNameExpressionResolver);
@@ -363,6 +379,181 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
         }
 
         execRef.set(scheduler.execute(context, batchesListener)); // execRef read by profile listener after execution completes
+    }
+
+    /** Backend id of the DataFusion analytics backend (the only distributed-engine backend today). */
+    private static final String DATAFUSION_BACKEND = "datafusion";
+
+    /**
+     * The {@code datafusion-distributed} execution path. Bypasses the Java DAG/fork/scheduler: builds
+     * a single-aggregate marked plan, converts the WHOLE query to one Substrait plan (the engine does
+     * the partial/final decomposition natively), resolves the shard→node routing, hands all of it to
+     * the backend's {@link AnalyticsSearchBackendPlugin#distributedExecute} (direct rust↔rust data
+     * plane), and drains the head-stage stream into the same {@code ProfiledResult} the legacy path
+     * returns. Runs on the SEARCH executor (the caller already forked there).
+     */
+    private void executeInternalDistributed(
+        RelNode logicalFragment,
+        PlannerContext plannerContext,
+        ClusterState planningState,
+        AnalyticsQueryTask queryTask,
+        long queryStartNanos,
+        ActionListener<ProfiledResult> listener
+    ) {
+        // 1. Single-aggregate marked tree (no CBO split): one OpenSearchAggregate, real table scans.
+        RelNode marked = PlannerImpl.createMarkedPlan(logicalFragment, plannerContext);
+
+        // 2. Whole-query Substrait via the DataFusion backend's convertor. Uses the shared
+        //    FragmentConversionDriver.convertWholeQuery so the marked tree's ANNOTATED_* wrappers are
+        //    stripped (predicates/projects resolved, Lucene-delegated predicates captured) — but with
+        //    NO DAG cut and NO partial/final pre-split; the native distributed planner does that.
+        AnalyticsSearchBackendPlugin backend = capabilityRegistry.getBackend(DATAFUSION_BACKEND);
+        if (backend == null) {
+            listener.onFailure(new IllegalStateException("distributed_engine requires the [datafusion] backend, which is not registered"));
+            return;
+        }
+        final byte[] planBytes;
+        final DfShardRouting.Routing routing;
+        final List<String> orderedWorkerUrls;
+        final byte[] delegationBytes;
+        final int delegationTreeShape;
+        final int delegationPredicateCount;
+        final byte[] leafFragmentBytes;
+        try {
+            org.opensearch.analytics.planner.dag.FragmentConversionDriver.WholeQueryConversion conv =
+                org.opensearch.analytics.planner.dag.FragmentConversionDriver.convertWholeQuery(
+                    marked,
+                    backend.getFragmentConvertor(),
+                    capabilityRegistry
+                );
+            planBytes = conv.planBytes();
+            // Indexed-query path: a predicate delegated to a secondary backend (Lucene). Serialize the
+            // DelegationDescriptor so the Rust coordinator pushes it into the leaf scan and the leaf
+            // worker rebuilds the FilterDelegationHandle. null = no delegation (plain scan).
+            if (conv.delegation() != null) {
+                org.opensearch.common.io.stream.BytesStreamOutput out = new org.opensearch.common.io.stream.BytesStreamOutput();
+                conv.delegation().writeTo(out);
+                delegationBytes = org.opensearch.core.common.bytes.BytesReference.toBytes(out.bytes());
+                delegationTreeShape = conv.delegation().treeShape().ordinal();
+                delegationPredicateCount = conv.delegation().delegatedPredicateCount();
+                leafFragmentBytes = conv.leafFragmentBytes();
+            } else {
+                delegationBytes = null;
+                delegationTreeShape = 0;
+                delegationPredicateCount = 0;
+                leafFragmentBytes = null;
+            }
+            // 3. Shard→node routing (ordered hosting nodes + shard→worker map), enforcing max_shards_per_query.
+            routing = DfShardRouting.buildRouting(marked, planningState, clusterService, indexNameExpressionResolver, maxShardsPerQuery);
+            // 3b. Resolve each hosting node's bound Worker gRPC port via the GetWorkerPort action and
+            //     compose its rust↔rust data-plane URL. Discovery (not a node attr) so ephemeral ports
+            //     and >1 node/host work.
+            orderedWorkerUrls = resolveWorkerUrls(routing.orderedWorkerNodes());
+        } catch (Exception e) {
+            listener.onFailure(e);
+            return;
+        }
+        if (orderedWorkerUrls.isEmpty()) {
+            listener.onFailure(new IllegalStateException("distributed_engine: no data-node workers resolved for the query's shards"));
+            return;
+        }
+
+        final long contextId = queryTask.getId();
+        // Per-table index-uuid map ("table=uuid" lines) so each join leg resolves against its own index.
+        final String indexUuid = routing.indexUuidCsv();
+        final List<String> outputColumnOrder = logicalFragment.getRowType().getFieldNames();
+
+        // 4. Allocator (mirrors the legacy path's per-query allocator + 429 translation).
+        final BufferAllocator queryAllocator;
+        final boolean ownsAllocator;
+        if (perQueryBufferLimit <= 0) {
+            queryAllocator = coordinatorAllocator;
+            ownsAllocator = false;
+        } else {
+            queryAllocator = AllocationRejection.wrap(
+                "dist-" + contextId,
+                () -> coordinatorAllocator.newChildAllocator("dist-" + contextId, 0, perQueryBufferLimit)
+            );
+            ownsAllocator = true;
+        }
+
+        // 5. Execute + drain the head-stage stream into rows. distributedExecute returns a streaming
+        //    result; we materialize it here (the caller is already on the SEARCH executor).
+        try {
+            List<Object[]> rows = new ArrayList<>();
+            try (EngineResultStream stream = backend.distributedExecute(
+                planBytes,
+                orderedWorkerUrls,
+                routing.shardMapCsv(),
+                indexUuid,
+                queryAllocator,
+                contextId,
+                delegationBytes,
+                delegationTreeShape,
+                delegationPredicateCount,
+                leafFragmentBytes
+            )) {
+                var it = stream.iterator();
+                while (it.hasNext()) {
+                    VectorSchemaRoot root = it.next().getArrowRoot();
+                    try {
+                        for (Object[] row : batchesToRows(List.of(root), outputColumnOrder)) {
+                            rows.add(row);
+                        }
+                    } finally {
+                        root.close();
+                    }
+                }
+            }
+            // Distributed-path profiling is degraded (no ExecutionGraph/QueryExecution); record a
+            // null-graph execution for stats parity and return rows with a null profile.
+            statsCollector.recordExecution(null, null, 0L);
+            logger.debug("[dist-{}] distributed query complete: {} rows in {}ns", contextId, rows.size(), System.nanoTime() - queryStartNanos);
+            listener.onResponse(new ProfiledResult(rows, null, null));
+        } catch (Exception e) {
+            listener.onFailure(contextProvider.convertException(e));
+        } finally {
+            if (ownsAllocator) {
+                try {
+                    queryAllocator.close();
+                } catch (Exception ignore) {}
+            }
+        }
+    }
+
+    /**
+     * Resolves the rust↔rust Worker gRPC URL for each hosting node, in the same order as
+     * {@code orderedWorkerNodes} (so {@code taskToWorkerUrlIndex} stays valid). Fans out the
+     * {@code GetWorkerPort} action to exactly those nodes and composes {@code http://host:port}.
+     * Blocks briefly on the SEARCH executor (mirrors the legacy scheduler's synchronous resolve).
+     * A node reporting {@code -1} (Worker not running) fails the query clearly.
+     */
+    private List<String> resolveWorkerUrls(List<org.opensearch.cluster.node.DiscoveryNode> orderedNodes) {
+        String[] nodeIds = orderedNodes.stream().map(org.opensearch.cluster.node.DiscoveryNode::getId).toArray(String[]::new);
+        org.opensearch.analytics.exec.distributed.GetWorkerPortAction.Response resp = client.execute(
+            org.opensearch.analytics.exec.distributed.GetWorkerPortAction.INSTANCE,
+            new org.opensearch.analytics.exec.distributed.GetWorkerPortAction.Request(nodeIds)
+        ).actionGet();
+
+        java.util.Map<String, Integer> portByNodeId = new java.util.HashMap<>();
+        for (var nr : resp.getNodes()) {
+            portByNodeId.put(nr.getNode().getId(), nr.getWorkerPort());
+        }
+        List<String> urls = new ArrayList<>(orderedNodes.size());
+        for (org.opensearch.cluster.node.DiscoveryNode node : orderedNodes) {
+            Integer port = portByNodeId.get(node.getId());
+            if (port == null || port <= 0) {
+                throw new IllegalStateException(
+                    "distributed_engine: node ["
+                        + node.getId()
+                        + "] is not running a DataFusion Worker gRPC server (port="
+                        + port
+                        + "); ensure 'datafusion-worker' is in aux.transport.types on data nodes."
+                );
+            }
+            urls.add("http://" + node.getHostAddress() + ":" + port);
+        }
+        return urls;
     }
 
     /**

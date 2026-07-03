@@ -40,6 +40,40 @@ public class PlanForker {
         forkStage(dag.rootStage(), registry);
     }
 
+    /**
+     * Resolves a WHOLE marked tree (no DAG cut) to a single driving backend — the distributed-engine
+     * analogue of {@link #forkStage}. This is the step the distributed path was missing: after
+     * {@code mark}, dual-viable operators (e.g. a filter viable on {@code [lucene, datafusion]}) are
+     * still unresolved, so a predicate delegated to a secondary backend is NOT yet turned into a
+     * {@code delegated_predicate(id)} marker. Running resolution narrows every operator to
+     * {@code preferredBackend} (when viable) and narrows each annotation to its target backend via
+     * {@link #resolveAnnotationsToTarget} — so the subsequent {@code convertWholeQuery} strip emits the
+     * marker + captures the secondary backend's serialized query, exactly as a per-shard fragment does.
+     *
+     * <p>Picks the alternative whose top-level chosen backend is {@code preferredBackend}; falls back
+     * to the first alternative when the preferred backend is not viable for the whole tree.
+     *
+     * @param marked the marked whole-query tree ({@code PlannerImpl.createMarkedPlan})
+     * @param preferredBackend the driving backend to resolve to (e.g. {@code "datafusion"})
+     * @param registry capability registry
+     * @return the resolved single-backend tree (delegated predicates left as annotations for the strip)
+     */
+    public static RelNode resolveWholeQuery(RelNode marked, String preferredBackend, CapabilityRegistry registry) {
+        List<Resolved> alternatives = resolve(marked, registry);
+        if (alternatives.isEmpty()) {
+            throw new IllegalStateException("PlanForker.resolveWholeQuery: no viable backend resolution for the marked plan");
+        }
+        for (Resolved r : alternatives) {
+            if (preferredBackend.equals(r.chosenBackend)) {
+                return r.node;
+            }
+        }
+        // Preferred backend not viable at the top — fall back to the first alternative (deterministic
+        // order from resolve()); the distributed engine requires the datafusion driver, so the caller
+        // may still reject a non-datafusion resolution downstream.
+        return alternatives.getFirst().node;
+    }
+
     private static void forkStage(Stage stage, CapabilityRegistry registry) {
         for (Stage child : stage.getChildStages()) {
             forkStage(child, registry);

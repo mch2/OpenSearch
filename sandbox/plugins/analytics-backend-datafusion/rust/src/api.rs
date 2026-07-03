@@ -129,6 +129,14 @@ impl QueryStreamHandle {
         self
     }
 
+    /// Adopts this handle as a bare [`SendableRecordBatchStream`] for the distributed leaf path: the
+    /// distributed `ShardScanExec` runs inside DataFusion and needs a stream to return, not an FFM
+    /// pointer. The returned stream OWNS this whole handle (session ctx, permit, tracking context,
+    /// task_done), so all query-scoped state lives exactly as long as the stream — no premature drop.
+    pub fn into_sendable_stream(self) -> datafusion::execution::SendableRecordBatchStream {
+        Box::pin(QueryStreamHandleStream { inner: self })
+    }
+
     pub fn new_with_plan(
         stream: RecordBatchStreamAdapter<CrossRtStream>,
         query_context: QueryTrackingContext,
@@ -236,6 +244,32 @@ impl QueryStreamHandle {
         for child in plan.children() {
             Self::collect_metrics(child.as_ref(), map);
         }
+    }
+}
+
+/// Adapts a whole [`QueryStreamHandle`] into a [`RecordBatchStream`] by polling its inner stream while
+/// keeping every query-scoped field (session ctx, permit, tracking context) alive for the stream's
+/// lifetime. Used by the distributed leaf path (`into_sendable_stream`).
+struct QueryStreamHandleStream {
+    inner: QueryStreamHandle,
+}
+
+impl futures::Stream for QueryStreamHandleStream {
+    type Item = datafusion::error::Result<arrow::record_batch::RecordBatch>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        // Safe: the inner adapter is Unpin (RecordBatchStreamAdapter<CrossRtStream>), so projecting a
+        // &mut to it from a pinned &mut Self is sound.
+        std::pin::Pin::new(&mut self.inner.stream).poll_next(cx)
+    }
+}
+
+impl RecordBatchStream for QueryStreamHandleStream {
+    fn schema(&self) -> arrow_schema::SchemaRef {
+        self.inner.stream.schema()
     }
 }
 
@@ -1695,6 +1729,27 @@ pub(crate) fn first_named_table_name(plan_bytes: &[u8]) -> Option<String> {
         }
     }
     None
+}
+
+/// Extracts EVERY distinct NamedTable name in the plan (join/union leaves), in first-seen order.
+/// A self-join references the same name twice → one entry. Used by the distributed coordinator to
+/// register a `ShardScanTable` per leaf table (multi-table support).
+pub(crate) fn all_named_table_names(plan_bytes: &[u8]) -> Vec<String> {
+    use substrait::proto::read_rel::ReadType;
+    let Ok(plan): Result<substrait::proto::Plan, _> = prost::Message::decode(plan_bytes) else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for read in collect_plan_reads(&plan) {
+        if let Some(ReadType::NamedTable(nt)) = read.read_type {
+            if let Some(name) = nt.names.last().cloned() {
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+        }
+    }
+    names
 }
 
 /// Extracts the `base_schema` NamedStruct from the plan's first ReadRel matching `table_name`.

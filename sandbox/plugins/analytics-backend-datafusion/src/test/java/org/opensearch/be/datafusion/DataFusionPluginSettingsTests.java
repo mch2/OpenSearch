@@ -53,7 +53,7 @@ public class DataFusionPluginSettingsTests extends OpenSearchTestCase {
      * application does not log a spurious failure during node startup.
      */
     public void testUpdateSpillMemoryLimitBeforeServiceStartDoesNotThrow() {
-        try (DataFusionPlugin plugin = new DataFusionPlugin()) {
+        try (DataFusionPlugin plugin = new DataFusionPlugin(Settings.EMPTY)) {
             plugin.updateSpillMemoryLimit(32L * 1024 * 1024);
         } catch (Exception e) {
             throw new AssertionError(e);
@@ -65,7 +65,7 @@ public class DataFusionPluginSettingsTests extends OpenSearchTestCase {
     }
 
     public void testPluginRegistersMemoryPoolLimitSetting() {
-        try (DataFusionPlugin plugin = new DataFusionPlugin()) {
+        try (DataFusionPlugin plugin = new DataFusionPlugin(Settings.EMPTY)) {
             List<Setting<?>> settings = plugin.getSettings();
             assertTrue(
                 "Plugin must register DATAFUSION_MEMORY_POOL_LIMIT via getSettings()",
@@ -86,7 +86,7 @@ public class DataFusionPluginSettingsTests extends OpenSearchTestCase {
      * so the cluster-state update does not log a failure during node startup.
      */
     public void testUpdateMemoryPoolLimitBeforeServiceStartDoesNotThrow() {
-        try (DataFusionPlugin plugin = new DataFusionPlugin()) {
+        try (DataFusionPlugin plugin = new DataFusionPlugin(Settings.EMPTY)) {
             // Service field is null — should be a no-op, not an NPE.
             plugin.updateMemoryPoolLimit(64L * 1024 * 1024);
         } catch (Exception e) {
@@ -95,7 +95,7 @@ public class DataFusionPluginSettingsTests extends OpenSearchTestCase {
     }
 
     public void testGetSettingsReturnsAllIndexedSettings() {
-        try (DataFusionPlugin plugin = new DataFusionPlugin()) {
+        try (DataFusionPlugin plugin = new DataFusionPlugin(Settings.EMPTY)) {
             List<Setting<?>> settings = plugin.getSettings();
             Set<String> settingKeys = settings.stream().map(Setting::getKey).collect(Collectors.toSet());
 
@@ -109,7 +109,7 @@ public class DataFusionPluginSettingsTests extends OpenSearchTestCase {
     }
 
     public void testGetSettingsReturnsTotalExpectedCount() {
-        try (DataFusionPlugin plugin = new DataFusionPlugin()) {
+        try (DataFusionPlugin plugin = new DataFusionPlugin(Settings.EMPTY)) {
             List<Setting<?>> settings = plugin.getSettings();
             assertEquals(31, settings.size());
         } catch (Exception e) {
@@ -120,7 +120,7 @@ public class DataFusionPluginSettingsTests extends OpenSearchTestCase {
     // ── datafusion.spill_directory (task 1.1) ──
 
     public void testSpillDirectoryIsRegistered() {
-        try (DataFusionPlugin plugin = new DataFusionPlugin()) {
+        try (DataFusionPlugin plugin = new DataFusionPlugin(Settings.EMPTY)) {
             List<Setting<?>> settings = plugin.getSettings();
             assertTrue(
                 "Plugin must register DATAFUSION_SPILL_DIRECTORY via getSettings()",
@@ -183,7 +183,7 @@ public class DataFusionPluginSettingsTests extends OpenSearchTestCase {
     }
 
     public void testDatafusionSettingsIsNullBeforeCreateComponents() {
-        try (DataFusionPlugin plugin = new DataFusionPlugin()) {
+        try (DataFusionPlugin plugin = new DataFusionPlugin(Settings.EMPTY)) {
             assertNull(plugin.getDatafusionSettings());
         } catch (Exception e) {
             throw new AssertionError(e);
@@ -323,7 +323,7 @@ public class DataFusionPluginSettingsTests extends OpenSearchTestCase {
     // ── datafusion.memory_guard.spill_exempt_cap_bytes ──
 
     public void testSpillExemptCapIsRegistered() {
-        try (DataFusionPlugin plugin = new DataFusionPlugin()) {
+        try (DataFusionPlugin plugin = new DataFusionPlugin(Settings.EMPTY)) {
             List<Setting<?>> settings = plugin.getSettings();
             assertTrue(
                 "Plugin must register DATAFUSION_MEMORY_GUARD_SPILL_EXEMPT_CAP via getSettings()",

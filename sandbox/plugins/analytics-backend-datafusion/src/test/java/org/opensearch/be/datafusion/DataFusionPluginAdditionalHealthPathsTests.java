@@ -17,12 +17,12 @@ import java.util.List;
 public class DataFusionPluginAdditionalHealthPathsTests extends OpenSearchTestCase {
 
     public void testReturnsEmptyWhenSpillDisabled() {
-        DataFusionPlugin plugin = new DataFusionPlugin();
+        DataFusionPlugin plugin = new DataFusionPlugin(Settings.EMPTY);
         assertEquals(List.of(), plugin.getAdditionalHealthPaths(Settings.EMPTY));
     }
 
     public void testReturnsConfiguredSpillDirectory() {
-        DataFusionPlugin plugin = new DataFusionPlugin();
+        DataFusionPlugin plugin = new DataFusionPlugin(Settings.EMPTY);
         Path dir = createTempDir();
         Settings settings = Settings.builder().put(DataFusionPlugin.DATAFUSION_SPILL_DIRECTORY.getKey(), dir.toString()).build();
         // Compare by string form: createTempDir() may return a Path on a randomized FileSystem,
@@ -98,7 +98,7 @@ public class DataFusionPluginAdditionalHealthPathsTests extends OpenSearchTestCa
     }
 
     public void testGetAdditionalHealthPathsHandlesExplicitlyEmptyString() {
-        DataFusionPlugin plugin = new DataFusionPlugin();
+        DataFusionPlugin plugin = new DataFusionPlugin(Settings.EMPTY);
         Settings settings = Settings.builder().put(DataFusionPlugin.DATAFUSION_SPILL_DIRECTORY.getKey(), "").build();
         assertEquals(List.of(), plugin.getAdditionalHealthPaths(settings));
     }

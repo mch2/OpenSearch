@@ -101,6 +101,7 @@ public class DataFusionPlugin extends Plugin
         AnalyticsSearchBackendPlugin,
         ActionPlugin,
         CircuitBreakerPlugin,
+        org.opensearch.plugins.NetworkPlugin,
         DocumentLookupProvider {
 
     private static final Logger logger = LogManager.getLogger(DataFusionPlugin.class);
@@ -494,10 +495,17 @@ public class DataFusionPlugin extends Plugin
     private volatile GetService getService;
     private volatile CircuitBreaker datafusionBreaker;
 
+    /** Node settings captured at construction (the {@code (Settings)} ctor form). */
+    private final Settings nodeSettings;
+
     /**
-     * Creates the DataFusion plugin.
+     * Creates the DataFusion plugin. OpenSearch's {@code PluginsService} requires exactly ONE public
+     * constructor; this {@code (Settings)} form is one of the three it accepts. (A second no-arg ctor
+     * would trip "no unique public constructor".)
      */
-    public DataFusionPlugin() {}
+    public DataFusionPlugin(Settings settings) {
+        this.nodeSettings = settings == null ? Settings.EMPTY : settings;
+    }
 
     @Override
     public Collection<Object> createComponents(
@@ -777,6 +785,25 @@ public class DataFusionPlugin extends Plugin
     @Override
     public List<Setting<?>> getSettings() {
         return DatafusionSettings.ALL_SETTINGS;
+    }
+
+    @Override
+    public Map<String, Supplier<org.opensearch.transport.AuxTransport>> getAuxTransports(
+        Settings settings,
+        ThreadPool threadPool,
+        org.opensearch.core.indices.breaker.CircuitBreakerService circuitBreakerService,
+        org.opensearch.common.network.NetworkService networkService,
+        ClusterSettings clusterSettings,
+        org.opensearch.telemetry.tracing.Tracer tracer
+    ) {
+        // The Worker server owns the data-node side of the rust↔rust distributed data plane. It is an
+        // AuxTransport so it gets the standard bind-port-range + lifecycle; enable by adding
+        // "datafusion-worker" to aux.transport.types. getAuxTransports runs AFTER createComponents,
+        // so dataFusionService (and its native runtime) already exists.
+        return Collections.singletonMap(
+            org.opensearch.be.datafusion.distributed.DataFusionWorkerAuxTransport.DATAFUSION_WORKER_TRANSPORT_KEY,
+            () -> new org.opensearch.be.datafusion.distributed.DataFusionWorkerAuxTransport(settings, dataFusionService)
+        );
     }
 
     @Override

@@ -779,6 +779,31 @@ mod tests {
 /// TODO: extract shared logic with `execute_indexed_query` to avoid duplication.
 /// For now this delegates to the existing function by reconstructing the needed args
 /// from the handle.
+/// Distributed-leaf entry: run the indexed executor for a shard-local `Filter(markers)->Read`
+/// fragment and return a BARE [`SendableRecordBatchStream`] the `ShardScanExec` leaf adopts (it runs
+/// inside DataFusion on the worker, so it needs a stream, not an FFM pointer). Reuses the exact
+/// pointer-returning path (`execute_indexed_with_context`) and unwraps the resulting QueryStreamHandle
+/// into a stream that keeps all query state alive.
+pub async fn indexed_scan_stream_from_handle(
+    handle: crate::session_context::SessionContextHandle,
+    substrait_bytes: Vec<u8>,
+) -> Result<datafusion::execution::SendableRecordBatchStream, DataFusionError> {
+    let mgr = crate::ffm::try_get_rt_manager()
+        .ok_or_else(|| DataFusionError::Execution("runtime manager not initialized".into()))?;
+    let cpu = mgr.cpu_executor();
+    // The leaf is already gated by the distributed worker's execution; the indexed executor only needs
+    // a permit token to hold for its lifetime. A fresh single-permit semaphore satisfies that.
+    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+    let permit = sem
+        .acquire_owned()
+        .await
+        .map_err(|e| DataFusionError::Execution(format!("indexed leaf permit: {e}")))?;
+    let ptr = Box::into_raw(Box::new(handle)) as i64;
+    let stream_ptr = unsafe { execute_indexed_with_context(ptr, substrait_bytes, cpu, permit).await? };
+    let handle_box = unsafe { Box::from_raw(stream_ptr as *mut crate::api::QueryStreamHandle) };
+    Ok(handle_box.into_sendable_stream())
+}
+
 pub async unsafe fn execute_indexed_with_context(
     session_ctx_ptr: i64,
     substrait_bytes: Vec<u8>,

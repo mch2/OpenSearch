@@ -80,8 +80,28 @@ public final class AnalyticsQuerySettings {
         Setting.Property.Dynamic
     );
 
+    /**
+     * When true, the analytics-engine bypasses the Java distributed planner/scheduler
+     * ({@code DAGBuilder}/{@code PlanForker}/{@code FragmentConversionDriver}/{@code QueryScheduler})
+     * and instead emits one whole-query Substrait plan that is executed through the Rust
+     * {@code datafusion-distributed} engine (direct rust↔rust gRPC data plane). Off by default;
+     * dynamic so it can be flipped per cluster while the new path bakes. See
+     * {@code DefaultPlanExecutor.executeInternalDistributed}.
+     */
+    public static final Setting<Boolean> DISTRIBUTED_ENGINE = Setting.boolSetting(
+        "analytics.query.distributed_engine",
+        false,
+        Setting.Property.NodeScope,
+        Setting.Property.Dynamic
+    );
+
     public static List<Setting<?>> all() {
-        return List.of(DELEGATION_BLOCKED_PREDICATES, MAX_SHARDS_PER_QUERY, MAX_CONCURRENT_SHARD_REQUESTS_PER_NODE);
+        return List.of(
+            DELEGATION_BLOCKED_PREDICATES,
+            MAX_SHARDS_PER_QUERY,
+            MAX_CONCURRENT_SHARD_REQUESTS_PER_NODE,
+            DISTRIBUTED_ENGINE
+        );
     }
 
     private AnalyticsQuerySettings() {}

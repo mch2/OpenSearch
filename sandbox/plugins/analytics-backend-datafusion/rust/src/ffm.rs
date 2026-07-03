@@ -1516,6 +1516,219 @@ pub extern "C" fn df_set_scoped_page_index_enabled(enabled: i64) -> i64 {
     Ok(0)
 }
 
+// ───────────────────────── Distributed (datafusion-distributed) FFM entries ─────────────────────
+
+/// Coordinator-side distributed execution. Takes whole-query Substrait (emitted by Java with phases
+/// marked but NOT pre-split), the per-query worker gRPC URL list, the shard-id list in task order,
+/// and the task→worker routing map; builds a distributed physical plan via datafusion-distributed,
+/// executes its head stage, and returns a `QueryStreamHandle` pointer drained by the existing
+/// `df_stream_next` / `df_stream_get_schema` / `df_stream_close` exports.
+///
+/// `worker_urls` and `shard_map` are newline-joined UTF-8: worker_urls = "url0\nurl1\n..."; shard_map
+/// = "shardId0:workerIdx0\nshardId1:workerIdx1\n..." (workerIdx indexes worker_urls; shard order is
+/// task order). This compact text form avoids a bespoke struct marshalling across FFM.
+///
+/// # Safety
+/// All pointers must be valid for their stated lengths; `runtime_ptr` a valid DataFusionRuntime.
+#[ffm_safe]
+#[no_mangle]
+pub unsafe extern "C" fn df_distributed_execute(
+    runtime_ptr: i64,
+    substrait_ptr: *const u8,
+    substrait_len: i64,
+    worker_urls_ptr: *const u8,
+    worker_urls_len: i64,
+    shard_map_ptr: *const u8,
+    shard_map_len: i64,
+    index_uuid_ptr: *const u8,
+    index_uuid_len: i64,
+    context_id: i64,
+    delegation_ptr: *const u8,
+    delegation_len: i64,
+    tree_shape: i32,
+    predicate_count: i32,
+    leaf_fragment_ptr: *const u8,
+    leaf_fragment_len: i64,
+    partial_reduce: i32,
+    cardinality_task_count_factor: f64,
+    max_tasks_per_stage: i32,
+) -> i64 {
+    let mgr = get_rt_manager()?;
+    let runtime_ptr_v = runtime_ptr;
+    let plan_vec = slice::from_raw_parts(substrait_ptr, substrait_len as usize).to_vec();
+    let urls_csv = str_from_raw(worker_urls_ptr, worker_urls_len)?.to_string();
+    let shard_map_csv = str_from_raw(shard_map_ptr, shard_map_len)?.to_string();
+    let index_uuid = str_from_raw(index_uuid_ptr, index_uuid_len)?.to_string();
+    // Optional Java-serialized DelegationDescriptor bytes (indexed query, Lucene-delegated predicate).
+    let java_delegation: Option<Vec<u8>> = if delegation_len > 0 {
+        Some(slice::from_raw_parts(delegation_ptr, delegation_len as usize).to_vec())
+    } else {
+        None
+    };
+    // Shard-local leaf fragment Substrait (Filter(markers)->Read) for the indexed leaf executor.
+    let leaf_fragment: Vec<u8> = if leaf_fragment_len > 0 {
+        slice::from_raw_parts(leaf_fragment_ptr, leaf_fragment_len as usize).to_vec()
+    } else {
+        Vec::new()
+    };
+
+    let worker_urls: Vec<String> = urls_csv
+        .split('\n')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect();
+
+    // Parse the shard map into PER-TABLE routing. Two line forms are accepted:
+    //   "table:shardId:workerIdx"  (multi-table — joins/unions)
+    //   "shardId:workerIdx"        (single-table back-compat → empty-key table)
+    // Shard order within a table is task order.
+    use crate::distributed::shard_task_estimator::TableRouting;
+    let mut by_table: std::collections::HashMap<String, TableRouting> = std::collections::HashMap::new();
+    for line in shard_map_csv.split('\n').map(str::trim).filter(|s| !s.is_empty()) {
+        let parts: Vec<&str> = line.split(':').collect();
+        let (table, sid, widx) = match parts.as_slice() {
+            [sid, widx] => ("", *sid, *widx),
+            [table, sid, widx] => (*table, *sid, *widx),
+            _ => return Err(format!("bad shard_map entry '{line}', expected 'table:shardId:workerIdx' or 'shardId:workerIdx'")),
+        };
+        let entry = by_table.entry(table.to_string()).or_default();
+        entry.shard_ids.push(sid.trim().parse::<i32>().map_err(|e| format!("bad shard id '{sid}': {e}"))?);
+        entry.task_to_worker.push(widx.trim().parse::<usize>().map_err(|e| format!("bad worker idx '{widx}': {e}"))?);
+    }
+
+    // Parse the index-uuid map. Line forms: "table=uuid" (multi-table) or a bare "uuid" (single-table
+    // → empty key). The empty-key entry is also the fallback for any unlisted table.
+    let mut index_uuid_by_table: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for line in index_uuid.split('\n').map(str::trim).filter(|s| !s.is_empty()) {
+        match line.split_once('=') {
+            Some((table, uuid)) => {
+                index_uuid_by_table.insert(table.trim().to_string(), uuid.trim().to_string());
+            }
+            None => {
+                index_uuid_by_table.insert(String::new(), line.to_string());
+            }
+        }
+    }
+
+    let mgr_inner = Arc::clone(&mgr);
+    timed_block_on(&mgr.io_runtime, "distributed_execute", async move {
+        let runtime = &*(runtime_ptr_v as *const DataFusionRuntime);
+        crate::distributed::coordinator::distributed_execute(
+            runtime,
+            &plan_vec,
+            worker_urls,
+            by_table,
+            index_uuid_by_table,
+            &mgr_inner,
+            context_id,
+            java_delegation,
+            leaf_fragment,
+            tree_shape,
+            predicate_count,
+            partial_reduce != 0,
+            cardinality_task_count_factor,
+            max_tasks_per_stage.max(0) as usize,
+        )
+        .await
+        .map_err(|e| e.to_string())
+    })
+}
+
+/// Publishes a query's shard files into the worker-side process-global registry BEFORE the query
+/// executes. `shards` is newline-joined "shardId\tfilename\trowBase\tnumRows" lines; files are
+/// resolved relative to `store_prefix` (a local filesystem prefix in tests / the shard's data path).
+/// This is the worker-side counterpart to the coordinator worker-URL feed; in production the leaf
+/// FFM upcall will replace it once the Java data node drives shard-reader acquisition.
+///
+/// # Safety
+/// All pointers valid for their lengths.
+#[ffm_safe]
+#[no_mangle]
+pub unsafe extern "C" fn df_worker_put_shards(
+    query_id: i64,
+    shards_ptr: *const u8,
+    shards_len: i64,
+    store_prefix_ptr: *const u8,
+    store_prefix_len: i64,
+) -> i64 {
+    use crate::api::ShardFileInfo;
+    use datafusion::execution::object_store::ObjectStoreUrl;
+
+    let shards_csv = str_from_raw(shards_ptr, shards_len)?.to_string();
+    let store_prefix = str_from_raw(store_prefix_ptr, store_prefix_len)?.to_string();
+
+    let store = std::sync::Arc::new(
+        object_store::local::LocalFileSystem::new_with_prefix(&store_prefix)
+            .map_err(|e| format!("LocalFileSystem prefix '{store_prefix}': {e}"))?,
+    );
+    let store_url = ObjectStoreUrl::local_filesystem();
+
+    // Group files by shard id.
+    let mut by_shard: std::collections::HashMap<i32, Vec<ShardFileInfo>> = std::collections::HashMap::new();
+    for line in shards_csv.split('\n').map(str::trim).filter(|s| !s.is_empty()) {
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() != 4 {
+            return Err(format!("bad shard line '{line}', expected 4 tab-separated fields"));
+        }
+        let shard_id: i32 = parts[0].parse().map_err(|e| format!("bad shard id: {e}"))?;
+        let filename = parts[1].to_string();
+        let row_base: i64 = parts[2].parse().map_err(|e| format!("bad row_base: {e}"))?;
+        let num_rows: u64 = parts[3].parse().map_err(|e| format!("bad num_rows: {e}"))?;
+
+        let path = std::path::Path::new(&store_prefix).join(&filename);
+        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let object_meta = object_store::ObjectMeta {
+            location: object_store::path::Path::from(filename),
+            last_modified: chrono::DateTime::from_timestamp(0, 0).unwrap(),
+            size,
+            e_tag: None,
+            version: None,
+        };
+        by_shard.entry(shard_id).or_default().push(ShardFileInfo {
+            object_meta,
+            row_base,
+            num_rows,
+            row_group_row_counts: vec![num_rows],
+            access_plan: None,
+        });
+    }
+
+    let shards: Vec<(i32, Vec<ShardFileInfo>)> = by_shard.into_iter().collect();
+    crate::distributed::worker_server::shard_registry().put_query(query_id, shards, store_url, store);
+    Ok(0)
+}
+
+/// Clears a query's shard registry entry (called by Java when the query finishes).
+#[no_mangle]
+pub extern "C" fn df_worker_clear_shards(query_id: i64) {
+    crate::distributed::worker_server::shard_registry().clear_query(query_id);
+}
+
+/// Starts the data-node Worker gRPC server on the node IO runtime. `bind_port` 0 = ephemeral; the
+/// chosen port is written to `out_port`. Returns a `WorkerServerHandle` pointer freed by
+/// `df_close_worker`.
+///
+/// # Safety
+/// `runtime_ptr` valid; `out_port` a writable `*mut i32`.
+#[ffm_safe]
+#[no_mangle]
+pub unsafe extern "C" fn df_create_worker(runtime_ptr: i64, bind_port: i32, out_port: *mut i32) -> i64 {
+    let mgr = get_rt_manager()?;
+    let runtime = &*(runtime_ptr as *const DataFusionRuntime);
+    crate::distributed::worker_server::start_worker(runtime, bind_port, out_port, &mgr)
+        .map_err(|e| e.to_string())
+}
+
+/// Stops + frees a Worker gRPC server handle.
+///
+/// # Safety
+/// `ptr` must be 0 or a pointer from `df_create_worker`.
+#[no_mangle]
+pub unsafe extern "C" fn df_close_worker(ptr: i64) {
+    crate::distributed::worker_server::stop_worker(ptr);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

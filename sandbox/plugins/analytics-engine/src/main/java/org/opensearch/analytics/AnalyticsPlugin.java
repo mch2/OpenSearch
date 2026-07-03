@@ -230,7 +230,11 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
     public List<ActionHandler<? extends ActionRequest, ? extends ActionResponse>> getActions() {
         return List.of(
             new ActionHandler<>(AnalyticsQueryAction.INSTANCE, DefaultPlanExecutor.class),
-            new ActionHandler<>(AnalyticsStatsAction.INSTANCE, TransportAnalyticsStatsAction.class)
+            new ActionHandler<>(AnalyticsStatsAction.INSTANCE, TransportAnalyticsStatsAction.class),
+            new ActionHandler<>(
+                org.opensearch.analytics.exec.distributed.GetWorkerPortAction.INSTANCE,
+                org.opensearch.analytics.exec.distributed.TransportGetWorkerPortAction.class
+            )
         );
     }
 

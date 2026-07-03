@@ -8,6 +8,8 @@
 
 package org.opensearch.be.datafusion;
 
+import org.opensearch.common.settings.Settings;
+
 import org.opensearch.analytics.spi.BackendCapabilityProvider;
 import org.opensearch.analytics.spi.ProjectCapability;
 import org.opensearch.analytics.spi.ScalarFunction;
@@ -27,7 +29,7 @@ import java.util.Set;
 public class MathProjectCapabilitiesTests extends OpenSearchTestCase {
 
     private Set<ScalarFunction> exposedProjectScalars() {
-        DataFusionAnalyticsBackendPlugin backendPlugin = new DataFusionAnalyticsBackendPlugin(new DataFusionPlugin());
+        DataFusionAnalyticsBackendPlugin backendPlugin = new DataFusionAnalyticsBackendPlugin(new DataFusionPlugin(Settings.EMPTY));
         BackendCapabilityProvider provider = backendPlugin.getCapabilityProvider();
         Set<ScalarFunction> seen = new HashSet<>();
         for (ProjectCapability cap : provider.projectCapabilities()) {
@@ -86,7 +88,7 @@ public class MathProjectCapabilitiesTests extends OpenSearchTestCase {
     }
 
     public void testAdapterTargetFunctionsHaveAdapters() {
-        DataFusionAnalyticsBackendPlugin backendPlugin = new DataFusionAnalyticsBackendPlugin(new DataFusionPlugin());
+        DataFusionAnalyticsBackendPlugin backendPlugin = new DataFusionAnalyticsBackendPlugin(new DataFusionPlugin(Settings.EMPTY));
         Map<ScalarFunction, ScalarFunctionAdapter> adapters = backendPlugin.getCapabilityProvider().scalarFunctionAdapters();
         assertNotNull("SINH must have an adapter registered", adapters.get(ScalarFunction.SINH));
         assertNotNull("COSH must have an adapter registered", adapters.get(ScalarFunction.COSH));

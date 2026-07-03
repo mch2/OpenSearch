@@ -17,6 +17,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.message.ParameterizedMessage;
 import org.opensearch.analytics.backend.EngineResultStream;
+import java.util.List;
 import org.opensearch.analytics.spi.AbstractNameMappingAdapter;
 import org.opensearch.analytics.spi.AggregateCapability;
 import org.opensearch.analytics.spi.AggregateFunction;
@@ -484,6 +485,9 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
         AggregateFunction.ARG_MIN,
         AggregateFunction.ARG_MAX
     );
+
+    /** Stable table name a distributed leaf registers its shard ListingTable under (register == lookup). */
+    private static final String DISTRIBUTED_LEAF_TABLE = "__df_distributed_leaf";
 
     private final DataFusionPlugin plugin;
 
@@ -1023,11 +1027,176 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
     }
 
     @Override
+    public EngineResultStream distributedExecute(
+        byte[] planBytes,
+        List<String> workerEndpoints,
+        String shardRouting,
+        String indexUuid,
+        BufferAllocator allocator,
+        long contextId,
+        byte[] delegationBytes,
+        int treeShape,
+        int predicateCount,
+        byte[] leafFragmentBytes,
+        DistributedTuning tuning
+    ) {
+        DataFusionService dataFusionService = plugin.getDataFusionService();
+        if (dataFusionService == null) {
+            throw new IllegalStateException("DataFusionService not initialized");
+        }
+        if (!NativeBridge.isDistributedEngineAvailable()) {
+            throw new UnsupportedOperationException(
+                "The loaded native library does not export the datafusion-distributed entries; "
+                    + "rebuild the native lib with the distributed engine to use analytics.query.distributed_engine"
+            );
+        }
+        DistributedTuning t = tuning == null ? DistributedTuning.DEFAULT : tuning;
+        long runtimePtr = dataFusionService.getNativeRuntime().get();
+        long streamPtr = NativeBridge.distributedExecute(
+            runtimePtr,
+            planBytes,
+            String.join("\n", workerEndpoints),
+            shardRouting,
+            indexUuid == null ? "" : indexUuid,
+            contextId,
+            delegationBytes,
+            treeShape,
+            predicateCount,
+            leafFragmentBytes,
+            t.partialReduce(),
+            t.cardinalityTaskCountFactor(),
+            t.maxTasksPerStage()
+        );
+        StreamHandle streamHandle = new StreamHandle(streamPtr, dataFusionService.getNativeRuntime());
+        return new DatafusionResultStream(streamHandle, allocator);
+    }
+
+    @Override
     public void cancelByContext(long contextId) {
         // Fire the per-context cancellation token so the fetch stream's cross_rt task breaks
         // cooperatively. No-op for an unknown contextId.
         if (contextId != 0) {
             NativeBridge.cancelQuery(contextId);
+        }
+    }
+
+    @Override
+    public void registerLeafBridge(org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin.LeafBridge bridge) {
+        // Adapt the framework LeafBridge to the FFM-boundary shim and install it as the node-global
+        // upcall target. The engine injects this at startup (it owns shard/reader access); the backend
+        // owns the native FFM registry. null clears it.
+        if (bridge == null) {
+            org.opensearch.be.datafusion.distributed.LeafBridgeCallbacks.clearBridge();
+            return;
+        }
+        org.opensearch.be.datafusion.distributed.LeafBridgeCallbacks.setBridge(
+            new org.opensearch.be.datafusion.distributed.LeafBridgeCallbacks.LeafBridge() {
+                @Override
+                public org.opensearch.be.datafusion.distributed.LeafBridgeCallbacks.LeafBridge.Opened open(
+                    long queryId,
+                    String indexUuid,
+                    int shardId,
+                    byte[] substrait,
+                    byte[] descriptor,
+                    int treeShape,
+                    int predicateCount
+                ) throws Exception {
+                    var opened = bridge.open(queryId, indexUuid, shardId, substrait, descriptor, treeShape, predicateCount);
+                    return new org.opensearch.be.datafusion.distributed.LeafBridgeCallbacks.LeafBridge.Opened(
+                        opened.mode(),
+                        opened.handle()
+                    );
+                }
+
+                @Override
+                public long next(long cursor) throws Exception {
+                    return bridge.next(cursor);
+                }
+
+                @Override
+                public void close(long cursor) {
+                    bridge.close(cursor);
+                }
+            }
+        );
+    }
+
+    @Override
+    public int getWorkerPort() {
+        DataFusionService svc = plugin.getDataFusionService();
+        return svc == null ? -1 : svc.getWorkerPort();
+    }
+
+    @Override
+    public long createNativeSessionHandle(
+        org.opensearch.index.engine.exec.IndexReaderProvider.Reader reader,
+        byte[] substrait,
+        boolean indexed,
+        long contextId,
+        int treeShape,
+        int delegatedPredicateCount
+    ) {
+        DataFusionService dataFusionService = plugin.getDataFusionService();
+        if (dataFusionService == null) {
+            throw new IllegalStateException("DataFusionService not initialized");
+        }
+        DataFormatRegistry registry = plugin.getDataFormatRegistry();
+        DatafusionReader dfReader = null;
+        for (String formatName : plugin.getSupportedFormats()) {
+            dfReader = reader.getReader(registry.format(formatName), DatafusionReader.class);
+            if (dfReader != null) break;
+        }
+        if (dfReader == null) {
+            throw new IllegalStateException("No DatafusionReader available for distributed leaf scan");
+        }
+        long readerPtr = dfReader.getReaderHandle().getPointer();
+        long runtimePtr = dataFusionService.getNativeRuntime().get();
+        WireConfigSnapshot snapshot = plugin.getDatafusionSettings().getSnapshot();
+        try (java.lang.foreign.Arena arena = java.lang.foreign.Arena.ofConfined()) {
+            java.lang.foreign.MemorySegment segment = arena.allocate(WireConfigSnapshot.BYTE_SIZE);
+            snapshot.writeTo(segment);
+            long ptr;
+            if (indexed) {
+                // Indexed leaf (Lucene-delegated predicate): the substrait IS the shard-local
+                // Filter(delegated_predicate markers) -> Read fragment, whose NamedTable the Rust side
+                // binds to this shard's reader. The indexed executor decodes the markers into the Lucene
+                // BoolNode tree and evaluates via the contextId-keyed FilterDelegationHandle (registered
+                // by DistributedLeafBridge before this call). DISTRIBUTED_LEAF_TABLE is only a fallback
+                // name; the fragment's NamedTable is authoritative.
+                org.opensearch.be.datafusion.nativelib.SessionContextHandle handle =
+                    NativeBridge.createSessionContextForIndexedExecution(
+                        readerPtr,
+                        runtimePtr,
+                        DISTRIBUTED_LEAF_TABLE,
+                        contextId,
+                        treeShape,
+                        delegatedPredicateCount,
+                        false, // requestsRowIds — QTF row-id emission is a separate follow-on
+                        false, // hasPartialAggregate — the distributed planner inserts Partial/Final natively
+                        segment.address(),
+                        substrait
+                    );
+                ptr = handle.getPointer();
+                handle.markConsumed();
+            } else {
+                // Vanilla leaf: plan bytes are empty, so create_session_context registers the
+                // ListingTable under DISTRIBUTED_LEAF_TABLE and scan_stream_from_handle looks it up by
+                // the same name (register == lookup); the leaf scans the single table in full.
+                org.opensearch.be.datafusion.nativelib.SessionContextHandle handle = NativeBridge.createSessionContext(
+                    readerPtr,
+                    runtimePtr,
+                    DISTRIBUTED_LEAF_TABLE,
+                    contextId,
+                    false, // hasPartialAggregate — the distributed planner inserts Partial/Final natively
+                    segment.address(),
+                    substrait
+                );
+                ptr = handle.getPointer();
+                handle.markConsumed();
+            }
+            // The Rust leaf takes ownership (Box::from_raw) of this SessionContextHandle, so the Java
+            // wrapper is marked consumed above to avoid a double-free on its close().
+            return ptr;
         }
     }
 

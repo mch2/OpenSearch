@@ -95,6 +95,27 @@ crc32fast = { workspace = true }
 # rewrite. STANDARD alphabet matches the OpenSearch `binary` field wire contract.
 base64 = "0.22"
 
+# datafusion-distributed: the distributed planner/scheduler that replaces the Java-side DAG. Used
+# by src/distributed/* in the library build. Path dep to the local checkout (Phase 1; a Brazil
+# vendoring story comes later). datafusion-proto backs the stage-subplan codec.
+datafusion-distributed = { path = "/local/home/handalm/datafusion-distributed" }
+datafusion-proto = "=54.0.0"
+# tonic for the data-node Worker gRPC server (df_create_worker). Version pinned to match the one
+# datafusion-distributed resolves so there is a single tonic in the graph. (tokio-stream is already
+# a dependency above.)
+tonic = { version = "=0.14.6", features = ["transport"] }
+# arrow-flight: Model A leaf is a Rust Arrow Flight client doing do_get directly against the data
+# node's plain-Flight shard endpoint. Pinned to our arrow version (single arrow in the graph).
+arrow-flight = "=58.3.0"
+# http: HeaderMap for df-distributed passthrough headers (query-id propagation coordinator->worker).
+http = "1"
+
+[features]
+# Turns on datafusion-distributed's `integration` feature (InMemoryChannelResolver etc.) so the
+# Phase-1 distributed e2e test can spin up in-process workers. Off by default; never enabled for
+# the production cdylib. Enable with: cargo test -p opensearch-datafusion --features spike_integration
+spike_integration = ["datafusion-distributed/integration"]
+
 [dev-dependencies]
 criterion = { workspace = true }
 tempfile = { workspace = true }

@@ -190,6 +190,156 @@ async fn internal_search_dataframe(
 ///
 /// This is the fragment (non-row-id) execution path: row-id-requesting plans are
 /// routed to the indexed executor by `df_execute_with_context` before reaching here.
+/// Native-adopt leaf helper (Model B, cases 1&2): given a `SessionContextHandle` that the Java leaf
+/// upcall already built (reader acquired, table registered, delegation set up), decode the shard-local
+/// Substrait, plan it, and return the RAW `SendableRecordBatchStream`.
+///
+/// Unlike [`execute_with_context`], this returns the bare DataFusion stream (NO `CrossRtStream`, NO
+/// `QueryStreamHandle`): the caller is `ShardScanExec::execute`, which already runs inside DataFusion
+/// on a worker thread, so it adopts this stream directly as its leaf output. The `SessionContextHandle`
+/// is kept alive by parking it in the returned stream's closure scope via `AdoptedScanStream`.
+pub async fn scan_stream_from_handle(
+    handle: SessionContextHandle,
+    plan_bytes: &[u8],
+) -> Result<datafusion::physical_plan::SendableRecordBatchStream, DataFusionError> {
+    scan_stream_from_handle_projected(handle, plan_bytes, None).await
+}
+
+/// Like [`scan_stream_from_handle`], but for the non-delegated (empty-plan) full-scan case the leaf
+/// passes the coordinator-advertised output schema so the scan is PROJECTED + REORDERED to exactly
+/// those columns by name. The coordinator derives `ShardScanExec`'s schema from the Substrait
+/// base_schema (Spike F) and the parent operators bind by position, so a raw parquet-order full scan
+/// (which may differ in column order/count) must be conformed here or the shuffle fails with
+/// "column types must match schema types".
+pub async fn scan_stream_from_handle_projected(
+    handle: SessionContextHandle,
+    plan_bytes: &[u8],
+    target_schema: Option<datafusion::arrow::datatypes::SchemaRef>,
+) -> Result<datafusion::physical_plan::SendableRecordBatchStream, DataFusionError> {
+    use datafusion::physical_plan::ExecutionPlan;
+
+    // Indexed leaf (delegated Lucene predicate): the Java upcall built a handle with indexed_config set
+    // and `plan_bytes` is the shard-local Filter(markers)->Read fragment. Route to the indexed executor
+    // (which builds the Lucene BoolNode tree from the markers + evaluates via the contextId-keyed FFM
+    // callbacks) and adopt its stream. The indexed executor consumes the handle by pointer and returns
+    // a QueryStreamHandle ptr wrapping a SendableRecordBatchStream; we unbox it and adopt it directly.
+    if handle.indexed_config.is_some() {
+        // Route to the indexed executor, which builds the Lucene BoolNode tree from the shard-local
+        // Filter(markers)->Read fragment and evaluates it via the contextId-keyed FFM callbacks. It
+        // returns a bare SendableRecordBatchStream the leaf adopts directly (no CrossRtStream double-hop:
+        // the leaf already runs on the worker's CPU executor via block_in_place upstream).
+        let stream = crate::indexed_executor::indexed_scan_stream_from_handle(handle, plan_bytes.to_vec()).await?;
+        // The indexed leaf fragment (Filter(markers)->Read) passes through the predicate columns (e.g.
+        // `body`) as well as the output columns — but the coordinator advertised only the projected
+        // columns for ShardScanExec (e.g. `service`). Project the stream to the advertised schema by
+        // name so the leaf output is positionally identical to what the parent (shuffle) expects.
+        return match target_schema {
+            Some(ts) => Ok(project_stream_by_name(stream, ts)),
+            None => Ok(stream),
+        };
+    }
+
+    // Non-delegated leaf (the common distributed case): the data-node leaf emits the shard's RAW
+    // rows — the distributed physical plan runs the Partial aggregate ABOVE this leaf, so there is
+    // no shard-local plan to decode. `plan_bytes` is empty; scan the table the Java upcall just
+    // registered (`handle.table_name`), projected to the advertised columns. Delegation/indexed
+    // leaves carry a real plan and take the decode branch below.
+    if plan_bytes.is_empty() {
+        if handle.object_metas.is_empty() {
+            use datafusion::physical_plan::empty::EmptyExec;
+            // Empty shard: emit zero rows with the advertised schema (preferred) or the table schema.
+            let schema = match target_schema {
+                Some(s) => s,
+                None => {
+                    let provider = handle.ctx.table_provider(handle.table_name.as_str()).await.map_err(|e| {
+                        DataFusionError::Execution(format!(
+                            "scan_stream_from_handle: empty-shard table '{}' not registered: {e}",
+                            handle.table_name
+                        ))
+                    })?;
+                    crate::schema_coerce::coerce_inferred_schema(provider.schema())
+                }
+            };
+            return EmptyExec::new(schema).execute(0, handle.ctx.task_ctx());
+        }
+        let mut dataframe = handle.ctx.table(handle.table_name.as_str()).await.map_err(|e| {
+            DataFusionError::Execution(format!(
+                "scan_stream_from_handle: leaf table '{}' not registered: {e}",
+                handle.table_name
+            ))
+        })?;
+        // Project + reorder to the advertised schema's columns by name so the leaf output is
+        // positionally identical to what the coordinator planned for ShardScanExec.
+        if let Some(ts) = target_schema.as_ref() {
+            let cols: Vec<datafusion::logical_expr::Expr> =
+                ts.fields().iter().map(|f| datafusion::logical_expr::col(f.name())).collect();
+            dataframe = dataframe.select(cols)?;
+        }
+        let physical_plan = dataframe.create_physical_plan().await?;
+        let final_schema = target_schema
+            .unwrap_or_else(|| crate::schema_coerce::coerce_inferred_schema(physical_plan.schema()));
+        let physical_plan = crate::relabel_exec::wrap_if_relabel_needed(physical_plan, final_schema)?;
+        return execute_stream(physical_plan, handle.ctx.task_ctx());
+    }
+
+    let plan = Plan::decode(plan_bytes)
+        .map_err(|e| DataFusionError::Execution(format!("scan_stream_from_handle: decode Substrait: {e}")))?;
+    let logical_plan = from_substrait_plan(&handle.ctx.state(), &plan).await?;
+
+    // Empty shard → EmptyExec with the logical plan's schema (parquet planning errors on zero files).
+    if handle.object_metas.is_empty() {
+        use datafusion::physical_plan::empty::EmptyExec;
+        let plan_schema = crate::schema_coerce::coerce_inferred_schema(Arc::new(
+            logical_plan.schema().as_arrow().clone(),
+        ));
+        return EmptyExec::new(plan_schema).execute(0, handle.ctx.task_ctx());
+    }
+
+    let dataframe = handle.ctx.execute_logical_plan(logical_plan).await?;
+    let physical_plan = dataframe.create_physical_plan().await?;
+    let target_schema = crate::schema_coerce::coerce_inferred_schema(physical_plan.schema());
+    let physical_plan = crate::relabel_exec::wrap_if_relabel_needed(physical_plan, target_schema)?;
+    // task_ctx borrows the session; execute_stream returns a stream that holds Arcs into it, so the
+    // session must outlive the stream — the caller parks `handle` alongside the returned stream.
+    execute_stream(physical_plan, handle.ctx.task_ctx())
+}
+
+/// Projects each batch of `stream` to `target`'s columns BY NAME, reordering/dropping as needed. Used
+/// by the distributed indexed leaf: the indexed executor passes the predicate columns through, but the
+/// coordinator advertised only the projected columns for `ShardScanExec`, so the leaf output must be
+/// narrowed to match positionally.
+fn project_stream_by_name(
+    stream: datafusion::physical_plan::SendableRecordBatchStream,
+    target: datafusion::arrow::datatypes::SchemaRef,
+) -> datafusion::physical_plan::SendableRecordBatchStream {
+    use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+    use futures::StreamExt;
+
+    let src_schema = stream.schema();
+    // Resolve target field name -> source column index once, up front.
+    let indices: Vec<usize> = target
+        .fields()
+        .iter()
+        .map(|f| src_schema.index_of(f.name()))
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_or_default();
+    let out_schema = Arc::clone(&target);
+    let mapped = stream.map(move |batch_res| {
+        let batch = batch_res?;
+        if indices.len() != out_schema.fields().len() {
+            return Err(DataFusionError::Execution(format!(
+                "indexed leaf projection: target columns {:?} not all present in scan output {:?}",
+                out_schema.fields().iter().map(|f| f.name()).collect::<Vec<_>>(),
+                batch.schema().fields().iter().map(|f| f.name()).collect::<Vec<_>>(),
+            )));
+        }
+        let cols: Vec<_> = indices.iter().map(|&i| batch.column(i).clone()).collect();
+        datafusion::arrow::record_batch::RecordBatch::try_new(Arc::clone(&out_schema), cols)
+            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
+    });
+    Box::pin(RecordBatchStreamAdapter::new(target, mapped))
+}
+
 pub async fn execute_with_context(
     handle: SessionContextHandle,
     plan_bytes: &[u8],

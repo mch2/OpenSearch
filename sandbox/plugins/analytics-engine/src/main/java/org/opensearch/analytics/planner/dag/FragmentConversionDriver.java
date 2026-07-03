@@ -90,6 +90,85 @@ public class FragmentConversionDriver {
         }
     }
 
+    /** Result of a whole-query conversion for the distributed engine.
+     *  @param planBytes the whole-query wire plan (fed to the distributed planner)
+     *  @param delegation the delegation descriptor, or null when nothing was delegated to a secondary backend
+     *  @param leafFragmentBytes for the delegated (indexed) case, the shard-local {@code Filter(markers)->scan}
+     *         Substrait the leaf worker feeds to its indexed executor; null when no delegation. Derived from
+     *         the SAME stripped plan (the WHERE-filter subtree) — not a separate DAG cut. */
+    public record WholeQueryConversion(
+        byte[] planBytes,
+        org.opensearch.analytics.spi.DelegationDescriptor delegation,
+        byte[] leafFragmentBytes
+    ) {}
+
+    /**
+     * Converts a WHOLE marked query tree (from {@code PlannerImpl.createMarkedPlan}) into a single
+     * logical-Substrait plan for the {@code datafusion-distributed} engine — the distributed-path
+     * analogue of {@link #convertStage}, but with NO DAG cut and NO partial/final pre-split (the
+     * native distributed planner inserts the shuffle + Partial/Final split itself).
+     *
+     * <p>Crucially it runs the marked tree through {@link #strip} first, so the {@code ANNOTATED_*}
+     * wrappers the marking phase inserts (predicates, project expressions) are resolved — either
+     * unwrapped to native RexNodes or turned into delegation placeholders + {@link DelegatedExpression}s
+     * (the Lucene pushdown). Calling {@code convertFragment} on an un-stripped tree fails with
+     * "Unable to convert call ANNOTATED_PREDICATE/ANNOTATED_PROJECT_EXPR".
+     *
+     * @param marked   the marked whole-query tree (single aggregate, real table scans)
+     * @param convertor the target backend's fragment convertor (datafusion)
+     * @param registry  capability registry (used to resolve delegated-predicate serializers)
+     */
+    public static WholeQueryConversion convertWholeQuery(
+        RelNode marked,
+        FragmentConvertor convertor,
+        CapabilityRegistry registry
+    ) {
+        // MISSING-STEP FIX: resolve the marked tree to a single driving backend BEFORE stripping — the
+        // whole-query analogue of PlanForker (minus the DAG cut). Without this, dual-viable operators
+        // (filter viable on [lucene, datafusion]) stay unresolved, so a Lucene-only predicate is never
+        // turned into a delegated_predicate(id) marker (delegatedCount=0) and its raw call (e.g. the
+        // match() options MAP) breaks Substrait conversion. Resolving to datafusion makes each
+        // secondary-backend annotation differ from the driver, so the strip below emits the marker +
+        // captures the secondary backend's serialized (e.g. Lucene) query. The resulting Substrait is
+        // byte-identical to today's per-shard fragment, just uncut.
+        RelNode resolved = PlanForker.resolveWholeQuery(marked, "datafusion", registry);
+
+        // Derive the filter-tree shape BEFORE stripping (annotations must be intact) — mirrors
+        // convertStage. Pick the bottommost (WHERE) filter: pushdown+merge leaves delegated
+        // annotations only there; a HAVING stays un-delegated above the Aggregate.
+        List<OpenSearchFilter> filters = RelNodeUtils.findAllNodes(resolved, OpenSearchFilter.class);
+        OpenSearchFilter whereFilter = filters.isEmpty() ? null : filters.getLast();
+
+        IntraOperatorDelegationBytes delegationBytes = new IntraOperatorDelegationBytes(registry);
+        RelNode stripped = strip(resolved, delegationBytes);
+        List<DelegatedExpression> delegated = delegationBytes.getResult();
+        byte[] planBytes = convertor.convertFragment(stripped);
+        if (delegated.isEmpty()) {
+            return new WholeQueryConversion(planBytes, null, null);
+        }
+        FilterTreeShape treeShape = whereFilter != null
+            ? FilterTreeShapeDeriver.derive(whereFilter, whereFilter.getViableBackends().getFirst())
+            : FilterTreeShape.NO_DELEGATION;
+
+        // Leaf fragment for the indexed worker: the stripped WHERE-filter subtree (Filter(markers)->scan),
+        // NOT a separate DAG cut — it's the same stripped tree, taken at the bottommost filter. strip()
+        // rewrote the OpenSearchFilter into a plain Calcite Filter (LogicalFilter) carrying the
+        // `delegated_predicate(id)` markers, so search for the base Filter class. The leaf's indexed
+        // executor decodes those markers into the Lucene BoolNode tree.
+        List<org.apache.calcite.rel.core.Filter> strippedFilters = RelNodeUtils.findAllNodes(
+            stripped,
+            org.apache.calcite.rel.core.Filter.class
+        );
+        RelNode leafSubtree = strippedFilters.isEmpty() ? stripped : strippedFilters.getLast();
+        byte[] leafFragmentBytes = convertor.convertFragment(leafSubtree);
+
+        return new WholeQueryConversion(
+            planBytes,
+            new org.opensearch.analytics.spi.DelegationDescriptor(treeShape, delegated.size(), delegated),
+            leafFragmentBytes
+        );
+    }
+
     private static void convertStage(Stage stage, CapabilityRegistry registry) {
         for (Stage child : stage.getChildStages()) {
             convertStage(child, registry);

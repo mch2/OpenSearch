@@ -8,6 +8,8 @@
 
 package org.opensearch.be.datafusion;
 
+import org.opensearch.common.settings.Settings;
+
 import org.opensearch.analytics.spi.BackendCapabilityProvider;
 import org.opensearch.analytics.spi.FieldType;
 import org.opensearch.analytics.spi.ProjectCapability;
@@ -25,7 +27,7 @@ import java.util.Set;
 public class CastProjectCapabilitiesTests extends OpenSearchTestCase {
 
     private Set<ProjectCapability> getProjectCapabilities() {
-        DataFusionAnalyticsBackendPlugin backendPlugin = new DataFusionAnalyticsBackendPlugin(new DataFusionPlugin());
+        DataFusionAnalyticsBackendPlugin backendPlugin = new DataFusionAnalyticsBackendPlugin(new DataFusionPlugin(Settings.EMPTY));
         BackendCapabilityProvider provider = backendPlugin.getCapabilityProvider();
         return provider.projectCapabilities();
     }

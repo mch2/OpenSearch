@@ -64,7 +64,8 @@ public class AnalyticsSearchTransportService {
         ClusterService clusterService,
         AnalyticsSearchService searchService,
         IndicesService indicesService,
-        TaskResourceTrackingService taskResourceTrackingService
+        TaskResourceTrackingService taskResourceTrackingService,
+        org.opensearch.analytics.planner.CapabilityRegistry capabilityRegistry
     ) {
         if (streamTransportService == null) {
             throw new IllegalStateException(
@@ -79,6 +80,30 @@ public class AnalyticsSearchTransportService {
         this.clusterService = clusterService;
         registerStreamingFragmentHandler(this.transportService, searchService, indicesService);
         registerFetchByRowIdsHandler(this.transportService, searchService, indicesService);
+        // Distributed-engine (Model B) leaf bridge: the data-node Rust Worker upcalls Java to set up
+        // the leaf scan. The bridge delegates the actual reader/context/delegation setup to
+        // AnalyticsSearchService (its existing logic), so nothing is reimplemented here. Best-effort:
+        // only when the datafusion backend is present.
+        registerDistributedLeafBridge(indicesService, clusterService, capabilityRegistry, searchService);
+    }
+
+    private static void registerDistributedLeafBridge(
+        IndicesService indicesService,
+        ClusterService clusterService,
+        org.opensearch.analytics.planner.CapabilityRegistry capabilityRegistry,
+        AnalyticsSearchService searchService
+    ) {
+        try {
+            org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin backend = capabilityRegistry.getBackend("datafusion");
+            if (backend == null) {
+                return;
+            }
+            backend.registerLeafBridge(new DistributedLeafBridge(indicesService, clusterService, backend, searchService));
+        } catch (Exception e) {
+            // Distributed engine is opt-in; a backend without leaf-bridge support must not block startup.
+            org.apache.logging.log4j.LogManager.getLogger(AnalyticsSearchTransportService.class)
+                .debug("DistributedLeafBridge not registered (datafusion backend unavailable or unsupported)", e);
+        }
     }
 
     private static void registerStreamingFragmentHandler(

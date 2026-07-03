@@ -167,6 +167,33 @@ public class PlannerImpl {
     }
 
     /**
+     * RBO marking ONLY — phases 0–1c (removeSubQueries → extractLiteralAgg → reduceExpressions →
+     * pushdownRules → decomposeAggregates → mark → splitAggLiteralArgProject), stopping BEFORE the
+     * Volcano CBO ({@link #cbo}).
+     *
+     * <p>The distributed-engine path ({@code DefaultPlanExecutor.executeInternalDistributed}) uses
+     * this instead of {@link #createPlan}: CBO is what inserts the PARTIAL/FINAL aggregate split
+     * ({@code OpenSearchAggregateSplitRule}) and the exchange reducers that drive the Java DAG. For
+     * the datafusion-distributed path we want a tree with a SINGLE {@code OpenSearchAggregate} (mode
+     * neither PARTIAL nor FINAL), real {@code OpenSearchTableScan} leaves, and no
+     * {@code OpenSearchStageInputScan} — so the whole-query Substrait carries one logical aggregate
+     * and the Rust distributed planner does the partial/final decomposition natively.
+     */
+    public static RelNode createMarkedPlan(RelNode rawRelNode, PlannerContext context) {
+        RuleProfilingListener listener = context.isProfilingEnabled() ? new RuleProfilingListener() : null;
+        RelNode n = rawRelNode;
+        n = removeSubQueries(n, listener);
+        n = extractLiteralAgg(n, listener);
+        n = reduceExpressions(n, listener);
+        n = pushdownRules(n, listener);
+        n = decomposeAggregates(n, listener);
+        n = mark(n, context, listener);
+        n = splitAggLiteralArgProject(n, listener);
+        LOGGER.debug("After marking (distributed path, no CBO):\n{}", RelOptUtil.toString(n));
+        return n;
+    }
+
+    /**
      * Phase 0: lower {@link org.apache.calcite.rex.RexSubQuery}s (EXISTS / IN / SOME / ANY,
      * including the PPL {@code subsearch} shapes that the frontend lowers to them) into
      * {@code LogicalCorrelate} via the three {@code *_SUB_QUERY_TO_CORRELATE} rules, then

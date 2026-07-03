@@ -107,6 +107,11 @@ def configureAnalyticsCluster = { cluster ->
 
     // analytics-engine requires the streaming transport — fragment dispatch is streaming-only.
     cluster.systemProperty 'opensearch.experimental.feature.transport.stream.enabled', 'true'
+
+    // Enable the datafusion-distributed Worker gRPC server (rust↔rust data plane) as an auxiliary
+    // transport so the distributed engine can route directly node→node. The bound (ephemeral) port
+    // is discovered per-query via the GetWorkerPort transport action.
+    cluster.setting 'aux.transport.types', 'datafusion-worker'
 }
 
 // ── Default integTest cluster ────────────────────────────────────────────────

@@ -519,6 +519,131 @@ public class AnalyticsSearchService implements AutoCloseable {
     }
 
     /**
+     * Handle for a distributed-leaf scan opened via {@link #openDistributedLeaf}. Carries the native
+     * DataFusion session pointer the Rust {@code ShardScanExec} adopts, plus a {@link #close} that
+     * releases the reader lease + any delegation binding. The Rust leaf owns the session pointer
+     * (it {@code Box::from_raw}s it), so {@code close} only releases the Java-side leases.
+     */
+    public static final class DistributedLeafHandle {
+        private final long nativeSessionPtr;
+        private final Runnable cleanup;
+
+        DistributedLeafHandle(long nativeSessionPtr, Runnable cleanup) {
+            this.nativeSessionPtr = nativeSessionPtr;
+            this.cleanup = cleanup;
+        }
+
+        public long nativeSessionPtr() {
+            return nativeSessionPtr;
+        }
+
+        public void close() {
+            cleanup.run();
+        }
+    }
+
+    /**
+     * Distributed-engine (Model B) leaf entrypoint: the data-node Rust {@code ShardScanExec} upcalls
+     * here to set up a shard-local scan, REUSING this service's existing reader-acquisition + context +
+     * delegation logic ({@link #buildContext}-equivalent + the {@code startFragment} delegation block) —
+     * nothing is reimplemented in the bridge. Unlike {@code startFragment}, it does NOT construct a
+     * {@link SearchExecEngine}: the Rust leaf drives execution natively from the returned session
+     * pointer. So this method only does the SETUP (reader lease, delegation handle registration, native
+     * session creation) and hands back the pointer + a cleanup.
+     *
+     * @param backend the driving backend (datafusion) that owns the native session + FFM delegation registry
+     * @param shard the local shard hosting this scan
+     * @param contextId the query id (keys the per-query delegation binding + native session)
+     * @param substrait the shard-local leaf fragment (empty = plain full scan; else Filter(markers)->Read)
+     * @param delegation the delegation descriptor (null = no delegation / vanilla scan)
+     * @return a {@link DistributedLeafHandle} carrying the native session pointer + a cleanup
+     */
+    public DistributedLeafHandle openDistributedLeaf(
+        AnalyticsSearchBackendPlugin backend,
+        IndexShard shard,
+        Task task,
+        long contextId,
+        byte[] substrait,
+        DelegationDescriptor delegation
+    ) throws IOException {
+        GatedCloseable<Reader> gatedReader = shard.getReaderProvider().acquireReader();
+        Reader reader = gatedReader.get();
+        Runnable delegationCleanup = null;
+        try {
+            boolean indexed = delegation != null && !delegation.delegatedExpressions().isEmpty();
+            int treeShape = indexed ? delegation.treeShape().ordinal() : 0;
+            int predicateCount = indexed ? delegation.delegatedPredicateCount() : 0;
+
+            if (indexed) {
+                // Build the SAME ShardScanExecutionContext startFragment uses (reader + mapper +
+                // queryCache + namedWriteableRegistry + shardId), then register the accepting backend's
+                // FilterDelegationHandle under contextId — verbatim reuse of the startFragment
+                // delegation block. The native indexed executor's FFM callbacks resolve to this handle.
+                ShardScanExecutionContext ctx = buildLeafContext(shard, task, reader, substrait);
+                String acceptingBackendId = delegation.delegatedExpressions().getFirst().getAcceptingBackendId();
+                AnalyticsSearchBackendPlugin acceptingBackend = backends.get(acceptingBackendId);
+                if (acceptingBackend == null) {
+                    throw new IllegalStateException("Delegation accepting backend [" + acceptingBackendId + "] is not registered");
+                }
+                FilterDelegationHandle handle = acceptingBackend.getFilterDelegationHandle(delegation.delegatedExpressions(), ctx);
+                delegationCleanup = backend.configureFilterDelegation(contextId, handle, null, null);
+            }
+
+            long nativePtr = backend.createNativeSessionHandle(reader, substrait, indexed, contextId, treeShape, predicateCount);
+
+            final Runnable delegationCleanupFinal = delegationCleanup;
+            Runnable cleanup = () -> {
+                if (delegationCleanupFinal != null) {
+                    try {
+                        delegationCleanupFinal.run();
+                    } catch (Exception e) {
+                        LOGGER.warn("openDistributedLeaf: failed to release filter delegation for query " + contextId, e);
+                    }
+                }
+                try {
+                    gatedReader.close();
+                } catch (Exception e) {
+                    LOGGER.warn("openDistributedLeaf: failed to close reader gate for query " + contextId, e);
+                }
+            };
+            return new DistributedLeafHandle(nativePtr, cleanup);
+        } catch (Exception e) {
+            if (delegationCleanup != null) {
+                try {
+                    delegationCleanup.run();
+                } catch (Exception suppressed) {
+                    e.addSuppressed(suppressed);
+                }
+            }
+            try {
+                gatedReader.close();
+            } catch (Exception suppressed) {
+                e.addSuppressed(suppressed);
+            }
+            throw e;
+        }
+    }
+
+    /**
+     * Builds the leaf-scan {@link ShardScanExecutionContext} for {@link #openDistributedLeaf}, setting
+     * the same shard-derived fields as {@link #buildContext} (the delegation handle build reads
+     * mapperService / queryCache / queryCachingPolicy / namedWriteableRegistry off it). Table name is a
+     * fallback only — the backend derives the real registration name from the Substrait NamedTable.
+     */
+    private ShardScanExecutionContext buildLeafContext(IndexShard shard, Task task, Reader reader, byte[] substrait) {
+        ShardScanExecutionContext ctx = new ShardScanExecutionContext(shard.shardId().getIndexName(), task, reader);
+        ctx.setFragmentBytes(substrait);
+        ctx.setAllocator(allocator);
+        ctx.setMapperService(shard.mapperService());
+        ctx.setIndexSettings(shard.indexSettings());
+        ctx.setNamedWriteableRegistry(namedWriteableRegistry);
+        ctx.setQueryCache(shard.getQueryCache());
+        ctx.setQueryCachingPolicy(shard.getQueryCachingPolicy());
+        ctx.setShardId(shard.shardId());
+        return ctx;
+    }
+
+    /**
      * Applies each instruction handler in order. Each handler reads the previous handler's
      * {@link BackendExecutionContext} and returns the next one. Returns {@code null} when the
      * instruction list is empty.
