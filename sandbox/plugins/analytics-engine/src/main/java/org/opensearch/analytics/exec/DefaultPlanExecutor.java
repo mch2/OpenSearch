@@ -65,6 +65,7 @@ import org.opensearch.transport.client.node.NodeClient;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -413,8 +414,7 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
             return;
         }
         final byte[] planBytes;
-        final DfShardRouting.Routing routing;
-        final List<String> orderedWorkerUrls;
+        final DfShardRouting.ResolvedRouting resolved;
         final byte[] delegationBytes;
         final int delegationTreeShape;
         final int delegationPredicateCount;
@@ -443,24 +443,33 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
                 delegationPredicateCount = 0;
                 leafFragmentBytes = null;
             }
-            // 3. Shard→node routing (ordered hosting nodes + shard→worker map), enforcing max_shards_per_query.
-            routing = DfShardRouting.buildRouting(marked, planningState, clusterService, indexNameExpressionResolver, maxShardsPerQuery);
-            // 3b. Resolve each hosting node's bound Worker gRPC port via the GetWorkerPort action and
-            //     compose its rust↔rust data-plane URL. Discovery (not a node attr) so ephemeral ports
-            //     and >1 node/host work.
-            orderedWorkerUrls = resolveWorkerUrls(routing.orderedWorkerNodes());
+            // 3. Shard→node routing: each shard carries its ordered candidate nodes (primary + replicas)
+            //    over a shared candidate-node list; enforces max_shards_per_query.
+            DfShardRouting.Routing routing = DfShardRouting.buildRouting(
+                marked,
+                planningState,
+                clusterService,
+                indexNameExpressionResolver,
+                maxShardsPerQuery
+            );
+            // 3b. Discover which candidate nodes have a LIVE Worker gRPC server via the GetWorkerPort
+            //     action (discovery, not a node attr, so ephemeral ports and >1 node/host work), then
+            //     pick the first live copy per shard — routing around a dead/worker-less node to a
+            //     replica. A shard with no live copy fails the query clearly.
+            Map<Integer, String> liveUrlByNodeIdx = resolveLiveWorkerUrls(routing.orderedWorkerNodes());
+            resolved = DfShardRouting.resolve(routing, liveUrlByNodeIdx);
         } catch (Exception e) {
             listener.onFailure(e);
             return;
         }
-        if (orderedWorkerUrls.isEmpty()) {
+        if (resolved.workerUrls().isEmpty()) {
             listener.onFailure(new IllegalStateException("distributed_engine: no data-node workers resolved for the query's shards"));
             return;
         }
 
         final long contextId = queryTask.getId();
         // Per-table index-uuid map ("table=uuid" lines) so each join leg resolves against its own index.
-        final String indexUuid = routing.indexUuidCsv();
+        final String indexUuid = resolved.indexUuidCsv();
         final List<String> outputColumnOrder = logicalFragment.getRowType().getFieldNames();
 
         // 3c. Cancellation: a front-end cancel / client disconnect / timeout cascades into queryTask;
@@ -489,8 +498,8 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
             List<Object[]> rows = new ArrayList<>();
             try (EngineResultStream stream = backend.distributedExecute(
                 planBytes,
-                orderedWorkerUrls,
-                routing.shardMapCsv(),
+                resolved.workerUrls(),
+                resolved.shardMapCsv(),
                 indexUuid,
                 queryAllocator,
                 contextId,
@@ -528,13 +537,17 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
     }
 
     /**
-     * Resolves the rust↔rust Worker gRPC URL for each hosting node, in the same order as
-     * {@code orderedWorkerNodes} (so {@code taskToWorkerUrlIndex} stays valid). Fans out the
-     * {@code GetWorkerPort} action to exactly those nodes and composes {@code http://host:port}.
-     * Blocks briefly on the SEARCH executor (mirrors the legacy scheduler's synchronous resolve).
-     * A node reporting {@code -1} (Worker not running) fails the query clearly.
+     * Discovers which candidate nodes have a LIVE Worker gRPC server and returns a map from the node's
+     * index in {@code orderedNodes} to its {@code http://host:port} URL. Fans out the
+     * {@code GetWorkerPort} action to those nodes and composes each URL. Blocks briefly on the SEARCH
+     * executor (mirrors the legacy scheduler's synchronous resolve).
+     *
+     * <p>Unlike a strict per-node resolve, a node that is down / not running the Worker (absent from
+     * the response, or reporting {@code port <= 0}) is simply OMITTED from the map rather than failing
+     * the query — {@link DfShardRouting#resolve} then routes that node's shards to a live replica, and
+     * only errors if a shard has no live copy at all.
      */
-    private List<String> resolveWorkerUrls(List<org.opensearch.cluster.node.DiscoveryNode> orderedNodes) {
+    private Map<Integer, String> resolveLiveWorkerUrls(List<org.opensearch.cluster.node.DiscoveryNode> orderedNodes) {
         String[] nodeIds = orderedNodes.stream().map(org.opensearch.cluster.node.DiscoveryNode::getId).toArray(String[]::new);
         org.opensearch.analytics.exec.distributed.GetWorkerPortAction.Response resp = client.execute(
             org.opensearch.analytics.exec.distributed.GetWorkerPortAction.INSTANCE,
@@ -545,21 +558,15 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
         for (var nr : resp.getNodes()) {
             portByNodeId.put(nr.getNode().getId(), nr.getWorkerPort());
         }
-        List<String> urls = new ArrayList<>(orderedNodes.size());
-        for (org.opensearch.cluster.node.DiscoveryNode node : orderedNodes) {
+        Map<Integer, String> liveUrlByNodeIdx = new java.util.HashMap<>();
+        for (int idx = 0; idx < orderedNodes.size(); idx++) {
+            org.opensearch.cluster.node.DiscoveryNode node = orderedNodes.get(idx);
             Integer port = portByNodeId.get(node.getId());
-            if (port == null || port <= 0) {
-                throw new IllegalStateException(
-                    "distributed_engine: node ["
-                        + node.getId()
-                        + "] is not running a DataFusion Worker gRPC server (port="
-                        + port
-                        + "); ensure 'datafusion-worker' is in aux.transport.types on data nodes."
-                );
+            if (port != null && port > 0) {
+                liveUrlByNodeIdx.put(idx, "http://" + node.getHostAddress() + ":" + port);
             }
-            urls.add("http://" + node.getHostAddress() + ":" + port);
         }
-        return urls;
+        return liveUrlByNodeIdx;
     }
 
     /**

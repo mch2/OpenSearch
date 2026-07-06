@@ -55,53 +55,88 @@ import java.util.Map;
  */
 public final class DfShardRouting {
 
-    /** Per-table shard routing: for each shard (task order) its real shard number + worker index. */
-    public record TableRouting(String tableName, String indexUuid, int[] shardIds, int[] taskToWorkerUrlIndex) {}
+    /**
+     * Per-table shard routing. For each shard (task order): its real shard number plus the ORDERED
+     * list of candidate node indices (into {@code Routing.orderedWorkerNodes}) that host a copy —
+     * primary first, then replicas. Final worker selection (first LIVE candidate) is deferred to
+     * {@link DfShardRouting#resolve} once {@code GetWorkerPort} reveals which nodes run a Worker, so the
+     * query routes around a dead/worker-less node to a replica.
+     */
+    public record TableRouting(String tableName, String indexUuid, int[] shardIds, int[][] shardCandidateNodeIdxs) {}
 
     /**
-     * The Rust-facing routing: the shared ordered worker-node list + one {@link TableRouting} per
-     * distinct leaf table (join legs on different indices route independently).
+     * The Rust-facing routing BEFORE liveness is known: the shared candidate worker-node list + one
+     * {@link TableRouting} per distinct leaf table. {@link #resolve} collapses the per-shard candidate
+     * lists to concrete workers using the live set and produces the wire form.
      */
-    public record Routing(List<DiscoveryNode> orderedWorkerNodes, List<TableRouting> tables) {
-        /**
-         * Newline-joined {@code table:shardId:workerIdx} lines — the wire form
-         * {@code df_distributed_execute} parses into per-table {@code TableRouting}. {@code shardId}
-         * is the REAL shard number (the data node resolves {@code getShard(shardId)}), NOT a dense
-         * ordinal, so cross-index legs with different shard layouts route correctly.
-         */
-        public String shardMapCsv() {
-            StringBuilder sb = new StringBuilder();
-            boolean first = true;
-            for (TableRouting t : tables) {
-                for (int i = 0; i < t.shardIds.length; i++) {
-                    if (first == false) {
-                        sb.append('\n');
+    public record Routing(List<DiscoveryNode> orderedWorkerNodes, List<TableRouting> tables) {}
+
+    /**
+     * The resolved wire form after picking a live worker per shard. {@code workerUrls} are the live
+     * data-node Worker gRPC URLs (task order irrelevant; shard map indexes into this list).
+     */
+    public record ResolvedRouting(List<String> workerUrls, String shardMapCsv, String indexUuidCsv) {}
+
+    /**
+     * Collapses each shard's candidate node list to its first LIVE node (a Worker gRPC URL was
+     * resolved for it via {@code GetWorkerPort}) and emits the wire form. {@code liveWorkerUrlByNodeIdx}
+     * maps an index into {@link Routing#orderedWorkerNodes} to that node's Worker URL; a node absent
+     * from the map has no live Worker (down, or {@code datafusion-worker} not enabled) and is skipped
+     * as a candidate — routing the shard to a replica. A shard with NO live candidate fails the query
+     * clearly (its data is unavailable).
+     *
+     * <p>The emitted {@code workerIdx} indexes a compacted list of only the live URLs actually used.
+     */
+    public static ResolvedRouting resolve(Routing routing, Map<Integer, String> liveWorkerUrlByNodeIdx) {
+        // Compact the used live URLs into a dense list, remembering each node-idx's position in it.
+        List<String> usedUrls = new ArrayList<>();
+        Map<Integer, Integer> nodeIdxToUsedIdx = new LinkedHashMap<>();
+
+        StringBuilder shardMap = new StringBuilder();
+        boolean firstShard = true;
+        for (TableRouting t : routing.tables()) {
+            for (int i = 0; i < t.shardIds().length; i++) {
+                // First live candidate for this shard (primary, then replicas in order).
+                Integer chosenNodeIdx = null;
+                for (int cand : t.shardCandidateNodeIdxs()[i]) {
+                    if (liveWorkerUrlByNodeIdx.containsKey(cand)) {
+                        chosenNodeIdx = cand;
+                        break;
                     }
-                    first = false;
-                    sb.append(t.tableName).append(':').append(t.shardIds[i]).append(':').append(t.taskToWorkerUrlIndex[i]);
                 }
+                if (chosenNodeIdx == null) {
+                    throw new IllegalStateException(
+                        "distributed_engine: shard ["
+                            + t.shardIds()[i]
+                            + "] of table ["
+                            + t.tableName()
+                            + "] has no live data-node Worker on any of its copies; the query cannot be routed"
+                    );
+                }
+                final Integer nodeIdxKey = chosenNodeIdx;
+                int usedIdx = nodeIdxToUsedIdx.computeIfAbsent(nodeIdxKey, k -> {
+                    usedUrls.add(liveWorkerUrlByNodeIdx.get(k));
+                    return usedUrls.size() - 1;
+                });
+                if (firstShard == false) {
+                    shardMap.append('\n');
+                }
+                firstShard = false;
+                shardMap.append(t.tableName()).append(':').append(t.shardIds()[i]).append(':').append(usedIdx);
             }
-            return sb.toString();
         }
 
-        /** Newline-joined {@code table=indexUuid} lines — the per-table index uuid map. */
-        public String indexUuidCsv() {
-            StringBuilder sb = new StringBuilder();
-            boolean first = true;
-            for (TableRouting t : tables) {
-                if (first == false) {
-                    sb.append('\n');
-                }
-                first = false;
-                sb.append(t.tableName).append('=').append(t.indexUuid);
+        StringBuilder uuidCsv = new StringBuilder();
+        boolean firstTable = true;
+        for (TableRouting t : routing.tables()) {
+            if (firstTable == false) {
+                uuidCsv.append('\n');
             }
-            return sb.toString();
+            firstTable = false;
+            uuidCsv.append(t.tableName()).append('=').append(t.indexUuid());
         }
 
-        /** First table's index uuid (diagnostics / single-table callers). */
-        public String firstIndexUuid() {
-            return tables.isEmpty() ? "" : tables.getFirst().indexUuid;
-        }
+        return new ResolvedRouting(usedUrls, shardMap.toString(), uuidCsv.toString());
     }
 
     private DfShardRouting() {}
@@ -159,22 +194,32 @@ public final class DfShardRouting {
             String indexUuid = resolution.concreteIndices().getFirst().getIndexUUID();
 
             List<Integer> shardIds = new ArrayList<>();
-            List<Integer> taskToWorker = new ArrayList<>();
+            List<int[]> shardCandidates = new ArrayList<>();
             for (ShardIterator shardIt : shardIterators) {
-                ShardRouting shard = shardIt.nextOrNull();
-                if (shard == null) {
-                    continue;
+                // Collect ALL copies of this shard (primary first, then replicas) as candidate nodes,
+                // so DfShardRouting.resolve can route around a node whose Worker is down/absent.
+                List<Integer> candidates = new ArrayList<>();
+                int shardNum = -1;
+                ShardRouting shard;
+                while ((shard = shardIt.nextOrNull()) != null) {
+                    shardNum = shard.id();
+                    DiscoveryNode node = clusterState.nodes().get(shard.currentNodeId());
+                    if (node == null) {
+                        continue;
+                    }
+                    int urlIndex = nodeIdToUrlIndex.computeIfAbsent(node.getId(), id -> {
+                        orderedWorkerNodes.add(node);
+                        return orderedWorkerNodes.size() - 1;
+                    });
+                    if (candidates.contains(urlIndex) == false) {
+                        candidates.add(urlIndex);
+                    }
                 }
-                DiscoveryNode node = clusterState.nodes().get(shard.currentNodeId());
-                if (node == null) {
-                    continue;
+                if (candidates.isEmpty()) {
+                    continue; // no assigned copy anywhere (shard unallocated); resolve() will error if referenced
                 }
-                int urlIndex = nodeIdToUrlIndex.computeIfAbsent(node.getId(), id -> {
-                    orderedWorkerNodes.add(node);
-                    return orderedWorkerNodes.size() - 1;
-                });
-                shardIds.add(shard.id()); // REAL shard number — the data node resolves getShard(shardId)
-                taskToWorker.add(urlIndex);
+                shardIds.add(shardNum); // REAL shard number — the data node resolves getShard(shardId)
+                shardCandidates.add(candidates.stream().mapToInt(Integer::intValue).toArray());
             }
             totalShards += shardIds.size();
             tables.add(
@@ -182,7 +227,7 @@ public final class DfShardRouting {
                     tableName,
                     indexUuid,
                     shardIds.stream().mapToInt(Integer::intValue).toArray(),
-                    taskToWorker.stream().mapToInt(Integer::intValue).toArray()
+                    shardCandidates.toArray(new int[0][])
                 )
             );
         }
