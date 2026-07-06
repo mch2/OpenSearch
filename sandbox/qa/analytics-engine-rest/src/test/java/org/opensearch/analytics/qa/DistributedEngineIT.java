@@ -46,6 +46,44 @@ public class DistributedEngineIT extends AnalyticsRestTestCase {
         assertEquals("result mismatch for: " + query, normalize(legacy), normalize(distributed));
     }
 
+    /**
+     * Reader-lease release on the distributed path: run MANY distributed queries in a row against the
+     * same shards and assert every one succeeds + the index stays queryable. Each distributed leaf
+     * acquires a shard Reader gate via the JVM upcall and must release it when its stream drops
+     * ({@code NativeLeafStream::drop → leaf_close → DistributedLeafBridge.close}). If the gate leaked
+     * (the pre-fix bug), the gate pool would exhaust and later queries / refreshes would stall or fail.
+     * A force-merge at the end requires all readers to be released, so a leak fails it.
+     */
+    public void testDistributedRepeatedQueriesReleaseReaders() throws Exception {
+        createParquetBackedIndex();
+        ingestDeterministicDocs();
+
+        String query = "source = " + INDEX + " | stats count() as n, sum(amount) as total by category | sort category";
+        setDistributedEngine(false);
+        List<List<Object>> legacy = rowsOf(executePpl(query));
+
+        setDistributedEngine(true);
+        try {
+            for (int i = 0; i < 25; i++) {
+                List<List<Object>> distributed = rowsOf(executePpl(query));
+                assertEquals("iteration " + i + " result must equal legacy", normalize(legacy), normalize(distributed));
+            }
+        } finally {
+            setDistributedEngine(false);
+        }
+
+        // Force-merge needs every reader released; a leaked distributed reader gate would block it.
+        Request merge = new Request("POST", "/" + INDEX + "/_forcemerge");
+        merge.addParameter("max_num_segments", "1");
+        assertOkAndParse(client().performRequest(merge), "force-merge after distributed queries");
+
+        Map<String, Object> health = assertOkAndParse(
+            client().performRequest(new Request("GET", "/_cluster/health/" + INDEX)),
+            "health after repeated distributed queries"
+        );
+        assertNotEquals("index must not be RED after repeated distributed queries", "red", health.get("status"));
+    }
+
     public void testDistributedGroupByMatchesLegacy() throws Exception {
         createParquetBackedIndex();
         ingestDeterministicDocs();

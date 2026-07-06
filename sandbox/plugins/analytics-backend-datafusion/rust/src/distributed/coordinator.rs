@@ -26,7 +26,7 @@
 
 use std::sync::Arc;
 
-use datafusion::arrow::datatypes::{Schema, SchemaRef};
+use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::catalog::TableProvider;
 use datafusion::common::{exec_datafusion_err, exec_err, Result};
 use datafusion::execution::{SessionState, SessionStateBuilder};
@@ -42,7 +42,7 @@ use substrait::proto::Plan;
 
 use crate::api::DataFusionRuntime;
 use crate::distributed::codec::ShardScanCodec;
-use crate::distributed::shard_scan_exec::{ShardScanExec, UNASSIGNED_SHARD};
+use crate::distributed::shard_scan_exec::ShardScanExec;
 use crate::distributed::shard_task_estimator::ShardScanTaskEstimator;
 use crate::distributed::worker_resolver::OsWorkerResolver;
 
@@ -164,12 +164,7 @@ impl TableProvider for ShardScanTable {
             })?),
             None => Arc::clone(&self.schema),
         };
-        let mut exec = ShardScanExec::new(
-            self.table_name.clone(),
-            self.index_uuid.clone(),
-            UNASSIGNED_SHARD,
-            output_schema,
-        );
+        let mut exec = ShardScanExec::unassigned(self.table_name.clone(), self.index_uuid.clone(), output_schema);
         // If DataFusion pushed the delegation marker into this scan, attach the descriptor so the
         // codec ships it to the leaf worker (which runs the Lucene indexed scan).
         if let Some(java) = self.java_delegation.as_ref() {
@@ -469,6 +464,3 @@ pub async fn distributed_execute(
         .with_task_done(task_done);
     Ok(Box::into_raw(Box::new(handle)) as i64)
 }
-
-#[allow(dead_code)]
-fn _schema_ref_unused(_s: &Schema) {}

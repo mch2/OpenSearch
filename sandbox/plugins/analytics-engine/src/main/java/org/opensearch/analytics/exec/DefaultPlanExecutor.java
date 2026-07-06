@@ -463,6 +463,12 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
         final String indexUuid = routing.indexUuidCsv();
         final List<String> outputColumnOrder = logicalFragment.getRowType().getFieldNames();
 
+        // 3c. Cancellation: a front-end cancel / client disconnect / timeout cascades into queryTask;
+        //     fire the backend's per-context token so the coordinator head stage unwinds and dropping
+        //     its DistributedExec stream tears down the worker ExecuteTask streams (which cancels the
+        //     worker-side scans). Without this a cancelled distributed query keeps running natively.
+        queryTask.setOnCancelCallback(() -> backend.cancelByContext(contextId));
+
         // 4. Allocator (mirrors the legacy path's per-query allocator + 429 translation).
         final BufferAllocator queryAllocator;
         final boolean ownsAllocator;

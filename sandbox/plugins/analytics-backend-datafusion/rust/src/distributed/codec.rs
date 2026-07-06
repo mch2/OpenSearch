@@ -20,7 +20,7 @@ use datafusion_proto::physical_plan::PhysicalExtensionCodec;
 use datafusion_proto::protobuf;
 use prost::Message;
 
-use crate::distributed::shard_scan_exec::{DelegationDescriptor, ShardScanExec, UNASSIGNED_SHARD};
+use crate::distributed::shard_scan_exec::{DelegationDescriptor, ShardScanExec};
 
 #[derive(Clone, PartialEq, ::prost::Message)]
 struct ShardScanProto {
@@ -80,7 +80,7 @@ impl PhysicalExtensionCodec for ShardScanCodec {
             descriptor_bytes: d.descriptor_bytes,
         });
         Ok(Arc::new(
-            ShardScanExec::new(proto.table_name, proto.index_uuid, UNASSIGNED_SHARD, Arc::new(schema))
+            ShardScanExec::unassigned(proto.table_name, proto.index_uuid, Arc::new(schema))
                 .with_shards(proto.shard_ids)
                 .with_delegation(delegation),
         ))
@@ -126,7 +126,7 @@ mod tests {
     #[test]
     fn roundtrip_plain() {
         let node: Arc<dyn ExecutionPlan> = Arc::new(
-            ShardScanExec::new("events".into(), "idx".into(), UNASSIGNED_SHARD, schema()).with_shards(vec![2, 5]),
+            ShardScanExec::unassigned("events".into(), "idx".into(), schema()).with_shards(vec![2, 5]),
         );
         let mut buf = Vec::new();
         ShardScanCodec.try_encode(Arc::clone(&node), &mut buf).unwrap();
@@ -153,7 +153,8 @@ mod tests {
             descriptor_bytes: vec![9, 8, 7],
         };
         let node: Arc<dyn ExecutionPlan> = Arc::new(
-            ShardScanExec::new("events".into(), "idx".into(), 1, schema())
+            ShardScanExec::unassigned("events".into(), "idx".into(), schema())
+                .with_shards(vec![1])
                 .with_delegation(Some(delegation.clone())),
         );
         let mut buf = Vec::new();

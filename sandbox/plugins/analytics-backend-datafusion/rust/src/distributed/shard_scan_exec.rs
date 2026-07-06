@@ -87,9 +87,9 @@ pub struct ShardScanExec {
 }
 
 impl ShardScanExec {
-    /// Construct an UNASSIGNED placeholder leaf (no shard group yet). `scale_up_leaf_node` clones it
+    /// Construct an UNASSIGNED placeholder leaf (empty shard group). `scale_up_leaf_node` clones it
     /// into per-task variants via [`with_shards`](Self::with_shards).
-    pub fn new(table_name: String, index_uuid: String, _shard_id: i32, schema: SchemaRef) -> Self {
+    pub fn unassigned(table_name: String, index_uuid: String, schema: SchemaRef) -> Self {
         Self::with_group(table_name, index_uuid, Vec::new(), schema)
     }
 
