@@ -360,6 +360,12 @@ pub fn build_coordinator_context(
     //  - cardinality_task_count_factor: scale a stage's task count up when a node increases cardinality
     //    (>1) so wide reduces/joins spread across more workers.
     //  - max_tasks_per_stage: hard cap (0 = inherit worker count).
+    //  - elide_single_task_network_boundaries=false: our leaves are node-pinned (a ShardScanExec can
+    //    only run on the node hosting its shard; the coordinator hosts none). The library's default
+    //    elides a 1-producer/1-consumer boundary and runs the producer inline on the head — which for a
+    //    SINGLE-SHARD index would run the leaf on the shard-less coordinator ("ShardScanExec executed
+    //    while still unassigned"). Disabling elision keeps the boundary so the single task is dispatched
+    //    to its worker. (Multi-shard leaves already have >1 task and were unaffected.)
     {
         let opts = state.config_mut().options_mut();
         if let Ok(dcfg) = datafusion_distributed::DistributedConfig::from_config_options_mut(opts) {
@@ -368,6 +374,7 @@ pub fn build_coordinator_context(
                 dcfg.cardinality_task_count_factor = cardinality_task_count_factor;
             }
             dcfg.max_tasks_per_stage = max_tasks_per_stage;
+            dcfg.elide_single_task_network_boundaries = false;
         }
     }
     let ctx = SessionContext::from(state);
@@ -442,11 +449,16 @@ pub async fn distributed_execute(
     )?;
     let dplan = plan_distributed(&ctx, plan_bytes).await?;
 
-    // Log the distributed physical plan shape (shuffle/coalesce/partitioning) so the hash-shuffle
-    // aggregate path is verifiable in the node log without a debugger.
-    if log::log_enabled!(log::Level::Debug) {
-        let displayed = datafusion::physical_plan::displayable(dplan.as_ref()).indent(true).to_string();
-        log::debug!("[dist-{context_id}] distributed physical plan:\n{displayed}");
+    // Log the distributed physical plan shape (stage tree: NetworkShuffleExec/NetworkCoalesceExec +
+    // per-shard DistributedLeafExec task fan-out) so the MPP execution is verifiable in the node log
+    // without a debugger. Routed through the native logger (native_bridge_common) — which forwards to
+    // Java's RustLoggerBridge — NOT the `log` facade, which has no subscriber and never reaches the
+    // node log. Gated at DEBUG: enable with
+    //   PUT _cluster/settings {"transient":{"logger.org.opensearch.nativebridge.spi.RustLoggerBridge":"DEBUG"}}
+    // The macro short-circuits on the Rust-side level before formatting the (potentially large) plan.
+    if native_bridge_common::logger::enabled(native_bridge_common::logger::LogLevel::Debug) {
+        let displayed = datafusion_distributed::display_plan_ascii(dplan.as_ref(), false);
+        native_bridge_common::log_debug!("[dist-{context_id}] distributed physical plan:\n{displayed}");
     }
 
     // Per-query tracking + cancellation so a Java-side cancel_query(context_id) interrupts the head

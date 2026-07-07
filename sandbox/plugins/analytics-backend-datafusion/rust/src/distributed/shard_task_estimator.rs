@@ -120,7 +120,18 @@ impl TaskEstimator for ShardScanTaskEstimator {
             .into_iter()
             .map(|group| Arc::new(scan.with_shards(group)) as Arc<dyn ExecutionPlan>)
             .collect();
-        Ok(Some(Arc::new(DistributedLeafExec::try_new(Arc::clone(plan), variants)?)))
+        // `DistributedLeafExec::execute` runs its `original` (not a variant) on the single-task fast
+        // path (`task_count == 1`). Our `original` is the UNASSIGNED placeholder (`shard_ids=[]`), which
+        // errors at execute time. For a single-task stage (one shard, or one worker packing all shards)
+        // there is exactly one variant, so use THAT assigned variant as the original — otherwise a
+        // single-shard leaf executes unassigned. With >1 task the original is never executed (the
+        // per-task variant is), so the placeholder is fine there.
+        let original = if variants.len() == 1 {
+            Arc::clone(&variants[0])
+        } else {
+            Arc::clone(plan)
+        };
+        Ok(Some(Arc::new(DistributedLeafExec::try_new(original, variants)?)))
     }
 
     fn route_tasks(&self, ctx: &TaskRoutingContext<'_>) -> Result<Option<Vec<Url>>> {

@@ -76,12 +76,12 @@ public class IndexFilterCallbackTests extends OpenSearchTestCase {
     }
 
     /**
-     * Lifecycle assertion: invoking an upcall on an unregistered contextId trips
-     * {@code assert binding != null}. With {@code -ea} on (test default), this throws
-     * AssertionError rather than silently returning -1 — surfacing missing-register
-     * or premature-unregister bugs.
+     * Lifecycle assertion for the ACTIVE-EXECUTION callbacks: invoking {@code createProvider} /
+     * {@code createCollector} / {@code collectDocs} on an unregistered contextId trips
+     * {@code assert binding != null}. With {@code -ea} on (test default), this throws AssertionError —
+     * surfacing missing-register or premature-unregister bugs while the query is still executing.
      */
-    public void testUnregisteredContextIdAsserts() {
+    public void testUnregisteredContextIdAssertsOnActiveCallbacks() {
         FilterTreeCallbacks.unregister(CTX);
         expectThrows(AssertionError.class, () -> FilterTreeCallbacks.createProvider(CTX, 1));
         expectThrows(AssertionError.class, () -> FilterTreeCallbacks.createCollector(CTX, 1, 0L, 0, 64));
@@ -91,8 +91,20 @@ public class IndexFilterCallbackTests extends OpenSearchTestCase {
                 FilterTreeCallbacks.collectDocs(CTX, 1, 0, 64, buf, 1);
             }
         });
-        expectThrows(AssertionError.class, () -> FilterTreeCallbacks.releaseCollector(CTX, Integer.MAX_VALUE));
-        expectThrows(AssertionError.class, () -> FilterTreeCallbacks.releaseProvider(CTX, Integer.MAX_VALUE));
+    }
+
+    /**
+     * The RELEASE callbacks ({@code releaseProvider} / {@code releaseCollector}) must NOT throw on an
+     * unregistered contextId. They fire from a native handle's Drop, which can legitimately run after
+     * the query's binding was unregistered (distributed-leaf teardown ordering / cancellation races). A
+     * missing binding is benign — the thing to release is already gone — and, critically, these run
+     * inside FFM upcalls where any escaping throwable aborts the JVM. They must be silent no-ops.
+     */
+    public void testUnregisteredContextIdReleaseIsNoOp() {
+        FilterTreeCallbacks.unregister(CTX);
+        // No throw — a missing binding at release time is tolerated (query already torn down).
+        FilterTreeCallbacks.releaseCollector(CTX, Integer.MAX_VALUE);
+        FilterTreeCallbacks.releaseProvider(CTX, Integer.MAX_VALUE);
     }
 
     public void testHandleReturningNegativeOnePropagates() {

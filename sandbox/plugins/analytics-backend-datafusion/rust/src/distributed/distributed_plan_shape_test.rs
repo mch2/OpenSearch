@@ -106,6 +106,14 @@ async fn substrait_for(query: &str, dir: &std::path::Path) -> Vec<u8> {
 /// (`build_coordinator_context` + `register_shard_tables` + `plan_distributed`), then render it.
 /// `partial_reduce` mirrors the `analytics.query.distributed.partial_reduce` setting.
 async fn plan_string_for(query: &str, partial_reduce: bool) -> String {
+    plan_string_for_shards(query, partial_reduce, NUM_SHARDS).await
+}
+
+/// As [`plan_string_for`], but with `num_shards` shards routed round-robin onto `num_shards` workers.
+/// `num_shards == 1` reproduces the single-shard cluster shape (the common IT dataset layout), where
+/// the distributed planner would otherwise elide a 1-task network boundary and run the leaf on the
+/// coordinator.
+async fn plan_string_for_shards(query: &str, partial_reduce: bool, num_shards: usize) -> String {
     let dir = tempfile::tempdir().unwrap();
     write_shards(dir.path());
     let plan_bytes = substrait_for(query, dir.path()).await;
@@ -113,17 +121,17 @@ async fn plan_string_for(query: &str, partial_reduce: bool) -> String {
     // A minimal node runtime (bench constructor: no jemalloc pool wiring needed for planning).
     let runtime = DataFusionRuntime::new_for_bench(RuntimeEnvBuilder::new().build().unwrap());
 
-    // 3 synthetic worker URLs + single-table routing over 3 shards, round-robin onto the 3 workers —
-    // the same shape DfShardRouting hands the FFM entry in prod.
-    let worker_urls: Vec<String> = (0..NUM_SHARDS)
+    // `num_shards` synthetic worker URLs + single-table routing over `num_shards` shards, round-robin
+    // onto the workers — the same shape DfShardRouting hands the FFM entry in prod.
+    let worker_urls: Vec<String> = (0..num_shards)
         .map(|i| format!("http://127.0.0.1:{}", 9000 + i))
         .collect();
     let mut by_table = HashMap::new();
     by_table.insert(
         String::new(),
         TableRouting {
-            shard_ids: (0..NUM_SHARDS as i32).collect(),
-            task_to_worker: (0..NUM_SHARDS).collect(),
+            shard_ids: (0..num_shards as i32).collect(),
+            task_to_worker: (0..num_shards).collect(),
         },
     );
 
@@ -131,12 +139,12 @@ async fn plan_string_for(query: &str, partial_reduce: bool) -> String {
         &runtime,
         worker_urls,
         by_table,
-        NUM_SHARDS,     // target_partitions
-        4242,           // query_id
-        partial_reduce, // analytics.query.distributed.partial_reduce
-        0.0,            // cardinality_task_count_factor (library default)
-        0,              // max_tasks_per_stage (inherit worker count)
-        true,           // force_partitioned_joins
+        num_shards.max(1), // target_partitions
+        4242,              // query_id
+        partial_reduce,    // analytics.query.distributed.partial_reduce
+        0.0,               // cardinality_task_count_factor (library default)
+        0,                 // max_tasks_per_stage (inherit worker count)
+        true,              // force_partitioned_joins
     )
     .unwrap();
     register_shard_tables(&ctx, &plan_bytes, |_| "idx-uuid".to_string()).unwrap();
@@ -314,6 +322,40 @@ async fn bare_projection_still_distributes_leaves() {
     assert!(
         plan.contains("DistributedLeafExec") && plan.contains("NetworkCoalesceExec"),
         "[bare-projection] leaves must distribute + gather via a network stage; plan:\n{plan}"
+    );
+}
+
+#[tokio::test]
+async fn single_shard_filter_still_distributes_leaf() {
+    // SINGLE-SHARD index (the common IT dataset layout): `where amount > 0 | fields amount`. With one
+    // shard the leaf stage is one task, and the library elides a 1-producer/1-consumer network boundary
+    // — so ForceDistributeLeaf's coalesce evaporates and ShardScanExec runs UNASSIGNED on the
+    // coordinator (which hosts no shards). This is the whole-suite sweep's #1 failure (70 tests).
+    let plan = plan_string_for_shards("SELECT amount FROM events WHERE amount > 0", true, 1).await;
+    assert!(plan.contains("ShardScanExec"), "[single-shard] expected the leaf; plan:\n{plan}");
+    assert!(
+        plan.contains("shard_ids=[0]"),
+        "[single-shard] the leaf must be ASSIGNED to shard 0 (not shard_ids=[] running on the \
+         coordinator); plan:\n{plan}"
+    );
+    assert!(
+        plan.contains("NetworkCoalesceExec") || plan.contains("NetworkShuffleExec"),
+        "[single-shard] a single-shard leaf must still cross a network stage to its worker, not run on \
+         the coordinator; plan:\n{plan}"
+    );
+}
+
+#[tokio::test]
+async fn filter_then_projection_distributes_leaves() {
+    // The WhereCommandIT shape: `where amount > 0 | fields amount` — a FilterExec + projection over a
+    // bare scan, no aggregate/window/sort. Single-partition head with no natural seam; ForceDistributeLeaf
+    // must still distribute + gather. This is the shape the whole-suite distributed sweep found failing.
+    let plan = plan_string_for("SELECT amount FROM events WHERE amount > 0", true).await;
+    eprintln!("[FILTER+PROJECTION PLAN]\n{plan}");
+    assert!(plan.contains("ShardScanExec"), "[filter] expected per-shard leaves; plan:\n{plan}");
+    assert!(
+        plan.contains("DistributedLeafExec") && plan.contains("NetworkCoalesceExec"),
+        "[filter] leaves must distribute + gather via a network stage; plan:\n{plan}"
     );
 }
 

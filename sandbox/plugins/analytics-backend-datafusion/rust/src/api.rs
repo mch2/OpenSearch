@@ -198,8 +198,15 @@ impl QueryStreamHandle {
         let plan = self.physical_plan.as_ref()?;
         let mut map = serde_json::Map::new();
         Self::collect_metrics(plan.as_ref(), &mut map);
-        // Include the physical plan display text
-        let plan_text = datafusion::physical_plan::displayable(plan.as_ref()).indent(true).to_string();
+        // Include the physical plan display text. For a distributed plan use the library's staged
+        // renderer (display_plan_ascii) so the profile shows the MPP stage tree — NetworkShuffleExec /
+        // NetworkCoalesceExec boundaries and the per-shard DistributedLeafExec task fan-out — instead of
+        // a flat operator list. Any other plan uses DataFusion's indented displayable.
+        let plan_text = if plan.downcast_ref::<datafusion_distributed::DistributedExec>().is_some() {
+            datafusion_distributed::display_plan_ascii(plan.as_ref(), false)
+        } else {
+            datafusion::physical_plan::displayable(plan.as_ref()).indent(true).to_string()
+        };
         map.insert("physical_plan".to_string(), serde_json::Value::String(plan_text));
         serde_json::to_vec(&map).ok()
     }

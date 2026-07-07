@@ -297,7 +297,7 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
         // whole query through the Rust distributed engine (direct rust↔rust data plane). Gated by the
         // dynamic analytics.query.distributed_engine setting.
         if (distributedEngine) {
-            executeInternalDistributed(logicalFragment, plannerContext, planningState, queryTask, queryStartNanos, listener);
+            executeInternalDistributed(logicalFragment, plannerContext, planningState, queryTask, queryStartNanos, profile, listener);
             return;
         }
 
@@ -422,6 +422,7 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
         ClusterState planningState,
         AnalyticsQueryTask queryTask,
         long queryStartNanos,
+        boolean profile,
         ActionListener<ProfiledResult> listener
     ) {
         // 1. Single-aggregate marked tree (no CBO split): one OpenSearchAggregate, real table scans.
@@ -519,6 +520,7 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
         // result; we materialize it here (the caller is already on the SEARCH executor).
         try {
             List<Object[]> rows = new ArrayList<>();
+            QueryProfile queryProfile = null;
             try (
                 EngineResultStream stream = backend.distributedExecute(
                     planBytes,
@@ -550,9 +552,16 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
                         root.close();
                     }
                 }
+                // profile=true: pull the distributed physical plan (MPP stage tree with the
+                // NetworkShuffleExec/NetworkCoalesceExec boundaries + per-shard DistributedLeafExec fan-out)
+                // from the stream's metrics JSON — populated by the Rust QueryStreamHandle after execution —
+                // and surface it as the profile's full_plan. Must read BEFORE the stream closes.
+                if (profile) {
+                    queryProfile = buildDistributedProfile(stream, contextId, queryStartNanos);
+                }
             }
-            // Distributed-path profiling is degraded (no ExecutionGraph/QueryExecution); record a
-            // null-graph execution for stats parity and return rows with a null profile.
+            // Distributed-path profiling is degraded (no ExecutionGraph/QueryExecution): the profile,
+            // when present, carries the distributed physical plan (full_plan) but no per-stage timings.
             statsCollector.recordExecution(null, null, 0L);
             logger.debug(
                 "[dist-{}] distributed query complete: {} rows in {}ns",
@@ -560,7 +569,7 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
                 rows.size(),
                 System.nanoTime() - queryStartNanos
             );
-            listener.onResponse(new ProfiledResult(rows, null, null));
+            listener.onResponse(new ProfiledResult(rows, null, queryProfile));
         } catch (Exception e) {
             listener.onFailure(contextProvider.convertException(e));
         } finally {
@@ -570,6 +579,53 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
                 } catch (Exception ignore) {}
             }
         }
+    }
+
+    /**
+     * Builds a {@link QueryProfile} for the distributed path from the stream's metrics JSON. The Rust
+     * {@code QueryStreamHandle} renders the distributed physical plan (the {@code DistributedExec} stage
+     * tree — {@code NetworkShuffleExec}/{@code NetworkCoalesceExec} boundaries + per-shard
+     * {@code DistributedLeafExec} task fan-out) into the {@code physical_plan} field; we surface it as
+     * the profile's {@code full_plan} so {@code profile=true}/{@code _explain} shows the MPP execution.
+     *
+     * <p>Distributed profiling is otherwise degraded (no Java {@code ExecutionGraph}): {@code stages}
+     * is empty and per-stage timings are absent. Returns null if the backend exposes no metrics (e.g.
+     * an older native lib) so the caller falls back to a null profile rather than failing the query.
+     */
+    private static QueryProfile buildDistributedProfile(EngineResultStream stream, long contextId, long queryStartNanos) {
+        if (stream instanceof FragmentResources.MetricsCapable == false) {
+            return null;
+        }
+        byte[] metricsJson = ((FragmentResources.MetricsCapable) stream).getMetricsJson();
+        if (metricsJson == null || metricsJson.length == 0) {
+            return null;
+        }
+        List<String> planLines = List.of();
+        try (
+            var parser = org.opensearch.common.xcontent.XContentType.JSON.xContent()
+                .createParser(
+                    org.opensearch.core.xcontent.NamedXContentRegistry.EMPTY,
+                    org.opensearch.core.xcontent.DeprecationHandler.IGNORE_DEPRECATIONS,
+                    metricsJson
+                )
+        ) {
+            Object planText = parser.map().get("physical_plan");
+            if (planText instanceof String s && s.isEmpty() == false) {
+                List<String> lines = new ArrayList<>();
+                for (String line : s.split("\n")) {
+                    if (line.isEmpty() == false) {
+                        lines.add(line);
+                    }
+                }
+                planLines = lines;
+            }
+        } catch (Exception e) {
+            logger.debug("[dist-{}] failed to parse distributed metrics for profile", contextId, e);
+            return null;
+        }
+        long executionTimeMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - queryStartNanos);
+        // planningTimeMs unavailable on this path (planning folded into the native call); stages empty.
+        return new QueryProfile("dist-" + contextId, planLines, 0L, executionTimeMs, List.of());
     }
 
     /**

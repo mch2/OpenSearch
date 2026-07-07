@@ -167,17 +167,22 @@ public final class FilterTreeCallbacks {
     }
 
     /**
-     * {@code releaseProvider(contextId, providerKey)}. Never throws.
+     * {@code releaseProvider(contextId, providerKey)}. Never throws — a RELEASE callback fires from a
+     * native handle's Drop, which can legitimately run AFTER the query's binding was unregistered
+     * (e.g. a distributed leaf's {@code ProviderHandle} dropping after {@code leaf_close} already ran
+     * the binding's cleanup, or teardown racing query cancellation). A missing binding here is
+     * therefore benign — the thing to release is already gone — so we log-and-return instead of
+     * asserting. CRITICAL: this runs inside an FFM upcall; letting ANY throwable (incl. AssertionError)
+     * escape aborts the whole JVM ("Unrecoverable uncaught exception"), which would take down the node.
      */
     public static void releaseProvider(long contextId, int providerKey) {
         try {
             QueryBinding binding = BINDINGS.get(contextId);
-            assertBindingExists(binding, "releaseProvider", contextId);
             if (binding != null && binding.handle() != null) {
                 binding.handle().releaseProvider(providerKey);
+            } else {
+                LOGGER.debug("releaseProvider: no binding for contextId={} (already torn down); no-op", contextId);
             }
-        } catch (AssertionError e) {
-            throw e;
         } catch (Throwable throwable) {
             LOGGER.error(
                 new ParameterizedMessage("releaseProvider(contextId={}, providerKey={}) failed", contextId, providerKey),
@@ -261,17 +266,19 @@ public final class FilterTreeCallbacks {
     }
 
     /**
-     * {@code releaseCollector(contextId, collectorKey)}. Never throws.
+     * {@code releaseCollector(contextId, collectorKey)}. Never throws — like {@link #releaseProvider},
+     * this is a RELEASE callback fired from a native handle's Drop that can legitimately run after the
+     * query's binding was unregistered. A missing binding is benign (already torn down); assert-free +
+     * throwable-swallowing so nothing crosses the FFM boundary and aborts the JVM.
      */
     public static void releaseCollector(long contextId, int collectorKey) {
         try {
             QueryBinding binding = BINDINGS.get(contextId);
-            assertBindingExists(binding, "releaseCollector", contextId);
             if (binding != null && binding.handle() != null) {
                 binding.handle().releaseCollector(collectorKey);
+            } else {
+                LOGGER.debug("releaseCollector: no binding for contextId={} (already torn down); no-op", contextId);
             }
-        } catch (AssertionError e) {
-            throw e;
         } catch (Throwable throwable) {
             LOGGER.error(
                 new ParameterizedMessage("releaseCollector(contextId={}, collectorKey={}) failed", contextId, collectorKey),

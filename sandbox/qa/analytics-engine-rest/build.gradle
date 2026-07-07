@@ -120,6 +120,15 @@ testClusters.integTest {
     configureAnalyticsCluster(delegate)
     // Override block-list to empty so FilterDelegationGoldenIT exercises all predicate shapes.
     setting 'analytics.delegation.lucene.blocked_predicates', '[]'
+    // Whole-suite distributed-engine sweep: -Dtests.distributed_engine=true routes EVERY IT through
+    // the datafusion-distributed path (not just DistributedEngineIT) to surface which query shapes
+    // work end-to-end distributed. Defaults off so the normal suite stays on the legacy path.
+    if (System.getProperty('tests.distributed_engine') == 'true') {
+        setting 'analytics.query.distributed_engine', 'true'
+        // Surface the distributed physical plan (MPP stage tree) in the node log at DEBUG via the
+        // native logger bridge, so a failing shape's plan is inspectable without a debugger.
+        setting 'logger.org.opensearch.nativebridge.spi.RustLoggerBridge', 'DEBUG'
+    }
 }
 
 integTest {
