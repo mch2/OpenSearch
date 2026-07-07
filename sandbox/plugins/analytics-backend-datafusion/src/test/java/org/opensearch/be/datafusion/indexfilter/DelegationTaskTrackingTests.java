@@ -100,23 +100,17 @@ public class DelegationTaskTrackingTests extends OpenSearchTestCase {
     }
 
     /**
-     * Lifecycle assertion: invoking an upcall on a contextId that has no registered
-     * binding throws AssertionError when -ea is on. This catches premature unregister
-     * or stale Rust handles outliving their query.
-     *
-     * In production (no -ea), this same path silently returns -1 — the upcall's null
-     * check is the production safety net.
+     * Invoking an upcall on a contextId with no registered binding returns the safe fallback
+     * ({@code -1}) and NEVER throws — a throwable escaping an FFM upcall aborts the JVM. A missing
+     * binding is a legitimate runtime state on the distributed path (leaf tasks of one query sharing a
+     * node race the query-keyed binding), not a crash-worthy error.
      */
-    public void testUnregisteredContextIdAssertsInTests() throws Exception {
+    public void testUnregisteredContextIdReturnsFallback() throws Exception {
         long unregisteredCtx = 9999L;
         // Sanity: nothing registered for this contextId.
         FilterTreeCallbacks.unregister(unregisteredCtx);
 
-        AssertionError failure = expectThrows(AssertionError.class, () -> FilterTreeCallbacks.createProvider(unregisteredCtx, 1));
-        assertTrue(
-            "AssertionError should mention the offending contextId. Got: " + failure.getMessage(),
-            failure.getMessage().contains("contextId=" + unregisteredCtx)
-        );
+        assertEquals(-1, FilterTreeCallbacks.createProvider(unregisteredCtx, 1));
     }
 
     /**
@@ -253,22 +247,24 @@ public class DelegationTaskTrackingTests extends OpenSearchTestCase {
     }
 
     /**
-     * Lifecycle assertion: registering a second binding for the same contextId without
-     * an intervening unregister trips the double-register assert. This catches leaked
-     * bindings (missing unregister) and accidental sharing of contextIds across queries.
+     * A second register for the same contextId (multiple leaf tasks of one query on this node) must
+     * NOT throw — register runs inside/around the FFM leaf-open path, and the distributed engine
+     * legitimately opens several leaves of one query per node. It keeps the FIRST binding (putIfAbsent)
+     * so an in-flight leaf's handle isn't swapped mid-scan. (Per-leaf keying that would let each leaf
+     * keep its own handle is tracked separately.)
      */
-    public void testDoubleRegisterAsserts() throws Exception {
+    public void testDoubleRegisterKeepsFirstBindingNoThrow() throws Exception {
         long ctx = 1234L;
-        FilterTreeCallbacks.register(ctx, new MockHandle(new long[] { 1L }), null);
+        MockHandle first = new MockHandle(new long[] { 1L });
+        MockHandle second = new MockHandle(new long[] { 2L });
+        FilterTreeCallbacks.register(ctx, first, null);
         try {
-            AssertionError failure = expectThrows(
-                AssertionError.class,
-                () -> FilterTreeCallbacks.register(ctx, new MockHandle(new long[] { 2L }), null)
-            );
-            assertTrue(
-                "AssertionError should mention the offending contextId. Got: " + failure.getMessage(),
-                failure.getMessage().contains("contextId=" + ctx)
-            );
+            // No throw on the colliding register.
+            FilterTreeCallbacks.register(ctx, second, null);
+            // The FIRST binding is retained: a provider create advances `first`'s key counter (→1),
+            // never `second`'s (which stays at its initial 1).
+            assertEquals("create should route to the first bound handle", 1, FilterTreeCallbacks.createProvider(ctx, 0));
+            assertEquals("second handle must be unused (its counter untouched)", 1, second.createProvider(0));
         } finally {
             FilterTreeCallbacks.unregister(ctx);
         }

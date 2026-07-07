@@ -76,33 +76,21 @@ public class IndexFilterCallbackTests extends OpenSearchTestCase {
     }
 
     /**
-     * Lifecycle assertion for the ACTIVE-EXECUTION callbacks: invoking {@code createProvider} /
-     * {@code createCollector} / {@code collectDocs} on an unregistered contextId trips
-     * {@code assert binding != null}. With {@code -ea} on (test default), this throws AssertionError —
-     * surfacing missing-register or premature-unregister bugs while the query is still executing.
+     * NO callback may throw across the FFM boundary — an escaping throwable (incl. AssertionError)
+     * aborts the JVM and takes down the node. On an unregistered contextId every callback must return
+     * its safe fallback ({@code -1} / no-op), never throw. A missing binding is a legitimate runtime
+     * state on the distributed path (multiple leaf tasks of one query share a node and race the
+     * query-keyed binding; teardown can outlive a handle's Drop), not a crash-worthy programmer error.
      */
-    public void testUnregisteredContextIdAssertsOnActiveCallbacks() {
+    public void testUnregisteredContextIdReturnsFallbackNeverThrows() {
         FilterTreeCallbacks.unregister(CTX);
-        expectThrows(AssertionError.class, () -> FilterTreeCallbacks.createProvider(CTX, 1));
-        expectThrows(AssertionError.class, () -> FilterTreeCallbacks.createCollector(CTX, 1, 0L, 0, 64));
-        expectThrows(AssertionError.class, () -> {
-            try (Arena arena = Arena.ofConfined()) {
-                MemorySegment buf = arena.allocate(Long.BYTES);
-                FilterTreeCallbacks.collectDocs(CTX, 1, 0, 64, buf, 1);
-            }
-        });
-    }
-
-    /**
-     * The RELEASE callbacks ({@code releaseProvider} / {@code releaseCollector}) must NOT throw on an
-     * unregistered contextId. They fire from a native handle's Drop, which can legitimately run after
-     * the query's binding was unregistered (distributed-leaf teardown ordering / cancellation races). A
-     * missing binding is benign — the thing to release is already gone — and, critically, these run
-     * inside FFM upcalls where any escaping throwable aborts the JVM. They must be silent no-ops.
-     */
-    public void testUnregisteredContextIdReleaseIsNoOp() {
-        FilterTreeCallbacks.unregister(CTX);
-        // No throw — a missing binding at release time is tolerated (query already torn down).
+        assertEquals(-1, FilterTreeCallbacks.createProvider(CTX, 1));
+        assertEquals(-1, FilterTreeCallbacks.createCollector(CTX, 1, 0L, 0, 64));
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment buf = arena.allocate(Long.BYTES);
+            assertEquals(-1L, FilterTreeCallbacks.collectDocs(CTX, 1, 0, 64, buf, 1));
+        }
+        // Release callbacks: silent no-op (query already torn down).
         FilterTreeCallbacks.releaseCollector(CTX, Integer.MAX_VALUE);
         FilterTreeCallbacks.releaseProvider(CTX, Integer.MAX_VALUE);
     }

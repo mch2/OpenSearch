@@ -67,17 +67,27 @@ public final class FilterTreeCallbacks {
      * Register a per-query binding keyed by {@code contextId}.
      * Must be called before query execution begins.
      *
-     * <p>Asserts no prior binding exists for {@code contextId}. A pre-existing binding
-     * indicates a leaked binding from an earlier query (missing {@link #unregister}) or
-     * a duplicate register call.
+     * <p>KNOWN LIMITATION (distributed path): the binding is keyed by query-global {@code contextId},
+     * but the distributed engine runs MULTIPLE leaf tasks of one query on the same node (shards &gt;
+     * nodes), each building its OWN {@link FilterDelegationHandle} for its shard. They collide on
+     * {@code contextId}. We keep the FIRST binding ({@code putIfAbsent}) so the first leaf keeps a
+     * consistent handle rather than being corrupted mid-scan by a later leaf's {@code put}; a collision
+     * is logged. Correct multi-shard-per-node delegation needs per-leaf keying (a leaf token threaded
+     * through the Rust collector upcalls) — tracked separately. Never throws.
      *
      * @param contextId the per-query identifier (from the native {@code QueryTrackingContext})
      * @param handle    the delegation handle for this query (must not be null)
      * @param tracker   the thread tracker for this query (may be null)
      */
     public static void register(long contextId, FilterDelegationHandle handle, DelegationThreadTracker tracker) {
-        QueryBinding prev = BINDINGS.put(contextId, new QueryBinding(handle, tracker));
-        assert prev == null : "FilterTreeCallbacks.register: binding already present for contextId=" + contextId;
+        QueryBinding prev = BINDINGS.putIfAbsent(contextId, new QueryBinding(handle, tracker));
+        if (prev != null) {
+            LOGGER.warn(
+                "FilterTreeCallbacks.register: binding already present for contextId={} "
+                    + "(multiple leaf tasks of one query on this node); keeping the first binding",
+                contextId
+            );
+        }
     }
 
     /**
@@ -121,26 +131,6 @@ public final class FilterTreeCallbacks {
         }
     }
 
-    /**
-     * Asserts a binding exists. Lifecycle bugs (premature unregister, missing register,
-     * stale Rust handle outliving its query) trip this in tests; production silently
-     * returns -1 from the caller's null check.
-     *
-     * <p>Throws {@link AssertionError} when assertions are enabled and binding is null.
-     * Upcall methods catch {@code Throwable} and re-throw {@code AssertionError} so it
-     * surfaces in tests (causing the JVM to exit through the FFM stub) rather than
-     * being silently logged.
-     */
-    private static void assertBindingExists(QueryBinding binding, String op, long contextId) {
-        assert binding != null : "FilterTreeCallbacks."
-            + op
-            + ": no binding for contextId="
-            + contextId
-            + " (registered: "
-            + BINDINGS.keySet()
-            + ")";
-    }
-
     // ── Provider lifecycle (cold path, once per query) ────────────────
 
     /**
@@ -150,15 +140,13 @@ public final class FilterTreeCallbacks {
         long tid = trackStart(contextId);
         try {
             QueryBinding binding = BINDINGS.get(contextId);
-            assertBindingExists(binding, "createProvider", contextId);
             if (binding == null || binding.handle() == null) {
+                LOGGER.error("createProvider: no binding for contextId={} (registered={})", contextId, BINDINGS.keySet());
                 return -1;
             }
             return binding.handle().createProvider(annotationId);
-        } catch (AssertionError e) {
-            // Propagate so lifecycle bugs surface in tests; in production -ea is off and this branch never runs.
-            throw e;
         } catch (Throwable throwable) {
+            // NEVER let a throwable (incl. AssertionError) cross the FFM boundary — it aborts the JVM.
             LOGGER.error("createProvider failed for contextId=" + contextId + " annotationId=" + annotationId, throwable);
             return -1;
         } finally {
@@ -202,14 +190,13 @@ public final class FilterTreeCallbacks {
         long tid = trackStart(contextId);
         try {
             QueryBinding binding = BINDINGS.get(contextId);
-            assertBindingExists(binding, "createCollector", contextId);
             if (binding == null || binding.handle() == null) {
+                LOGGER.error("createCollector: no binding for contextId={} (registered={})", contextId, BINDINGS.keySet());
                 return -1;
             }
             return binding.handle().createCollector(providerKey, writerGeneration, minDoc, maxDoc);
-        } catch (AssertionError e) {
-            throw e;
         } catch (Throwable throwable) {
+            // NEVER let a throwable (incl. AssertionError) cross the FFM boundary — it aborts the JVM.
             LOGGER.error(
                 new ParameterizedMessage(
                     "createCollector(contextId={}, providerKey={}, writerGeneration={}, [{}, {})) failed",
@@ -234,8 +221,8 @@ public final class FilterTreeCallbacks {
         long tid = trackStart(contextId);
         try {
             QueryBinding binding = BINDINGS.get(contextId);
-            assertBindingExists(binding, "collectDocs", contextId);
             if (binding == null || binding.handle() == null) {
+                LOGGER.error("collectDocs: no binding for contextId={} (registered={})", contextId, BINDINGS.keySet());
                 return -1L;
             }
             FilterDelegationHandle handle = binding.handle();
@@ -246,9 +233,8 @@ public final class FilterTreeCallbacks {
             MemorySegment view = outPtr.reinterpret((long) maxWords * Long.BYTES);
             int wordsWritten = handle.collectDocs(collectorKey, minDoc, maxDoc, view);
             return (wordsWritten < 0) ? -1L : wordsWritten;
-        } catch (AssertionError e) {
-            throw e;
         } catch (Throwable throwable) {
+            // NEVER let a throwable (incl. AssertionError) cross the FFM boundary — it aborts the JVM.
             LOGGER.error(
                 new ParameterizedMessage(
                     "collectDocs(contextId={}, collectorKey={}, [{}, {})) failed",
