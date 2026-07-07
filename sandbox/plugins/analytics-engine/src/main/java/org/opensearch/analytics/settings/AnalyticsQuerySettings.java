@@ -95,12 +95,68 @@ public final class AnalyticsQuerySettings {
         Setting.Property.Dynamic
     );
 
+    /**
+     * Distributed-planner tuning (datafusion-distributed's {@code DistributedConfig}), read per query
+     * in {@code DefaultPlanExecutor} and passed via {@code DistributedTuning}. Only affects the
+     * distributed path ({@link #DISTRIBUTED_ENGINE}); no effect on the legacy path.
+     */
+
+    /**
+     * Insert an intermediate {@code PartialReduce} above each hash repartition, before the network
+     * shuffle, so high-cardinality group-bys merge partials locally and the shuffle carries fewer rows.
+     * Default true (helps the wide-key case; slight overhead when aggregation doesn't reduce much).
+     */
+    public static final Setting<Boolean> DISTRIBUTED_PARTIAL_REDUCE = Setting.boolSetting(
+        "analytics.query.distributed.partial_reduce",
+        true,
+        Setting.Property.NodeScope,
+        Setting.Property.Dynamic
+    );
+
+    /**
+     * Force PARTITIONED hash joins (both sides hash-repartitioned on the join key) rather than
+     * CollectLeft broadcast. Default true — REQUIRED for correctness on the distributed path (a
+     * CollectLeft join is capped to one task while our leaves are per-shard, so it would see only some
+     * shards' rows). Exposed as an escape hatch; changing it risks wrong join results.
+     */
+    public static final Setting<Boolean> DISTRIBUTED_FORCE_PARTITIONED_JOINS = Setting.boolSetting(
+        "analytics.query.distributed.force_partitioned_joins",
+        true,
+        Setting.Property.NodeScope,
+        Setting.Property.Dynamic
+    );
+
+    /**
+     * Multiplier applied to a stage's task count when a node increases cardinality (&gt;1 fans wider so
+     * a wide reduce/join spreads across more workers). {@code 0} keeps the library default.
+     */
+    public static final Setting<Double> DISTRIBUTED_CARDINALITY_TASK_COUNT_FACTOR = Setting.doubleSetting(
+        "analytics.query.distributed.cardinality_task_count_factor",
+        0.0,
+        0.0,
+        Setting.Property.NodeScope,
+        Setting.Property.Dynamic
+    );
+
+    /** Hard cap on tasks per distributed stage. {@code 0} inherits the worker count. */
+    public static final Setting<Integer> DISTRIBUTED_MAX_TASKS_PER_STAGE = Setting.intSetting(
+        "analytics.query.distributed.max_tasks_per_stage",
+        0,
+        0,
+        Setting.Property.NodeScope,
+        Setting.Property.Dynamic
+    );
+
     public static List<Setting<?>> all() {
         return List.of(
             DELEGATION_BLOCKED_PREDICATES,
             MAX_SHARDS_PER_QUERY,
             MAX_CONCURRENT_SHARD_REQUESTS_PER_NODE,
-            DISTRIBUTED_ENGINE
+            DISTRIBUTED_ENGINE,
+            DISTRIBUTED_PARTIAL_REDUCE,
+            DISTRIBUTED_FORCE_PARTITIONED_JOINS,
+            DISTRIBUTED_CARDINALITY_TASK_COUNT_FACTOR,
+            DISTRIBUTED_MAX_TASKS_PER_STAGE
         );
     }
 

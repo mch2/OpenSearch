@@ -48,7 +48,8 @@ public final class LeafBridgeCallbacks {
     public interface LeafBridge {
         /** Result of opening a fragment: which mode + the handle (SessionContextHandle ptr for
          *  NATIVE, or an opaque Java cursor id for JAVA_CURSOR). */
-        record Opened(int mode, long handle) {}
+        record Opened(int mode, long handle) {
+        }
 
         /**
          * Run the unchanged AnalyticsSearchService setup for {@code (indexUuid, shardId)} under
@@ -60,15 +61,8 @@ public final class LeafBridgeCallbacks {
          * when present the leaf runs the INDEXED path — Java registers the {@code FilterDelegationHandle}
          * (keyed by {@code queryId}) and builds an indexed session with {@code treeShape}/{@code predicateCount}.
          */
-        Opened open(
-            long queryId,
-            String indexUuid,
-            int shardId,
-            byte[] substrait,
-            byte[] descriptor,
-            int treeShape,
-            int predicateCount
-        ) throws Exception;
+        Opened open(long queryId, String indexUuid, int shardId, byte[] substrait, byte[] descriptor, int treeShape, int predicateCount)
+            throws Exception;
 
         /** Pull one batch from a JAVA_CURSOR; returns the FFI_ArrowArray pointer, or 0 at EOS. */
         long next(long cursor) throws Exception;
@@ -112,12 +106,8 @@ public final class LeafBridgeCallbacks {
             String indexUuid = indexUuidLen <= 0
                 ? ""
                 : new String(indexUuidPtr.reinterpret(indexUuidLen).toArray(ValueLayout.JAVA_BYTE), StandardCharsets.UTF_8);
-            byte[] substrait = substraitLen <= 0
-                ? new byte[0]
-                : substraitPtr.reinterpret(substraitLen).toArray(ValueLayout.JAVA_BYTE);
-            byte[] descriptor = descriptorLen <= 0
-                ? new byte[0]
-                : descriptorPtr.reinterpret(descriptorLen).toArray(ValueLayout.JAVA_BYTE);
+            byte[] substrait = substraitLen <= 0 ? new byte[0] : substraitPtr.reinterpret(substraitLen).toArray(ValueLayout.JAVA_BYTE);
+            byte[] descriptor = descriptorLen <= 0 ? new byte[0] : descriptorPtr.reinterpret(descriptorLen).toArray(ValueLayout.JAVA_BYTE);
             LeafBridge.Opened opened = bridge.open(queryId, indexUuid, shardId, substrait, descriptor, treeShape, predicateCount);
             // Raw `*mut` pointers arrive as zero-length segments across FFM; widen to the written
             // size before set() or the bounds check trips (byteSize 0, new length 4/8).

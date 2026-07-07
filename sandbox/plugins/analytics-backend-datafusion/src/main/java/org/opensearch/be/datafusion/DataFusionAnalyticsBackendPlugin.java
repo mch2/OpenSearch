@@ -17,7 +17,6 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.message.ParameterizedMessage;
 import org.opensearch.analytics.backend.EngineResultStream;
-import java.util.List;
 import org.opensearch.analytics.spi.AbstractNameMappingAdapter;
 import org.opensearch.analytics.spi.AggregateCapability;
 import org.opensearch.analytics.spi.AggregateFunction;
@@ -57,6 +56,7 @@ import org.opensearch.index.engine.dataformat.DataFormatRegistry;
 import org.opensearch.index.engine.exec.IndexReaderProvider.Reader;
 
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -1065,7 +1065,8 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
             leafFragmentBytes,
             t.partialReduce(),
             t.cardinalityTaskCountFactor(),
-            t.maxTasksPerStage()
+            t.maxTasksPerStage(),
+            t.forcePartitionedJoins()
         );
         StreamHandle streamHandle = new StreamHandle(streamPtr, dataFusionService.getNativeRuntime());
         return new DatafusionResultStream(streamHandle, allocator);
@@ -1163,19 +1164,18 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
                 // BoolNode tree and evaluates via the contextId-keyed FilterDelegationHandle (registered
                 // by DistributedLeafBridge before this call). DISTRIBUTED_LEAF_TABLE is only a fallback
                 // name; the fragment's NamedTable is authoritative.
-                org.opensearch.be.datafusion.nativelib.SessionContextHandle handle =
-                    NativeBridge.createSessionContextForIndexedExecution(
-                        readerPtr,
-                        runtimePtr,
-                        DISTRIBUTED_LEAF_TABLE,
-                        contextId,
-                        treeShape,
-                        delegatedPredicateCount,
-                        false, // requestsRowIds — QTF row-id emission is a separate follow-on
-                        false, // hasPartialAggregate — the distributed planner inserts Partial/Final natively
-                        segment.address(),
-                        substrait
-                    );
+                org.opensearch.be.datafusion.nativelib.SessionContextHandle handle = NativeBridge.createSessionContextForIndexedExecution(
+                    readerPtr,
+                    runtimePtr,
+                    DISTRIBUTED_LEAF_TABLE,
+                    contextId,
+                    treeShape,
+                    delegatedPredicateCount,
+                    false, // requestsRowIds — QTF row-id emission is a separate follow-on
+                    false, // hasPartialAggregate — the distributed planner inserts Partial/Final natively
+                    segment.address(),
+                    substrait
+                );
                 ptr = handle.getPointer();
                 handle.markConsumed();
             } else {

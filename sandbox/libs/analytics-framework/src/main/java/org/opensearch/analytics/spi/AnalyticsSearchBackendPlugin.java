@@ -247,10 +247,14 @@ public interface AnalyticsSearchBackendPlugin {
      * @param cardinalityTaskCountFactor scale a stage's task count when a node changes cardinality
      *        (&gt;1 = fan wider for cardinality-increasing nodes); {@code 0} keeps the library default.
      * @param maxTasksPerStage hard cap on tasks per stage; {@code 0} inherits the worker count.
+     * @param forcePartitionedJoins force PARTITIONED hash joins (zero the single-partition thresholds +
+     *        enable repartition_joins) so a join over per-shard leaves shuffles both sides correctly;
+     *        default true (required for correct join results on the distributed path).
      */
-    record DistributedTuning(boolean partialReduce, double cardinalityTaskCountFactor, int maxTasksPerStage) {
-        /** partial_reduce ON (the high-cardinality intermediate reduce); library defaults otherwise. */
-        public static final DistributedTuning DEFAULT = new DistributedTuning(true, 0.0, 0);
+    record DistributedTuning(boolean partialReduce, double cardinalityTaskCountFactor, int maxTasksPerStage,
+        boolean forcePartitionedJoins) {
+        /** partial_reduce + force-partitioned-joins ON (the safe/high-cardinality defaults). */
+        public static final DistributedTuning DEFAULT = new DistributedTuning(true, 0.0, 0, true);
     }
 
     /** As above, plus the distributed-planner {@link DistributedTuning} knobs. */
@@ -346,7 +350,8 @@ public interface AnalyticsSearchBackendPlugin {
      */
     interface LeafBridge {
         /** Discriminated open result: {@code mode} (1=NATIVE, 2=JAVA_CURSOR) + the handle/cursor. */
-        record Opened(int mode, long handle) {}
+        record Opened(int mode, long handle) {
+        }
 
         /**
          * Run the unchanged data-node setup for {@code (indexUuid, shardId)} under {@code queryId} and
@@ -358,15 +363,8 @@ public interface AnalyticsSearchBackendPlugin {
          * when present the leaf runs the INDEXED path — register the Lucene {@code FilterDelegationHandle}
          * (keyed by {@code queryId}) and build an indexed session using {@code treeShape}/{@code predicateCount}.
          */
-        Opened open(
-            long queryId,
-            String indexUuid,
-            int shardId,
-            byte[] substrait,
-            byte[] descriptor,
-            int treeShape,
-            int predicateCount
-        ) throws Exception;
+        Opened open(long queryId, String indexUuid, int shardId, byte[] substrait, byte[] descriptor, int treeShape, int predicateCount)
+            throws Exception;
 
         /** Pull one batch from a JAVA_CURSOR; returns an Arrow C-Data {@code FFI_ArrowArray} pointer, or 0 at EOS. */
         long next(long cursor) throws Exception;

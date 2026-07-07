@@ -214,3 +214,89 @@ async fn phase2_real_tcp_distributed_shard_scan() -> Result<(), Box<dyn std::err
     assert_eq!(dout, sout, "real-TCP distributed result must equal single-node");
     Ok(())
 }
+
+/// Regression: a GLOBAL window (`sum(amount) OVER ()`) followed by `ORDER BY amount`, executed over
+/// real TCP workers, must return rows in the SAME order as single-node. The distributed plan gathers
+/// per-shard leaves via `NetworkCoalesceExec` (interleaving task outputs), so the final top-level
+/// `SortExec` on the coordinator is what establishes the global order — this proves it actually runs
+/// (not just that the plan shape places it correctly). Exercises the `ForceDistributeLeaf` rule: a
+/// global window has no natural shuffle/coalesce seam, so without the rule the leaf would execute
+/// unassigned on the coordinator (which hosts no shards). Mirrors the `eventstats | sort` IT.
+#[tokio::test]
+async fn phase2_global_window_then_sort_orders_on_coordinator() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let (shards, store_url) = write_shards(dir.path());
+    let shard_ids: Vec<i32> = shards.iter().map(|(s, _)| *s).collect();
+    let dir_path = dir.path().to_path_buf();
+
+    let listeners = futures::future::try_join_all((0..NUM_SHARDS).map(|_| TcpListener::bind("127.0.0.1:0"))).await?;
+    let ports: Vec<u16> = listeners.iter().map(|l| l.local_addr().unwrap().port()).collect();
+    for listener in listeners {
+        let shards = shards.clone();
+        let store_url = store_url.clone();
+        let dir = dir_path.clone();
+        let session_builder = move |ctx: WorkerQueryContext| {
+            let shards = shards.clone();
+            let store_url = store_url.clone();
+            let dir = dir.clone();
+            async move {
+                let state = ctx.builder.with_distributed_user_codec(ShardScanCodec).build();
+                let sc = SessionContext::from(state);
+                sc.state_ref().write().config_mut().set_extension(Arc::new(build_catalog(&shards, &store_url)));
+                let store = Arc::new(LocalFileSystem::new_with_prefix(&dir).unwrap());
+                sc.runtime_env().register_object_store(store_url.as_ref(), store);
+                Ok::<SessionState, DataFusionError>(sc.state())
+            }
+        };
+        tokio::spawn(async move {
+            spawn_worker_service(session_builder, listener).await.unwrap();
+        });
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    let urls: Vec<Url> = ports.iter().map(|p| Url::parse(&format!("http://localhost:{p}")).unwrap()).collect();
+    let resolver = OsWorkerResolver::with_urls(urls);
+
+    // Build the coordinator with the SAME recipe production uses, incl. ForceDistributeLeaf (so the
+    // global-window leaf distributes and gathers via NetworkCoalesce).
+    let coord_state = SessionStateBuilder::new()
+        .with_config(SessionConfig::new().with_target_partitions(4))
+        .with_default_features()
+        .with_physical_optimizer_rule(Arc::new(
+            crate::distributed::force_distribute_leaf::ForceDistributeLeaf::new(NUM_SHARDS),
+        ))
+        .with_distributed_worker_resolver(resolver)
+        .with_distributed_user_codec(ShardScanCodec)
+        .with_distributed_task_estimator(ShardScanTaskEstimator::new(shard_ids.clone()))
+        .with_distributed_planner()
+        .build();
+    let coord = SessionContext::from(coord_state);
+
+    let query = "SELECT category, amount, sum(amount) OVER () AS grand_total FROM events ORDER BY amount";
+    let producer = SessionContext::new();
+    producer.register_parquet("events", dir_path.to_str().unwrap(), ParquetReadOptions::default()).await?;
+    let logical = producer.sql(query).await?.into_optimized_plan()?;
+    let substrait = datafusion_substrait::logical_plan::producer::to_substrait_plan(&logical, &producer.state())?;
+    let mut plan_bytes = Vec::new();
+    prost::Message::encode(&substrait, &mut plan_bytes)?;
+
+    register_shard_tables(&coord, &plan_bytes, |_| "idx-uuid".to_string())?;
+    let dplan = plan_distributed(&coord, &plan_bytes).await?;
+    println!("[phase2-window-sort] distributed plan:\n{}", display_plan_ascii(dplan.as_ref(), false));
+
+    let dbatches = execute_stream(dplan, coord.task_ctx())?.try_collect::<Vec<_>>().await?;
+    let dout = pretty_format_batches(&dbatches)?.to_string();
+    println!("[phase2-window-sort] distributed result (over real TCP):\n{dout}");
+
+    let sctx = SessionContext::new();
+    sctx.register_parquet("events", dir_path.to_str().unwrap(), ParquetReadOptions::default()).await?;
+    let sout = pretty_format_batches(
+        &execute_stream(sctx.sql(query).await?.create_physical_plan().await?, sctx.task_ctx())?
+            .try_collect::<Vec<_>>()
+            .await?,
+    )?
+    .to_string();
+
+    assert_eq!(dout, sout, "global-window+sort distributed result must equal single-node (row order incl.)");
+    Ok(())
+}

@@ -47,6 +47,33 @@ public class DistributedEngineIT extends AnalyticsRestTestCase {
     }
 
     /**
+     * As {@link #assertDistributedMatchesLegacy}, but compares the two result sets as MULTISETS (row
+     * order ignored). Used for {@code eventstats} (window) shapes: the window annotates every row and a
+     * trailing {@code | sort} establishes order, but after the cross-shard gather the legacy engine's
+     * final ordering is not stable (the same query returns the correct rows in different orders across
+     * runs). The correctness contract for these shapes is the row SET plus each row's window values —
+     * not a globally-stable order — so we assert multiset equality (mirrors the codebase's "membership,
+     * not exact-list equality" guidance for non-deterministic cross-shard ordering).
+     */
+    private void assertDistributedMatchesLegacyUnordered(String query) throws Exception {
+        setDistributedEngine(false);
+        List<List<Object>> legacy = rowsOf(executePpl(query));
+        setDistributedEngine(true);
+        List<List<Object>> distributed;
+        try {
+            distributed = rowsOf(executePpl(query));
+        } finally {
+            setDistributedEngine(false);
+        }
+        assertEquals("row count mismatch for: " + query, legacy.size(), distributed.size());
+        List<String> legacySorted = new ArrayList<>(normalize(legacy));
+        List<String> distributedSorted = new ArrayList<>(normalize(distributed));
+        legacySorted.sort(null);
+        distributedSorted.sort(null);
+        assertEquals("result multiset mismatch for: " + query, legacySorted, distributedSorted);
+    }
+
+    /**
      * Reader-lease release on the distributed path: run MANY distributed queries in a row against the
      * same shards and assert every one succeeds + the index stays queryable. Each distributed leaf
      * acquires a shard Reader gate via the JVM upcall and must release it when its stream drops
@@ -201,6 +228,42 @@ public class DistributedEngineIT extends AnalyticsRestTestCase {
         assertEquals("high-cardinality group count mismatch", legacy.size(), distributed.size());
         assertEquals("high-cardinality GROUP BY result must equal legacy", normalize(legacy), normalize(distributed));
         assertEquals("expected 500 distinct groups", 500, distributed.size());
+    }
+
+    /**
+     * WINDOW FUNCTION on the distributed path: PPL {@code eventstats ... by <key>} is a
+     * {@code PARTITION BY} window (each input row is annotated with a per-partition aggregate, no row
+     * collapse). This is exactly a "pull all data to the coordinator" shape UNLESS the plan shuffles on
+     * the partition key so each worker owns whole partitions and runs the window distributed. The Rust
+     * plan-shape test proves the shape (leaf → hash shuffle on the partition key → distributed
+     * WindowAggExec, head only coalesces); this IT proves the DISTRIBUTED result equals the legacy path
+     * end-to-end across two shards.
+     */
+    public void testDistributedWindowEventstatsByMatchesLegacy() throws Exception {
+        createParquetBackedIndex();
+        ingestDeterministicDocs();
+
+        // Per-category window aggregate annotated onto every row (no collapse), then a stable sort so
+        // the row order is deterministic for comparison. category total/count is repeated per row.
+        String query = "source = " + INDEX
+            + " | eventstats sum(amount) as cat_total, count() as cat_n by category | sort category, amount";
+
+        assertDistributedMatchesLegacyUnordered(query);
+    }
+
+    /**
+     * GLOBAL window (no BY): {@code eventstats} over all rows annotates every row with the grand total.
+     * The window's partition set is the whole table, so the partials from each shard must travel a
+     * network stage and the annotation is applied distributed — asserting the distributed result still
+     * equals legacy confirms the global window doesn't silently gather-then-recompute per shard.
+     */
+    public void testDistributedGlobalWindowMatchesLegacy() throws Exception {
+        createParquetBackedIndex();
+        ingestDeterministicDocs();
+
+        String query = "source = " + INDEX + " | eventstats sum(amount) as grand_total, count() as grand_n | sort amount";
+
+        assertDistributedMatchesLegacyUnordered(query);
     }
 
     /**

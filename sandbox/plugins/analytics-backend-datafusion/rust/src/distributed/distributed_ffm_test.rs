@@ -183,6 +183,7 @@ fn ffm_path_distributed_execute_end_to_end() {
                 true,       // partial_reduce
                 0.0,        // cardinality_task_count_factor (0 = library default)
                 0,          // max_tasks_per_stage (0 = inherit worker count)
+                true,       // force_partitioned_joins
             )
             .await
         })

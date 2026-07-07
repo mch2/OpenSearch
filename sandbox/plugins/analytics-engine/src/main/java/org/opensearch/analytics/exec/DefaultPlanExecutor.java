@@ -25,6 +25,7 @@ import org.opensearch.action.support.TimeoutTaskCancellationUtility;
 import org.opensearch.analytics.AnalyticsPlugin;
 import org.opensearch.analytics.EngineContextProvider;
 import org.opensearch.analytics.QueryRequestContext;
+import org.opensearch.analytics.backend.EngineResultStream;
 import org.opensearch.analytics.exec.action.AnalyticsQueryAction;
 import org.opensearch.analytics.exec.action.AnalyticsQueryRequest;
 import org.opensearch.analytics.exec.action.AnalyticsQueryResponse;
@@ -38,15 +39,14 @@ import org.opensearch.analytics.planner.PlannerImpl;
 import org.opensearch.analytics.planner.RelNodeUtils;
 import org.opensearch.analytics.planner.dag.BackendPlanAdapter;
 import org.opensearch.analytics.planner.dag.DAGBuilder;
+import org.opensearch.analytics.planner.dag.DfShardRouting;
 import org.opensearch.analytics.planner.dag.FragmentConversionDriver;
 import org.opensearch.analytics.planner.dag.PlanAlternativeSelector;
 import org.opensearch.analytics.planner.dag.PlanForker;
 import org.opensearch.analytics.planner.dag.QueryDAG;
-import org.opensearch.analytics.planner.dag.DfShardRouting;
-import org.opensearch.analytics.backend.EngineResultStream;
-import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
 import org.opensearch.analytics.settings.AnalyticsQuerySettings;
 import org.opensearch.analytics.settings.PlannerSettings;
+import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
 import org.opensearch.analytics.stats.AnalyticsStatsCollector;
 import org.opensearch.arrow.allocator.AllocationRejection;
 import org.opensearch.cluster.ClusterState;
@@ -106,6 +106,11 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
     private volatile int maxConcurrentShardRequestsPerNode;
     private volatile boolean preferMetadataDriver;
     private volatile boolean distributedEngine;
+    // Distributed-planner tuning (analytics.query.distributed.*), read per query into DistributedTuning.
+    private volatile boolean distPartialReduce;
+    private volatile boolean distForcePartitionedJoins;
+    private volatile double distCardinalityTaskCountFactor;
+    private volatile int distMaxTasksPerStage;
     private final PlannerSettings plannerSettings;
     private final IndexNameExpressionResolver indexNameExpressionResolver;
     private final AnalyticsSearchSlowLog analyticsSearchSlowLog;
@@ -163,6 +168,24 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
         this.distributedEngine = AnalyticsQuerySettings.DISTRIBUTED_ENGINE.get(clusterService.getSettings());
         clusterService.getClusterSettings()
             .addSettingsUpdateConsumer(AnalyticsQuerySettings.DISTRIBUTED_ENGINE, v -> distributedEngine = v);
+        // Distributed-planner tuning (analytics.query.distributed.*) — dynamic.
+        this.distPartialReduce = AnalyticsQuerySettings.DISTRIBUTED_PARTIAL_REDUCE.get(clusterService.getSettings());
+        clusterService.getClusterSettings()
+            .addSettingsUpdateConsumer(AnalyticsQuerySettings.DISTRIBUTED_PARTIAL_REDUCE, v -> distPartialReduce = v);
+        this.distForcePartitionedJoins = AnalyticsQuerySettings.DISTRIBUTED_FORCE_PARTITIONED_JOINS.get(clusterService.getSettings());
+        clusterService.getClusterSettings()
+            .addSettingsUpdateConsumer(AnalyticsQuerySettings.DISTRIBUTED_FORCE_PARTITIONED_JOINS, v -> distForcePartitionedJoins = v);
+        this.distCardinalityTaskCountFactor = AnalyticsQuerySettings.DISTRIBUTED_CARDINALITY_TASK_COUNT_FACTOR.get(
+            clusterService.getSettings()
+        );
+        clusterService.getClusterSettings()
+            .addSettingsUpdateConsumer(
+                AnalyticsQuerySettings.DISTRIBUTED_CARDINALITY_TASK_COUNT_FACTOR,
+                v -> distCardinalityTaskCountFactor = v
+            );
+        this.distMaxTasksPerStage = AnalyticsQuerySettings.DISTRIBUTED_MAX_TASKS_PER_STAGE.get(clusterService.getSettings());
+        clusterService.getClusterSettings()
+            .addSettingsUpdateConsumer(AnalyticsQuerySettings.DISTRIBUTED_MAX_TASKS_PER_STAGE, v -> distMaxTasksPerStage = v);
         // Planner settings (oversampling factor + delegation block-list); self-registers update
         // consumers for live changes.
         this.plannerSettings = PlannerSettings.create(
@@ -405,9 +428,9 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
         RelNode marked = PlannerImpl.createMarkedPlan(logicalFragment, plannerContext);
 
         // 2. Whole-query Substrait via the DataFusion backend's convertor. Uses the shared
-        //    FragmentConversionDriver.convertWholeQuery so the marked tree's ANNOTATED_* wrappers are
-        //    stripped (predicates/projects resolved, Lucene-delegated predicates captured) — but with
-        //    NO DAG cut and NO partial/final pre-split; the native distributed planner does that.
+        // FragmentConversionDriver.convertWholeQuery so the marked tree's ANNOTATED_* wrappers are
+        // stripped (predicates/projects resolved, Lucene-delegated predicates captured) — but with
+        // NO DAG cut and NO partial/final pre-split; the native distributed planner does that.
         AnalyticsSearchBackendPlugin backend = capabilityRegistry.getBackend(DATAFUSION_BACKEND);
         if (backend == null) {
             listener.onFailure(new IllegalStateException("distributed_engine requires the [datafusion] backend, which is not registered"));
@@ -444,7 +467,7 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
                 leafFragmentBytes = null;
             }
             // 3. Shard→node routing: each shard carries its ordered candidate nodes (primary + replicas)
-            //    over a shared candidate-node list; enforces max_shards_per_query.
+            // over a shared candidate-node list; enforces max_shards_per_query.
             DfShardRouting.Routing routing = DfShardRouting.buildRouting(
                 marked,
                 planningState,
@@ -453,9 +476,9 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
                 maxShardsPerQuery
             );
             // 3b. Discover which candidate nodes have a LIVE Worker gRPC server via the GetWorkerPort
-            //     action (discovery, not a node attr, so ephemeral ports and >1 node/host work), then
-            //     pick the first live copy per shard — routing around a dead/worker-less node to a
-            //     replica. A shard with no live copy fails the query clearly.
+            // action (discovery, not a node attr, so ephemeral ports and >1 node/host work), then
+            // pick the first live copy per shard — routing around a dead/worker-less node to a
+            // replica. A shard with no live copy fails the query clearly.
             Map<Integer, String> liveUrlByNodeIdx = resolveLiveWorkerUrls(routing.orderedWorkerNodes());
             resolved = DfShardRouting.resolve(routing, liveUrlByNodeIdx);
         } catch (Exception e) {
@@ -473,9 +496,9 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
         final List<String> outputColumnOrder = logicalFragment.getRowType().getFieldNames();
 
         // 3c. Cancellation: a front-end cancel / client disconnect / timeout cascades into queryTask;
-        //     fire the backend's per-context token so the coordinator head stage unwinds and dropping
-        //     its DistributedExec stream tears down the worker ExecuteTask streams (which cancels the
-        //     worker-side scans). Without this a cancelled distributed query keeps running natively.
+        // fire the backend's per-context token so the coordinator head stage unwinds and dropping
+        // its DistributedExec stream tears down the worker ExecuteTask streams (which cancels the
+        // worker-side scans). Without this a cancelled distributed query keeps running natively.
         queryTask.setOnCancelCallback(() -> backend.cancelByContext(contextId));
 
         // 4. Allocator (mirrors the legacy path's per-query allocator + 429 translation).
@@ -493,21 +516,29 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
         }
 
         // 5. Execute + drain the head-stage stream into rows. distributedExecute returns a streaming
-        //    result; we materialize it here (the caller is already on the SEARCH executor).
+        // result; we materialize it here (the caller is already on the SEARCH executor).
         try {
             List<Object[]> rows = new ArrayList<>();
-            try (EngineResultStream stream = backend.distributedExecute(
-                planBytes,
-                resolved.workerUrls(),
-                resolved.shardMapCsv(),
-                indexUuid,
-                queryAllocator,
-                contextId,
-                delegationBytes,
-                delegationTreeShape,
-                delegationPredicateCount,
-                leafFragmentBytes
-            )) {
+            try (
+                EngineResultStream stream = backend.distributedExecute(
+                    planBytes,
+                    resolved.workerUrls(),
+                    resolved.shardMapCsv(),
+                    indexUuid,
+                    queryAllocator,
+                    contextId,
+                    delegationBytes,
+                    delegationTreeShape,
+                    delegationPredicateCount,
+                    leafFragmentBytes,
+                    new AnalyticsSearchBackendPlugin.DistributedTuning(
+                        distPartialReduce,
+                        distCardinalityTaskCountFactor,
+                        distMaxTasksPerStage,
+                        distForcePartitionedJoins
+                    )
+                )
+            ) {
                 var it = stream.iterator();
                 while (it.hasNext()) {
                     VectorSchemaRoot root = it.next().getArrowRoot();
@@ -523,7 +554,12 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
             // Distributed-path profiling is degraded (no ExecutionGraph/QueryExecution); record a
             // null-graph execution for stats parity and return rows with a null profile.
             statsCollector.recordExecution(null, null, 0L);
-            logger.debug("[dist-{}] distributed query complete: {} rows in {}ns", contextId, rows.size(), System.nanoTime() - queryStartNanos);
+            logger.debug(
+                "[dist-{}] distributed query complete: {} rows in {}ns",
+                contextId,
+                rows.size(),
+                System.nanoTime() - queryStartNanos
+            );
             listener.onResponse(new ProfiledResult(rows, null, null));
         } catch (Exception e) {
             listener.onFailure(contextProvider.convertException(e));

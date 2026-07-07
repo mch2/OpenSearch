@@ -1552,6 +1552,7 @@ pub unsafe extern "C" fn df_distributed_execute(
     partial_reduce: i32,
     cardinality_task_count_factor: f64,
     max_tasks_per_stage: i32,
+    force_partitioned_joins: i32,
 ) -> i64 {
     let mgr = get_rt_manager()?;
     let runtime_ptr_v = runtime_ptr;
@@ -1629,6 +1630,7 @@ pub unsafe extern "C" fn df_distributed_execute(
             partial_reduce != 0,
             cardinality_task_count_factor,
             max_tasks_per_stage.max(0) as usize,
+            force_partitioned_joins != 0,
         )
         .await
         .map_err(|e| e.to_string())

@@ -8,12 +8,11 @@
 
 package org.opensearch.be.datafusion;
 
-import org.opensearch.common.settings.Settings;
-
 import org.opensearch.analytics.spi.BackendCapabilityProvider;
 import org.opensearch.analytics.spi.FieldType;
 import org.opensearch.analytics.spi.ProjectCapability;
 import org.opensearch.analytics.spi.ScalarFunction;
+import org.opensearch.common.settings.Settings;
 import org.opensearch.test.OpenSearchTestCase;
 
 import java.util.Set;

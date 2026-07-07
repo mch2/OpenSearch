@@ -88,7 +88,11 @@ public final class DataFusionWorkerAuxTransport extends AuxTransport {
         if (bound <= 0) {
             // Distributed engine may be unavailable (older native lib) — that's not fatal; the node
             // simply can't serve distributed leaf/shuffle tasks. Leave boundAddress null.
-            logger.warn("DataFusion Worker aux transport did not bind a port (range={}, tried={}); distributed engine disabled on this node", portRange, tried);
+            logger.warn(
+                "DataFusion Worker aux transport did not bind a port (range={}, tried={}); distributed engine disabled on this node",
+                portRange,
+                tried
+            );
             return;
         }
         try {

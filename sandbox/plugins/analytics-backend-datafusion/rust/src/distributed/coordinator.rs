@@ -300,6 +300,7 @@ pub fn build_coordinator_context(
     partial_reduce: bool,
     cardinality_task_count_factor: f64,
     max_tasks_per_stage: usize,
+    force_partitioned_joins: bool,
 ) -> Result<SessionContext> {
     use datafusion_distributed::DistributedExt;
 
@@ -324,15 +325,27 @@ pub fn build_coordinator_context(
     // RepartitionExec but caps a CollectLeft join to a single task — so with distributed per-shard
     // leaves underneath, a CollectLeft join collects only SOME shards' rows (placement-dependent →
     // wrong join counts). Setting the single-partition thresholds to 0 makes DataFusion always pick
-    // Partitioned, which the library shuffles correctly on both legs.
+    // Partitioned, which the library shuffles correctly on both legs. Gated by
+    // analytics.query.distributed.force_partitioned_joins (default true; the escape hatch is opt-out).
     let mut config = SessionConfig::new().with_target_partitions(target_partitions.max(1));
-    config.options_mut().optimizer.hash_join_single_partition_threshold = 0;
-    config.options_mut().optimizer.hash_join_single_partition_threshold_rows = 0;
-    config.options_mut().optimizer.repartition_joins = true;
+    if force_partitioned_joins {
+        config.options_mut().optimizer.hash_join_single_partition_threshold = 0;
+        config.options_mut().optimizer.hash_join_single_partition_threshold_rows = 0;
+        config.options_mut().optimizer.repartition_joins = true;
+    }
     let builder = SessionStateBuilder::new()
         .with_config(config)
         .with_runtime_env(Arc::new(runtime.runtime_env.clone()))
         .with_default_features()
+        // Guarantee every ShardScanExec is distributed. The distributed planner only fans a leaf out
+        // where it finds a network-boundary seam (hash repartition / coalesce / SPM) above it; a
+        // single-partition head stage with no such seam (global window `OVER ()`, bare SELECT *,
+        // filter-only) would leave the leaf UNASSIGNED and executed on the coordinator, which hosts no
+        // shards. This rule (appended AFTER DataFusion's built-ins, so it sees the final physical plan
+        // just before the distributed planner runs) inserts the coalesce seam over any bare leaf.
+        .with_physical_optimizer_rule(Arc::new(
+            crate::distributed::force_distribute_leaf::ForceDistributeLeaf::new(target_partitions),
+        ))
         .with_distributed_worker_resolver(resolver)
         .with_distributed_user_codec(ShardScanCodec)
         .with_distributed_task_estimator(estimator)
@@ -394,6 +407,7 @@ pub async fn distributed_execute(
     partial_reduce: bool,
     cardinality_task_count_factor: f64,
     max_tasks_per_stage: usize,
+    force_partitioned_joins: bool,
 ) -> Result<i64> {
     use datafusion::physical_plan::execute_stream;
 
@@ -412,6 +426,7 @@ pub async fn distributed_execute(
         partial_reduce,
         cardinality_task_count_factor,
         max_tasks_per_stage,
+        force_partitioned_joins,
     )?;
 
     // Per-table index uuid (each join leg may be a different index); fall back to the empty-key entry.

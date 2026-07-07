@@ -30,6 +30,7 @@ pub mod codec;
 pub mod coordinator;
 pub mod flight_shard_scan_exec;
 pub mod flight_task_estimator;
+pub mod force_distribute_leaf;
 pub mod leaf_bridge;
 pub mod leaf_stream;
 pub mod shard_catalog;
@@ -46,6 +47,9 @@ mod distributed_e2e_test;
 
 #[cfg(all(test, feature = "spike_integration"))]
 mod distributed_tcp_test;
+
+#[cfg(all(test, feature = "spike_integration"))]
+mod distributed_plan_shape_test;
 
 #[cfg(all(test, feature = "spike_integration"))]
 mod distributed_ffm_test;

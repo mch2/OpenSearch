@@ -62,20 +62,23 @@ public final class DfShardRouting {
      * {@link DfShardRouting#resolve} once {@code GetWorkerPort} reveals which nodes run a Worker, so the
      * query routes around a dead/worker-less node to a replica.
      */
-    public record TableRouting(String tableName, String indexUuid, int[] shardIds, int[][] shardCandidateNodeIdxs) {}
+    public record TableRouting(String tableName, String indexUuid, int[] shardIds, int[][] shardCandidateNodeIdxs) {
+    }
 
     /**
      * The Rust-facing routing BEFORE liveness is known: the shared candidate worker-node list + one
      * {@link TableRouting} per distinct leaf table. {@link #resolve} collapses the per-shard candidate
      * lists to concrete workers using the live set and produces the wire form.
      */
-    public record Routing(List<DiscoveryNode> orderedWorkerNodes, List<TableRouting> tables) {}
+    public record Routing(List<DiscoveryNode> orderedWorkerNodes, List<TableRouting> tables) {
+    }
 
     /**
      * The resolved wire form after picking a live worker per shard. {@code workerUrls} are the live
      * data-node Worker gRPC URLs (task order irrelevant; shard map indexes into this list).
      */
-    public record ResolvedRouting(List<String> workerUrls, String shardMapCsv, String indexUuidCsv) {}
+    public record ResolvedRouting(List<String> workerUrls, String shardMapCsv, String indexUuidCsv) {
+    }
 
     /**
      * Collapses each shard's candidate node list to its first LIVE node (a Worker gRPC URL was
@@ -187,7 +190,10 @@ public final class DfShardRouting {
             // Phase-1 constraint: one concrete index per leaf table (no alias/wildcard fan-out yet).
             if (resolution.concreteIndices().size() != 1) {
                 throw new IllegalArgumentException(
-                    "distributed_engine: table [" + tableName + "] resolves to " + resolution.concreteIndices().size()
+                    "distributed_engine: table ["
+                        + tableName
+                        + "] resolves to "
+                        + resolution.concreteIndices().size()
                         + " concrete indices; only single-index leaves are supported on the distributed path"
                 );
             }

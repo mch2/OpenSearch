@@ -673,7 +673,8 @@ public final class NativeBridge {
                         ValueLayout.JAVA_LONG, // leaf fragment len
                         ValueLayout.JAVA_INT, // partial_reduce (0/1)
                         ValueLayout.JAVA_DOUBLE, // cardinality_task_count_factor (0 = default)
-                        ValueLayout.JAVA_INT // max_tasks_per_stage (0 = inherit)
+                        ValueLayout.JAVA_INT, // max_tasks_per_stage (0 = inherit)
+                        ValueLayout.JAVA_INT // force_partitioned_joins (0/1)
                     )
                 )
             )
@@ -711,7 +712,7 @@ public final class NativeBridge {
         WORKER_CLEAR_SHARDS = lib.find("df_worker_clear_shards")
             .map(addr -> linker.downcallHandle(addr, FunctionDescriptor.ofVoid(ValueLayout.JAVA_LONG)))
             .orElse(null);
-        // void df_register_leaf_bridge(open_fragment, leaf_next, leaf_close)  [Model B pull-based leaf]
+        // void df_register_leaf_bridge(open_fragment, leaf_next, leaf_close) [Model B pull-based leaf]
         REGISTER_LEAF_BRIDGE = lib.find("df_register_leaf_bridge")
             .map(
                 addr -> linker.downcallHandle(
@@ -749,20 +750,23 @@ public final class NativeBridge {
                 cb,
                 "openFragment",
                 java.lang.invoke.MethodType.methodType(
-                    int.class, long.class, seg, long.class, int.class, seg, long.class, seg, long.class,
-                    int.class, int.class, seg, seg
+                    int.class,
+                    long.class,
+                    seg,
+                    long.class,
+                    int.class,
+                    seg,
+                    long.class,
+                    seg,
+                    long.class,
+                    int.class,
+                    int.class,
+                    seg,
+                    seg
                 )
             );
-            MethodHandle leafNext = lookup.findStatic(
-                cb,
-                "leafNext",
-                java.lang.invoke.MethodType.methodType(int.class, long.class, seg)
-            );
-            MethodHandle leafClose = lookup.findStatic(
-                cb,
-                "leafClose",
-                java.lang.invoke.MethodType.methodType(void.class, long.class)
-            );
+            MethodHandle leafNext = lookup.findStatic(cb, "leafNext", java.lang.invoke.MethodType.methodType(int.class, long.class, seg));
+            MethodHandle leafClose = lookup.findStatic(cb, "leafClose", java.lang.invoke.MethodType.methodType(void.class, long.class));
 
             java.lang.foreign.MemorySegment openStub = linker.upcallStub(
                 openFragment,
@@ -1504,7 +1508,8 @@ public final class NativeBridge {
         byte[] leafFragmentBytes,
         boolean partialReduce,
         double cardinalityTaskCountFactor,
-        int maxTasksPerStage
+        int maxTasksPerStage,
+        boolean forcePartitionedJoins
     ) {
         NativeHandle.validatePointer(runtimePtr, "runtime");
         try (var call = new NativeCall()) {
@@ -1537,7 +1542,8 @@ public final class NativeBridge {
                 leafLen,
                 partialReduce ? 1 : 0,
                 cardinalityTaskCountFactor,
-                maxTasksPerStage
+                maxTasksPerStage,
+                forcePartitionedJoins ? 1 : 0
             );
         } catch (RuntimeException e) {
             throw rethrowConverted(e);

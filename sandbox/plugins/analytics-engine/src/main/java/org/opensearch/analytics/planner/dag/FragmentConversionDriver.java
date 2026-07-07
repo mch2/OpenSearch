@@ -96,11 +96,9 @@ public class FragmentConversionDriver {
      *  @param leafFragmentBytes for the delegated (indexed) case, the shard-local {@code Filter(markers)->scan}
      *         Substrait the leaf worker feeds to its indexed executor; null when no delegation. Derived from
      *         the SAME stripped plan (the WHERE-filter subtree) — not a separate DAG cut. */
-    public record WholeQueryConversion(
-        byte[] planBytes,
-        org.opensearch.analytics.spi.DelegationDescriptor delegation,
-        byte[] leafFragmentBytes
-    ) {}
+    public record WholeQueryConversion(byte[] planBytes, org.opensearch.analytics.spi.DelegationDescriptor delegation,
+        byte[] leafFragmentBytes) {
+    }
 
     /**
      * Converts a WHOLE marked query tree (from {@code PlannerImpl.createMarkedPlan}) into a single
@@ -118,11 +116,7 @@ public class FragmentConversionDriver {
      * @param convertor the target backend's fragment convertor (datafusion)
      * @param registry  capability registry (used to resolve delegated-predicate serializers)
      */
-    public static WholeQueryConversion convertWholeQuery(
-        RelNode marked,
-        FragmentConvertor convertor,
-        CapabilityRegistry registry
-    ) {
+    public static WholeQueryConversion convertWholeQuery(RelNode marked, FragmentConvertor convertor, CapabilityRegistry registry) {
         // MISSING-STEP FIX: resolve the marked tree to a single driving backend BEFORE stripping — the
         // whole-query analogue of PlanForker (minus the DAG cut). Without this, dual-viable operators
         // (filter viable on [lucene, datafusion]) stay unresolved, so a Lucene-only predicate is never
