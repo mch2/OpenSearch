@@ -152,6 +152,55 @@ async fn plan_string_for_shards(query: &str, partial_reduce: bool, num_shards: u
     display_plan_ascii(dplan.as_ref(), false)
 }
 
+/// Reproduces the ClickBench "No field named os" class of failures: a MIXED-CASE column (`OS`)
+/// referenced by a group-by. The coordinator's whole-query planning (from_substrait_plan) must resolve
+/// the reference against the case-preserved leaf schema. If ident normalization lowercases the
+/// reference to `os` while the schema keeps `OS`, planning fails with "No field named os".
+#[tokio::test]
+async fn mixed_case_column_group_by_resolves() {
+    let dir = tempfile::tempdir().unwrap();
+    // A parquet with a mixed-case column name, like ClickBench's OS / BrowserLanguage.
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("OS", DataType::Int64, true),
+        Field::new("amount", DataType::Int64, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![Arc::new(Int64Array::from(vec![1i64, 2, 1])), Arc::new(Int64Array::from(vec![10i64, 20, 30]))],
+    )
+    .unwrap();
+    let path = dir.path().join("shard-0.parquet");
+    let f = std::fs::File::create(&path).unwrap();
+    let mut w = ArrowWriter::try_new(f, Arc::clone(&schema), None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+
+    // Quoted OS so the SQL producer preserves case in the emitted Substrait (production PPL emits
+    // case-preserved names too). The coordinator's from_substrait_plan must then resolve `OS` against
+    // the case-preserved leaf schema WITHOUT lowercasing it to `os`.
+    let plan_bytes = substrait_for("SELECT \"OS\", sum(amount) AS total FROM events GROUP BY \"OS\"", dir.path()).await;
+    let runtime = DataFusionRuntime::new_for_bench(RuntimeEnvBuilder::new().build().unwrap());
+    let mut by_table = HashMap::new();
+    by_table.insert(String::new(), TableRouting { shard_ids: vec![0], task_to_worker: vec![0] });
+    let ctx = build_coordinator_context(
+        &runtime,
+        vec!["http://127.0.0.1:9000".to_string()],
+        by_table,
+        1,
+        4242,
+        true,
+        0.0,
+        0,
+        true,
+    )
+    .unwrap();
+    register_shard_tables(&ctx, &plan_bytes, |_| "idx-uuid".to_string()).unwrap();
+    // The bug manifests here: plan_distributed → from_substrait_plan fails to resolve `OS`.
+    let dplan = plan_distributed(&ctx, &plan_bytes).await.expect("mixed-case column must resolve at planning");
+    let plan = display_plan_ascii(dplan.as_ref(), false);
+    assert!(plan.contains("ShardScanExec"), "[mixed-case] expected the leaf; plan:\n{plan}");
+}
+
 /// A distributed reduce must place a NetworkShuffleExec between the per-shard leaves and the final
 /// aggregate/sort — so the final stage runs across workers, not gathered onto the coordinator.
 fn assert_distributed_reduce(plan: &str, shape: &str) {
