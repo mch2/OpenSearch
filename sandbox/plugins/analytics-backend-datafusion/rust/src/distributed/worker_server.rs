@@ -131,6 +131,18 @@ async fn build_worker_session(
         .build();
     let sc = SessionContext::from(state);
 
+    // Register the SAME functions the coordinator has, so a stage subplan the coordinator serialized
+    // (datafusion-proto) resolves every UDF/UDAF/UDWF by name when this worker decodes it. Without this
+    // the worker's function registry is empty and decoding a plan that carries e.g. `delegation_possible`
+    // or `opensearch_extract` fails with "PhysicalExtensionCodec is not provided for scalar function X".
+    crate::udf::register_all(&sc);
+    crate::udaf::register_all(&sc);
+    crate::udwf::register_all(&sc);
+    // The delegation marker UDFs (mirrors build_coordinator_context) — a whole-query plan whose WHERE
+    // predicate was delegated to Lucene carries these markers into worker stages.
+    sc.register_udf(crate::indexed_table::substrait_to_tree::create_index_filter_udf());
+    sc.register_udf(crate::indexed_table::substrait_to_tree::create_delegation_possible_udf());
+
     // Carry the query id so ShardScanExec::execute can lazily upcall the JVM to resolve a shard's
     // files on a catalog miss (the registry may be empty at session-build time when resolution is
     // driven lazily per shard).
