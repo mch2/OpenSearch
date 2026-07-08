@@ -280,10 +280,18 @@ pub async fn scan_stream_from_handle_projected(
             return Ok(project_stream_by_name(stream, target_schema.unwrap()));
         }
         // Project + reorder to the advertised schema's columns by name so the leaf output is
-        // positionally identical to what the coordinator planned for ShardScanExec.
+        // positionally identical to what the coordinator planned for ShardScanExec. Build each
+        // reference from an UNNORMALIZED Column (Column::new_unqualified) rather than col(&str): the
+        // latter routes through ident parsing that, under the session's default
+        // enable_ident_normalization=true, lowercases a mixed-case name (e.g. ClickBench's
+        // `AdvEngineID` → `advengineid`) so it no longer matches the case-preserved table schema
+        // ("No field named advengineid"). new_unqualified takes the name verbatim.
         if let Some(ts) = target_schema.as_ref() {
-            let cols: Vec<datafusion::logical_expr::Expr> =
-                ts.fields().iter().map(|f| datafusion::logical_expr::col(f.name())).collect();
+            let cols: Vec<datafusion::logical_expr::Expr> = ts
+                .fields()
+                .iter()
+                .map(|f| datafusion::logical_expr::Expr::Column(datafusion::common::Column::new_unqualified(f.name())))
+                .collect();
             dataframe = dataframe.select(cols)?;
         }
         let physical_plan = dataframe.create_physical_plan().await?;
