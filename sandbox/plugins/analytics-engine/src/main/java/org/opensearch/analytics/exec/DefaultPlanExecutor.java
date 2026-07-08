@@ -296,7 +296,12 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
         // datafusion-distributed path: bypass the Java DAG/fork/scheduler entirely and execute the
         // whole query through the Rust distributed engine (direct rust↔rust data plane). Gated by the
         // dynamic analytics.query.distributed_engine setting.
-        if (distributedEngine) {
+        //
+        // Phase-1 constraint: the distributed path supports only single-concrete-index leaves. When a
+        // leaf resolves to multiple concrete indices (alias / wildcard / comma-list / data stream),
+        // fall back to the legacy scatter-gather engine (which handles multi-index fan-out) rather than
+        // failing the query. The check is over the RAW plan's table names — cheap, no marking/shards.
+        if (distributedEngine && distributedEligible(logicalFragment, planningState)) {
             executeInternalDistributed(logicalFragment, plannerContext, planningState, queryTask, queryStartNanos, profile, listener);
             return;
         }
@@ -407,6 +412,39 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
 
     /** Backend id of the DataFusion analytics backend (the only distributed-engine backend today). */
     private static final String DATAFUSION_BACKEND = "datafusion";
+
+    /**
+     * Whether {@code logicalFragment} is eligible for the distributed path. Phase-1 supports only
+     * single-concrete-index leaves; a leaf that expands to multiple concrete indices (alias, wildcard,
+     * comma-list, data stream) must run on the legacy engine. Checks the raw plan's table names against
+     * the planning cluster state — cheap, and conservative: any resolution failure ⇒ not eligible
+     * (fall back to legacy, which produces the proper error/behavior).
+     */
+    private boolean distributedEligible(RelNode logicalFragment, ClusterState planningState) {
+        try {
+            // Resolve each leaf's FULL table name verbatim — do NOT comma-split. buildRouting resolves
+            // the whole leaf name (e.g. "logs_ds,plain_logs"), so a comma-list / data-stream / alias /
+            // wildcard leaf that fans out to >1 concrete index must be caught here. (RelNodeUtils
+            // .extractIndices splits comma-lists, which would mask this and wrongly enter the
+            // distributed path.)
+            for (org.apache.calcite.rel.core.TableScan scan : RelNodeUtils.findAllNodes(
+                logicalFragment,
+                org.apache.calcite.rel.core.TableScan.class
+            )) {
+                java.util.List<String> qn = scan.getTable().getQualifiedName();
+                String table = qn.get(qn.size() - 1);
+                if (org.opensearch.analytics.planner.IndexResolution.resolve(table, planningState, indexNameExpressionResolver)
+                    .concreteIndices()
+                    .size() != 1) {
+                    return false;
+                }
+            }
+            return true;
+        } catch (Exception e) {
+            logger.debug("distributedEligible check failed; routing to legacy engine", e);
+            return false;
+        }
+    }
 
     /**
      * The {@code datafusion-distributed} execution path. Bypasses the Java DAG/fork/scheduler: builds
