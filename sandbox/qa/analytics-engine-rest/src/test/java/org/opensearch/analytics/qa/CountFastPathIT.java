@@ -15,6 +15,8 @@ import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 
+import static org.junit.Assume.assumeFalse;
+
 /**
  * End-to-end tests for the count fast path covering the four shape buckets the planner
  * must navigate:
@@ -376,6 +378,10 @@ public class CountFastPathIT extends AnalyticsRestTestCase {
 
     @SuppressWarnings("unchecked")
     private static void assertStageChoseBackend(Map<String, Object> explain, String executionType, String expectedBackend) {
+        // Legacy-planner backend-selection assertion: the distributed engine has no per-stage
+        // SHARD_FRAGMENT/COORDINATOR_REDUCE DAG (its plan shape is in profile.plan.full_plan), so skip
+        // under the distributed sweep — the query itself still ran above.
+        assumeFalse("distributed engine has no legacy profile stages", distributedEngineForced());
         Map<String, Object> profile = (Map<String, Object>) explain.get("profile");
         assertNotNull("profile present", profile);
         List<Map<String, Object>> stages = (List<Map<String, Object>>) profile.get("stages");
@@ -396,6 +402,7 @@ public class CountFastPathIT extends AnalyticsRestTestCase {
     /** Asserts the named stage has no {@code tree_shape} field — i.e. no delegation instruction. */
     @SuppressWarnings("unchecked")
     private static void assertStageHasNoTreeShape(Map<String, Object> explain, String executionType) {
+        assumeFalse("distributed engine has no legacy profile stages", distributedEngineForced());
         Map<String, Object> profile = (Map<String, Object>) explain.get("profile");
         List<Map<String, Object>> stages = (List<Map<String, Object>>) profile.get("stages");
         for (Map<String, Object> stage : stages) {

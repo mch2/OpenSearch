@@ -49,6 +49,18 @@ public abstract class AnalyticsRestTestCase extends OpenSearchRestTestCase {
     }
 
     /**
+     * True when the whole-suite distributed sweep is active ({@code -Dtests.distributed_engine=true},
+     * forwarded to the test JVM by build.gradle). Tests that assert on legacy-planner internals with no
+     * distributed-path equivalent — e.g. the {@code SHARD_FRAGMENT} / {@code COORDINATOR_REDUCE} stages
+     * of {@code profile.stages}, which the distributed engine does not produce (its plan shape is
+     * surfaced via {@code profile.plan.full_plan} instead) — should {@code assumeFalse(distributedEngineForced())}
+     * around those assertions so the sweep exercises the query without failing on legacy-only shape.
+     */
+    protected static boolean distributedEngineForced() {
+        return "true".equals(System.getProperty("tests.distributed_engine"));
+    }
+
+    /**
      * Load a classpath resource as a UTF-8 string.
      * Fails with an assertion error if the resource does not exist.
      */

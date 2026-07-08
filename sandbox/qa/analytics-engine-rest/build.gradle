@@ -143,6 +143,11 @@ integTest {
     }
     // Source resources dir, so -Dplan.generate writes goldens to the source tree (not build/).
     systemProperty 'plan.resourcesDir', file('src/test/resources').absolutePath
+    // Forward the distributed-sweep flag to the test JVM so tests can skip legacy-only assertions
+    // (e.g. profile SHARD_FRAGMENT stages) that the distributed path does not produce.
+    if (System.getProperty('tests.distributed_engine') == 'true') {
+        systemProperty 'tests.distributed_engine', 'true'
+    }
     testLogging {
         exceptionFormat = 'full'
     }
