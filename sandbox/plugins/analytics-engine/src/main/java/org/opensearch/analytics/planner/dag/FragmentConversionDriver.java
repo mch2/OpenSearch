@@ -127,6 +127,16 @@ public class FragmentConversionDriver {
         // byte-identical to today's per-shard fragment, just uncut.
         RelNode resolved = PlanForker.resolveWholeQuery(marked, "datafusion", registry);
 
+        // Apply the driving backend's per-function adapters — the whole-query analogue of the legacy
+        // path's BackendPlanAdapter.adaptAll (which runs right after PlanForker.forkAll). This is what
+        // makes heterogeneous scalar calls bindable by whole-query Substrait conversion: the numeric-
+        // widening / coercion adapters (NumericToDoubleAdapter, CoalesceAdapter, DivideAdapter, ...)
+        // rewrite e.g. DIVIDE(i32, decimal) into a homogeneous, overload-matching shape. Skipping this
+        // (as the distributed path previously did) is why conversion failed with "Unable to convert
+        // call X". Runs after resolve (tree pinned to datafusion) and before strip/convert, mirroring
+        // the legacy resolve→adapt→convert order.
+        resolved = BackendPlanAdapter.adaptWholeQuery(resolved, "datafusion", registry);
+
         // Derive the filter-tree shape BEFORE stripping (annotations must be intact) — mirrors
         // convertStage. Pick the bottommost (WHERE) filter: pushdown+merge leaves delegated
         // annotations only there; a HAVING stays un-delegated above the Aggregate.

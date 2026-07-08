@@ -66,6 +66,29 @@ public class BackendPlanAdapter {
         adaptStage(dag.rootStage(), registry);
     }
 
+    /**
+     * Adapt a WHOLE resolved query tree with a single driving backend's adapters — the distributed-path
+     * analogue of {@link #adaptAll}, with no DAG/stage structure. The datafusion-distributed path
+     * ({@code FragmentConversionDriver.convertWholeQuery}) runs this so the SAME per-function
+     * {@link ScalarFunctionAdapter}s the legacy path applies via {@link #adaptAll} also run before
+     * whole-query Substrait conversion — in particular the numeric-widening / coercion adapters
+     * (e.g. {@code NumericToDoubleAdapter}, {@code CoalesceAdapter}, {@code DivideAdapter}) that make a
+     * heterogeneous call like {@code DIVIDE(i32, decimal)} bind to a homogeneous Substrait overload.
+     * Without this the whole-query converter fails with "Unable to convert call X".
+     *
+     * <p>The tree must already be resolved to {@code backendId} (see {@code PlanForker.resolveWholeQuery}).
+     * The {@code AggregateMode.FINAL} branch of {@link #adaptNode} (the {@code DistributedAggregateRewriter}
+     * partial/final split) is inert here: the distributed marked plan carries a single {@code SINGLE}
+     * aggregate, never {@code FINAL}.
+     *
+     * @return the adapted tree (same instance if no adapter fired)
+     */
+    public static RelNode adaptWholeQuery(RelNode resolved, String backendId, CapabilityRegistry registry) {
+        var capabilityProvider = registry.getBackend(backendId).getCapabilityProvider();
+        Adapters adapters = new Adapters(capabilityProvider.scalarFunctionAdapters(), capabilityProvider.windowFunctionAdapters());
+        return adaptNode(resolved, adapters);
+    }
+
     private static void adaptStage(Stage stage, CapabilityRegistry registry) {
         for (Stage child : stage.getChildStages()) {
             adaptStage(child, registry);
