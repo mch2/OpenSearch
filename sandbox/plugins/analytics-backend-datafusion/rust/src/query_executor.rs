@@ -268,6 +268,17 @@ pub async fn scan_stream_from_handle_projected(
                 handle.table_name
             ))
         })?;
+        // Zero-column advertised schema (e.g. count(*), which needs no input columns): a
+        // `select([])` projection produces zero-column batches that Arrow's RecordBatch rejects
+        // ("must either specify a row count or at least one column"). Scan the table unprojected and
+        // map each batch to the empty schema while preserving its row count (project_stream_by_name
+        // carries the count via RecordBatchOptions). Only the row count matters to the Partial
+        // aggregate above the leaf.
+        if target_schema.as_ref().is_some_and(|ts| ts.fields().is_empty()) {
+            let physical_plan = dataframe.create_physical_plan().await?;
+            let stream = execute_stream(physical_plan, handle.ctx.task_ctx())?;
+            return Ok(project_stream_by_name(stream, target_schema.unwrap()));
+        }
         // Project + reorder to the advertised schema's columns by name so the leaf output is
         // positionally identical to what the coordinator planned for ShardScanExec.
         if let Some(ts) = target_schema.as_ref() {
@@ -334,6 +345,13 @@ fn project_stream_by_name(
             )));
         }
         let cols: Vec<_> = indices.iter().map(|&i| batch.column(i).clone()).collect();
+        // Zero-column projection (e.g. count(*) needs no columns): a bare RecordBatch::try_new rejects
+        // an empty column set, so carry the source row count explicitly via RecordBatchOptions.
+        if cols.is_empty() {
+            let opts = datafusion::arrow::record_batch::RecordBatchOptions::new().with_row_count(Some(batch.num_rows()));
+            return datafusion::arrow::record_batch::RecordBatch::try_new_with_options(Arc::clone(&out_schema), cols, &opts)
+                .map_err(|e| DataFusionError::ArrowError(Box::new(e), None));
+        }
         datafusion::arrow::record_batch::RecordBatch::try_new(Arc::clone(&out_schema), cols)
             .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
     });
