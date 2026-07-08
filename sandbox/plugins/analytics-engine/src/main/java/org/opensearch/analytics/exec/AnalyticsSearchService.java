@@ -73,6 +73,17 @@ public class AnalyticsSearchService implements AutoCloseable {
 
     private static final Logger LOGGER = LogManager.getLogger(AnalyticsSearchService.class);
 
+    /**
+     * Per-leaf id source for distributed-leaf delegation bindings. Counts DOWN from -1 so leaf ids are
+     * always negative — disjoint from real (positive) query context ids, so a per-leaf delegation
+     * binding can never collide with a query-global one, and multiple leaves of one query on the same
+     * node each get a unique id. Only the leaf's own collector upcalls (which carry this id via the
+     * native session's query_context) resolve its binding.
+     */
+    private static final java.util.concurrent.atomic.AtomicLong DISTRIBUTED_LEAF_CONTEXT_SEQ = new java.util.concurrent.atomic.AtomicLong(
+        0L
+    );
+
     private final Map<String, AnalyticsSearchBackendPlugin> backends;
     private final AnalyticsOperationListener listener;
     private final NamedWriteableRegistry namedWriteableRegistry;
@@ -574,10 +585,20 @@ public class AnalyticsSearchService implements AutoCloseable {
             int treeShape = indexed ? delegation.treeShape().ordinal() : 0;
             int predicateCount = indexed ? delegation.delegatedPredicateCount() : 0;
 
+            // Per-LEAF delegation id, distinct from the query-global contextId. The distributed engine
+            // runs multiple leaf tasks of ONE query on the same node (shards > nodes); keying the
+            // delegation binding + native session by query-global contextId collides — two leaves
+            // register the same key and one leaf's createCollector then resolves the wrong (or a
+            // torn-down) binding ("createCollector failed: -1"). A unique id per leaf gives each its own
+            // binding, and stamping the SAME id into the native session's query_context makes that
+            // leaf's collector upcalls route back to its own binding. Distributed-leaf cancellation
+            // rides the gRPC stream drop, not cancelByContext, so a per-leaf id doesn't break cancel.
+            long leafContextId = DISTRIBUTED_LEAF_CONTEXT_SEQ.decrementAndGet();
+
             if (indexed) {
                 // Build the SAME ShardScanExecutionContext startFragment uses (reader + mapper +
                 // queryCache + namedWriteableRegistry + shardId), then register the accepting backend's
-                // FilterDelegationHandle under contextId — verbatim reuse of the startFragment
+                // FilterDelegationHandle under the per-leaf id — verbatim reuse of the startFragment
                 // delegation block. The native indexed executor's FFM callbacks resolve to this handle.
                 ShardScanExecutionContext ctx = buildLeafContext(shard, task, reader, substrait);
                 String acceptingBackendId = delegation.delegatedExpressions().getFirst().getAcceptingBackendId();
@@ -586,10 +607,10 @@ public class AnalyticsSearchService implements AutoCloseable {
                     throw new IllegalStateException("Delegation accepting backend [" + acceptingBackendId + "] is not registered");
                 }
                 FilterDelegationHandle handle = acceptingBackend.getFilterDelegationHandle(delegation.delegatedExpressions(), ctx);
-                delegationCleanup = backend.configureFilterDelegation(contextId, handle, null, null);
+                delegationCleanup = backend.configureFilterDelegation(leafContextId, handle, null, null);
             }
 
-            long nativePtr = backend.createNativeSessionHandle(reader, substrait, indexed, contextId, treeShape, predicateCount);
+            long nativePtr = backend.createNativeSessionHandle(reader, substrait, indexed, leafContextId, treeShape, predicateCount);
 
             final Runnable delegationCleanupFinal = delegationCleanup;
             Runnable cleanup = () -> {
