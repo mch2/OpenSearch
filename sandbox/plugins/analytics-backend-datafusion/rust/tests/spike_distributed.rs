@@ -129,6 +129,91 @@ async fn spike_b_our_substrait_gets_distributed() -> Result<(), Box<dyn std::err
     Ok(())
 }
 
+/// GATE TEST for native count(DISTINCT) on the DISTRIBUTED path.
+///
+/// This is the make-or-break check for emitting DataFusion's native exact `count(DISTINCT x)`
+/// on the distributed engine path. The custom `os_count_distinct` UDAF exists only because the
+/// substrait *window* consumer drops the `AggregationInvocation::DISTINCT` bit (see
+/// os_count_distinct.rs header). Here we prove that the plain (non-window) GROUP BY aggregate
+/// producer+consumer path PRESERVES the DISTINCT bit through `to_substrait_plan` ->
+/// `from_substrait_plan` — the exact boundary the whole-query Java->Rust converter crosses.
+///
+/// If DISTINCT survived, `count(DISTINCT user)` produces EXACT distinct counts. If it were
+/// silently dropped, it would collapse to plain `count(user)` == count(*). The test data is a
+/// discriminator: category 'a' has count(*)=4 but 2 distinct users; category 'b' has count(*)=4
+/// but 3 distinct users. So distinct != count(*) for both groups.
+#[tokio::test]
+async fn gate_count_distinct_survives_aggregate_substrait_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+    use datafusion::arrow::util::pretty::pretty_format_batches;
+    use datafusion::physical_plan::execute_stream;
+    use futures::TryStreamExt;
+
+    let dir = write_parquet_table();
+    let dir_path = dir.path().to_str().unwrap();
+
+    // ── 1. Producer context: build a plain GROUP BY aggregate with count(DISTINCT) and count(*).
+    let producer_ctx = SessionContext::new();
+    producer_ctx.register_parquet("events", dir_path, ParquetReadOptions::default()).await?;
+
+    let query = "SELECT category, \
+                        count(*) AS n, \
+                        count(DISTINCT \"user\") AS distinct_users \
+                 FROM events GROUP BY category ORDER BY category";
+
+    let logical = producer_ctx.sql(query).await?.into_optimized_plan()?;
+    let produced_dbg = format!("{logical:?}");
+    println!("[gate] produced logical plan:\n{produced_dbg}");
+
+    // ── 2. Round-trip: LogicalPlan -> Substrait -> LogicalPlan (mirrors Java->Rust whole-query path).
+    let substrait = to_substrait_plan(&logical, &producer_ctx.state())?;
+
+    // Consumer is a distinct SessionContext (name resolution must succeed on the "far side").
+    let consumer_ctx = SessionContext::new();
+    consumer_ctx.register_parquet("events", dir_path, ParquetReadOptions::default()).await?;
+    let logical_in = from_substrait_plan(&consumer_ctx.state(), &substrait).await?;
+
+    let reconstructed_dbg = format!("{logical_in:?}");
+    println!("[gate] reconstructed logical plan after Substrait round-trip:\n{reconstructed_dbg}");
+
+    // The reconstructed aggregate must still carry a DISTINCT invocation. In DataFusion 54.x the
+    // aggregate consumer renders a preserved distinct aggregate as "count(DISTINCT ...)" in the
+    // logical plan Debug output; a dropped bit renders as plain "count(...)".
+    assert!(
+        reconstructed_dbg.to_lowercase().contains("distinct"),
+        "count(DISTINCT) DISTINCT bit was DROPPED by the aggregate Substrait round-trip; \
+         reconstructed plan:\n{reconstructed_dbg}"
+    );
+
+    // ── 3. Execute the reconstructed plan and assert EXACT distinct counts, proving the aggregate
+    //    did not silently collapse to plain count().
+    let physical = consumer_ctx.state().create_physical_plan(&logical_in).await?;
+    let batches = execute_stream(physical, consumer_ctx.task_ctx())?.try_collect::<Vec<_>>().await?;
+    let out = pretty_format_batches(&batches)?.to_string();
+    println!("[gate] reconstructed-plan result:\n{out}");
+
+    // Pull (category -> (n, distinct_users)) out of the result. `category` arrives as Utf8View,
+    // so cast to Utf8 before downcasting to StringArray.
+    use datafusion::arrow::array::{Int64Array, StringArray};
+    use datafusion::arrow::compute::cast;
+    let mut got: std::collections::BTreeMap<String, (i64, i64)> = std::collections::BTreeMap::new();
+    for b in &batches {
+        let cats_utf8 = cast(b.column(0).as_ref(), &DataType::Utf8)?;
+        let cats = cats_utf8.as_any().downcast_ref::<StringArray>().unwrap();
+        let ns = b.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
+        let ds = b.column(2).as_any().downcast_ref::<Int64Array>().unwrap();
+        for r in 0..b.num_rows() {
+            got.insert(cats.value(r).to_string(), (ns.value(r), ds.value(r)));
+        }
+    }
+    println!("[gate] parsed result map = {got:?}");
+
+    // count(*) is 4 for both groups; distinct_users must be 2 (a) and 3 (b). If DISTINCT collapsed,
+    // distinct_users would equal count(*) == 4 for both.
+    assert_eq!(got.get("a"), Some(&(4, 2)), "category 'a': expected count=4, distinct=2 (got {:?})", got.get("a"));
+    assert_eq!(got.get("b"), Some(&(4, 3)), "category 'b': expected count=4, distinct=3 (got {:?})", got.get("b"));
+    Ok(())
+}
+
 /// Spike C: EXECUTION correctness across a REAL shuffle, using an in-memory Worker.
 ///
 /// Runs a distributed aggregation with native `count(DISTINCT)` and `approx_distinct` (HLL)

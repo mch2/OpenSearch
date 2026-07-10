@@ -127,7 +127,9 @@ public class PlannerImpl {
         modifiedRelNode = extractLiteralAgg(modifiedRelNode, listener);
         modifiedRelNode = reduceExpressions(modifiedRelNode, listener);
         modifiedRelNode = pushdownRules(modifiedRelNode, listener);
-        modifiedRelNode = decomposeAggregates(modifiedRelNode, listener);
+        // Legacy path: rewrite exact COUNT(DISTINCT x) to HLL APPROX_COUNT_DISTINCT — the additive
+        // Java-DAG PARTIAL/FINAL split cannot merge exact distinct sets across shards.
+        modifiedRelNode = decomposeAggregates(modifiedRelNode, listener, /* rewriteExactCountDistinct */ true);
         modifiedRelNode = mark(modifiedRelNode, context, listener);
         LOGGER.debug("After marking:\n{}", RelOptUtil.toString(modifiedRelNode));
         modifiedRelNode = splitAggLiteralArgProject(modifiedRelNode, listener);
@@ -186,7 +188,11 @@ public class PlannerImpl {
         n = extractLiteralAgg(n, listener);
         n = reduceExpressions(n, listener);
         n = pushdownRules(n, listener);
-        n = decomposeAggregates(n, listener);
+        // Distributed path: do NOT rewrite exact COUNT(DISTINCT x) to HLL. The whole-query Substrait
+        // carries a single logical aggregate and the Rust distributed planner splits it natively;
+        // DataFusion's exact DistinctCountAccumulator merges set-union state correctly across the
+        // NetworkShuffle. Leaving isDistinct=true lets isthmus emit native count(DISTINCT).
+        n = decomposeAggregates(n, listener, /* rewriteExactCountDistinct */ false);
         n = mark(n, context, listener);
         n = splitAggLiteralArgProject(n, listener);
         LOGGER.debug("After marking (distributed path, no CBO):\n{}", RelOptUtil.toString(n));
@@ -391,10 +397,10 @@ public class PlannerImpl {
      *       {@link org.apache.calcite.rel.logical.LogicalProject} computing the quotient.</li>
      * </ul>
      */
-    private static RelNode decomposeAggregates(RelNode input, RuleProfilingListener listener) {
+    private static RelNode decomposeAggregates(RelNode input, RuleProfilingListener listener, boolean rewriteExactCountDistinct) {
         return HepPhase.named("aggregate-decompose")
             .bottomUp()
-            .addRuleInstance(new OpenSearchDistinctCountRule())
+            .addRuleInstance(new OpenSearchDistinctCountRule(rewriteExactCountDistinct))
             .addRuleInstance(new OpenSearchAggregateReduceRule())
             .run(input, listener);
     }

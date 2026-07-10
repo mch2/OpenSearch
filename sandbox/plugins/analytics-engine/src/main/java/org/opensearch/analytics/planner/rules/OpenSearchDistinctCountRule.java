@@ -31,18 +31,42 @@ import java.util.List;
  * {@link OpenSearchAggregateRule}, so substrait dispatch resolves by operator identity. Multi-arg
  * distinct falls through to coordinator-gather in {@link OpenSearchAggregateSplitRule}.
  *
+ * <p>Path-awareness: the exact {@code COUNT(DISTINCT x)} → HLL {@code APPROX_COUNT_DISTINCT}
+ * rewrite is only correct for the LEGACY Java-DAG path, whose additive PARTIAL/FINAL split cannot
+ * merge exact distinct sets across shards. On the DISTRIBUTED (datafusion-distributed) path the
+ * whole-query Substrait carries a single logical aggregate and the Rust planner does the
+ * partial/final split natively — DataFusion's {@code DistinctCountAccumulator} merges exact
+ * set-union state correctly across the {@code NetworkShuffle}. So when {@code rewriteExactCountDistinct}
+ * is {@code false} the exact {@code COUNT(DISTINCT x)} is left untouched (isDistinct=true), letting
+ * isthmus emit a native {@code count} with the Substrait DISTINCT invocation. The explicit PPL
+ * {@code distinct_count_approx} UDF is still lowered to HLL on both paths — the user asked for the
+ * approximate function.
+ *
  * @opensearch.internal
  */
 public class OpenSearchDistinctCountRule extends RelOptRule {
 
+    /**
+     * When {@code true} (legacy path), exact single-arg {@code COUNT(DISTINCT x)} is rewritten to
+     * HLL {@code APPROX_COUNT_DISTINCT}. When {@code false} (distributed path), it is left as a real
+     * {@code COUNT(DISTINCT x)} so DataFusion emits its native exact distinct-count accumulator.
+     */
+    private final boolean rewriteExactCountDistinct;
+
+    /** Legacy behavior: rewrite exact {@code COUNT(DISTINCT x)} to HLL. */
     public OpenSearchDistinctCountRule() {
+        this(true);
+    }
+
+    public OpenSearchDistinctCountRule(boolean rewriteExactCountDistinct) {
         super(operand(LogicalAggregate.class, any()), "OpenSearchDistinctCountRule");
+        this.rewriteExactCountDistinct = rewriteExactCountDistinct;
     }
 
     @Override
     public boolean matches(RelOptRuleCall ruleCall) {
         LogicalAggregate agg = ruleCall.rel(0);
-        return agg.getAggCallList().stream().anyMatch(OpenSearchDistinctCountRule::needsRewriteToApprox);
+        return agg.getAggCallList().stream().anyMatch(this::needsRewriteToApprox);
     }
 
     @Override
@@ -101,9 +125,18 @@ public class OpenSearchDistinctCountRule extends RelOptRule {
         return relBuilder.build();
     }
 
-    /** True when the call is a single-arg COUNT(DISTINCT) or PPL's distinct_count_approx UDAF. */
-    private static boolean needsRewriteToApprox(AggregateCall call) {
-        return isSingleArgCountDistinct(call) || isPplDistinctCountApproxUdf(call);
+    /**
+     * True when the call must be rewritten to {@code APPROX_COUNT_DISTINCT}. The explicit PPL
+     * {@code distinct_count_approx} UDF is always rewritten (the user asked for the approximate
+     * function). The exact single-arg {@code COUNT(DISTINCT x)} is only rewritten on the legacy
+     * path ({@code rewriteExactCountDistinct}); on the distributed path it is left as a real
+     * distinct count for DataFusion's native accumulator.
+     */
+    private boolean needsRewriteToApprox(AggregateCall call) {
+        if (isPplDistinctCountApproxUdf(call)) {
+            return true;
+        }
+        return rewriteExactCountDistinct && isSingleArgCountDistinct(call);
     }
 
     private static boolean isSingleArgCountDistinct(AggregateCall call) {
