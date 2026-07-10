@@ -24,6 +24,9 @@ import org.opensearch.analytics.exec.ArrowValues;
 import org.opensearch.analytics.exec.FragmentResources;
 import org.opensearch.be.datafusion.nativelib.NativeBridge;
 import org.opensearch.be.datafusion.nativelib.StreamHandle;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.opensearch.ExceptionsHelper;
 import org.opensearch.common.annotation.ExperimentalApi;
 import org.opensearch.core.action.ActionListener;
 
@@ -44,6 +47,8 @@ import static org.apache.arrow.c.Data.importField;
  */
 @ExperimentalApi
 public class DatafusionResultStream implements EngineResultStream, FragmentResources.MetricsCapable {
+
+    private static final Logger logger = LogManager.getLogger(DatafusionResultStream.class);
 
     private final StreamHandle streamHandle;
     private final BufferAllocator allocator;
@@ -134,9 +139,28 @@ public class DatafusionResultStream implements EngineResultStream, FragmentResou
                 }
                 return false;
             }
-            VectorSchemaRoot freshRoot = VectorSchemaRoot.create(schema, allocator);
+            VectorSchemaRoot freshRoot = null;
+            boolean ok = false;
             try (ArrowArray arrowArray = ArrowArray.wrap(arrayAddr)) {
+                freshRoot = VectorSchemaRoot.create(schema, allocator);
                 Data.importIntoVectorSchemaRoot(allocator, arrowArray, freshRoot, dictionaryProvider);
+                ok = true;
+            } catch (Exception e) {
+                logger.error(
+                    "Batch import failed on allocator [name={}, limit={}, allocated={}]. Caller trace:\n{}",
+                    allocator.getName(),
+                    allocator.getLimit(),
+                    allocator.getAllocatedMemory(),
+                    ExceptionsHelper.formatStackTrace(Thread.currentThread().getStackTrace())
+                );
+                throw e;
+            } finally {
+                if (!ok) {
+                    if (freshRoot != null) {
+                        freshRoot.close();
+                    }
+                    nativeStreamExhausted = true;
+                }
             }
             nextBatch = freshRoot;
             batchEmitted = true;

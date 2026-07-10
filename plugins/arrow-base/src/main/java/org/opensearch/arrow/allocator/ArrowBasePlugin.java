@@ -56,6 +56,8 @@ import java.util.function.Supplier;
  */
 public class ArrowBasePlugin extends Plugin implements ExtensiblePlugin, ActionPlugin {
 
+    private static final org.apache.logging.log4j.Logger logger = org.apache.logging.log4j.LogManager.getLogger(ArrowBasePlugin.class);
+
     /** Creates the plugin. */
     public ArrowBasePlugin() {}
 
@@ -303,12 +305,10 @@ public class ArrowBasePlugin extends Plugin implements ExtensiblePlugin, ActionP
             allocator.setBudget(nativeBudget);
         }
 
-        // Validate min < max for each pool
+        // Validate min < max for enforced pools
         validateMinMax(NativeAllocatorPoolConfig.POOL_FLIGHT, FLIGHT_MIN_SETTING.get(settings), FLIGHT_MAX_SETTING.get(settings));
         validateMinMax(NativeAllocatorPoolConfig.POOL_INGEST, INGEST_MIN_SETTING.get(settings), INGEST_MAX_SETTING.get(settings));
-        validateMinMax(NativeAllocatorPoolConfig.POOL_QUERY, QUERY_MIN_SETTING.get(settings), QUERY_MAX_SETTING.get(settings));
-
-        // Create pools (always start at max)
+        // Create pools (always start at max).
         allocator.getOrCreatePool(
             NativeAllocatorPoolConfig.POOL_FLIGHT,
             FLIGHT_MIN_SETTING.get(settings),
@@ -321,20 +321,26 @@ public class ArrowBasePlugin extends Plugin implements ExtensiblePlugin, ActionP
             INGEST_MAX_SETTING.get(settings),
             PoolGroup.INDEXING
         );
+        // POOL_QUERY is unbounded: arrow-java's C Data importer retains a reference BEFORE
+        // consulting the allocator, so any throw from allocateBytes permanently leaks the
+        // native batch. The limit guarded nothing for these bytes (zero-copy; memory pre-exists)
+        // and enforcement lives Rust-side (DataFusion memory pool → CircuitBreakingException → 429).
+        // Do NOT add a finite limit or throwing AllocationListener to this pool.
         allocator.getOrCreatePool(
             NativeAllocatorPoolConfig.POOL_QUERY,
-            QUERY_MIN_SETTING.get(settings),
-            QUERY_MAX_SETTING.get(settings),
+            0,
+            Long.MAX_VALUE,
             PoolGroup.SEARCH
         );
 
-        // Register dynamic setting consumers for min/max changes
+        // Register dynamic setting consumers for min/max changes (enforced pools only)
         cs.addSettingsUpdateConsumer(FLIGHT_MIN_SETTING, newMin -> allocator.setPoolMin(NativeAllocatorPoolConfig.POOL_FLIGHT, newMin));
         cs.addSettingsUpdateConsumer(FLIGHT_MAX_SETTING, newMax -> allocator.setPoolLimit(NativeAllocatorPoolConfig.POOL_FLIGHT, newMax));
         cs.addSettingsUpdateConsumer(INGEST_MIN_SETTING, newMin -> allocator.setPoolMin(NativeAllocatorPoolConfig.POOL_INGEST, newMin));
         cs.addSettingsUpdateConsumer(INGEST_MAX_SETTING, newMax -> allocator.setPoolLimit(NativeAllocatorPoolConfig.POOL_INGEST, newMax));
-        cs.addSettingsUpdateConsumer(QUERY_MIN_SETTING, newMin -> allocator.setPoolMin(NativeAllocatorPoolConfig.POOL_QUERY, newMin));
-        cs.addSettingsUpdateConsumer(QUERY_MAX_SETTING, newMax -> allocator.setPoolLimit(NativeAllocatorPoolConfig.POOL_QUERY, newMax));
+        // QUERY settings are accepted but have no effect — the pool is unbounded.
+        cs.addSettingsUpdateConsumer(QUERY_MIN_SETTING, v -> logger.warn("native.allocator.pool.query.min has no effect: query pool is unbounded"));
+        cs.addSettingsUpdateConsumer(QUERY_MAX_SETTING, v -> logger.warn("native.allocator.pool.query.max has no effect: query pool is unbounded"));
 
         // Register dynamic consumer for rebalancer enable/disable
         cs.addSettingsUpdateConsumer(REBALANCER_ENABLED_SETTING, enabled -> {
