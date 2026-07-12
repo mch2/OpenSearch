@@ -85,6 +85,13 @@ pub struct ShardScanTable {
     leaf_fragment: Vec<u8>,
     tree_shape: i32,
     predicate_count: i32,
+    /// Non-delegated filter-pushdown leaf fragment Substrait (`Filter(real predicate)->Read`). Unlike
+    /// `leaf_fragment` (Lucene-delegated, marker-driven), this carries the REAL WHERE predicate for a
+    /// datafusion-scanned leaf so the worker re-plans `Filter->ListingTable` and DataFusion pushes the
+    /// predicate into the parquet scan (row-group / page-index pruning). Attached UNCONDITIONALLY when
+    /// present (no delegation marker needed); routes to the vanilla ListingTable path, NOT the indexed
+    /// executor. Empty = no pushable filter (bare scan).
+    plain_leaf_fragment: Vec<u8>,
 }
 
 impl ShardScanTable {
@@ -97,6 +104,7 @@ impl ShardScanTable {
             leaf_fragment: Vec::new(),
             tree_shape: 0,
             predicate_count: 0,
+            plain_leaf_fragment: Vec::new(),
         }
     }
 
@@ -112,6 +120,15 @@ impl ShardScanTable {
         self.leaf_fragment = leaf_fragment;
         self.tree_shape = tree_shape;
         self.predicate_count = predicate_count;
+        self
+    }
+
+    /// Attach a non-delegated filter-pushdown leaf fragment (`Filter(real predicate)->Read`). The
+    /// worker re-plans it against the vanilla ListingTable so DataFusion pushes the predicate into
+    /// the parquet scan. Independent of `with_delegation` (a query has at most one WHERE filter, so
+    /// only one of the two is set for a given leaf).
+    pub fn with_plain_leaf_fragment(mut self, plain_leaf_fragment: Vec<u8>) -> Self {
+        self.plain_leaf_fragment = plain_leaf_fragment;
         self
     }
 }
@@ -178,6 +195,19 @@ impl TableProvider for ShardScanTable {
                     descriptor_bytes: java.clone(),
                 }));
             }
+        } else if self.plain_leaf_fragment.is_empty() == false {
+            // Non-delegated filter pushdown: ship the `Filter(real predicate)->Read` fragment as the
+            // leaf substrait with EMPTY descriptor_bytes. The Java bridge sees no DelegationDescriptor
+            // (descriptor empty) -> indexed=false -> createSessionContext (ListingTable) + passes the
+            // substrait to scan_stream_from_handle, which re-plans Filter->Read so DataFusion pushes
+            // the predicate into the parquet scan (row-group / page-index pruning). No marker required.
+            exec = exec.with_delegation(Some(crate::distributed::shard_scan_exec::DelegationDescriptor {
+                filter_tree: self.plain_leaf_fragment.clone(),
+                tree_shape: 0,
+                delegated_predicate_count: 0,
+                requests_row_ids: false,
+                descriptor_bytes: Vec::new(),
+            }));
         }
         Ok(Arc::new(exec))
     }
@@ -218,7 +248,7 @@ pub fn register_shard_tables(
     plan_bytes: &[u8],
     index_uuid_for: impl Fn(&str) -> String,
 ) -> Result<Vec<String>> {
-    register_shard_tables_with_delegation(ctx, plan_bytes, index_uuid_for, None, Vec::new(), 0, 0)
+    register_shard_tables_with_delegation(ctx, plan_bytes, index_uuid_for, None, Vec::new(), 0, 0, Vec::new())
 }
 
 /// As [`register_shard_tables`], but attaches the Java-supplied delegation descriptor + the leaf
@@ -233,6 +263,7 @@ pub fn register_shard_tables_with_delegation(
     leaf_fragment: Vec<u8>,
     tree_shape: i32,
     predicate_count: i32,
+    plain_leaf_fragment: Vec<u8>,
 ) -> Result<Vec<String>> {
     let plan = Plan::decode(plan_bytes)
         .map_err(|e| exec_datafusion_err!("failed to decode Substrait plan: {e}"))?;
@@ -253,6 +284,12 @@ pub fn register_shard_tables_with_delegation(
         if let (Some(java), Some(dt)) = (java_delegation.as_ref(), delegation_table.as_ref()) {
             if name == dt {
                 table = table.with_delegation(java.clone(), leaf_fragment.clone(), tree_shape, predicate_count);
+            }
+        } else if plain_leaf_fragment.is_empty() == false {
+            // Non-delegated filter pushdown: attach the real Filter->Read fragment to the first
+            // (single) table. Mutually exclusive with delegation — a query has one WHERE filter.
+            if delegation_table.as_ref() == Some(name) {
+                table = table.with_plain_leaf_fragment(plain_leaf_fragment.clone());
             }
         }
         ctx.register_table(name.as_str(), Arc::new(table))?;
@@ -411,6 +448,7 @@ pub async fn distributed_execute(
     leaf_fragment: Vec<u8>,
     tree_shape: i32,
     predicate_count: i32,
+    plain_leaf_fragment: Vec<u8>,
     partial_reduce: bool,
     cardinality_task_count_factor: f64,
     max_tasks_per_stage: usize,
@@ -446,6 +484,7 @@ pub async fn distributed_execute(
         leaf_fragment,
         tree_shape,
         predicate_count,
+        plain_leaf_fragment,
     )?;
     let dplan = plan_distributed(&ctx, plan_bytes).await?;
 

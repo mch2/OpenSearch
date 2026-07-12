@@ -316,11 +316,20 @@ pub async fn scan_stream_from_handle_projected(
 
     let dataframe = handle.ctx.execute_logical_plan(logical_plan).await?;
     let physical_plan = dataframe.create_physical_plan().await?;
-    let target_schema = crate::schema_coerce::coerce_inferred_schema(physical_plan.schema());
-    let physical_plan = crate::relabel_exec::wrap_if_relabel_needed(physical_plan, target_schema)?;
+    let plan_schema = crate::schema_coerce::coerce_inferred_schema(physical_plan.schema());
+    let physical_plan = crate::relabel_exec::wrap_if_relabel_needed(physical_plan, plan_schema)?;
     // task_ctx borrows the session; execute_stream returns a stream that holds Arcs into it, so the
     // session must outlive the stream — the caller parks `handle` alongside the returned stream.
-    execute_stream(physical_plan, handle.ctx.task_ctx())
+    let stream = execute_stream(physical_plan, handle.ctx.task_ctx())?;
+    // Non-delegated filter-pushdown leaf: the fragment is `Filter(pred)->Read` and the WHERE predicate
+    // may reference columns the parent stage did not advertise (e.g. `where CounterID=62 | ... by URL`
+    // — the leaf reads [CounterID, URL] so the pushed filter can prune, but the coordinator's
+    // ShardScanExec advertised only [URL]). Project by name to the advertised `target_schema` so the
+    // leaf output is positionally identical to what the parent binds — mirrors the indexed-leaf branch.
+    match target_schema {
+        Some(ts) => Ok(project_stream_by_name(stream, ts)),
+        None => Ok(stream),
+    }
 }
 
 /// Projects each batch of `stream` to `target`'s columns BY NAME, reordering/dropping as needed. Used

@@ -1038,6 +1038,7 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
         int treeShape,
         int predicateCount,
         byte[] leafFragmentBytes,
+        byte[] plainLeafFragmentBytes,
         DistributedTuning tuning
     ) {
         DataFusionService dataFusionService = plugin.getDataFusionService();
@@ -1063,6 +1064,7 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
             treeShape,
             predicateCount,
             leafFragmentBytes,
+            plainLeafFragmentBytes,
             t.partialReduce(),
             t.cardinalityTaskCountFactor(),
             t.maxTasksPerStage(),

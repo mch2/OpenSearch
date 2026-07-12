@@ -234,6 +234,7 @@ public interface AnalyticsSearchBackendPlugin {
             treeShape,
             predicateCount,
             leafFragmentBytes,
+            null,
             DistributedTuning.DEFAULT
         );
     }
@@ -257,7 +258,15 @@ public interface AnalyticsSearchBackendPlugin {
         public static final DistributedTuning DEFAULT = new DistributedTuning(true, 0.0, 0, true);
     }
 
-    /** As above, plus the distributed-planner {@link DistributedTuning} knobs. */
+    /**
+     * As above, plus the distributed-planner {@link DistributedTuning} knobs and the non-delegated
+     * filter-pushdown leaf fragment.
+     *
+     * @param plainLeafFragmentBytes shard-local {@code Filter(real predicate)->Read} plan for a
+     *        NON-delegated (datafusion) leaf, so the worker re-plans it against the ListingTable and
+     *        DataFusion pushes the predicate into the parquet scan (row-group / page-index pruning).
+     *        {@code null} / empty = no pushable WHERE filter. Mutually exclusive with delegation.
+     */
     default EngineResultStream distributedExecute(
         byte[] planBytes,
         List<String> workerEndpoints,
@@ -269,6 +278,7 @@ public interface AnalyticsSearchBackendPlugin {
         int treeShape,
         int predicateCount,
         byte[] leafFragmentBytes,
+        byte[] plainLeafFragmentBytes,
         DistributedTuning tuning
     ) {
         throw new UnsupportedOperationException("distributedExecute not implemented for [" + name() + "]");

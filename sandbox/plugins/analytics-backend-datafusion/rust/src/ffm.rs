@@ -1549,6 +1549,8 @@ pub unsafe extern "C" fn df_distributed_execute(
     predicate_count: i32,
     leaf_fragment_ptr: *const u8,
     leaf_fragment_len: i64,
+    plain_leaf_fragment_ptr: *const u8,
+    plain_leaf_fragment_len: i64,
     partial_reduce: i32,
     cardinality_task_count_factor: f64,
     max_tasks_per_stage: i32,
@@ -1569,6 +1571,13 @@ pub unsafe extern "C" fn df_distributed_execute(
     // Shard-local leaf fragment Substrait (Filter(markers)->Read) for the indexed leaf executor.
     let leaf_fragment: Vec<u8> = if leaf_fragment_len > 0 {
         slice::from_raw_parts(leaf_fragment_ptr, leaf_fragment_len as usize).to_vec()
+    } else {
+        Vec::new()
+    };
+    // Non-delegated filter-pushdown leaf fragment Substrait (Filter(real predicate)->Read) for the
+    // vanilla ListingTable leaf, so DataFusion pushes the predicate into the parquet scan.
+    let plain_leaf_fragment: Vec<u8> = if plain_leaf_fragment_len > 0 {
+        slice::from_raw_parts(plain_leaf_fragment_ptr, plain_leaf_fragment_len as usize).to_vec()
     } else {
         Vec::new()
     };
@@ -1627,6 +1636,7 @@ pub unsafe extern "C" fn df_distributed_execute(
             leaf_fragment,
             tree_shape,
             predicate_count,
+            plain_leaf_fragment,
             partial_reduce != 0,
             cardinality_task_count_factor,
             max_tasks_per_stage.max(0) as usize,

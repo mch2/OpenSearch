@@ -481,6 +481,7 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
         final int delegationTreeShape;
         final int delegationPredicateCount;
         final byte[] leafFragmentBytes;
+        final byte[] plainLeafFragmentBytes;
         try {
             org.opensearch.analytics.planner.dag.FragmentConversionDriver.WholeQueryConversion conv =
                 org.opensearch.analytics.planner.dag.FragmentConversionDriver.convertWholeQuery(
@@ -499,11 +500,16 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
                 delegationTreeShape = conv.delegation().treeShape().ordinal();
                 delegationPredicateCount = conv.delegation().delegatedPredicateCount();
                 leafFragmentBytes = conv.leafFragmentBytes();
+                plainLeafFragmentBytes = null;
             } else {
                 delegationBytes = null;
                 delegationTreeShape = 0;
                 delegationPredicateCount = 0;
                 leafFragmentBytes = null;
+                // Non-delegated filter pushdown: the Filter(real predicate)->Read leaf fragment (null
+                // when the query has no pushable WHERE filter). Shipped so the worker re-plans it
+                // against ListingTable and DataFusion prunes the parquet scan.
+                plainLeafFragmentBytes = conv.plainLeafFragmentBytes();
             }
             // 3. Shard→node routing: each shard carries its ordered candidate nodes (primary + replicas)
             // over a shared candidate-node list; enforces max_shards_per_query.
@@ -571,6 +577,7 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
                     delegationTreeShape,
                     delegationPredicateCount,
                     leafFragmentBytes,
+                    plainLeafFragmentBytes,
                     new AnalyticsSearchBackendPlugin.DistributedTuning(
                         distPartialReduce,
                         distCardinalityTaskCountFactor,

@@ -671,6 +671,8 @@ public final class NativeBridge {
                         ValueLayout.JAVA_INT, // predicate_count
                         ValueLayout.ADDRESS, // leaf fragment ptr
                         ValueLayout.JAVA_LONG, // leaf fragment len
+                        ValueLayout.ADDRESS, // plain (non-delegated) leaf fragment ptr
+                        ValueLayout.JAVA_LONG, // plain leaf fragment len
                         ValueLayout.JAVA_INT, // partial_reduce (0/1)
                         ValueLayout.JAVA_DOUBLE, // cardinality_task_count_factor (0 = default)
                         ValueLayout.JAVA_INT, // max_tasks_per_stage (0 = inherit)
@@ -1506,6 +1508,7 @@ public final class NativeBridge {
         int treeShape,
         int predicateCount,
         byte[] leafFragmentBytes,
+        byte[] plainLeafFragmentBytes,
         boolean partialReduce,
         double cardinalityTaskCountFactor,
         int maxTasksPerStage,
@@ -1522,6 +1525,9 @@ public final class NativeBridge {
             boolean hasLeaf = leafFragmentBytes != null && leafFragmentBytes.length > 0;
             MemorySegment leafSeg = hasLeaf ? call.bytes(leafFragmentBytes) : MemorySegment.NULL;
             long leafLen = hasLeaf ? leafFragmentBytes.length : 0L;
+            boolean hasPlainLeaf = plainLeafFragmentBytes != null && plainLeafFragmentBytes.length > 0;
+            MemorySegment plainLeafSeg = hasPlainLeaf ? call.bytes(plainLeafFragmentBytes) : MemorySegment.NULL;
+            long plainLeafLen = hasPlainLeaf ? plainLeafFragmentBytes.length : 0L;
             return call.invoke(
                 DISTRIBUTED_EXECUTE,
                 runtimePtr,
@@ -1540,6 +1546,8 @@ public final class NativeBridge {
                 predicateCount,
                 leafSeg,
                 leafLen,
+                plainLeafSeg,
+                plainLeafLen,
                 partialReduce ? 1 : 0,
                 cardinalityTaskCountFactor,
                 maxTasksPerStage,

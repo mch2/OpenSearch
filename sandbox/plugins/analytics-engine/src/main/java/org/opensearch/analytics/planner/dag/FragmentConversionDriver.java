@@ -97,7 +97,12 @@ public class FragmentConversionDriver {
      *         Substrait the leaf worker feeds to its indexed executor; null when no delegation. Derived from
      *         the SAME stripped plan (the WHERE-filter subtree) — not a separate DAG cut. */
     public record WholeQueryConversion(byte[] planBytes, org.opensearch.analytics.spi.DelegationDescriptor delegation,
-        byte[] leafFragmentBytes) {
+        byte[] leafFragmentBytes, byte[] plainLeafFragmentBytes) {
+
+        /** Back-compat 3-arg form: no non-delegated filter-pushdown leaf fragment. */
+        public WholeQueryConversion(byte[] planBytes, org.opensearch.analytics.spi.DelegationDescriptor delegation, byte[] leafFragmentBytes) {
+            this(planBytes, delegation, leafFragmentBytes, null);
+        }
     }
 
     /**
@@ -148,7 +153,30 @@ public class FragmentConversionDriver {
         List<DelegatedExpression> delegated = delegationBytes.getResult();
         byte[] planBytes = convertor.convertFragment(stripped);
         if (delegated.isEmpty()) {
-            return new WholeQueryConversion(planBytes, null, null);
+            // No Lucene-delegated predicate. But if there's still a WHERE filter over the (datafusion)
+            // scan, ship its stripped `Filter(real predicate)->Read` subtree as a NON-delegated leaf
+            // fragment. The worker re-plans it against the vanilla ListingTable so DataFusion pushes the
+            // predicate into the parquet scan (row-group / page-index pruning) — instead of the filter
+            // running as a physical FilterExec above an opaque leaf that decodes the full column. The
+            // whole-query planBytes still carries the same filter (double-filtering is correct + cheap;
+            // the leaf drops rows before they reach the Level-1 filter). Only fires when the WHERE
+            // predicate sits directly over a scan (bottommost filter → leaf), matching the leaf shape
+            // the worker can re-plan.
+            byte[] plainLeafFragmentBytes = null;
+            if (whereFilter != null) {
+                List<org.apache.calcite.rel.core.Filter> strippedFilters = RelNodeUtils.findAllNodes(
+                    stripped,
+                    org.apache.calcite.rel.core.Filter.class
+                );
+                if (strippedFilters.isEmpty() == false) {
+                    // Leaf subtree = bottommost stripped filter (Filter(real predicate)->Read). Its
+                    // Read binds to the same NamedTable the whole-query plan scans, so the worker's
+                    // registered ListingTable is the pushdown target.
+                    RelNode plainLeafSubtree = strippedFilters.getLast();
+                    plainLeafFragmentBytes = convertor.convertFragment(plainLeafSubtree);
+                }
+            }
+            return new WholeQueryConversion(planBytes, null, null, plainLeafFragmentBytes);
         }
         FilterTreeShape treeShape = whereFilter != null
             ? FilterTreeShapeDeriver.derive(whereFilter, whereFilter.getViableBackends().getFirst())
