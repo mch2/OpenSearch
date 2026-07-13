@@ -314,18 +314,34 @@ pub async fn scan_stream_from_handle_projected(
         return EmptyExec::new(plan_schema).execute(0, handle.ctx.task_ctx());
     }
 
-    let dataframe = handle.ctx.execute_logical_plan(logical_plan).await?;
+    let mut dataframe = handle.ctx.execute_logical_plan(logical_plan).await?;
+    // CRITICAL for the non-delegated filter-pushdown leaf: the substrait `Filter(pred)->Read` fragment
+    // carries NO projection, so `from_substrait_plan` yields `Filter -> Scan(ALL columns)`. Without an
+    // explicit projection above it, DataFusion reads every column (incl. fat URL/Title) for every row
+    // and only trims at the end — a ~100x regression vs the bare-scan path, which projected into the
+    // scan. Re-apply the advertised projection: `Projection(target) -> Filter(pred) -> Scan` lets
+    // PushDownProjection compute the scan's read set = target columns UNION the filter's referenced
+    // columns and push it into the ListingTable scan (so the filter still sees its predicate columns,
+    // but nothing else is decoded). Mirrors the bare-scan branch's `.select(cols)`.
+    if let Some(ts) = target_schema.as_ref() {
+        if ts.fields().is_empty() == false {
+            let cols: Vec<datafusion::logical_expr::Expr> = ts
+                .fields()
+                .iter()
+                .map(|f| datafusion::logical_expr::Expr::Column(datafusion::common::Column::new_unqualified(f.name())))
+                .collect();
+            dataframe = dataframe.select(cols)?;
+        }
+    }
     let physical_plan = dataframe.create_physical_plan().await?;
     let plan_schema = crate::schema_coerce::coerce_inferred_schema(physical_plan.schema());
     let physical_plan = crate::relabel_exec::wrap_if_relabel_needed(physical_plan, plan_schema)?;
     // task_ctx borrows the session; execute_stream returns a stream that holds Arcs into it, so the
     // session must outlive the stream — the caller parks `handle` alongside the returned stream.
     let stream = execute_stream(physical_plan, handle.ctx.task_ctx())?;
-    // Non-delegated filter-pushdown leaf: the fragment is `Filter(pred)->Read` and the WHERE predicate
-    // may reference columns the parent stage did not advertise (e.g. `where CounterID=62 | ... by URL`
-    // — the leaf reads [CounterID, URL] so the pushed filter can prune, but the coordinator's
-    // ShardScanExec advertised only [URL]). Project by name to the advertised `target_schema` so the
-    // leaf output is positionally identical to what the parent binds — mirrors the indexed-leaf branch.
+    // The `.select(target)` above already produced exactly the advertised columns in order; the
+    // project-by-name is a defensive no-op for the non-empty case, and the authoritative narrowing for
+    // the zero-column / empty-target case (which skipped the select).
     match target_schema {
         Some(ts) => Ok(project_stream_by_name(stream, ts)),
         None => Ok(stream),
