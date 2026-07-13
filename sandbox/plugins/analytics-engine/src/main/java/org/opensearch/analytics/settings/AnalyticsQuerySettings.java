@@ -96,6 +96,21 @@ public final class AnalyticsQuerySettings {
     );
 
     /**
+     * Push a non-Lucene-delegable WHERE predicate into the distributed leaf scan (ship a
+     * {@code Filter(real predicate)->Read} substrait fragment so the worker re-plans against
+     * ListingTable and DataFusion prunes the parquet scan). Default OFF: while it speeds SELECTIVE
+     * filters (row-group / page pruning), the leaf's filtered re-plan currently loses scan
+     * parallelism, so a NON-selective filter (matches most rows) regresses ~20x. Gate on until the
+     * leaf re-plan parallelization is fixed. Only affects the distributed path.
+     */
+    public static final Setting<Boolean> DISTRIBUTED_LEAF_FILTER_PUSHDOWN = Setting.boolSetting(
+        "analytics.query.distributed_leaf_filter_pushdown",
+        false,
+        Setting.Property.NodeScope,
+        Setting.Property.Dynamic
+    );
+
+    /**
      * Distributed-planner tuning (datafusion-distributed's {@code DistributedConfig}), read per query
      * in {@code DefaultPlanExecutor} and passed via {@code DistributedTuning}. Only affects the
      * distributed path ({@link #DISTRIBUTED_ENGINE}); no effect on the legacy path.
@@ -153,6 +168,7 @@ public final class AnalyticsQuerySettings {
             MAX_SHARDS_PER_QUERY,
             MAX_CONCURRENT_SHARD_REQUESTS_PER_NODE,
             DISTRIBUTED_ENGINE,
+            DISTRIBUTED_LEAF_FILTER_PUSHDOWN,
             DISTRIBUTED_PARTIAL_REDUCE,
             DISTRIBUTED_FORCE_PARTITIONED_JOINS,
             DISTRIBUTED_CARDINALITY_TASK_COUNT_FACTOR,

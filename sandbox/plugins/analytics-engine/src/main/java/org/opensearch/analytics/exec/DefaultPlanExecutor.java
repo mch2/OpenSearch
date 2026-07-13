@@ -106,6 +106,7 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
     private volatile int maxConcurrentShardRequestsPerNode;
     private volatile boolean preferMetadataDriver;
     private volatile boolean distributedEngine;
+    private volatile boolean distributedLeafFilterPushdown;
     // Distributed-planner tuning (analytics.query.distributed.*), read per query into DistributedTuning.
     private volatile boolean distPartialReduce;
     private volatile boolean distForcePartitionedJoins;
@@ -168,6 +169,9 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
         this.distributedEngine = AnalyticsQuerySettings.DISTRIBUTED_ENGINE.get(clusterService.getSettings());
         clusterService.getClusterSettings()
             .addSettingsUpdateConsumer(AnalyticsQuerySettings.DISTRIBUTED_ENGINE, v -> distributedEngine = v);
+        this.distributedLeafFilterPushdown = AnalyticsQuerySettings.DISTRIBUTED_LEAF_FILTER_PUSHDOWN.get(clusterService.getSettings());
+        clusterService.getClusterSettings()
+            .addSettingsUpdateConsumer(AnalyticsQuerySettings.DISTRIBUTED_LEAF_FILTER_PUSHDOWN, v -> distributedLeafFilterPushdown = v);
         // Distributed-planner tuning (analytics.query.distributed.*) — dynamic.
         this.distPartialReduce = AnalyticsQuerySettings.DISTRIBUTED_PARTIAL_REDUCE.get(clusterService.getSettings());
         clusterService.getClusterSettings()
@@ -508,8 +512,11 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
                 leafFragmentBytes = null;
                 // Non-delegated filter pushdown: the Filter(real predicate)->Read leaf fragment (null
                 // when the query has no pushable WHERE filter). Shipped so the worker re-plans it
-                // against ListingTable and DataFusion prunes the parquet scan.
-                plainLeafFragmentBytes = conv.plainLeafFragmentBytes();
+                // against ListingTable and DataFusion prunes the parquet scan. GATED (default off):
+                // helps selective filters but the leaf's filtered re-plan currently loses scan
+                // parallelism, regressing non-selective filters ~20x. Enable via
+                // analytics.query.distributed_leaf_filter_pushdown once the parallelization is fixed.
+                plainLeafFragmentBytes = distributedLeafFilterPushdown ? conv.plainLeafFragmentBytes() : null;
             }
             // 3. Shard→node routing: each shard carries its ordered candidate nodes (primary + replicas)
             // over a shared candidate-node list; enforces max_shards_per_query.
