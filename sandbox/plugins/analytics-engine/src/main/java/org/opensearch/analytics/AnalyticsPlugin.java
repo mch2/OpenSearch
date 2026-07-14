@@ -28,6 +28,8 @@ import org.opensearch.analytics.exec.action.AnalyticsQueryAction;
 import org.opensearch.analytics.planner.CapabilityRegistry;
 import org.opensearch.analytics.planner.FieldStorageResolver;
 import org.opensearch.analytics.schema.OpenSearchSchemaBuilder;
+import org.opensearch.analytics.exec.AnalyticsQueryBreakerHandle;
+import org.opensearch.analytics.settings.AnalyticsQuerySettings;
 import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
 import org.opensearch.analytics.stats.AnalyticsStats;
 import org.opensearch.analytics.stats.AnalyticsStatsCollector;
@@ -48,12 +50,17 @@ import org.opensearch.common.settings.Setting;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.common.settings.SettingsFilter;
 import org.opensearch.core.action.ActionResponse;
+import org.opensearch.core.common.breaker.CircuitBreaker;
 import org.opensearch.core.common.io.stream.NamedWriteableRegistry;
+import org.opensearch.core.common.unit.ByteSizeValue;
+import org.opensearch.core.indices.breaker.CircuitBreakerStats;
 import org.opensearch.core.xcontent.NamedXContentRegistry;
 import org.opensearch.env.Environment;
 import org.opensearch.env.NodeEnvironment;
 import org.opensearch.index.search.stats.SearchStats;
+import org.opensearch.indices.breaker.BreakerSettings;
 import org.opensearch.plugins.ActionPlugin;
+import org.opensearch.plugins.CircuitBreakerPlugin;
 import org.opensearch.plugins.ExtensiblePlugin;
 import org.opensearch.plugins.Plugin;
 import org.opensearch.plugins.PluginComponentRegistry;
@@ -81,7 +88,37 @@ import java.util.function.Supplier;
  *
  * @opensearch.internal
  */
-public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionPlugin, SearchStatsContributor {
+public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionPlugin, SearchStatsContributor, CircuitBreakerPlugin {
+
+    /** Name of the node-level circuit breaker that bounds heap held by analytics query results. */
+    public static final String ANALYTICS_QUERY_BREAKER_NAME = "analytics_query";
+
+    /**
+     * Limit for the {@code analytics_query} circuit breaker — the total heap (across all concurrent
+     * analytics queries on this node) that may be reserved for result materialization before new
+     * charges are rejected with a {@link org.opensearch.core.common.breaker.CircuitBreakingException}
+     * (HTTP 429). This is a <em>cross-request</em> ceiling: every query charges the same shared
+     * breaker, so N concurrent wide-row results collectively trip it rather than each staying under
+     * an isolated per-query cap. Subordinate to the parent real-memory breaker
+     * ({@code indices.breaker.total.limit}, default 95% of heap), so it also protects total node heap.
+     *
+     * <p>Default 50% of the JVM heap. Dynamic via {@code breaker.analytics_query.limit}.
+     */
+    public static final Setting<ByteSizeValue> ANALYTICS_QUERY_BREAKER_LIMIT = Setting.memorySizeSetting(
+        "breaker.analytics_query.limit",
+        "50%",
+        Setting.Property.Dynamic,
+        Setting.Property.NodeScope
+    );
+
+    /** Overhead multiplier applied to charged bytes for the {@code analytics_query} breaker. */
+    public static final Setting<Double> ANALYTICS_QUERY_BREAKER_OVERHEAD = Setting.doubleSetting(
+        "breaker.analytics_query.overhead",
+        1.0,
+        0.0,
+        Setting.Property.Dynamic,
+        Setting.Property.NodeScope
+    );
 
     private static final Logger logger = LogManager.getLogger(AnalyticsPlugin.class);
 
@@ -142,6 +179,11 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
     private CoordinatorAllocatorHandle coordinatorAllocatorHandle;
     private ReaderContextStore readerContextStore;
     private final AnalyticsStatsCollector statsCollector = new AnalyticsStatsCollector();
+    // Node-level analytics_query breaker, set by the framework via setCircuitBreaker() at startup
+    // (after createComponents builds the Guice graph). The handle is injectable into
+    // DefaultPlanExecutor; this field is the plugin-side reference used for stats reporting.
+    private final AnalyticsQueryBreakerHandle queryBreakerHandle = new AnalyticsQueryBreakerHandle();
+    private volatile CircuitBreaker queryBreaker;
 
     @SuppressWarnings("rawtypes")
     @Override
@@ -194,7 +236,15 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
             nativeAllocator.getPoolAllocator(NativeAllocatorPoolConfig.POOL_QUERY).newChildAllocator("coordinator", 0, Long.MAX_VALUE)
         );
 
-        return List.of(searchService, ctx, capabilityRegistry, coordinatorAllocatorHandle, analyticsSearchSlowLog, statsCollector);
+        return List.of(
+            searchService,
+            ctx,
+            capabilityRegistry,
+            coordinatorAllocatorHandle,
+            analyticsSearchSlowLog,
+            statsCollector,
+            queryBreakerHandle
+        );
     }
 
     @Override
@@ -239,10 +289,38 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
         List<Setting<?>> settings = new java.util.ArrayList<>();
         settings.add(COORDINATOR_BUFFER_LIMIT);
         settings.add(PREFER_METADATA_DRIVER);
+        settings.add(ANALYTICS_QUERY_BREAKER_LIMIT);
+        settings.add(ANALYTICS_QUERY_BREAKER_OVERHEAD);
         settings.add(ReaderContextStore.READER_CONTEXT_KEEP_ALIVE);
         settings.addAll(org.opensearch.analytics.settings.AnalyticsApproximationSettings.all());
         settings.addAll(org.opensearch.analytics.settings.AnalyticsQuerySettings.all());
         return List.copyOf(settings);
+    }
+
+    @Override
+    public BreakerSettings getCircuitBreaker(Settings settings) {
+        long limit = ANALYTICS_QUERY_BREAKER_LIMIT.get(settings).getBytes();
+        double overhead = ANALYTICS_QUERY_BREAKER_OVERHEAD.get(settings);
+        return new BreakerSettings(
+            ANALYTICS_QUERY_BREAKER_NAME,
+            limit,
+            overhead,
+            CircuitBreaker.Type.MEMORY,
+            CircuitBreaker.Durability.TRANSIENT,
+            () -> {
+                CircuitBreaker b = queryBreaker;
+                if (b == null) {
+                    return new CircuitBreakerStats(ANALYTICS_QUERY_BREAKER_NAME, limit, 0, overhead, 0);
+                }
+                return new CircuitBreakerStats(ANALYTICS_QUERY_BREAKER_NAME, b.getLimit(), b.getUsed(), overhead, b.getTrippedCount());
+            }
+        );
+    }
+
+    @Override
+    public void setCircuitBreaker(CircuitBreaker circuitBreaker) {
+        this.queryBreaker = circuitBreaker;
+        this.queryBreakerHandle.setBreaker(circuitBreaker);
     }
 
     @Override

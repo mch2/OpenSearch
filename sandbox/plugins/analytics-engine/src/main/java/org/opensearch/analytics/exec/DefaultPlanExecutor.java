@@ -11,6 +11,7 @@ package org.opensearch.analytics.exec;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.calcite.plan.RelOptUtil;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.metadata.JaninoRelMetadataProvider;
@@ -61,6 +62,7 @@ import org.opensearch.transport.TransportService;
 import org.opensearch.transport.client.node.NodeClient;
 
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
@@ -104,6 +106,11 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
     private final PlannerSettings plannerSettings;
     private final IndexNameExpressionResolver indexNameExpressionResolver;
     private final AnalyticsSearchSlowLog analyticsSearchSlowLog;
+    // Node-level analytics_query breaker (shared across all queries) used to bound heap held while
+    // materializing result batches into Java rows. Populated by the framework at startup via
+    // AnalyticsPlugin#setCircuitBreaker; read through the handle so the injected graph doesn't
+    // depend on startup ordering. May be null in embeddings/tests without a registered breaker.
+    private final AnalyticsQueryBreakerHandle queryBreakerHandle;
 
     @Inject
     public DefaultPlanExecutor(
@@ -118,7 +125,8 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
         CoordinatorAllocatorHandle coordinatorAllocatorHandle,
         IndexNameExpressionResolver indexNameExpressionResolver,
         AnalyticsSearchSlowLog analyticsSearchSlowLog,
-        AnalyticsStatsCollector statsCollector
+        AnalyticsStatsCollector statsCollector,
+        AnalyticsQueryBreakerHandle queryBreakerHandle
     ) {
         super(AnalyticsQueryAction.NAME, transportService, actionFilters, AnalyticsQueryRequest::new);
         this.capabilityRegistry = capabilityRegistry;
@@ -155,6 +163,7 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
         this.preferMetadataDriver = AnalyticsPlugin.PREFER_METADATA_DRIVER.get(clusterService.getSettings());
         clusterService.getClusterSettings()
             .addSettingsUpdateConsumer(AnalyticsPlugin.PREFER_METADATA_DRIVER, v -> preferMetadataDriver = v);
+        this.queryBreakerHandle = queryBreakerHandle;
         // Planner settings (oversampling factor + delegation block-list); self-registers update
         // consumers for live changes.
         this.plannerSettings = PlannerSettings.create(
@@ -326,6 +335,15 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
          */
         final AtomicReference<QueryExecution> execRef = new AtomicReference<>();
 
+        // Cross-request heap guard: reserve estimated heap against the shared analytics_query breaker
+        // as each result batch is materialized into Java rows. Charging can throw
+        // CircuitBreakingException (→ 429) when the node/analytics heap budget is exhausted by this
+        // plus concurrent queries. The reservation is held until the whole action settles — the
+        // materialized rows stay live through response construction/serialization — and released
+        // exactly once via runAfter on the top-level listener, on both success and failure.
+        final ResultHeapCharge heapCharge = new ResultHeapCharge(queryBreakerHandle.breaker(), dag.queryId());
+        final ActionListener<ProfiledResult> releasingListener = ActionListener.runAfter(listener, heapCharge::release);
+
         // Build the profile on every terminal — both for the _explain payload (when profile=true)
         // and for the stats collector (always). When profile=false the resulting profile is
         // recorded into the collector and dropped from the response.
@@ -336,7 +354,7 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
             planningTimeMs,
             statsCollector,
             profile,
-            listener
+            releasingListener
         );
 
         final List<String> outputColumnOrder = logicalFragment.getRowType().getFieldNames();
@@ -344,7 +362,7 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
         // task it created for doExecute once this listener settles. Unregistering it ourselves
         // would double-free a task we no longer own.
         ActionListener<Iterable<VectorSchemaRoot>> batchesListener = ActionListener.wrap(batches -> {
-            Iterable<Object[]> rows = batchesToRows(batches, outputColumnOrder);
+            Iterable<Object[]> rows = batchesToRows(batches, outputColumnOrder, heapCharge);
             long totalRows = rows instanceof List ? ((List<?>) rows).size() : 0;
             queryListener.onQueryComplete(dag.queryId(), System.nanoTime() - queryStartNanos, totalRows);
             rowsListener.onResponse(rows);
@@ -498,24 +516,101 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
     }
 
     static Iterable<Object[]> batchesToRows(Iterable<VectorSchemaRoot> batches, List<String> targetColumnOrder) {
+        return batchesToRows(batches, targetColumnOrder, null);
+    }
+
+    /**
+     * Materializes native Arrow batches into heap {@code Object[]} rows, charging the shared
+     * {@code analytics_query} circuit breaker with a reserve-then-correct scheme borrowed from
+     * {@code QueryPhaseResultConsumer} (estimate ahead, true up to the real size after):
+     *
+     * <ol>
+     *   <li><b>Pre-emptive reserve:</b> before materializing a batch, {@link ResultHeapCharge#charge}
+     *       reserves the batch's native buffer size — a cheap, measured floor. This can throw
+     *       {@link org.opensearch.core.common.breaker.CircuitBreakingException} (→ HTTP 429) so we
+     *       reject <em>before</em> allocating the heap copy, and — because prior batches were already
+     *       trued-up to their real heap cost — the reserve for batch N sees the exact accumulated
+     *       heap of batches 1..N-1 plus every concurrent query. That is the cross-batch, cross-request
+     *       pre-emption: we trip before the allocation that would exhaust heap, not after.</li>
+     *   <li><b>True-up to real:</b> after copying, {@link RamUsageEstimator#sizeOfObject} measures the
+     *       actual Java footprint of this batch's rows and {@link ResultHeapCharge#adjust} corrects the
+     *       reservation to the measured value. No expansion-factor guess: the running total converges
+     *       to real heap within one batch. Intra-batch overshoot (rows already allocated before the
+     *       true-up) is bounded by the batch size and backstopped by the parent real-memory breaker.</li>
+     * </ol>
+     *
+     * Each native batch is closed as soon as it is copied. When {@code heapCharge} is {@code null}
+     * (tests / no registered breaker) this is the original unaccounted materialization.
+     */
+    static Iterable<Object[]> batchesToRows(
+        Iterable<VectorSchemaRoot> batches,
+        List<String> targetColumnOrder,
+        ResultHeapCharge heapCharge
+    ) {
         List<Object[]> rows = new ArrayList<>();
-        for (VectorSchemaRoot batch : batches) {
-            try {
-                List<FieldVector> ordered = orderedColumns(batch, targetColumnOrder);
-                int colCount = ordered.size();
-                int rowCount = batch.getRowCount();
-                for (int r = 0; r < rowCount; r++) {
-                    Object[] row = new Object[colCount];
-                    for (int c = 0; c < colCount; c++) {
-                        row[c] = ArrowValues.toJavaValue(ordered.get(c), r);
+        Iterator<VectorSchemaRoot> it = batches.iterator();
+        try {
+            while (it.hasNext()) {
+                VectorSchemaRoot batch = it.next();
+                try {
+                    long reserved = 0;
+                    if (heapCharge != null) {
+                        // Pre-emptive reserve of the native floor — throws (429) before we allocate
+                        // this batch's heap copy if the shared/parent budget is already exhausted.
+                        reserved = estimateNativeBatchBytes(batch);
+                        heapCharge.charge(reserved); // may throw CircuitBreakingException (429)
                     }
-                    rows.add(row);
+                    List<FieldVector> ordered = orderedColumns(batch, targetColumnOrder);
+                    int colCount = ordered.size();
+                    int rowCount = batch.getRowCount();
+                    int firstRow = rows.size();
+                    for (int r = 0; r < rowCount; r++) {
+                        Object[] row = new Object[colCount];
+                        for (int c = 0; c < colCount; c++) {
+                            row[c] = ArrowValues.toJavaValue(ordered.get(c), r);
+                        }
+                        rows.add(row);
+                    }
+                    if (heapCharge != null) {
+                        // True up the reservation to the measured Java footprint of just-added rows.
+                        long real = measuredHeapBytes(rows, firstRow);
+                        heapCharge.adjust(real - reserved);
+                    }
+                } finally {
+                    batch.close();
                 }
-            } finally {
-                batch.close();
             }
+        } catch (RuntimeException e) {
+            // A breaker trip (or any error) mid-drain: close the batches we never got to so their
+            // native buffers aren't stranded, then propagate (mapped to 429 for CircuitBreakingException).
+            while (it.hasNext()) {
+                try {
+                    it.next().close();
+                } catch (Exception suppressed) {
+                    e.addSuppressed(suppressed);
+                }
+            }
+            throw e;
         }
         return rows;
+    }
+
+    /** Native footprint of a batch: sum of its vectors' buffer sizes. Cheap, measured, no ratio. */
+    private static long estimateNativeBatchBytes(VectorSchemaRoot batch) {
+        long bytes = 0;
+        for (FieldVector v : batch.getFieldVectors()) {
+            bytes += v.getBufferSize();
+        }
+        return bytes;
+    }
+
+    /** Measured Java-heap footprint of rows[fromIndex..end) via {@link RamUsageEstimator}. */
+    private static long measuredHeapBytes(List<Object[]> rows, int fromIndex) {
+        long bytes = 0;
+        for (int i = fromIndex; i < rows.size(); i++) {
+            bytes += RamUsageEstimator.sizeOfObject(rows.get(i));
+        }
+        return bytes;
     }
 
     private static List<FieldVector> orderedColumns(VectorSchemaRoot batch, List<String> targetColumnOrder) {
