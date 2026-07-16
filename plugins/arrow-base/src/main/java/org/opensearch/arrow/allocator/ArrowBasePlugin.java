@@ -321,17 +321,15 @@ public class ArrowBasePlugin extends Plugin implements ExtensiblePlugin, ActionP
             INGEST_MAX_SETTING.get(settings),
             PoolGroup.INDEXING
         );
-        // POOL_QUERY is unbounded: arrow-java's C Data importer retains a reference BEFORE
-        // consulting the allocator, so any throw from allocateBytes permanently leaks the
-        // native batch. The limit guarded nothing for these bytes (zero-copy; memory pre-exists)
+        // POOL_QUERY is a SPECIAL, UNMANAGED, unbounded pool: arrow-java's C Data importer retains a
+        // reference BEFORE consulting the allocator, so any throw from allocateBytes permanently leaks
+        // the native batch. The limit guarded nothing for these bytes (zero-copy; memory pre-exists)
         // and enforcement lives Rust-side (DataFusion memory pool → CircuitBreakingException → 429).
+        // registerUnmanagedPool fixes it at Long.MAX_VALUE AND excludes it from budget validation, the
+        // rebalancer, and pool-group limit sums — so its unbounded limit no longer pollutes the sizing
+        // math the managed pools (flight/ingest/datafusion) depend on at startup and on every tick.
         // Do NOT add a finite limit or throwing AllocationListener to this pool.
-        allocator.getOrCreatePool(
-            NativeAllocatorPoolConfig.POOL_QUERY,
-            0,
-            Long.MAX_VALUE,
-            PoolGroup.SEARCH
-        );
+        allocator.registerUnmanagedPool(NativeAllocatorPoolConfig.POOL_QUERY, PoolGroup.SEARCH);
 
         // Register dynamic setting consumers for min/max changes (enforced pools only)
         cs.addSettingsUpdateConsumer(FLIGHT_MIN_SETTING, newMin -> allocator.setPoolMin(NativeAllocatorPoolConfig.POOL_FLIGHT, newMin));
