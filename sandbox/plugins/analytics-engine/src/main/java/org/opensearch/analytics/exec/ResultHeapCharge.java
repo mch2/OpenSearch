@@ -57,21 +57,6 @@ public final class ResultHeapCharge {
         charged += bytes;
     }
 
-    /**
-     * Trues up a prior {@link #charge(long)} estimate to the measured real size, exactly like
-     * {@code QueryPhaseResultConsumer}'s reserve-estimate-then-correct-to-real. A positive delta
-     * (real &gt; estimate) is added <em>without</em> a break check — the heap is already allocated, so
-     * refusing it here would only desync accounting; the parent real-memory breaker is the backstop.
-     * A negative delta (estimate was high) releases the difference. No-op once released.
-     */
-    public synchronized void adjust(long deltaBytes) {
-        if (breaker == null || deltaBytes == 0 || released) {
-            return;
-        }
-        breaker.addWithoutBreaking(deltaBytes);
-        charged += deltaBytes;
-    }
-
     /** Releases exactly what was charged. Idempotent — safe to call on every terminal path. */
     public synchronized void release() {
         if (breaker == null || released) {
