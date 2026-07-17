@@ -93,11 +93,29 @@ public class QueryScheduler implements Scheduler {
         QueryExecution execution = new QueryExecution(context, graph, this::scheduleStage, wrapped);
         executions.put(queryId, execution);
 
-        setCancellationCallback(context, execution);
-
-        opListener.onQueryStart(queryId, graph.stageCount());
-        logger.debug("[QueryScheduler] ExecutionGraph built:\n{}", graph.explain());
-        execution.start();
+        // Everything from here can throw AFTER the execution is registered and AFTER start() has
+        // dispatched some leaf fragments asynchronously (e.g. native pressure mid-dispatch). Drive the
+        // execution to a terminal through its OWN exactly-once state machine rather than letting the
+        // raw throw escape to the caller: cancelAll cancels any dispatched fragments first, then the
+        // CANCELLED transition fires the wrapped listener exactly once (user terminal +
+        // executions.remove + context.close → heap-charge release). This is why the caller
+        // (DefaultPlanExecutor) must NOT also complete the listener / close the context for a
+        // registered execution:
+        // - it never closes the owned per-query allocator out from under live async fragments;
+        // - cancelAll's transitionTo is a no-op once a fast INLINE terminal has already fired, so
+        // the listener is never double-completed (the runAfter delegate is not double-invoked).
+        // We return the (now-terminal) execution normally; only pre-registration failures
+        // (ExecutionGraph.build / new QueryExecution) propagate to the caller, where no execution
+        // exists and no listener has fired.
+        try {
+            setCancellationCallback(context, execution);
+            opListener.onQueryStart(queryId, graph.stageCount());
+            logger.debug("[QueryScheduler] ExecutionGraph built:\n{}", graph.explain());
+            execution.start();
+        } catch (RuntimeException dispatchFailed) {
+            logger.debug(new ParameterizedMessage("[QueryScheduler] dispatch failed for queryId={}, cancelling", queryId), dispatchFailed);
+            execution.cancelAll("query dispatch failed: " + dispatchFailed.getMessage());
+        }
         return execution;
     }
 

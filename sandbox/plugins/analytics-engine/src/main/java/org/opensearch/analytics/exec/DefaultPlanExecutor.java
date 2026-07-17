@@ -435,13 +435,14 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
             );
         }
 
-        // A synchronous throw from scheduler.execute (ExecutionGraph.build / execution.start() failing
-        // under native pressure during the storm) would otherwise propagate to doExecute's outer
-        // try/catch — which completes the TRANSPORT listener, not this releasingListener, and never
-        // reaches a QueryExecution terminal to fire context.close(). Both the runAfter release AND the
-        // context.onClose safety-net would be orphaned, leaking the upfront charge. Catch it here and
-        // route through releasingListener so the charge is released exactly once; also close the
-        // context (its own cleanup + our registered release) since no QueryExecution owns it yet.
+        // scheduler.execute only propagates PRE-REGISTRATION failures (ExecutionGraph.build / Query
+        // execution construction) — once a QueryExecution is registered, the scheduler drives any
+        // start()/dispatch failure to a terminal through the execution's own state machine (cancels
+        // fragments, fires the wrapped listener exactly once → executions.remove + context.close →
+        // charge release). So a throw HERE means no execution was created, no leaf fragments were
+        // dispatched, and no listener/terminal has fired: it is safe (and necessary) to close the
+        // context ourselves (its cleanup + our registered charge release, which no later terminal
+        // would run) and complete the listener exactly once via releasingListener.
         try {
             execRef.set(scheduler.execute(context, batchesListener)); // execRef read by profile listener after execution completes
         } catch (RuntimeException dispatchFailed) {
