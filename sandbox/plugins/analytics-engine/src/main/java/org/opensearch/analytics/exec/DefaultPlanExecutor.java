@@ -370,12 +370,16 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
             ? null
             : circuitBreakerService.getBreaker(CircuitBreaker.REQUEST);
         final ResultHeapCharge heapCharge = new ResultHeapCharge(requestBreaker, dag.queryId(), resultHeapExpansionFactor);
-        // Release exactly once on any terminal (success, failure, or the upfront-charge rejection),
-        // via the core Releasables idiom rather than a bespoke flag.
-        final ActionListener<ProfiledResult> releasingListener = ActionListener.runAfter(
-            listener,
-            Releasables.releaseOnce(heapCharge)::close
-        );
+        // Release exactly once across ALL terminals. Two paths register the SAME releaseOnce so the
+        // charge is freed no matter which fires first (the other becomes a no-op):
+        // 1. runAfter(listener) — the fast path on a delivered ActionListener terminal (success,
+        // failure, or the upfront-charge rejection below, which has no execution/context yet).
+        // 2. context.onClose — the safety net. QueryExecution.close() fires context close from
+        // EVERY terminal transition (incl. CANCELLED and the cancel races where the scheduler
+        // never delivers a listener terminal), which the runAfter path alone leaks.
+        final Releasable heapChargeRelease = Releasables.releaseOnce(heapCharge);
+        final ActionListener<ProfiledResult> releasingListener = ActionListener.runAfter(listener, heapChargeRelease::close);
+        context.onClose(heapChargeRelease);
 
         // Upfront worst-case admission — may throw CircuitBreakingException (→ 429) with ZERO
         // execution dispatched and ZERO batches created. Routed through releasingListener so the
@@ -423,7 +427,23 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
             );
         }
 
-        execRef.set(scheduler.execute(context, batchesListener)); // execRef read by profile listener after execution completes
+        // A synchronous throw from scheduler.execute (ExecutionGraph.build / execution.start() failing
+        // under native pressure during the storm) would otherwise propagate to doExecute's outer
+        // try/catch — which completes the TRANSPORT listener, not this releasingListener, and never
+        // reaches a QueryExecution terminal to fire context.close(). Both the runAfter release AND the
+        // context.onClose safety-net would be orphaned, leaking the upfront charge. Catch it here and
+        // route through releasingListener so the charge is released exactly once; also close the
+        // context (its own cleanup + our registered release) since no QueryExecution owns it yet.
+        try {
+            execRef.set(scheduler.execute(context, batchesListener)); // execRef read by profile listener after execution completes
+        } catch (RuntimeException dispatchFailed) {
+            try {
+                context.close();
+            } catch (RuntimeException closeError) {
+                dispatchFailed.addSuppressed(closeError);
+            }
+            releasingListener.onFailure(dispatchFailed);
+        }
     }
 
     /**

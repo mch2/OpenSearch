@@ -191,4 +191,55 @@ public class ResultHeapChargeTests extends org.opensearch.test.OpenSearchTestCas
         charge.shrinkTo(10); // safe
         charge.close(); // safe
     }
+
+    /**
+     * Cancel-race safety net: a charge registered on {@link QueryContext#onClose} is released when the
+     * context closes — the release path that fires from every {@code QueryExecution} terminal, incl.
+     * the cancel races where the user ActionListener terminal is never delivered (the leak this fixes).
+     */
+    public void testContextOnCloseReleasesCharge() {
+        CircuitBreaker breaker = requestBreaker(1_000_000);
+        ResultHeapCharge charge = new ResultHeapCharge(breaker, "q-ctx", 1.0);
+        charge.charge(500);
+        assertEquals(500, breaker.getUsed());
+
+        QueryContext ctx = QueryContext.forTest(new org.opensearch.analytics.planner.dag.QueryDAG("q-ctx", mockRootStage()), newTask());
+        ctx.onClose(org.opensearch.common.lease.Releasables.releaseOnce(charge));
+
+        // Simulate a terminal where the listener chain never released (cancel race): only close fires.
+        ctx.close();
+        assertEquals("context close must release the stranded charge", 0, breaker.getUsed());
+        assertEquals(0, charge.chargedBytes());
+    }
+
+    /** onClose registered AFTER the context is already closed releases inline (never stranded). */
+    public void testContextOnCloseAfterClosedReleasesInline() {
+        CircuitBreaker breaker = requestBreaker(1_000_000);
+        ResultHeapCharge charge = new ResultHeapCharge(breaker, "q-ctx2", 1.0);
+        charge.charge(300);
+
+        QueryContext ctx = QueryContext.forTest(new org.opensearch.analytics.planner.dag.QueryDAG("q-ctx2", mockRootStage()), newTask());
+        ctx.close();
+        ctx.onClose(org.opensearch.common.lease.Releasables.releaseOnce(charge)); // already closed → inline
+        assertEquals(0, breaker.getUsed());
+    }
+
+    private static org.opensearch.analytics.planner.dag.Stage mockRootStage() {
+        org.opensearch.analytics.planner.dag.Stage stage = org.mockito.Mockito.mock(org.opensearch.analytics.planner.dag.Stage.class);
+        org.mockito.Mockito.when(stage.getStageId()).thenReturn(0);
+        org.mockito.Mockito.when(stage.getChildStages()).thenReturn(java.util.List.of());
+        return stage;
+    }
+
+    private static org.opensearch.analytics.exec.task.AnalyticsQueryTask newTask() {
+        return new org.opensearch.analytics.exec.task.AnalyticsQueryTask(
+            1L,
+            "transport",
+            "analytics_query",
+            "q-ctx",
+            org.opensearch.core.tasks.TaskId.EMPTY_TASK_ID,
+            java.util.Map.of(),
+            null
+        );
+    }
 }

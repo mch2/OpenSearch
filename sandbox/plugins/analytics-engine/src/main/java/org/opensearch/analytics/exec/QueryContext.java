@@ -10,12 +10,15 @@ package org.opensearch.analytics.exec;
 
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.AnalyticsPlugin;
 import org.opensearch.analytics.backend.AnalyticsOperationListener;
 import org.opensearch.analytics.exec.task.AnalyticsQueryTask;
 import org.opensearch.analytics.planner.dag.QueryDAG;
 import org.opensearch.analytics.planner.dag.ShardExecutionTarget;
 import org.opensearch.analytics.settings.AnalyticsQuerySettings;
+import org.opensearch.common.lease.Releasable;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.threadpool.ThreadPool;
 
@@ -34,6 +37,8 @@ import java.util.concurrent.Executors;
  */
 public class QueryContext {
 
+    private static final Logger logger = LogManager.getLogger(QueryContext.class);
+
     /** Setting defaults for {@code analytics.query.*}; used by test contexts and as the baseline. */
     private static final int DEFAULT_MAX_CONCURRENT_SHARD_REQUESTS_PER_NODE = AnalyticsQuerySettings.MAX_CONCURRENT_SHARD_REQUESTS_PER_NODE
         .get(Settings.EMPTY);
@@ -50,6 +55,14 @@ public class QueryContext {
     private final boolean profile;
     private volatile ExecutorService localTaskExecutor;
     private boolean closed;  // guarded by `this`
+    /**
+     * Cleanups to run exactly once when this context closes — which {@link QueryExecution#close}
+     * fires from <em>every</em> terminal transition (SUCCEEDED / FAILED / CANCELLED), including the
+     * cancel races where the user {@link org.opensearch.core.action.ActionListener} terminal is never
+     * delivered. Used to release the per-query result-heap breaker charge without leaking it on those
+     * races. Guarded by {@code this}; each is a {@link Releasable} so registration is idempotent-safe.
+     */
+    private final List<Releasable> onCloseReleasables = new java.util.ArrayList<>();
     /**
      * HACK: side-table for cross-stage routing of resolved {@link ShardExecutionTarget}s.
      * Today's only consumer is the QTF (late-materialization) Phase C, which needs to map
@@ -203,8 +216,31 @@ public class QueryContext {
         return ownsAllocator;
     }
 
+    /**
+     * Registers a cleanup to run when this context closes. Fired from every query terminal via
+     * {@link QueryExecution#close} — the one release point guaranteed to run even on the cancel
+     * races where the user listener terminal is dropped. If the context is already closed, the
+     * releasable is closed inline so the caller's resource is never stranded. The releasable should
+     * be idempotent (e.g. wrapped in {@code Releasables.releaseOnce}) since a fast-path terminal may
+     * also release it.
+     */
+    public void onClose(Releasable releasable) {
+        boolean closeNow = false;
+        synchronized (this) {
+            if (closed) {
+                closeNow = true;
+            } else {
+                onCloseReleasables.add(releasable);
+            }
+        }
+        if (closeNow) {
+            releasable.close();
+        }
+    }
+
     /** Idempotent. Serialised with lazy-init accessors; post-close accessors throw. */
     public void close() {
+        List<Releasable> toRelease;
         synchronized (this) {
             if (closed) return;
             closed = true;
@@ -214,6 +250,17 @@ public class QueryContext {
             if (localTaskExecutor != null) {
                 localTaskExecutor.shutdown();
                 localTaskExecutor = null;
+            }
+            toRelease = List.copyOf(onCloseReleasables);
+            onCloseReleasables.clear();
+        }
+        // Release outside the lock: a charge release calls into the circuit breaker, which must not
+        // run under the context monitor.
+        for (Releasable r : toRelease) {
+            try {
+                r.close();
+            } catch (Exception e) {
+                logger.warn("[query-{}] onClose releasable failed", queryId(), e);
             }
         }
     }
