@@ -149,4 +149,31 @@ public class NativeMemoryRebalancerTests extends OpenSearchTestCase {
             bufs.forEach(ArrowBuf::close);
         }
     }
+
+    /**
+     * An unmanaged (special, unbounded) pool must be invisible to the rebalancer: never shrunk,
+     * never grown, and — critically — its Long.MAX_VALUE limit must never be treated as idle
+     * capacity to redistribute to a pressured managed pool.
+     */
+    public void testUnmanagedPoolUntouchedByRebalance() {
+        // A pressured managed pool that would normally receive freed capacity...
+        allocator.getOrCreatePool("pressured", 5 * MB, 20 * MB, org.opensearch.arrow.spi.PoolGroup.INDEXING);
+        // ...and the special unbounded query pool, which is idle (0 allocated).
+        allocator.registerUnmanagedPool("query", org.opensearch.arrow.spi.PoolGroup.SEARCH);
+
+        BufferAllocator pressuredPool = allocator.getPoolAllocator("pressured");
+        ArrowBuf buf = pressuredPool.buffer((long) (20 * MB * 0.9)); // >75% → pressured
+        try {
+            long queryLimitBefore = allocator.getPoolAllocator("query").getLimit();
+            rebalancer.rebalance();
+            long queryLimitAfter = allocator.getPoolAllocator("query").getLimit();
+
+            // The unmanaged pool's limit is unchanged (still Long.MAX_VALUE) — it was neither
+            // shrunk as an "idle" pool nor otherwise touched.
+            assertEquals("unmanaged pool must not be resized by the rebalancer", queryLimitBefore, queryLimitAfter);
+            assertEquals(Long.MAX_VALUE, queryLimitAfter);
+        } finally {
+            buf.close();
+        }
+    }
 }

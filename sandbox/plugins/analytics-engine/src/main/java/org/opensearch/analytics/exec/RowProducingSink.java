@@ -57,6 +57,13 @@ public class RowProducingSink implements ExchangeSink, ExchangeSource {
      */
     static final long DEFAULT_MAX_ROWS = 10_000L;
 
+    /**
+     * {@link #DEFAULT_MAX_ROWS} as an {@code int}, for the upfront worst-case result estimate in
+     * {@code DefaultPlanExecutor} which multiplies a per-row byte width by the row cap. The cap fits
+     * an {@code int}; hoisted here so the sink and the estimator read the same constant.
+     */
+    static final int DEFAULT_MAX_ROWS_INT = (int) DEFAULT_MAX_ROWS;
+
     private final List<VectorSchemaRoot> batches = new ArrayList<>();
     private final List<String> fieldNames = new ArrayList<>();
     private final long maxRows;

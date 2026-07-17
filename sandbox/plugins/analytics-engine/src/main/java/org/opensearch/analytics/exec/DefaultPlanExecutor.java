@@ -15,6 +15,9 @@ import org.apache.calcite.plan.RelOptUtil;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.metadata.JaninoRelMetadataProvider;
 import org.apache.calcite.rel.metadata.RelMetadataQueryBase;
+import org.apache.calcite.rel.type.RelDataType;
+import org.apache.calcite.rel.type.RelDataTypeField;
+import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.ExceptionsHelper;
@@ -50,8 +53,12 @@ import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.inject.Inject;
+import org.opensearch.common.lease.Releasable;
+import org.opensearch.common.lease.Releasables;
 import org.opensearch.common.unit.TimeValue;
 import org.opensearch.core.action.ActionListener;
+import org.opensearch.core.common.breaker.CircuitBreaker;
+import org.opensearch.core.indices.breaker.CircuitBreakerService;
 import org.opensearch.core.rest.RestStatus;
 import org.opensearch.core.tasks.TaskId;
 import org.opensearch.search.SearchService;
@@ -61,7 +68,6 @@ import org.opensearch.transport.TransportService;
 import org.opensearch.transport.client.node.NodeClient;
 
 import java.util.ArrayList;
-import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
@@ -105,11 +111,15 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
     private final PlannerSettings plannerSettings;
     private final IndexNameExpressionResolver indexNameExpressionResolver;
     private final AnalyticsSearchSlowLog analyticsSearchSlowLog;
-    // Node-level analytics_query breaker (shared across all queries) used to bound heap held while
-    // materializing result batches into Java rows. Populated by the framework at startup via
-    // AnalyticsPlugin#setCircuitBreaker; read through the handle so the injected graph doesn't
-    // depend on startup ordering. May be null in embeddings/tests without a registered breaker.
-    private final AnalyticsQueryBreakerHandle queryBreakerHandle;
+    // Node-level circuit-breaker service (Guice-bound singleton). The result-heap guard charges the
+    // shared REQUEST breaker (indices.breaker.request.limit) — the same budget used by aggregations
+    // and QueryPhaseResultConsumer — resolved per request via getBreaker(CircuitBreaker.REQUEST).
+    private final CircuitBreakerService circuitBreakerService;
+    private volatile double resultHeapExpansionFactor;
+    private volatile long varWidthAllowanceBytes;
+    // Row cap enforced by the result sink (RowProducingSink); the upfront admission estimate reads
+    // the SAME constant so enforcement and estimate can never drift.
+    private final int maxResultRows = RowProducingSink.DEFAULT_MAX_ROWS_INT;
 
     @Inject
     public DefaultPlanExecutor(
@@ -125,7 +135,7 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
         IndexNameExpressionResolver indexNameExpressionResolver,
         AnalyticsSearchSlowLog analyticsSearchSlowLog,
         AnalyticsStatsCollector statsCollector,
-        AnalyticsQueryBreakerHandle queryBreakerHandle
+        CircuitBreakerService circuitBreakerService
     ) {
         super(AnalyticsQueryAction.NAME, transportService, actionFilters, AnalyticsQueryRequest::new);
         this.capabilityRegistry = capabilityRegistry;
@@ -162,7 +172,13 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
         this.preferMetadataDriver = AnalyticsPlugin.PREFER_METADATA_DRIVER.get(clusterService.getSettings());
         clusterService.getClusterSettings()
             .addSettingsUpdateConsumer(AnalyticsPlugin.PREFER_METADATA_DRIVER, v -> preferMetadataDriver = v);
-        this.queryBreakerHandle = queryBreakerHandle;
+        this.circuitBreakerService = circuitBreakerService;
+        this.resultHeapExpansionFactor = AnalyticsQuerySettings.RESULT_HEAP_EXPANSION_FACTOR.get(clusterService.getSettings());
+        clusterService.getClusterSettings()
+            .addSettingsUpdateConsumer(AnalyticsQuerySettings.RESULT_HEAP_EXPANSION_FACTOR, v -> resultHeapExpansionFactor = v);
+        this.varWidthAllowanceBytes = AnalyticsQuerySettings.RESULT_VARWIDTH_ALLOWANCE.get(clusterService.getSettings()).getBytes();
+        clusterService.getClusterSettings()
+            .addSettingsUpdateConsumer(AnalyticsQuerySettings.RESULT_VARWIDTH_ALLOWANCE, v -> varWidthAllowanceBytes = v.getBytes());
         // Planner settings (oversampling factor + delegation block-list); self-registers update
         // consumers for live changes.
         this.plannerSettings = PlannerSettings.create(
@@ -334,14 +350,42 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
          */
         final AtomicReference<QueryExecution> execRef = new AtomicReference<>();
 
-        // Cross-request heap guard: reserve estimated heap against the shared analytics_query breaker
-        // as each result batch is materialized into Java rows. Charging can throw
-        // CircuitBreakingException (→ 429) when the node/analytics heap budget is exhausted by this
-        // plus concurrent queries. The reservation is held until the whole action settles — the
-        // materialized rows stay live through response construction/serialization — and released
-        // exactly once via runAfter on the top-level listener, on both success and failure.
-        final ResultHeapCharge heapCharge = new ResultHeapCharge(queryBreakerHandle.breaker(), dag.queryId());
-        final ActionListener<ProfiledResult> releasingListener = ActionListener.runAfter(listener, heapCharge::release);
+        // ─── Result-heap admission guard ──────────────────────────────────
+        // Charge the shared REQUEST breaker (indices.breaker.request.limit) — the same coordinator-heap
+        // budget used by aggregations and QueryPhaseResultConsumer, and subordinate to the parent
+        // real-memory breaker (indices.breaker.total.limit). A CircuitBreakingException maps to HTTP
+        // 429 via the standard exception→status path. The charge label <analytics_result[queryId]> is
+        // the attribution mechanism in trip messages, since the budget is shared with other consumers.
+        //
+        // Admission is UPFRONT and pessimistic: before dispatching any execution, reserve the
+        // worst-case result footprint (row cap × per-column widths, expansion-adjusted). This rejects
+        // an over-budget query before the full distributed execution runs, rather than mid-drain after
+        // the work is wasted. batchesToRows later shrinks the reservation to the actual native size.
+        // The reservation is held until the whole action settles (materialized rows stay live through
+        // response construction) and released exactly once on every terminal via runAfter below.
+        //
+        // If analytics/search isolation is ever required, the graduation path is a dedicated breaker
+        // via CircuitBreakerPlugin — only the getBreaker(...) lookup here would change.
+        final CircuitBreaker requestBreaker = circuitBreakerService == null
+            ? null
+            : circuitBreakerService.getBreaker(CircuitBreaker.REQUEST);
+        final ResultHeapCharge heapCharge = new ResultHeapCharge(requestBreaker, dag.queryId(), resultHeapExpansionFactor);
+        // Release exactly once on any terminal (success, failure, or the upfront-charge rejection),
+        // via the core Releasables idiom rather than a bespoke flag.
+        final ActionListener<ProfiledResult> releasingListener = ActionListener.runAfter(
+            listener,
+            Releasables.releaseOnce(heapCharge)::close
+        );
+
+        // Upfront worst-case admission — may throw CircuitBreakingException (→ 429) with ZERO
+        // execution dispatched and ZERO batches created. Routed through releasingListener so the
+        // terminal (and release) still fires exactly once.
+        try {
+            heapCharge.charge(estimateWorstCaseResultBytes(logicalFragment.getRowType(), maxResultRows, varWidthAllowanceBytes));
+        } catch (RuntimeException admissionRejected) {
+            releasingListener.onFailure(admissionRejected);
+            return;
+        }
 
         // Build the profile on every terminal — both for the _explain payload (when profile=true)
         // and for the stats collector (always). When profile=false the resulting profile is
@@ -519,24 +563,26 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
     }
 
     /**
-     * Materializes native Arrow batches into heap {@code Object[]} rows, charging the shared
-     * {@code analytics_query} circuit breaker per batch as it goes.
+     * Materializes native Arrow batches into heap {@code Object[]} rows.
      *
-     * <p>Before materializing each batch, {@link ResultHeapCharge#charge} reserves the batch's native
-     * buffer size (sum of vector buffer sizes — cheap and measured, no per-row {@code RamUsageEstimator}
-     * walk). This can throw {@link org.opensearch.core.common.breaker.CircuitBreakingException} (→ HTTP
-     * 429) if the running charge — accumulated across this query's batches AND every concurrent query
-     * sharing the node-level {@code analytics_query} breaker — would exceed the child limit or trip the
-     * parent real-memory breaker. That is the cross-batch, cross-request guard: we reject before the
-     * allocation that would exhaust heap, not after.
-     *
-     * <p>The native size is a deterministic lower bound on the row footprint, not the exact Java-object
-     * cost; the {@code analytics_query} limit is the tuning knob (set to leave headroom for Java-object
-     * expansion and the downstream response copy). The charge is released on request completion by the
+     * <p>Heap accounting is UPFRONT, not per-batch: {@code executeInternal} already charged the shared
+     * REQUEST breaker with the pessimistic worst-case result footprint before dispatch (see
+     * {@link #estimateWorstCaseResultBytes}). Here we accumulate the actual native size of the batches
+     * as we drain them and, once the true size is known, call {@link ResultHeapCharge#shrinkTo} to
+     * release the difference between the worst-case reservation and the actual — never growing it (the
+     * upfront estimate is the ceiling). The remaining reservation is released on the terminal by the
      * caller.
      *
-     * <p>Each native batch is closed as soon as it is copied. When {@code heapCharge} is {@code null}
-     * (tests / no registered breaker) this is the original unaccounted materialization.
+     * <p><b>Batch ownership.</b> The producer fulfils the batches listener and hands ownership of the
+     * {@link VectorSchemaRoot}s to this method; from here they are owned by a {@link Releasables#wrap}
+     * cleanup held in try-with-resources, so every path — normal completion, a {@link RuntimeException},
+     * or an {@link Error} thrown mid-conversion — releases all batches' native buffers exactly once
+     * (the previous {@code catch (RuntimeException)} drain leaked on {@link Error}). Consumed batches
+     * are also closed eagerly inside the loop to bound peak native footprint; the wrapper close is
+     * idempotent per batch, so the try-with-resources close of an already-consumed batch is a no-op.
+     *
+     * <p>When {@code heapCharge} is {@code null} (tests / no registered breaker) this is the original
+     * unaccounted materialization.
      */
     static Iterable<Object[]> batchesToRows(
         Iterable<VectorSchemaRoot> batches,
@@ -544,49 +590,62 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
         ResultHeapCharge heapCharge
     ) {
         List<Object[]> rows = new ArrayList<>();
-        Iterator<VectorSchemaRoot> it = batches.iterator();
-        try {
-            while (it.hasNext()) {
-                VectorSchemaRoot batch = it.next();
-                try {
-                    if (heapCharge != null) {
-                        // Pre-emptive charge of the batch's native footprint BEFORE materializing its
-                        // Java rows — throws CircuitBreakingException (→ 429) if this plus the
-                        // already-charged in-flight queries would exceed the shared analytics_query
-                        // budget (or the parent real-memory breaker). Cheap and measured: sum of the
-                        // batch's vector buffer sizes, no per-row RamUsageEstimator walk. The native
-                        // size is a deterministic lower bound on the row footprint; the analytics_query
-                        // limit is the tuning knob (set to leave headroom for the Java-object expansion
-                        // and the downstream response copy).
-                        heapCharge.charge(estimateNativeBatchBytes(batch)); // may throw (429)
+        // Own every batch via a single Releasable so success / RuntimeException / Error all release
+        // uniformly. Each per-batch Releasable guards against double-close so eager in-loop closes and
+        // the final wrapper close cannot double-free.
+        List<Releasable> batchReleasables = new ArrayList<>();
+        for (VectorSchemaRoot batch : batches) {
+            batchReleasables.add(closeOnce(batch));
+        }
+        long actualNativeBytes = 0;
+        try (Releasable batchCleanup = Releasables.wrap(batchReleasables)) {
+            for (int i = 0; i < batchReleasables.size(); i++) {
+                VectorSchemaRoot batch = ((BatchReleasable) batchReleasables.get(i)).batch();
+                actualNativeBytes += estimateNativeBatchBytes(batch);
+                List<FieldVector> ordered = orderedColumns(batch, targetColumnOrder);
+                int colCount = ordered.size();
+                int rowCount = batch.getRowCount();
+                for (int r = 0; r < rowCount; r++) {
+                    Object[] row = new Object[colCount];
+                    for (int c = 0; c < colCount; c++) {
+                        row[c] = ArrowValues.toJavaValue(ordered.get(c), r);
                     }
-                    List<FieldVector> ordered = orderedColumns(batch, targetColumnOrder);
-                    int colCount = ordered.size();
-                    int rowCount = batch.getRowCount();
-                    for (int r = 0; r < rowCount; r++) {
-                        Object[] row = new Object[colCount];
-                        for (int c = 0; c < colCount; c++) {
-                            row[c] = ArrowValues.toJavaValue(ordered.get(c), r);
-                        }
-                        rows.add(row);
-                    }
-                } finally {
+                    rows.add(row);
+                }
+                // Close eagerly to bound peak native footprint; idempotent, so the wrapper close is safe.
+                batchReleasables.get(i).close();
+            }
+        }
+        // Shrink the upfront worst-case reservation down to the actual materialized size (no-op if the
+        // caller passed a null charge, or if actual >= worst-case which shrinkTo refuses to grow).
+        if (heapCharge != null) {
+            heapCharge.shrinkTo(actualNativeBytes);
+        }
+        return rows;
+    }
+
+    /** A {@link Releasable} that closes a {@link VectorSchemaRoot} at most once and exposes it. */
+    private interface BatchReleasable extends Releasable {
+        VectorSchemaRoot batch();
+    }
+
+    private static BatchReleasable closeOnce(VectorSchemaRoot batch) {
+        return new BatchReleasable() {
+            private boolean closed;
+
+            @Override
+            public VectorSchemaRoot batch() {
+                return batch;
+            }
+
+            @Override
+            public void close() {
+                if (closed == false) {
+                    closed = true;
                     batch.close();
                 }
             }
-        } catch (RuntimeException e) {
-            // A breaker trip (or any error) mid-drain: close the batches we never got to so their
-            // native buffers aren't stranded, then propagate (mapped to 429 for CircuitBreakingException).
-            while (it.hasNext()) {
-                try {
-                    it.next().close();
-                } catch (Exception suppressed) {
-                    e.addSuppressed(suppressed);
-                }
-            }
-            throw e;
-        }
-        return rows;
+        };
     }
 
     /** Native footprint of a batch: sum of its vectors' buffer sizes. Cheap, measured, no ratio. */
@@ -596,6 +655,55 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
             bytes += v.getBufferSize();
         }
         return bytes;
+    }
+
+    /**
+     * Worst-case <em>native</em> (pre-expansion) byte footprint of a full result, used for upfront
+     * admission: {@code rowCap} rows of the output {@code rowType}. Per column:
+     *
+     * <ul>
+     *   <li>fixed-width (INT/FLOAT/DATE → 4B, BIGINT/DOUBLE/TIMESTAMP → 8B, BOOLEAN → 1B): the Arrow
+     *       value-buffer width plus 1 byte amortized validity;</li>
+     *   <li>variable-width (VARCHAR/VARBINARY/other): {@code varWidthAllowanceBytes} per value plus 4
+     *       bytes offset plus 1 byte validity.</li>
+     * </ul>
+     *
+     * <p>Returns {@code rowCap × Σ(per-column width)}. This is a native-byte estimate; the caller's
+     * {@link ResultHeapCharge} applies the heap-expansion factor. It is intentionally pessimistic —
+     * the ceiling that {@link ResultHeapCharge#shrinkTo} later relaxes to the actual size.
+     */
+    static long estimateWorstCaseResultBytes(RelDataType rowType, int rowCap, long varWidthAllowanceBytes) {
+        long perRow = 0;
+        for (RelDataTypeField field : rowType.getFieldList()) {
+            perRow += perColumnWidthBytes(field.getType().getSqlTypeName(), varWidthAllowanceBytes);
+        }
+        return (long) rowCap * perRow;
+    }
+
+    private static long perColumnWidthBytes(SqlTypeName type, long varWidthAllowanceBytes) {
+        final long validity = 1L;
+        switch (type) {
+            case BOOLEAN:
+                return 1L + validity;
+            case TINYINT:
+                return 1L + validity;
+            case SMALLINT:
+                return 2L + validity;
+            case INTEGER:
+            case FLOAT:
+            case REAL:
+            case DATE:
+            case TIME:
+                return 4L + validity;
+            case BIGINT:
+            case DOUBLE:
+            case TIMESTAMP:
+            case TIMESTAMP_WITH_LOCAL_TIME_ZONE:
+                return 8L + validity;
+            default:
+                // variable-width (VARCHAR, VARBINARY, CHAR, and anything else): allowance + offset + validity
+                return varWidthAllowanceBytes + 4L + validity;
+        }
     }
 
     private static List<FieldVector> orderedColumns(VectorSchemaRoot batch, List<String> targetColumnOrder) {

@@ -18,12 +18,20 @@ import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.types.pojo.Schema;
+import org.opensearch.common.settings.ClusterSettings;
+import org.opensearch.common.settings.Settings;
+import org.opensearch.core.common.breaker.CircuitBreaker;
+import org.opensearch.core.common.unit.ByteSizeUnit;
+import org.opensearch.indices.breaker.HierarchyCircuitBreakerService;
 import org.opensearch.test.OpenSearchTestCase;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
+
+import static org.opensearch.indices.breaker.HierarchyCircuitBreakerService.REQUEST_CIRCUIT_BREAKER_LIMIT_SETTING;
 
 /**
  * Tests for {@link DefaultPlanExecutor}'s row-materialization boundary.
@@ -174,7 +182,110 @@ public class DefaultPlanExecutorTests extends OpenSearchTestCase {
         expectThrows(IllegalStateException.class, () -> DefaultPlanExecutor.batchesToRows(List.of(batch), List.of("name", "nonexistent")));
     }
 
+    // ── upfront charge → shrinkTo-actual on materialization ───────────────
+
+    /**
+     * Charging is UPFRONT (worst-case) in executeInternal, not per-batch here. After materializing,
+     * batchesToRows calls {@link ResultHeapCharge#shrinkTo} with the actual native size, releasing the
+     * over-reservation. This asserts the reservation shrinks from a pessimistic pre-charge down toward
+     * the true footprint.
+     */
+    public void testBatchesToRowsShrinksChargeToActual() {
+        CircuitBreaker breaker = requestBreaker(10_000_000);
+        ResultHeapCharge charge = new ResultHeapCharge(breaker, "q-shrink", 1.0);
+        // Pre-charge a pessimistic worst case, mirroring executeInternal's upfront admission.
+        charge.charge(1_000_000);
+        assertEquals(1_000_000, breaker.getUsed());
+
+        VectorSchemaRoot batch = makeIntBatch("x", 1, 2, 3);
+        long actualNative = 0;
+        for (org.apache.arrow.vector.FieldVector v : batch.getFieldVectors()) {
+            actualNative += v.getBufferSize();
+        }
+
+        List<Object[]> rows = toList(DefaultPlanExecutor.batchesToRows(List.of(batch), null, charge));
+        assertEquals(3, rows.size());
+        assertTrue("reservation must shrink below the pessimistic pre-charge", charge.chargedBytes() < 1_000_000);
+        assertEquals("reservation must shrink to the actual native footprint", actualNative, charge.chargedBytes());
+        assertEquals(actualNative, breaker.getUsed());
+        charge.close();
+        assertEquals("close returns the shared breaker to zero", 0, breaker.getUsed());
+    }
+
+    /**
+     * Every batch's native buffer is released even when materialization throws mid-drain — the batches
+     * are owned by a Releasables.wrap cleanup in try-with-resources, so a throw (here: a missing target
+     * column while ordering the first batch) still closes all batches, including ones never reached.
+     * This is the leak the previous {@code catch (RuntimeException)} drain missed on Error paths.
+     */
+    public void testBatchesToRowsClosesAllBatchesWhenMaterializationThrows() {
+        BufferAllocator child = allocator.newChildAllocator("throw", 0, Long.MAX_VALUE);
+        VectorSchemaRoot b1 = makeIntBatch(child, "x", 1, 2);
+        VectorSchemaRoot b2 = makeIntBatch(child, "x", 3, 4);
+        assertTrue(child.getAllocatedMemory() > 0);
+
+        // Target column "nonexistent" is absent from every batch → orderedColumns throws on batch 0;
+        // batch 1 is never materialized but must still be closed by the wrapper.
+        expectThrows(IllegalStateException.class, () -> DefaultPlanExecutor.batchesToRows(List.of(b1, b2), List.of("nonexistent"), null));
+        assertEquals("all batches must be closed even when materialization throws", 0, child.getAllocatedMemory());
+        child.close();
+    }
+
+    /** A null heapCharge (no breaker registered / tests) leaves materialization unaccounted, no NPE. */
+    public void testBatchesToRowsNullChargeIsUnaccounted() {
+        VectorSchemaRoot batch = makeIntBatch("x", 7, 8);
+        List<Object[]> rows = toList(DefaultPlanExecutor.batchesToRows(List.of(batch), null, null));
+        assertEquals(2, rows.size());
+    }
+
+    // ── worst-case admission estimate ─────────────────────────────────────
+
+    /**
+     * estimateWorstCaseResultBytes multiplies the per-column widths by the row cap. Fixed-width
+     * columns use the exact Arrow buffer width + 1 validity byte; variable-width columns use the
+     * allowance + 4-byte offset + 1 validity byte.
+     */
+    public void testEstimateWorstCaseResultBytes() {
+        // BIGINT (8+1) + VARCHAR (allowance 256 + 4 + 1) = 9 + 261 = 270 per row.
+        org.apache.calcite.rel.type.RelDataTypeFactory factory = new org.apache.calcite.jdbc.JavaTypeFactoryImpl(
+            org.apache.calcite.rel.type.RelDataTypeSystem.DEFAULT
+        );
+        org.apache.calcite.rel.type.RelDataType rowType = factory.builder()
+            .add("id", org.apache.calcite.sql.type.SqlTypeName.BIGINT)
+            .add("name", org.apache.calcite.sql.type.SqlTypeName.VARCHAR)
+            .build();
+
+        long perRow = (8 + 1) + (256 + 4 + 1);
+        assertEquals(perRow * 100, DefaultPlanExecutor.estimateWorstCaseResultBytes(rowType, 100, 256));
+    }
+
+    /** Fixed-width widths: INT/FLOAT/DATE → 4+1, BIGINT/DOUBLE/TIMESTAMP → 8+1, BOOLEAN → 1+1. */
+    public void testEstimateWorstCaseFixedWidths() {
+        org.apache.calcite.rel.type.RelDataTypeFactory factory = new org.apache.calcite.jdbc.JavaTypeFactoryImpl(
+            org.apache.calcite.rel.type.RelDataTypeSystem.DEFAULT
+        );
+        org.apache.calcite.rel.type.RelDataType rowType = factory.builder()
+            .add("i", org.apache.calcite.sql.type.SqlTypeName.INTEGER)
+            .add("d", org.apache.calcite.sql.type.SqlTypeName.DOUBLE)
+            .add("b", org.apache.calcite.sql.type.SqlTypeName.BOOLEAN)
+            .build();
+        long perRow = (4 + 1) + (8 + 1) + (1 + 1);
+        assertEquals(perRow * 10, DefaultPlanExecutor.estimateWorstCaseResultBytes(rowType, 10, 256));
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────
+
+    private CircuitBreaker requestBreaker(long limitBytes) {
+        HierarchyCircuitBreakerService service = new HierarchyCircuitBreakerService(
+            Settings.builder()
+                .put(REQUEST_CIRCUIT_BREAKER_LIMIT_SETTING.getKey(), limitBytes, ByteSizeUnit.BYTES)
+                .put(HierarchyCircuitBreakerService.USE_REAL_MEMORY_USAGE_SETTING.getKey(), false)
+                .build(),
+            Collections.emptyList(),
+            new ClusterSettings(Settings.EMPTY, ClusterSettings.BUILT_IN_CLUSTER_SETTINGS)
+        );
+        return service.getBreaker(CircuitBreaker.REQUEST);
+    }
 
     /** Two-column batch with vectors in physical order [age (BigInt), name (VarChar)]. */
     private VectorSchemaRoot makeAgeNameBatch(long age, String name) {
