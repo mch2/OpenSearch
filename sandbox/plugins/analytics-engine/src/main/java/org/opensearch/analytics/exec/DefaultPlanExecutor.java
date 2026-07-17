@@ -382,11 +382,19 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
         context.onClose(heapChargeRelease);
 
         // Upfront worst-case admission — may throw CircuitBreakingException (→ 429) with ZERO
-        // execution dispatched and ZERO batches created. Routed through releasingListener so the
-        // terminal (and release) still fires exactly once.
+        // execution dispatched and ZERO batches created. No QueryExecution is created on this path, so
+        // close the context here to release BOTH the heap charge (via context.onClose above) and, when
+        // analytics.coordinator.buffer_limit > 0, the per-query child allocator the context owns —
+        // neither of which any later terminal would otherwise free. Routed through releasingListener so
+        // the user terminal still fires; the charge is released exactly once (context.close → onClose).
         try {
             heapCharge.charge(estimateWorstCaseResultBytes(logicalFragment.getRowType(), maxResultRows, varWidthAllowanceBytes));
         } catch (RuntimeException admissionRejected) {
+            try {
+                context.close();
+            } catch (RuntimeException closeError) {
+                admissionRejected.addSuppressed(closeError);
+            }
             releasingListener.onFailure(admissionRejected);
             return;
         }
