@@ -87,6 +87,8 @@ public class ArrowBasePluginTests extends OpenSearchTestCase {
         IllegalArgumentException eQuery = expectThrows(IllegalArgumentException.class, () -> ArrowBasePlugin.QUERY_MAX_SETTING.get(query));
         assertTrue(eQuery.getMessage().contains("must be >= 0"));
         assertTrue("query error must name its setting", eQuery.getMessage().contains(NativeAllocatorPoolConfig.SETTING_QUERY_MAX));
+        // QUERY_MAX is deprecated (the query pool is unbounded) — reading an explicitly-set value warns.
+        assertSettingDeprecationsAndWarnings(new Setting<?>[] { ArrowBasePlugin.QUERY_MAX_SETTING });
     }
 
     // -----------------------------------------------------------------
@@ -119,11 +121,18 @@ public class ArrowBasePluginTests extends OpenSearchTestCase {
             assertTrue(poolNames.contains(NativeAllocatorPoolConfig.POOL_INGEST));
             assertTrue(poolNames.contains(NativeAllocatorPoolConfig.POOL_QUERY));
 
-            // Pool maxes match the operator-set values (rebalancer disabled,
-            // so initial limit == max).
+            // Flight/ingest maxes match the operator-set values (rebalancer disabled, so limit == max).
             assertEquals(1L * 1024 * 1024 * 1024, allocator.getPoolAllocator(NativeAllocatorPoolConfig.POOL_FLIGHT).getLimit());
             assertEquals(2L * 1024 * 1024 * 1024, allocator.getPoolAllocator(NativeAllocatorPoolConfig.POOL_INGEST).getLimit());
-            assertEquals(1L * 1024 * 1024 * 1024, allocator.getPoolAllocator(NativeAllocatorPoolConfig.POOL_QUERY).getLimit());
+            // POOL_QUERY is a special UNMANAGED, unbounded pool: its limit is fixed at Long.MAX_VALUE
+            // and the native.allocator.pool.query.max setting has no effect (see ArrowBasePlugin /
+            // registerUnmanagedPool). It is excluded from budget/rebalance/group-sum math.
+            assertTrue(allocator.isUnmanagedPool(NativeAllocatorPoolConfig.POOL_QUERY));
+            assertEquals(Long.MAX_VALUE, allocator.getPoolAllocator(NativeAllocatorPoolConfig.POOL_QUERY).getLimit());
+            assertFalse(
+                "unmanaged query pool must be excluded from the rebalancer's managed set",
+                allocator.getManagedPoolNames().contains(NativeAllocatorPoolConfig.POOL_QUERY)
+            );
         } finally {
             allocator.close();
             plugin.close();
@@ -148,10 +157,12 @@ public class ArrowBasePluginTests extends OpenSearchTestCase {
         long budget2 = ResourceTrackerSettings.NODE_NATIVE_MEMORY_LIMIT_SETTING.get(nodeSettings).getBytes();
         ArrowNativeAllocator allocator = plugin.buildAllocator(nodeSettings, cs, () -> budget2);
         try {
-            // Pools always start at max regardless of rebalancer state
+            // Managed pools always start at max regardless of rebalancer state.
             assertEquals(200L * 1024 * 1024, allocator.getPoolAllocator(NativeAllocatorPoolConfig.POOL_FLIGHT).getLimit());
             assertEquals(200L * 1024 * 1024, allocator.getPoolAllocator(NativeAllocatorPoolConfig.POOL_INGEST).getLimit());
-            assertEquals(200L * 1024 * 1024, allocator.getPoolAllocator(NativeAllocatorPoolConfig.POOL_QUERY).getLimit());
+            // POOL_QUERY is the special unmanaged pool — always unbounded, never sized by the
+            // query.max setting or the rebalancer.
+            assertEquals(Long.MAX_VALUE, allocator.getPoolAllocator(NativeAllocatorPoolConfig.POOL_QUERY).getLimit());
         } finally {
             allocator.close();
             plugin.close();

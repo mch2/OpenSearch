@@ -53,6 +53,14 @@ public class ArrowNativeAllocator implements NativeAllocator {
     private final ConcurrentMap<String, ArrowPoolHandle> pools = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, VirtualPoolHandleImpl> virtualPools = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, PoolConfig> poolConfigs = new ConcurrentHashMap<>();
+    /**
+     * "Special" pools that are unbounded (limit fixed at {@code Long.MAX_VALUE}) and deliberately
+     * excluded from budget validation, the rebalancer, and pool-group limit sums. Today this is only
+     * POOL_QUERY: its bytes are zero-copy foreign wraps of pre-existing native memory (not real Java
+     * allocations), so it must never be limited — and its {@code Long.MAX_VALUE} limit must not
+     * pollute the sizing math the other (managed) pools depend on.
+     */
+    private final Set<String> unmanagedPools = ConcurrentHashMap.newKeySet();
     private final ConcurrentMap<PoolGroup, List<Consumer<Long>>> poolGroupLimitListeners = new ConcurrentHashMap<>();
     private final List<Runnable> statsRefreshers = new CopyOnWriteArrayList<>();
     private volatile Supplier<long[]> nativeMemoryStatsSupplier;
@@ -267,6 +275,55 @@ public class ArrowNativeAllocator implements NativeAllocator {
         });
     }
 
+    /**
+     * Registers a <b>special, unbounded, unmanaged</b> Arrow pool (fixed {@code Long.MAX_VALUE} limit),
+     * excluded from: budget validation ({@link #validateSumMaxesWithinBudget} — its max isn't summed
+     * against the native budget); the rebalancer ({@link #getManagedPoolNames} — never resized or
+     * treated as idle capacity); and pool-group limit sums ({@link #firePoolGroupListeners}).
+     *
+     * <p>Intended for POOL_QUERY, whose bytes are zero-copy foreign wraps of pre-existing native
+     * memory: limiting it would leak batches on import (arrow-java retains the array ref before
+     * consulting the allocator), and real enforcement lives Rust-side. See ArrowBasePlugin.
+     *
+     * @param poolName name of the special pool
+     * @param group    pool group (recorded for stats/reporting only; excluded from group limit sums)
+     * @throws IllegalStateException if a managed pool with this name already exists — flipping it would
+     *     leave a bounded child allocator flagged unmanaged. Register the pool as unmanaged from the start.
+     */
+    public PoolHandle registerUnmanagedPool(String poolName, PoolGroup group) {
+        if (pools.containsKey(poolName)) {
+            throw new IllegalStateException(
+                "Pool ["
+                    + poolName
+                    + "] already exists as a managed pool and cannot be re-registered as unmanaged; "
+                    + "its child allocator has a bounded limit. Register it unmanaged from the start."
+            );
+        }
+        unmanagedPools.add(poolName);
+        // unmanagedPools membership is what excludes it from budget/rebalance/group-sum math.
+        poolConfigs.putIfAbsent(poolName, new PoolConfig(0, Long.MAX_VALUE, group));
+        return pools.computeIfAbsent(poolName, name -> {
+            BufferAllocator child = root.newChildAllocator(name, 0, Long.MAX_VALUE);
+            return new ArrowPoolHandle(child);
+        });
+    }
+
+    /** Whether a pool is a special/unmanaged unbounded pool (excluded from sizing math). */
+    public boolean isUnmanagedPool(String poolName) {
+        return unmanagedPools.contains(poolName);
+    }
+
+    /**
+     * Pool names the rebalancer should manage — all registered pools minus the unmanaged/special
+     * ones. The rebalancer iterates this instead of {@link #getAllPoolNames()} so an unbounded pool
+     * is never snapshotted, shrunk, grown, or treated as idle capacity.
+     */
+    public Set<String> getManagedPoolNames() {
+        Set<String> managed = new HashSet<>(getAllPoolNames());
+        managed.removeAll(unmanagedPools);
+        return Collections.unmodifiableSet(managed);
+    }
+
     @Override
     public void setPoolLimit(String poolName, long newLimit) {
         PoolConfig config = poolConfigs.get(poolName);
@@ -375,6 +432,9 @@ public class ArrowNativeAllocator implements NativeAllocator {
      */
     public void resetAllPoolsToMax() {
         for (String name : getAllPoolNames()) {
+            if (unmanagedPools.contains(name)) {
+                continue; // special unbounded pool — nothing to reset
+            }
             PoolConfig config = poolConfigs.get(name);
             long max = config != null ? config.max : Long.MAX_VALUE;
             long current = getEffectiveLimit(name);
@@ -646,7 +706,9 @@ public class ArrowNativeAllocator implements NativeAllocator {
 
         long groupSum = 0;
         for (var entry : poolConfigs.entrySet()) {
-            if (entry.getValue().group == group) {
+            // Skip unmanaged/special pools: their Long.MAX_VALUE effective limit would swamp the
+            // grouped total that group listeners (e.g. the DataFusion pool sizer) consume.
+            if (entry.getValue().group == group && unmanagedPools.contains(entry.getKey()) == false) {
                 groupSum += getEffectiveLimit(entry.getKey());
             }
         }
@@ -672,9 +734,14 @@ public class ArrowNativeAllocator implements NativeAllocator {
         if (budget == Long.MAX_VALUE || budget <= 0) {
             return;
         }
+        // Unmanaged/special pools (e.g. POOL_QUERY) are unbounded by design; their Long.MAX_VALUE
+        // "max" is not real budget consumption and must not be summed against the node budget.
+        if (unmanagedPools.contains(newPoolName)) {
+            return;
+        }
         long sumMaxes = newPoolMax;
         for (var entry : poolConfigs.entrySet()) {
-            if (entry.getKey().equals(newPoolName) == false) {
+            if (entry.getKey().equals(newPoolName) == false && unmanagedPools.contains(entry.getKey()) == false) {
                 sumMaxes += entry.getValue().max;
             }
         }
