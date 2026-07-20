@@ -49,11 +49,9 @@ public class RowProducingSink implements ExchangeSink, ExchangeSource {
     private static final Logger logger = LogManager.getLogger(RowProducingSink.class);
 
     /**
-     * Default maximum number of rows this sink will accept before rejecting
-     * further batches. Analogous to {@code index.max_result_window} (10k)
-     * in the core search path, but set higher for analytics workloads.
-     *
-     * <p>TODO: make configurable via cluster setting.
+     * Fallback row cap for the no-arg constructor (internal buffers). The result sink is constructed
+     * with the per-query snapshot of {@code analytics.query.max_result_rows}; this constant is only the
+     * default that setting resolves to.
      */
     static final long DEFAULT_MAX_ROWS = 10_000L;
 

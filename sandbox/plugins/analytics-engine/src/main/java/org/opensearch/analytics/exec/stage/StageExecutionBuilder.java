@@ -89,7 +89,8 @@ public class StageExecutionBuilder {
      */
     public StageExecution buildRootExecution(Stage rootStage, QueryContext config) {
         // TODO: Update to read directly from back-end provided ExchangeSource when the root stage has a fragment
-        StageExecution rootExec = buildStageExecution(rootStage, new RowProducingSink(), config);
+        // Row cap from the query's snapshot so the sink enforces the same value the admission guard estimated.
+        StageExecution rootExec = buildStageExecution(rootStage, new RowProducingSink(config.maxResultRows()), config);
         if ((rootExec instanceof DataProducer) == false) {
             throw new IllegalStateException(
                 "Root execution "

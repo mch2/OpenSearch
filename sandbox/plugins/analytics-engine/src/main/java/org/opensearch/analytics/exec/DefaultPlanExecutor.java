@@ -50,8 +50,12 @@ import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.inject.Inject;
+import org.opensearch.common.lease.Releasable;
+import org.opensearch.common.lease.Releasables;
 import org.opensearch.common.unit.TimeValue;
 import org.opensearch.core.action.ActionListener;
+import org.opensearch.core.common.breaker.CircuitBreaker;
+import org.opensearch.core.indices.breaker.CircuitBreakerService;
 import org.opensearch.core.rest.RestStatus;
 import org.opensearch.core.tasks.TaskId;
 import org.opensearch.search.SearchService;
@@ -104,6 +108,15 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
     private final PlannerSettings plannerSettings;
     private final IndexNameExpressionResolver indexNameExpressionResolver;
     private final AnalyticsSearchSlowLog analyticsSearchSlowLog;
+    // Node-level circuit-breaker service (Guice-bound singleton). The result-heap guard charges the
+    // shared REQUEST breaker (indices.breaker.request.limit) — the same budget used by aggregations
+    // and QueryPhaseResultConsumer — resolved per request via getBreaker(CircuitBreaker.REQUEST).
+    private final CircuitBreakerService circuitBreakerService;
+    private volatile double resultHeapExpansionFactor;
+    private volatile long varWidthAllowanceBytes;
+    // Row cap; snapshotted once per query into the QueryContext so the sink's enforcement and the
+    // admission estimate use the same value even if the setting changes mid-query.
+    private volatile int maxResultRows;
 
     @Inject
     public DefaultPlanExecutor(
@@ -118,7 +131,8 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
         CoordinatorAllocatorHandle coordinatorAllocatorHandle,
         IndexNameExpressionResolver indexNameExpressionResolver,
         AnalyticsSearchSlowLog analyticsSearchSlowLog,
-        AnalyticsStatsCollector statsCollector
+        AnalyticsStatsCollector statsCollector,
+        CircuitBreakerService circuitBreakerService
     ) {
         super(AnalyticsQueryAction.NAME, transportService, actionFilters, AnalyticsQueryRequest::new);
         this.capabilityRegistry = capabilityRegistry;
@@ -155,6 +169,15 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
         this.preferMetadataDriver = AnalyticsPlugin.PREFER_METADATA_DRIVER.get(clusterService.getSettings());
         clusterService.getClusterSettings()
             .addSettingsUpdateConsumer(AnalyticsPlugin.PREFER_METADATA_DRIVER, v -> preferMetadataDriver = v);
+        this.circuitBreakerService = circuitBreakerService;
+        this.resultHeapExpansionFactor = AnalyticsQuerySettings.RESULT_HEAP_EXPANSION_FACTOR.get(clusterService.getSettings());
+        clusterService.getClusterSettings()
+            .addSettingsUpdateConsumer(AnalyticsQuerySettings.RESULT_HEAP_EXPANSION_FACTOR, v -> resultHeapExpansionFactor = v);
+        this.varWidthAllowanceBytes = AnalyticsQuerySettings.RESULT_VARWIDTH_ALLOWANCE.get(clusterService.getSettings()).getBytes();
+        clusterService.getClusterSettings()
+            .addSettingsUpdateConsumer(AnalyticsQuerySettings.RESULT_VARWIDTH_ALLOWANCE, v -> varWidthAllowanceBytes = v.getBytes());
+        this.maxResultRows = AnalyticsQuerySettings.MAX_RESULT_ROWS.get(clusterService.getSettings());
+        clusterService.getClusterSettings().addSettingsUpdateConsumer(AnalyticsQuerySettings.MAX_RESULT_ROWS, v -> maxResultRows = v);
         // Planner settings (oversampling factor + delegation block-list); self-registers update
         // consumers for live changes.
         this.plannerSettings = PlannerSettings.create(
@@ -238,6 +261,10 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
         RelMetadataQueryBase.THREAD_PROVIDERS.set(JaninoRelMetadataProvider.of(logicalFragment.getCluster().getMetadataProvider()));
         logicalFragment.getCluster().invalidateMetadataQuery();
 
+        // Snapshot the row cap ONCE so the sink's enforcement (via QueryContext) and the admission
+        // estimate below use the same value even if the setting changes mid-query.
+        final int rowCap = maxResultRows;
+
         // Create the slow log wrapper at the start so it observes the full query lifecycle.
         final String querySource = queryCtx != null ? queryCtx.querySource() : null;
         final AnalyticsSearchSlowLog.QuerySlowLogListener queryListener = analyticsSearchSlowLog.createQueryListener(querySource);
@@ -308,6 +335,7 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
                 queryTask,
                 maxConcurrentShardRequestsPerNode,
                 maxShardsPerQuery,
+                rowCap,
                 List.of(queryListener),
                 queryAllocator,
                 ownsAllocator,
@@ -326,6 +354,39 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
          */
         final AtomicReference<QueryExecution> execRef = new AtomicReference<>();
 
+        // ─── Result-heap admission guard ──────────────────────────────────
+        // Charge the shared REQUEST breaker upfront with the pessimistic worst-case result footprint
+        // (rowCap × per-column widths, expansion-adjusted) so an over-budget query is rejected (429)
+        // before the distributed execution runs; batchesToRows later shrinks to the actual size.
+        final CircuitBreaker requestBreaker = circuitBreakerService == null
+            ? null
+            : circuitBreakerService.getBreaker(CircuitBreaker.REQUEST);
+        final ResultHeapCharge heapCharge = new ResultHeapCharge(requestBreaker, dag.queryId(), resultHeapExpansionFactor);
+        // Release exactly once across ALL terminals via the SAME releaseOnce, registered on two paths so
+        // whichever fires first wins (the other is a no-op): (1) runAfter(listener) — the fast path on a
+        // delivered ActionListener terminal; (2) context.onClose — the safety net, since
+        // QueryExecution.close() fires from every terminal incl. the cancel races the runAfter path misses.
+        final Releasable heapChargeRelease = Releasables.releaseOnce(heapCharge);
+        final ActionListener<ProfiledResult> releasingListener = ActionListener.runAfter(listener, heapChargeRelease::close);
+        context.onClose(heapChargeRelease);
+
+        // Upfront admission — may throw CircuitBreakingException (→ 429) before any execution/batches.
+        // No QueryExecution exists yet, so close the context here to release both the charge (via
+        // onClose) and, when coordinator.buffer_limit > 0, the owned per-query allocator.
+        try {
+            heapCharge.charge(
+                ResultSizeEstimator.estimateWorstCaseResultBytes(logicalFragment.getRowType(), rowCap, varWidthAllowanceBytes)
+            );
+        } catch (RuntimeException admissionRejected) {
+            try {
+                context.close();
+            } catch (RuntimeException closeError) {
+                admissionRejected.addSuppressed(closeError);
+            }
+            releasingListener.onFailure(admissionRejected);
+            return;
+        }
+
         // Build the profile on every terminal — both for the _explain payload (when profile=true)
         // and for the stats collector (always). When profile=false the resulting profile is
         // recorded into the collector and dropped from the response.
@@ -336,7 +397,7 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
             planningTimeMs,
             statsCollector,
             profile,
-            listener
+            releasingListener
         );
 
         final List<String> outputColumnOrder = logicalFragment.getRowType().getFieldNames();
@@ -344,7 +405,7 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
         // task it created for doExecute once this listener settles. Unregistering it ourselves
         // would double-free a task we no longer own.
         ActionListener<Iterable<VectorSchemaRoot>> batchesListener = ActionListener.wrap(batches -> {
-            Iterable<Object[]> rows = batchesToRows(batches, outputColumnOrder);
+            Iterable<Object[]> rows = batchesToRows(batches, outputColumnOrder, heapCharge);
             long totalRows = rows instanceof List ? ((List<?>) rows).size() : 0;
             queryListener.onQueryComplete(dag.queryId(), System.nanoTime() - queryStartNanos, totalRows);
             rowsListener.onResponse(rows);
@@ -362,7 +423,24 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
             );
         }
 
-        execRef.set(scheduler.execute(context, batchesListener)); // execRef read by profile listener after execution completes
+        // scheduler.execute only propagates PRE-REGISTRATION failures (ExecutionGraph.build / Query
+        // execution construction) — once a QueryExecution is registered, the scheduler drives any
+        // start()/dispatch failure to a terminal through the execution's own state machine (cancels
+        // fragments, fires the wrapped listener exactly once → executions.remove + context.close →
+        // charge release). So a throw HERE means no execution was created, no leaf fragments were
+        // dispatched, and no listener/terminal has fired: it is safe (and necessary) to close the
+        // context ourselves (its cleanup + our registered charge release, which no later terminal
+        // would run) and complete the listener exactly once via releasingListener.
+        try {
+            execRef.set(scheduler.execute(context, batchesListener)); // execRef read by profile listener after execution completes
+        } catch (RuntimeException dispatchFailed) {
+            try {
+                context.close();
+            } catch (RuntimeException closeError) {
+                dispatchFailed.addSuppressed(closeError);
+            }
+            releasingListener.onFailure(dispatchFailed);
+        }
     }
 
     /**
@@ -498,9 +576,33 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
     }
 
     static Iterable<Object[]> batchesToRows(Iterable<VectorSchemaRoot> batches, List<String> targetColumnOrder) {
+        return batchesToRows(batches, targetColumnOrder, null);
+    }
+
+    /**
+     * Materializes native Arrow batches into heap {@code Object[]} rows.
+     *
+     * <p>Heap accounting is UPFRONT: {@code executeInternal} charged the REQUEST breaker with the
+     * worst-case footprint before dispatch; here we sum the actual native size and {@link
+     * ResultHeapCharge#shrinkTo} the reservation down to it (never up — the estimate is the ceiling).
+     * Every batch's native buffer is closed in the {@code finally}, which runs on normal completion,
+     * {@link RuntimeException}, AND {@link Error} — the case the prior {@code catch (RuntimeException)}
+     * drain missed. A {@code null} heapCharge (tests / no breaker) is unaccounted.
+     */
+    static Iterable<Object[]> batchesToRows(
+        Iterable<VectorSchemaRoot> batches,
+        List<String> targetColumnOrder,
+        ResultHeapCharge heapCharge
+    ) {
         List<Object[]> rows = new ArrayList<>();
+        List<VectorSchemaRoot> owned = new ArrayList<>();
         for (VectorSchemaRoot batch : batches) {
-            try {
+            owned.add(batch);
+        }
+        long actualNativeBytes = 0;
+        try {
+            for (VectorSchemaRoot batch : owned) {
+                actualNativeBytes += estimateNativeBatchBytes(batch);
                 List<FieldVector> ordered = orderedColumns(batch, targetColumnOrder);
                 int colCount = ordered.size();
                 int rowCount = batch.getRowCount();
@@ -511,11 +613,51 @@ public class DefaultPlanExecutor extends HandledTransportAction<AnalyticsQueryRe
                     }
                     rows.add(row);
                 }
-            } finally {
-                batch.close();
+            }
+        } finally {
+            // Runs on success / RuntimeException / Error. Close each batch independently so one failure
+            // doesn't strand the rest.
+            for (VectorSchemaRoot batch : owned) {
+                try {
+                    batch.close();
+                } catch (Exception closeError) {
+                    logger.warn("failed to close result batch; native buffer may leak", closeError);
+                }
             }
         }
+        if (heapCharge != null) {
+            // Observability: the upfront estimate should bound the actual. If it under-accounted, the
+            // guard admitted a query it might have shed — warn (but never GROW the reservation).
+            long expandedActual = (long) (actualNativeBytes * heapCharge.expansionFactor());
+            if (expandedActual > heapCharge.chargedBytes()) {
+                logger.warn(
+                    "result-heap estimate under-accounted for query [{}]: estimated={} actual={} ratio={}",
+                    heapCharge.label(),
+                    heapCharge.chargedBytes(),
+                    expandedActual,
+                    heapCharge.chargedBytes() == 0
+                        ? "inf"
+                        : String.format(java.util.Locale.ROOT, "%.2f", (double) expandedActual / heapCharge.chargedBytes())
+                );
+            }
+            heapCharge.shrinkTo(actualNativeBytes);
+        }
         return rows;
+    }
+
+    /**
+     * Native footprint of a batch: sum of its vectors' buffer sizes.
+     * TODO: include dictionary vector buffers for dictionary-encoded columns — VectorSchemaRoot alone
+     * doesn't expose the DictionaryProvider, so reaching them here needs a provider handle threaded
+     * from the import path; the encoded columns' own buffers are counted, so this under-counts only the
+     * shared dictionary, which the heap-expansion factor partially absorbs.
+     */
+    private static long estimateNativeBatchBytes(VectorSchemaRoot batch) {
+        long bytes = 0;
+        for (FieldVector v : batch.getFieldVectors()) {
+            bytes += v.getBufferSize();
+        }
+        return bytes;
     }
 
     private static List<FieldVector> orderedColumns(VectorSchemaRoot batch, List<String> targetColumnOrder) {

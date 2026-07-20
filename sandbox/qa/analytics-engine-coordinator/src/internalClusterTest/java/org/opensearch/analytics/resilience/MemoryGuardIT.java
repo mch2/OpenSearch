@@ -226,6 +226,62 @@ public class MemoryGuardIT extends OpenSearchIntegTestCase {
         }
     }
 
+    /**
+     * Regression: the result-heap guard's REQUEST-breaker charge must be released on EVERY terminal,
+     * including the failure/cancel paths a storm exercises. A charge stranded on a failing query would
+     * leave the shared REQUEST breaker's {@code used} permanently elevated (observed as a plateau under
+     * concurrent load that never drains until restart). Force repeated failures (1-byte datafusion
+     * pool), then assert the REQUEST breaker drains back to its pre-query level.
+     */
+    public void testRequestBreakerReleasedAfterFailingQueries() throws Exception {
+        createIndexAndIngest();
+
+        long before = requestBreakerUsedMax();
+
+        client().admin()
+            .cluster()
+            .prepareUpdateSettings()
+            .setTransientSettings(Settings.builder().put("datafusion.memory_pool_limit_bytes", 1L).build())
+            .get();
+        try {
+            for (int i = 0; i < 12; i++) {
+                try {
+                    executePPL("source = " + INDEX_NAME + " | stats count() by url");
+                } catch (Exception expected) {
+                    // memory-pool exhaustion → 429/failure; the point is the charge must still release
+                }
+            }
+        } finally {
+            client().admin()
+                .cluster()
+                .prepareUpdateSettings()
+                .setTransientSettings(Settings.builder().putNull("datafusion.memory_pool_limit_bytes").build())
+                .get();
+        }
+
+        // The REQUEST breaker must drain back — no stranded per-query result-heap charge.
+        assertBusy(() -> {
+            long now = requestBreakerUsedMax();
+            assertTrue(
+                "REQUEST breaker must drain after failing queries (before=" + before + " now=" + now + ")",
+                now <= before
+            );
+        }, 30, java.util.concurrent.TimeUnit.SECONDS);
+    }
+
+    /** Max REQUEST-breaker estimated bytes across nodes (the shared budget our result-heap guard charges). */
+    private long requestBreakerUsedMax() {
+        NodesStatsResponse stats = client().admin().cluster().prepareNodesStats().addMetric("breaker").get();
+        long max = 0;
+        for (NodeStats nodeStats : stats.getNodes()) {
+            CircuitBreakerStats rb = nodeStats.getBreaker().getStats("request");
+            if (rb != null) {
+                max = Math.max(max, rb.getEstimated());
+            }
+        }
+        return max;
+    }
+
     public void testMemoryGuardThresholdsSettable() {
         ClusterUpdateSettingsResponse response = client().admin()
             .cluster()

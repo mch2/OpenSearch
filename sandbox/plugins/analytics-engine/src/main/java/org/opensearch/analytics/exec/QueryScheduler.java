@@ -93,11 +93,37 @@ public class QueryScheduler implements Scheduler {
         QueryExecution execution = new QueryExecution(context, graph, this::scheduleStage, wrapped);
         executions.put(queryId, execution);
 
-        setCancellationCallback(context, execution);
-
+        // A throwing stats listener must not cancel the query, so onQueryStart + the (lazy) explain log
+        // run OUTSIDE the guarded block.
         opListener.onQueryStart(queryId, graph.stageCount());
-        logger.debug("[QueryScheduler] ExecutionGraph built:\n{}", graph.explain());
-        execution.start();
+        if (logger.isDebugEnabled()) {
+            logger.debug("[QueryScheduler] ExecutionGraph built:\n{}", graph.explain());
+        }
+
+        // setCancellationCallback + start() can throw AFTER the execution is registered and AFTER leaf
+        // fragments are dispatched. Drive it to a terminal through the execution's OWN exactly-once state
+        // machine (cancelAll cancels dispatched fragments, then the CANCELLED transition fires the wrapped
+        // listener once → executions.remove + context.close → charge release) rather than letting the raw
+        // throw escape. Only PRE-registration failures (ExecutionGraph.build / new QueryExecution)
+        // propagate to the caller, where no execution exists and no listener has fired.
+        try {
+            setCancellationCallback(context, execution);
+            execution.start();
+        } catch (RuntimeException dispatchFailed) {
+            logger.debug(new ParameterizedMessage("[QueryScheduler] dispatch failed for queryId={}, cancelling", queryId), dispatchFailed);
+            // cancelAll MUST NOT propagate: it drives the terminal that fires the listener + closes the
+            // context; if it threw to DefaultPlanExecutor's pre-registration catch, that path would
+            // double-complete the listener and close the context under a live registered execution.
+            try {
+                execution.cancelAll("query dispatch failed: " + dispatchFailed.getMessage());
+            } catch (RuntimeException cancelError) {
+                cancelError.addSuppressed(dispatchFailed);
+                logger.error(
+                    new ParameterizedMessage("[QueryScheduler] cancelAll failed after dispatch failure for queryId={}", queryId),
+                    cancelError
+                );
+            }
+        }
         return execution;
     }
 
