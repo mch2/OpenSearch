@@ -144,6 +144,33 @@ public class DocValuesLeafIT extends AnalyticsRestTestCase {
         );
     }
 
+    /**
+     * Multi-segment shards exercise the PARALLEL leaf (thread-per-segment producers + bounded
+     * queue): flush between bulk waves so each shard has several segments, then verify grouped
+     * aggregation still matches the parquet baseline and repeated runs stay stable.
+     */
+    public void testMultiSegmentParallelScanMatchesBaseline() throws Exception {
+        createIndex(DV_INDEX, "lucene", 2);
+        createIndex(PARQUET_INDEX, "parquet", 2);
+        // 4 waves x 120 docs with a forced flush after each = several segments per shard.
+        for (int wave = 0; wave < 4; wave++) {
+            ingest(DV_INDEX);
+            ingest(PARQUET_INDEX);
+        }
+        String tail = "| stats count() as n, sum(amount) as total, min(amount) as lo, max(amount) as hi by category | sort category";
+        assertDvMatchesParquet(tail);
+        // Stability across repeated parallel scans (producer scheduling varies run to run).
+        setDistributedEngine(true);
+        try {
+            List<List<Object>> first = rowsOf(executePpl("source = " + DV_INDEX + " " + tail));
+            for (int i = 0; i < 5; i++) {
+                assertEquals("parallel scan run " + i, normalize(first), normalize(rowsOf(executePpl("source = " + DV_INDEX + " " + tail))));
+            }
+        } finally {
+            setDistributedEngine(false);
+        }
+    }
+
     /** Repeated queries must not leak reader leases; force-merge requires all readers released. */
     public void testRepeatedQueriesReleaseLeases() throws Exception {
         provisionBoth();

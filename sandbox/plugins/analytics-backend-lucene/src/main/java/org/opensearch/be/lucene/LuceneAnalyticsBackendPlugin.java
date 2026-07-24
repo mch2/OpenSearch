@@ -325,23 +325,36 @@ public class LuceneAnalyticsBackendPlugin implements AnalyticsSearchBackendPlugi
         );
         IndexSearcher searcher = luceneReader.searcher(shardCtx.getQueryCache(), shardCtx.getQueryCachingPolicy());
         org.apache.lucene.search.Query query = buildDvLeafQuery(delegation, shardCtx, searcher);
-        int batchSize = 8192;
-        org.opensearch.be.lucene.dv.LuceneColumnBatchSource source = new org.opensearch.be.lucene.dv.LuceneColumnBatchSource(
-            specs,
-            batchSize
-        );
+        org.opensearch.common.settings.Settings nodeSettings = shardCtx.getIndexSettings().getNodeSettings();
+        int batchSize = LucenePlugin.DV_BATCH_SIZE.get(nodeSettings);
+        int segments = searcher.getIndexReader().leaves().size();
+        int configured = LucenePlugin.DV_SEGMENT_PARALLELISM.get(nodeSettings);
+        // 0 = auto: min(segments, cores/2). Clamped to the segment count either way.
+        int parallelism = configured == 0 ? Math.max(1, Runtime.getRuntime().availableProcessors() / 2) : configured;
+        parallelism = Math.max(1, Math.min(parallelism, segments));
         try {
+            if (parallelism > 1) {
+                return new org.opensearch.be.lucene.dv.ParallelDocValuesFragmentExecutor(
+                    allocator,
+                    searcher,
+                    query,
+                    projectedSchema,
+                    () -> new org.opensearch.be.lucene.dv.LuceneColumnBatchSource(specs, batchSize),
+                    batchSize,
+                    parallelism,
+                    null // reader lease is released by the engine's bridge on leaf_close
+                );
+            }
             return new org.opensearch.be.lucene.dv.DocValuesFragmentExecutor(
                 allocator,
                 searcher,
                 query,
                 projectedSchema,
-                source,
+                new org.opensearch.be.lucene.dv.LuceneColumnBatchSource(specs, batchSize),
                 batchSize,
                 null // reader lease is released by the engine's bridge on leaf_close
             );
         } catch (java.io.IOException e) {
-            source.close();
             throw new RuntimeException("failed to open doc-values leaf on shard " + shardCtx.getShardId(), e);
         }
     }

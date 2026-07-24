@@ -82,6 +82,26 @@ public class LucenePlugin extends Plugin
     public static final LuceneDataFormat DATA_FORMAT = new LuceneDataFormat();
     private final LuceneDocumentResolver documentResolver = new LuceneDocumentResolver();
 
+    /**
+     * Producer threads per doc-values leaf scan. {@code 0} (default) = auto:
+     * {@code min(segments, cores/2)}. {@code 1} = sequential single-cursor scan.
+     */
+    public static final org.opensearch.common.settings.Setting<Integer> DV_SEGMENT_PARALLELISM = org.opensearch.common.settings.Setting
+        .intSetting("analytics.dv.segment_parallelism", 0, 0, org.opensearch.common.settings.Setting.Property.NodeScope);
+
+    /** Doc IDs per decode batch on the doc-values leaf. */
+    public static final org.opensearch.common.settings.Setting<Integer> DV_BATCH_SIZE = org.opensearch.common.settings.Setting.intSetting(
+        "analytics.dv.batch_size",
+        8192,
+        128,
+        org.opensearch.common.settings.Setting.Property.NodeScope
+    );
+
+    @Override
+    public List<org.opensearch.common.settings.Setting<?>> getSettings() {
+        return List.of(DV_SEGMENT_PARALLELISM, DV_BATCH_SIZE);
+    }
+
     /** Creates a new LucenePlugin. */
     public LucenePlugin() {}
 
