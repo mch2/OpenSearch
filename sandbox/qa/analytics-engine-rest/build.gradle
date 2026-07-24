@@ -138,7 +138,8 @@ integTest {
     //   -Dplan.generate=print  capture + log the block (read-only peek, no write)
     //   (flag absent           = assertion mode: compare capture vs golden)
     //   -Dplan.combos=...       override which named combos run (else combos.yaml defaults)
-    ['plan.generate', 'plan.combos'].each { k ->
+    // -Dtests.dv_bench=true opts into the doc-values-leaf benchmark (DocValuesLeafBenchIT).
+    ['plan.generate', 'plan.combos', 'tests.dv_bench'].each { k ->
         if (System.getProperty(k) != null) { systemProperty k, System.getProperty(k) }
     }
     // Source resources dir, so -Dplan.generate writes goldens to the source tree (not build/).
@@ -214,8 +215,10 @@ task integTestDvDictionary(type: RestIntegTestTask) {
     classpath = sourceSets.test.runtimeClasspath
     filter {
         includeTestsMatching 'org.opensearch.analytics.qa.DocValuesLeafIT'
+        includeTestsMatching 'org.opensearch.analytics.qa.DocValuesLeafBenchIT'
     }
     systemProperty 'tests.security.manager', 'false'
+    if (System.getProperty('tests.dv_bench') != null) { systemProperty 'tests.dv_bench', System.getProperty('tests.dv_bench') }
 }
 check.dependsOn(integTestDvDictionary)
 

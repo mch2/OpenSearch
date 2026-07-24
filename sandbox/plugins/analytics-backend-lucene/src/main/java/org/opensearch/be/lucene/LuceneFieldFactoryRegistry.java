@@ -19,6 +19,7 @@ import org.apache.lucene.util.BytesRef;
 import org.opensearch.common.annotation.ExperimentalApi;
 import org.opensearch.index.mapper.BooleanFieldMapper;
 import org.opensearch.index.mapper.DateFieldMapper;
+import org.opensearch.index.mapper.DocCountFieldMapper;
 import org.opensearch.index.mapper.IdFieldMapper;
 import org.opensearch.index.mapper.KeywordFieldMapper;
 import org.opensearch.index.mapper.MatchOnlyTextFieldMapper;
@@ -139,6 +140,16 @@ public final class LuceneFieldFactoryRegistry {
         register(SeqNoFieldMapper.CONTENT_TYPE, SEQ_NO_FIELD_FACTORY);
         register(SeqNoFieldMapper.PRIMARY_TERM_NAME, (d, ft, v, lft) -> d.add(new SortedNumericDocValuesField(ft.name(), (long) v)));
         register(SourceFieldMapper.CONTENT_TYPE, (d, ft, v, lft) -> d.add(new Field(ft.name(), (BytesRef) v, lft)));
+        // _version / _doc_count claim COLUMNAR_STORAGE when lucene is the PRIMARY format (the
+        // engine addField's them on every doc); plain numeric doc values, like the classic engine.
+        register(
+            org.opensearch.index.mapper.VersionFieldMapper.CONTENT_TYPE,
+            (d, ft, v, lft) -> d.add(new org.apache.lucene.document.NumericDocValuesField(ft.name(), ((Number) v).longValue()))
+        );
+        register(
+            DocCountFieldMapper.CONTENT_TYPE,
+            (d, ft, v, lft) -> d.add(new org.apache.lucene.document.NumericDocValuesField(ft.name(), ((Number) v).longValue()))
+        );
         // pending routing and ignored field handling
     }
 
