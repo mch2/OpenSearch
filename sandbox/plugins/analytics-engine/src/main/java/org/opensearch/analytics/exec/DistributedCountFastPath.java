@@ -9,7 +9,6 @@
 package org.opensearch.analytics.exec;
 
 import org.apache.calcite.rel.RelNode;
-import org.apache.calcite.rel.core.Aggregate;
 import org.apache.calcite.rel.core.AggregateCall;
 import org.apache.calcite.rel.core.TableScan;
 import org.apache.calcite.rel.type.RelDataType;
@@ -164,7 +163,7 @@ final class DistributedCountFastPath {
 
         // sum($0) over the single count column. isDistinct=false, not approximate, not ignoreNulls.
         // Overload: create(agg, distinct, approximate, ignoreNulls, rexList, argList, filterArg,
-        //                   distinctKeys, collation, type, name).
+        // distinctKeys, collation, type, name).
         AggregateCall sumCall = AggregateCall.create(
             SqlStdOperatorTable.SUM,
             /* distinct */ false,
@@ -191,7 +190,10 @@ final class DistributedCountFastPath {
             Map.of()
         );
 
-        LOGGER.debug("[count-fast-path] reshaped count() -> sum($0) over Lucene count scan (table={})", origScan.getTable().getQualifiedName());
+        LOGGER.debug(
+            "[count-fast-path] reshaped count() -> sum($0) over Lucene count scan (table={})",
+            origScan.getTable().getQualifiedName()
+        );
         return sumAgg;
     }
 

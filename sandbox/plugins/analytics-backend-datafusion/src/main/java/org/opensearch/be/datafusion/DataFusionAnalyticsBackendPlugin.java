@@ -1130,7 +1130,7 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
                 }
 
                 @Override
-                public long next(long cursor) throws Exception {
+                public long[] next(long cursor) throws Exception {
                     return bridge.next(cursor);
                 }
 

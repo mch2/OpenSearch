@@ -79,7 +79,11 @@ public final class DocValuesFragmentExecutor implements AnalyticsSearchBackendPl
     // wrapper itself must outlive that import — hence deferred close (mirrors the reduce-sink rule
     // that ArrowArray.close only frees the wrapper once Rust nulled the release callback).
     private ArrowArray pendingExport;
+    private org.apache.arrow.c.ArrowSchema pendingSchemaExport;
     private VectorSchemaRoot pendingRoot;
+
+    /** Physical batch schema (== projected schema in utf8 mode; dictionary-encoded otherwise). */
+    private final Schema physicalSchema;
 
     private boolean exhausted;
     private boolean closed;
@@ -114,6 +118,7 @@ public final class DocValuesFragmentExecutor implements AnalyticsSearchBackendPl
         Query rewritten = searcher.rewrite(query);
         this.weight = searcher.createWeight(rewritten, ScoreMode.COMPLETE_NO_SCORES, 1.0f);
         this.docBuffer = new int[batchSize];
+        this.physicalSchema = batchSource.physicalSchema(projectedSchema);
     }
 
     @Override
@@ -128,7 +133,7 @@ public final class DocValuesFragmentExecutor implements AnalyticsSearchBackendPl
             logCompletion();
             return 0L;
         }
-        VectorSchemaRoot root = VectorSchemaRoot.create(projectedSchema, allocator);
+        VectorSchemaRoot root = VectorSchemaRoot.create(physicalSchema, allocator);
         boolean exported = false;
         try {
             root.allocateNew();
@@ -140,23 +145,41 @@ public final class DocValuesFragmentExecutor implements AnalyticsSearchBackendPl
                 bytesEmitted += v.getBufferSize();
             }
             ArrowArray array = ArrowArray.allocateNew(allocator);
+            org.apache.arrow.c.ArrowSchema schemaStruct = null;
             try {
                 // Ownership of the buffers transfers into the C struct; the root is closed right
                 // after (the export holds references). The native importer moves the contents out
                 // during this same downcall; releasePending() frees the wrapper on the next pull.
-                Data.exportVectorSchemaRoot(allocator, root, null, array);
+                // Dictionary mode: the physical schema differs from the advertised one, so export
+                // it per batch (with the batch's dictionary provider) for the importer.
+                org.apache.arrow.vector.dictionary.DictionaryProvider dictionaries = batchSource.dictionaryProvider();
+                if (physicalSchema != projectedSchema) {
+                    schemaStruct = org.apache.arrow.c.ArrowSchema.allocateNew(allocator);
+                    Data.exportSchema(allocator, physicalSchema, dictionaries, schemaStruct);
+                }
+                Data.exportVectorSchemaRoot(allocator, root, dictionaries, array);
                 pendingExport = array;
+                pendingSchemaExport = schemaStruct;
                 exported = true;
                 return array.memoryAddress();
             } finally {
                 if (exported == false) {
                     array.release();
                     array.close();
+                    if (schemaStruct != null) {
+                        schemaStruct.release();
+                        schemaStruct.close();
+                    }
                 }
             }
         } finally {
             root.close();
         }
+    }
+
+    @Override
+    public long currentSchemaPtr() {
+        return pendingSchemaExport == null ? 0L : pendingSchemaExport.memoryAddress();
     }
 
     /**
@@ -203,6 +226,10 @@ public final class DocValuesFragmentExecutor implements AnalyticsSearchBackendPl
         if (pendingExport != null) {
             pendingExport.close();
             pendingExport = null;
+        }
+        if (pendingSchemaExport != null) {
+            pendingSchemaExport.close();
+            pendingSchemaExport = null;
         }
         if (pendingRoot != null) {
             pendingRoot.close();

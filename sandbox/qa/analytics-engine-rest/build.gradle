@@ -207,6 +207,24 @@ testClusters.integTestMemtable {
     setting 'datafusion.reduce.input_mode', 'memtable'
 }
 
+// ── Doc-values dictionary keyword mode: the item-9 A/B instrument ────────────
+task integTestDvDictionary(type: RestIntegTestTask) {
+    description = 'Runs the doc-values leaf tests with dictionary keyword encoding'
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    filter {
+        includeTestsMatching 'org.opensearch.analytics.qa.DocValuesLeafIT'
+    }
+    systemProperty 'tests.security.manager', 'false'
+}
+check.dependsOn(integTestDvDictionary)
+
+testClusters.integTestDvDictionary {
+    numberOfNodes = 2
+    configureAnalyticsCluster(delegate)
+    setting 'analytics.dv.keyword_encoding', 'dictionary'
+}
+
 // ── Query cache variant: all_segments=true for cache testing ─────────────────
 task integTestQueryCache(type: RestIntegTestTask) {
     description = 'Runs query cache tests with all_segments=true to bypass segment size threshold'

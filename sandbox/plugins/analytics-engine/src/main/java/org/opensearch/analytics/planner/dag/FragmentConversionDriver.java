@@ -100,7 +100,11 @@ public class FragmentConversionDriver {
         byte[] leafFragmentBytes, byte[] plainLeafFragmentBytes) {
 
         /** Back-compat 3-arg form: no non-delegated filter-pushdown leaf fragment. */
-        public WholeQueryConversion(byte[] planBytes, org.opensearch.analytics.spi.DelegationDescriptor delegation, byte[] leafFragmentBytes) {
+        public WholeQueryConversion(
+            byte[] planBytes,
+            org.opensearch.analytics.spi.DelegationDescriptor delegation,
+            byte[] leafFragmentBytes
+        ) {
             this(planBytes, delegation, leafFragmentBytes, null);
         }
     }
@@ -148,9 +152,28 @@ public class FragmentConversionDriver {
         List<OpenSearchFilter> filters = RelNodeUtils.findAllNodes(resolved, OpenSearchFilter.class);
         OpenSearchFilter whereFilter = filters.isEmpty() ? null : filters.getLast();
 
+        // Multi-table queries (joins): disable delegation. The delegation machinery attaches the
+        // DelegationDescriptor to a single ShardScanExec leaf, but joins have >1 leaf table — the
+        // descriptor would bind to the wrong scan, and the delegated predicate is stripped from the
+        // Substrait (replaced by a marker UDF), so the filter is silently lost. Force all predicates
+        // to stay native in the Substrait until per-table delegation is implemented.
+        // Detection: count leaf OpenSearchTableScan nodes in the resolved tree. >1 = join.
+        List<OpenSearchTableScan> tableScans = RelNodeUtils.findAllNodes(resolved, OpenSearchTableScan.class);
+        boolean isMultiTable = tableScans.size() > 1;
+
         IntraOperatorDelegationBytes delegationBytes = new IntraOperatorDelegationBytes(registry);
-        RelNode stripped = strip(resolved, delegationBytes);
-        List<DelegatedExpression> delegated = delegationBytes.getResult();
+        RelNode stripped;
+        List<DelegatedExpression> delegated;
+        if (isMultiTable) {
+            // For joins: strip without delegation — always unwrap annotations to native RexNodes
+            // (no markers). This preserves real filter predicates in the Substrait plan for the
+            // distributed engine's native FilterExec.
+            stripped = stripNative(resolved);
+            delegated = List.of();
+        } else {
+            stripped = strip(resolved, delegationBytes);
+            delegated = delegationBytes.getResult();
+        }
         byte[] planBytes = convertor.convertFragment(stripped);
         if (delegated.isEmpty()) {
             // No Lucene-delegated predicate. But if there's still a WHERE filter over the (datafusion)
@@ -682,6 +705,36 @@ public class FragmentConversionDriver {
                 return LogicalFilter.create(strippedChildren.getFirst(), flattened);
             }
             return openSearchNode.stripAnnotations(strippedChildren, resolver);
+        }
+        boolean childrenChanged = false;
+        for (int i = 0; i < strippedChildren.size(); i++) {
+            if (strippedChildren.get(i) != node.getInputs().get(i)) {
+                childrenChanged = true;
+                break;
+            }
+        }
+        return childrenChanged ? node.copy(node.getTraitSet(), strippedChildren) : node;
+    }
+
+    /**
+     * Structural-only strip: converts OpenSearch operator wrappers (OpenSearchFilter, OpenSearchProject,
+     * etc.) into plain Calcite LogicalFilter/LogicalProject for Substrait emission, but NEVER emits
+     * delegation markers — all AnnotatedPredicates are unwrapped to their native RexNode. Used for
+     * multi-table (join) queries where delegation is not supported on the distributed path.
+     */
+    private static RelNode stripNative(RelNode node) {
+        if (node instanceof OpenSearchStageInputScan) {
+            return node;
+        }
+        if (node instanceof OpenSearchExchangeReducer) {
+            return stripNative(node.getInputs().getFirst());
+        }
+        List<RelNode> strippedChildren = new ArrayList<>(node.getInputs().size());
+        for (RelNode input : node.getInputs()) {
+            strippedChildren.add(stripNative(input));
+        }
+        if (node instanceof OpenSearchRelNode openSearchNode) {
+            return openSearchNode.stripAnnotations(strippedChildren, OperatorAnnotation::unwrap);
         }
         boolean childrenChanged = false;
         for (int i = 0; i < strippedChildren.size(); i++) {

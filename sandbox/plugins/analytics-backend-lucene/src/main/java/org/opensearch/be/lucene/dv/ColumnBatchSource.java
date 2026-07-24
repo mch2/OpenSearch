@@ -45,6 +45,25 @@ public interface ColumnBatchSource extends Releasable {
     List<ColumnDecodeStats> decodeStats();
 
     /**
+     * The PHYSICAL schema of the batches this source fills, derived from the advertised (logical)
+     * schema. Identical by default; the dictionary keyword mode swaps keyword columns for
+     * dictionary-encoded Int32 index vectors. The executor creates roots from this schema and, when
+     * it differs from the advertised one, exports it per batch so the consumer can import + cast.
+     */
+    default org.apache.arrow.vector.types.pojo.Schema physicalSchema(org.apache.arrow.vector.types.pojo.Schema advertised) {
+        return advertised;
+    }
+
+    /**
+     * Dictionary provider for the CURRENT batch's dictionary-encoded vectors, or {@code null} when
+     * nothing is dictionary-encoded. Contents are valid until the next {@code decodeBatch} call on
+     * this source (per-batch dictionaries — see the "ordinal question" in the spec).
+     */
+    default org.apache.arrow.vector.dictionary.DictionaryProvider dictionaryProvider() {
+        return null;
+    }
+
+    /**
      * Per-column decode counters. {@code bulkDecodeBatches} counts batches served by a codec bulk
      * API; {@code perDocFallbackBatches} counts batches that fell back to per-doc {@code advanceExact}.
      * Without this split, "bulk decode working" and "silently on the slow path" are indistinguishable

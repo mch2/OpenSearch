@@ -674,6 +674,14 @@ public class AnalyticsSearchService implements AutoCloseable {
                 }
 
                 @Override
+                public long currentSchemaPtr() {
+                    // MUST delegate: a dictionary-mode batch's physical schema differs from the
+                    // advertised one; dropping this pointer makes the native importer read an Int32
+                    // dictionary array as Utf8View (2 buffers vs variadic-view layout) and panic.
+                    return inner.currentSchemaPtr();
+                }
+
+                @Override
                 public void close() {
                     try {
                         inner.close();

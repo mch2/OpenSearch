@@ -38,20 +38,52 @@ impl JavaCursorStream {
         Self { cursor, schema, done: false }
     }
 
-    /// Import one Java-produced batch (FFI_ArrowArray ptr) using the leaf's output schema.
+    /// Import one Java-produced batch (FFI_ArrowArray ptr) using the leaf's output schema, or —
+    /// when `schema_ptr != 0` — the per-batch schema Java exported alongside it (dictionary-encoded
+    /// keyword batches, dv.keyword_encoding=dictionary). A dictionary batch is CAST to the leaf's
+    /// advertised schema after import so parent operators see the planned types; the dictionary
+    /// still saves decode + transfer (the A/B instrument), while dictionary-native compute is the
+    /// roadmap item this flag informs.
     ///
     /// # Safety
-    /// `array_ptr` must be a valid `FFI_ArrowArray` produced by the Java cursor's C-Data export.
-    unsafe fn import(&self, array_ptr: i64) -> Result<RecordBatch, DataFusionError> {
+    /// `array_ptr` (and `schema_ptr` when non-zero) must be valid C-Data structs produced by the
+    /// Java cursor's export; ownership of both transfers here.
+    unsafe fn import(&self, array_ptr: i64, schema_ptr: i64) -> Result<RecordBatch, DataFusionError> {
         let ffi_array = FFI_ArrowArray::from_raw(array_ptr as *mut FFI_ArrowArray);
-        // The leaf schema is authoritative for the cursor's batches; build the FFI schema from it
-        // rather than requiring Java to also ship a schema pointer per batch.
-        let ffi_schema = FFI_ArrowSchema::try_from(self.schema.as_ref())
-            .map_err(|e| DataFusionError::Execution(format!("leaf schema -> FFI failed: {e}")))?;
-        let mut array_data = arrow_array::ffi::from_ffi(ffi_array, &ffi_schema)
-            .map_err(|e| DataFusionError::Execution(format!("leaf C-Data import failed: {e}")))?;
-        array_data.align_buffers();
-        Ok(RecordBatch::from(StructArray::from(array_data)))
+        let batch = if schema_ptr != 0 {
+            let ffi_schema = FFI_ArrowSchema::from_raw(schema_ptr as *mut FFI_ArrowSchema);
+            let mut array_data = arrow_array::ffi::from_ffi(ffi_array, &ffi_schema)
+                .map_err(|e| DataFusionError::Execution(format!("leaf C-Data import (per-batch schema) failed: {e}")))?;
+            array_data.align_buffers();
+            RecordBatch::from(StructArray::from(array_data))
+        } else {
+            // The leaf schema is authoritative for the cursor's batches; build the FFI schema from
+            // it rather than requiring Java to also ship a schema pointer per batch.
+            let ffi_schema = FFI_ArrowSchema::try_from(self.schema.as_ref())
+                .map_err(|e| DataFusionError::Execution(format!("leaf schema -> FFI failed: {e}")))?;
+            let mut array_data = arrow_array::ffi::from_ffi(ffi_array, &ffi_schema)
+                .map_err(|e| DataFusionError::Execution(format!("leaf C-Data import failed: {e}")))?;
+            array_data.align_buffers();
+            RecordBatch::from(StructArray::from(array_data))
+        };
+        if batch.schema() == self.schema {
+            return Ok(batch);
+        }
+        // Column-wise cast to the advertised schema (Dictionary(Int32,Utf8) -> Utf8/Utf8View etc).
+        let mut columns = Vec::with_capacity(batch.num_columns());
+        for (i, field) in self.schema.fields().iter().enumerate() {
+            let col = batch.column(i);
+            if col.data_type() == field.data_type() {
+                columns.push(col.clone());
+            } else {
+                columns.push(
+                    arrow::compute::cast(col, field.data_type())
+                        .map_err(|e| DataFusionError::Execution(format!("leaf batch cast to advertised schema failed: {e}")))?,
+                );
+            }
+        }
+        RecordBatch::try_new(std::sync::Arc::clone(&self.schema), columns)
+            .map_err(|e| DataFusionError::Execution(format!("leaf batch rebuild failed: {e}")))
     }
 }
 
@@ -66,8 +98,8 @@ impl Stream for JavaCursorStream {
         // thread driving this stream (the leaf is wrapped in CrossRtStream like every other native
         // stream), so blocking here is consistent with the existing native-execution model.
         match leaf_bridge::leaf_next(self.cursor) {
-            Ok(Some(array_ptr)) => {
-                let res = unsafe { self.import(array_ptr) };
+            Ok(Some((array_ptr, schema_ptr))) => {
+                let res = unsafe { self.import(array_ptr, schema_ptr) };
                 if res.is_err() {
                     self.done = true;
                 }

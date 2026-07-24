@@ -388,8 +388,12 @@ public interface AnalyticsSearchBackendPlugin {
             long arrowSchemaPtr
         ) throws Exception;
 
-        /** Pull one batch from a JAVA_CURSOR; returns an Arrow C-Data {@code FFI_ArrowArray} pointer, or 0 at EOS. */
-        long next(long cursor) throws Exception;
+        /**
+         * Pull one batch from a JAVA_CURSOR. Returns {@code [arrayPtr, schemaPtr]}: the Arrow C-Data
+         * {@code FFI_ArrowArray} pointer (0 = EOS) plus an optional per-batch {@code FFI_ArrowSchema}
+         * pointer (0 = batch matches the advertised leaf schema).
+         */
+        long[] next(long cursor) throws Exception;
 
         /** Release a JAVA_CURSOR's reader/context. */
         void close(long cursor);
@@ -426,6 +430,16 @@ public interface AnalyticsSearchBackendPlugin {
          * released on the following {@code next()} / {@link #close()}.
          */
         long next() throws Exception;
+
+        /**
+         * The current batch's per-batch {@code FFI_ArrowSchema} pointer, or 0 when the batch
+         * matches the leaf's advertised schema. Non-zero only for physically re-encoded batches
+         * (dictionary keyword mode). Valid until the next {@link #next()} call; same wrapper
+         * ownership rule as the array export.
+         */
+        default long currentSchemaPtr() {
+            return 0L;
+        }
 
         /** Release all cursor resources (pending exports, per-segment decoders). Idempotent. */
         void close();

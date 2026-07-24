@@ -76,8 +76,12 @@ public final class LeafBridgeCallbacks {
             long arrowSchemaPtr
         ) throws Exception;
 
-        /** Pull one batch from a JAVA_CURSOR; returns the FFI_ArrowArray pointer, or 0 at EOS. */
-        long next(long cursor) throws Exception;
+        /**
+         * Pull one batch from a JAVA_CURSOR. Returns {@code [arrayPtr, schemaPtr]}: the
+         * FFI_ArrowArray pointer (0 = EOS) plus an optional per-batch FFI_ArrowSchema pointer
+         * (0 = batch matches the leaf's advertised schema; non-zero for dictionary-encoded batches).
+         */
+        long[] next(long cursor) throws Exception;
 
         /** Release a JAVA_CURSOR's reader/context. */
         void close(long cursor);
@@ -144,17 +148,19 @@ public final class LeafBridgeCallbacks {
     }
 
     /**
-     * FFM upcall (matches Rust {@code LeafNextFn = fn(i64, *mut i64) -> i32}). Writes the
-     * FFI_ArrowArray pointer (or 0 = EOS) through {@code outArray}; returns 0 / negative.
+     * FFM upcall (matches Rust {@code LeafNextFn = fn(i64, *mut i64, *mut i64) -> i32}). Writes the
+     * FFI_ArrowArray pointer (or 0 = EOS) through {@code outArray} and the optional per-batch
+     * FFI_ArrowSchema pointer (0 = advertised schema) through {@code outSchema}; returns 0 / negative.
      */
-    public static int leafNext(long cursor, MemorySegment outArray) {
+    public static int leafNext(long cursor, MemorySegment outArray, MemorySegment outSchema) {
         LeafBridge bridge = BRIDGE;
         if (bridge == null) {
             return -1;
         }
         try {
-            long arrayPtr = bridge.next(cursor);
-            outArray.reinterpret(Long.BYTES).set(ValueLayout.JAVA_LONG, 0, arrayPtr);
+            long[] ptrs = bridge.next(cursor);
+            outArray.reinterpret(Long.BYTES).set(ValueLayout.JAVA_LONG, 0, ptrs[0]);
+            outSchema.reinterpret(Long.BYTES).set(ValueLayout.JAVA_LONG, 0, ptrs.length > 1 ? ptrs[1] : 0L);
             return 0;
         } catch (Throwable t) {
             LOGGER.error("leafNext failed for cursor=" + cursor, t);

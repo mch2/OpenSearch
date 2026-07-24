@@ -169,12 +169,13 @@ public final class DistributedLeafBridge implements AnalyticsSearchBackendPlugin
     }
 
     @Override
-    public long next(long cursor) throws Exception {
+    public long[] next(long cursor) throws Exception {
         AnalyticsSearchBackendPlugin.LeafCursor c = openCursors.get(cursor);
         if (c == null) {
             throw new IllegalStateException("leafNext for unknown/closed cursor " + cursor);
         }
-        return c.next();
+        long arrayPtr = c.next();
+        return new long[] { arrayPtr, arrayPtr == 0 ? 0L : c.currentSchemaPtr() };
     }
 
     @Override

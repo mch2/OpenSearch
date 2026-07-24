@@ -332,6 +332,15 @@ public class LuceneAnalyticsBackendPlugin implements AnalyticsSearchBackendPlugi
         // 0 = auto: min(segments, cores/2). Clamped to the segment count either way.
         int parallelism = configured == 0 ? Math.max(1, Runtime.getRuntime().availableProcessors() / 2) : configured;
         parallelism = Math.max(1, Math.min(parallelism, segments));
+        boolean dictionary = "dictionary".equals(LucenePlugin.DV_KEYWORD_ENCODING.get(nodeSettings));
+        if (dictionary) {
+            // Per-batch dictionaries ride a per-batch schema export; the parallel queue would need
+            // schema plumbed alongside each batch — sequential is the A/B instrument for now.
+            parallelism = 1;
+        }
+        org.opensearch.be.lucene.dv.LuceneColumnBatchSource.KeywordEncoding encoding = dictionary
+            ? org.opensearch.be.lucene.dv.LuceneColumnBatchSource.KeywordEncoding.DICTIONARY
+            : org.opensearch.be.lucene.dv.LuceneColumnBatchSource.KeywordEncoding.UTF8;
         try {
             if (parallelism > 1) {
                 return new org.opensearch.be.lucene.dv.ParallelDocValuesFragmentExecutor(
@@ -350,7 +359,7 @@ public class LuceneAnalyticsBackendPlugin implements AnalyticsSearchBackendPlugi
                 searcher,
                 query,
                 projectedSchema,
-                new org.opensearch.be.lucene.dv.LuceneColumnBatchSource(specs, batchSize),
+                new org.opensearch.be.lucene.dv.LuceneColumnBatchSource(specs, batchSize, encoding, dictionary ? allocator : null),
                 batchSize,
                 null // reader lease is released by the engine's bridge on leaf_close
             );

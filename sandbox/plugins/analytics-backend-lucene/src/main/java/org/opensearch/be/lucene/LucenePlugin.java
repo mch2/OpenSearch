@@ -97,9 +97,23 @@ public class LucenePlugin extends Plugin
         org.opensearch.common.settings.Setting.Property.NodeScope
     );
 
+    /**
+     * Keyword materialization on the doc-values leaf: {@code utf8} (default — materialize term
+     * bytes per row) or {@code dictionary} (DictionaryArray(Int32→Utf8) with per-batch
+     * dictionaries). The deliberate A/B instrument for the dictionary-execution decision; the
+     * benchmark must report group-by numbers under both. Dictionary mode implies a sequential
+     * (single-producer) scan.
+     */
+    public static final org.opensearch.common.settings.Setting<String> DV_KEYWORD_ENCODING = org.opensearch.common.settings.Setting
+        .simpleString("analytics.dv.keyword_encoding", "utf8", v -> {
+            if (v.equals("utf8") == false && v.equals("dictionary") == false) {
+                throw new IllegalArgumentException("analytics.dv.keyword_encoding must be utf8 or dictionary, got [" + v + "]");
+            }
+        }, org.opensearch.common.settings.Setting.Property.NodeScope);
+
     @Override
     public List<org.opensearch.common.settings.Setting<?>> getSettings() {
-        return List.of(DV_SEGMENT_PARALLELISM, DV_BATCH_SIZE);
+        return List.of(DV_SEGMENT_PARALLELISM, DV_BATCH_SIZE, DV_KEYWORD_ENCODING);
     }
 
     /** Creates a new LucenePlugin. */

@@ -70,13 +70,33 @@ public final class LuceneColumnBatchSource implements ColumnBatchSource {
         return true;
     }
 
+    /** Keyword materialization mode (the deliberate A/B — see the spec's "ordinal question"). */
+    public enum KeywordEncoding {
+        /** Materialize term bytes per row (simple, correct baseline; the default). */
+        UTF8,
+        /**
+         * Emit {@code DictionaryArray(Int32 -> Utf8)}: per-doc SEGMENT ordinals are re-encoded
+         * against a PER-BATCH dictionary built from the batch's distinct ords (segments' term
+         * dictionaries differ, so segment ords can't be used directly across batches; per-batch
+         * resolution costs one lookupOrd per DISTINCT term per batch instead of one per row —
+         * the win grows with duplication, exactly the group-by shape item 9 cares about).
+         */
+        DICTIONARY
+    }
+
     private final List<DvColumnSpec> specs;
     private final long[] scratch;
     private final int[] docsScratch;
+    private final KeywordEncoding keywordEncoding;
+    /** Allocator for per-batch dictionary vectors (dictionary mode only; null in utf8 mode). */
+    private final org.apache.arrow.memory.BufferAllocator dictionaryAllocator;
 
     // Per-column iterator state, valid for the CURRENT segment only.
     private LeafReaderContext currentLeaf;
     private final ColumnState[] columns;
+
+    // Dictionary mode: the current batch's dictionaries (rebuilt each decodeBatch; freed on the next).
+    private org.apache.arrow.vector.dictionary.DictionaryProvider.MapDictionaryProvider currentDictionaries;
 
     private static final class ColumnState {
         NumericDocValues numeric;          // singleton numeric (bulk-capable)
@@ -89,13 +109,64 @@ public final class LuceneColumnBatchSource implements ColumnBatchSource {
     }
 
     public LuceneColumnBatchSource(List<DvColumnSpec> specs, int batchSize) {
+        this(specs, batchSize, KeywordEncoding.UTF8, null);
+    }
+
+    public LuceneColumnBatchSource(
+        List<DvColumnSpec> specs,
+        int batchSize,
+        KeywordEncoding keywordEncoding,
+        org.apache.arrow.memory.BufferAllocator dictionaryAllocator
+    ) {
+        if (keywordEncoding == KeywordEncoding.DICTIONARY && dictionaryAllocator == null) {
+            throw new IllegalArgumentException("dictionary keyword mode requires an allocator for dictionary vectors");
+        }
         this.specs = specs;
         this.scratch = new long[batchSize];
         this.docsScratch = new int[batchSize];
+        this.keywordEncoding = keywordEncoding;
+        this.dictionaryAllocator = dictionaryAllocator;
         this.columns = new ColumnState[specs.size()];
         for (int i = 0; i < columns.length; i++) {
             columns[i] = new ColumnState();
         }
+    }
+
+    @Override
+    public org.apache.arrow.vector.types.pojo.Schema physicalSchema(org.apache.arrow.vector.types.pojo.Schema advertised) {
+        if (keywordEncoding == KeywordEncoding.UTF8) {
+            return advertised;
+        }
+        // Swap keyword columns for dictionary-encoded fields: Int32 indices -> Utf8 values.
+        List<org.apache.arrow.vector.types.pojo.Field> fields = new ArrayList<>(advertised.getFields().size());
+        for (int c = 0; c < specs.size(); c++) {
+            org.apache.arrow.vector.types.pojo.Field f = advertised.getFields().get(c);
+            if (specs.get(c).kind() == DvColumnSpec.DecodeKind.KEYWORD_ORD) {
+                org.apache.arrow.vector.types.pojo.DictionaryEncoding enc = new org.apache.arrow.vector.types.pojo.DictionaryEncoding(
+                    c, // dictionary id = column ordinal (unique per fragment)
+                    false,
+                    new ArrowType.Int(32, true)
+                );
+                // Arrow Java convention for encoded vectors: the FIELD carries the INDEX type
+                // (Int32) plus the DictionaryEncoding; the VALUE type (Utf8) lives on the
+                // dictionary vector in the provider. (Mirrors DictionaryEncoder.encode.)
+                fields.add(
+                    new org.apache.arrow.vector.types.pojo.Field(
+                        f.getName(),
+                        new org.apache.arrow.vector.types.pojo.FieldType(f.isNullable(), new ArrowType.Int(32, true), enc),
+                        null
+                    )
+                );
+            } else {
+                fields.add(f);
+            }
+        }
+        return new org.apache.arrow.vector.types.pojo.Schema(fields);
+    }
+
+    @Override
+    public org.apache.arrow.vector.dictionary.DictionaryProvider dictionaryProvider() {
+        return currentDictionaries;
     }
 
     @Override
@@ -104,17 +175,29 @@ public final class LuceneColumnBatchSource implements ColumnBatchSource {
         if (leaf != currentLeaf) {
             openSegment(leaf);
         }
+        releaseCurrentDictionaries();
         for (int c = 0; c < specs.size(); c++) {
             DvColumnSpec spec = specs.get(c);
             ColumnState state = columns[c];
             FieldVector vector = out.getVector(c);
             long start = System.nanoTime();
             if (spec.kind() == DvColumnSpec.DecodeKind.KEYWORD_ORD) {
-                decodeKeyword(state, docIds, count, vector);
+                if (keywordEncoding == KeywordEncoding.DICTIONARY) {
+                    decodeKeywordDictionary(c, state, docIds, count, (IntVector) vector);
+                } else {
+                    decodeKeyword(state, docIds, count, vector);
+                }
             } else {
                 decodeNumeric(spec.kind(), state, docIds, count, vector);
             }
             state.nanos += System.nanoTime() - start;
+        }
+    }
+
+    private void releaseCurrentDictionaries() {
+        if (currentDictionaries != null) {
+            currentDictionaries.close();
+            currentDictionaries = null;
         }
     }
 
@@ -268,6 +351,78 @@ public final class LuceneColumnBatchSource implements ColumnBatchSource {
         }
     }
 
+    /**
+     * Dictionary keyword decode: gather per-doc SEGMENT ordinals, then build a per-batch dictionary
+     * of only the DISTINCT ords (sorted, so the dictionary is ordered like the term dict) and remap
+     * each row to its dictionary index. One lookupOrd per distinct term per batch — the dictionary
+     * A/B's cost model versus utf8's one-materialization-per-row.
+     */
+    private void decodeKeywordDictionary(int columnOrdinal, ColumnState state, int[] docIds, int count, IntVector indices)
+        throws IOException {
+        state.fallbackBatches++; // still per-doc ordValue at Lucene 10.5 (bulk ordValues is fork-only)
+        long[] ords = scratch; // reuse the numeric scratch: segment ords fit in long
+        for (int i = 0; i < count; i++) {
+            int ord = -1;
+            if (state.sorted != null) {
+                SortedDocValues dv = state.sorted;
+                if (dv.docID() <= docIds[i] && dv.advanceExact(docIds[i])) {
+                    ord = dv.ordValue();
+                }
+            } else {
+                SortedSetDocValues dv = state.sortedSet;
+                if (dv.advanceExact(docIds[i])) {
+                    if (dv.docValueCount() > 1) {
+                        throw new DocValuesLeafUnsupportedException(
+                            DocValuesLeafUnsupportedException.Reason.MULTI_VALUED,
+                            "field [" + indices.getName() + "] has " + dv.docValueCount() + " values at doc " + docIds[i]
+                        );
+                    }
+                    ord = (int) dv.nextOrd();
+                }
+            }
+            ords[i] = ord;
+        }
+        // Distinct ords, ascending (-1 = null excluded).
+        long[] sorted = new long[count];
+        System.arraycopy(ords, 0, sorted, 0, count);
+        java.util.Arrays.sort(sorted, 0, count);
+        int distinct = 0;
+        long prev = Long.MIN_VALUE;
+        for (int i = 0; i < count; i++) {
+            if (sorted[i] >= 0 && sorted[i] != prev) {
+                sorted[distinct++] = sorted[i];
+                prev = sorted[i];
+            }
+        }
+        // Materialize the per-batch dictionary vector (one lookupOrd per distinct term).
+        VarCharVector dictVector = new VarCharVector("dict-" + indices.getName(), dictionaryAllocator);
+        dictVector.allocateNew(distinct);
+        for (int d = 0; d < distinct; d++) {
+            BytesRef term = state.sorted != null ? state.sorted.lookupOrd((int) sorted[d]) : state.sortedSet.lookupOrd(sorted[d]);
+            dictVector.setSafe(d, term.bytes, term.offset, term.length);
+        }
+        dictVector.setValueCount(distinct);
+        if (currentDictionaries == null) {
+            currentDictionaries = new org.apache.arrow.vector.dictionary.DictionaryProvider.MapDictionaryProvider();
+        }
+        currentDictionaries.put(
+            new org.apache.arrow.vector.dictionary.Dictionary(
+                dictVector,
+                new org.apache.arrow.vector.types.pojo.DictionaryEncoding(columnOrdinal, false, new ArrowType.Int(32, true))
+            )
+        );
+        // Remap rows: segment ord -> dictionary index via binary search over the distinct set.
+        for (int i = 0; i < count; i++) {
+            if (ords[i] < 0) {
+                indices.setNull(i);
+            } else {
+                int idx = java.util.Arrays.binarySearch(sorted, 0, distinct, ords[i]);
+                assert idx >= 0 : "ord " + ords[i] + " missing from its own batch dictionary";
+                indices.setSafe(i, idx);
+            }
+        }
+    }
+
     private static void writeUtf8(FieldVector vector, int row, BytesRef term) {
         if (vector instanceof VarCharVector v) {
             v.setSafe(row, term.bytes, term.offset, term.length);
@@ -293,6 +448,7 @@ public final class LuceneColumnBatchSource implements ColumnBatchSource {
 
     @Override
     public void close() {
-        currentLeaf = null; // iterators belong to the reader lease; nothing to free here
+        releaseCurrentDictionaries();
+        currentLeaf = null; // iterators belong to the reader lease; nothing else to free here
     }
 }

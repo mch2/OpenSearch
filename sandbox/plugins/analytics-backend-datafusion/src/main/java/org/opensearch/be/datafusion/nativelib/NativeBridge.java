@@ -768,7 +768,11 @@ public final class NativeBridge {
                     seg
                 )
             );
-            MethodHandle leafNext = lookup.findStatic(cb, "leafNext", java.lang.invoke.MethodType.methodType(int.class, long.class, seg));
+            MethodHandle leafNext = lookup.findStatic(
+                cb,
+                "leafNext",
+                java.lang.invoke.MethodType.methodType(int.class, long.class, seg, seg)
+            );
             MethodHandle leafClose = lookup.findStatic(cb, "leafClose", java.lang.invoke.MethodType.methodType(void.class, long.class));
 
             java.lang.foreign.MemorySegment openStub = linker.upcallStub(
@@ -793,7 +797,7 @@ public final class NativeBridge {
             );
             java.lang.foreign.MemorySegment nextStub = linker.upcallStub(
                 leafNext,
-                FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG, ValueLayout.ADDRESS),
+                FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG, ValueLayout.ADDRESS, ValueLayout.ADDRESS),
                 arena
             );
             java.lang.foreign.MemorySegment closeStub = linker.upcallStub(

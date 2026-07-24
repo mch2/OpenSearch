@@ -60,8 +60,12 @@ type OpenFragmentFn = unsafe extern "C" fn(
     *mut i32,
     *mut i64,
 ) -> i32;
-/// `leafNext(cursor) -> FFI_ArrowArray ptr | 0 (EOS) | negative (error)`. Pull one batch (case 3).
-type LeafNextFn = unsafe extern "C" fn(i64, *mut i64) -> i32;
+/// `leafNext(cursor, out_array*, out_schema*) -> 0|neg`. Pull one batch (case 3). Java writes the
+/// `FFI_ArrowArray*` (0 = EOS) plus an OPTIONAL per-batch `FFI_ArrowSchema*` (0 = the batch matches
+/// the leaf's advertised schema). A non-zero schema is used for dictionary-encoded keyword batches
+/// (dv.keyword_encoding=dictionary), whose physical layout differs from the planned Utf8 column;
+/// the consumer imports with it and casts to the advertised schema.
+type LeafNextFn = unsafe extern "C" fn(i64, *mut i64, *mut i64) -> i32;
 /// `leafClose(cursor)`. Release the Java cursor + its reader/context (case 3).
 type LeafCloseFn = unsafe extern "C" fn(i64);
 
@@ -168,18 +172,20 @@ pub fn open_fragment(
     }
 }
 
-/// Pull one batch from a Java cursor (case 3). Returns `Some(FFI_ArrowArray ptr)` or `None` at EOS.
-pub fn leaf_next(cursor: i64) -> Result<Option<i64>, String> {
+/// Pull one batch from a Java cursor (case 3). Returns `Some((array_ptr, schema_ptr))` or `None`
+/// at EOS; `schema_ptr == 0` means the batch matches the leaf's advertised schema.
+pub fn leaf_next(cursor: i64) -> Result<Option<(i64, i64)>, String> {
     let cb: LeafNextFn = load(&LEAF_NEXT).ok_or_else(|| "leaf bridge not registered".to_string())?;
     let mut array_ptr: i64 = 0;
-    let rc = unsafe { cb(cursor, &mut array_ptr as *mut i64) };
+    let mut schema_ptr: i64 = 0;
+    let rc = unsafe { cb(cursor, &mut array_ptr as *mut i64, &mut schema_ptr as *mut i64) };
     if rc < 0 {
         return Err(format!("leafNext(cursor={cursor}) failed with code {rc}"));
     }
     if array_ptr == 0 {
         Ok(None) // EOS
     } else {
-        Ok(Some(array_ptr))
+        Ok(Some((array_ptr, schema_ptr)))
     }
 }
 
