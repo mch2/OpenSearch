@@ -179,5 +179,9 @@ configurations.all {
     force "commons-io:commons-io:${versions.commonsio}"
     force "org.codehaus.janino:janino:3.1.12"
     force "org.codehaus.janino:commons-compiler:3.1.12"
+    // Fresh unified-query SNAPSHOTs pull calcite-babel 1.42 (avatica 1.28) + json-path 2.10;
+    // align with the versions analytics-framework pins (both jars are excluded from the bundle).
+    force 'org.apache.calcite.avatica:avatica-core:1.27.0'
+    force 'com.jayway.jsonpath:json-path:2.9.0'
   }
 }
