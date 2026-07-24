@@ -24,7 +24,8 @@ use datafusion::common::Result;
 use datafusion::config::ConfigOptions;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion_distributed::{
-    DistributedConfig, DistributedLeafExec, TaskEstimation, TaskEstimator, TaskRoutingContext,
+    DistributedLeafExec, TaskEstimation, TaskEstimator, TaskRoutingContext,
+    get_distributed_worker_resolver,
 };
 use url::Url;
 
@@ -151,8 +152,7 @@ impl TaskEstimator for ShardScanTaskEstimator {
             return Ok(None);
         };
 
-        let urls = DistributedConfig::from_task_context(&ctx.task_ctx)?
-            .worker_resolver()
+        let urls = get_distributed_worker_resolver(ctx.task_ctx.session_config())?
             .get_urls()?;
         if urls.is_empty() {
             return Ok(None);

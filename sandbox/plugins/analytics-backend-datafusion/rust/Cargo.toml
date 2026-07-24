@@ -98,7 +98,7 @@ base64 = "0.22"
 # datafusion-distributed: the distributed planner/scheduler that replaces the Java-side DAG. Used
 # by src/distributed/* in the library build. Path dep to the local checkout (Phase 1; a Brazil
 # vendoring story comes later). datafusion-proto backs the stage-subplan codec.
-datafusion-distributed = { path = "/local/home/handalm/datafusion-distributed" }
+datafusion-distributed = { path = "/Users/handalm/Workspace/datafusion-distributed" }
 datafusion-proto = "=54.0.0"
 # tonic for the data-node Worker gRPC server (df_create_worker). Version pinned to match the one
 # datafusion-distributed resolves so there is a single tonic in the graph. (tokio-stream is already
