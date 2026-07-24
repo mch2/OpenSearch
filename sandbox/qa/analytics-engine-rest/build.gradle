@@ -228,6 +228,36 @@ testClusters.integTestDvDictionary {
     setting 'analytics.dv.keyword_encoding', 'dictionary'
 }
 
+// ── Doc-values STORAGE variant: run the v1-fit query-shape ITs against a lucene-primary
+//    (doc-values-backed) index through the distributed engine — the broad DV-leaf coverage.
+//    Only datasets within the DV leaf's v1 type scope (numeric/keyword/date, no text projection,
+//    no ip/geo/binary/multi-valued) are included; the rest would fail at index creation.
+task integTestDvStorage(type: RestIntegTestTask) {
+    description = 'Runs v1-compatible query-shape ITs against a doc-values-backed (lucene-primary) index'
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    filter {
+        // v1-fit datasets only: numeric/keyword/date columns, no ip/geo/binary/text-projection.
+        // (TwoShardAggregationIT/merge_coverage carries an `ip` column → rejected at index creation
+        //  under lucene-primary, correctly; excluded here rather than muted.)
+        includeTestsMatching 'org.opensearch.analytics.qa.PplClickBenchIT'
+        includeTestsMatching 'org.opensearch.analytics.qa.AggregationsPplIT'
+        includeTestsMatching 'org.opensearch.analytics.qa.StatsCommandIT'
+        includeTestsMatching 'org.opensearch.analytics.qa.DistinctCountIT'
+        includeTestsMatching 'org.opensearch.analytics.qa.SingleShardAggregationIT'
+    }
+    systemProperty 'tests.security.manager', 'false'
+    // Provision lucene-primary indices; the DV leaf only runs on the distributed engine.
+    systemProperty 'tests.analytics.storage', 'docvalues'
+}
+check.dependsOn(integTestDvStorage)
+
+testClusters.integTestDvStorage {
+    numberOfNodes = 2
+    configureAnalyticsCluster(delegate)
+    setting 'analytics.query.distributed_engine', 'true'
+}
+
 // ── Query cache variant: all_segments=true for cache testing ─────────────────
 task integTestQueryCache(type: RestIntegTestTask) {
     description = 'Runs query cache tests with all_segments=true to bypass segment size threshold'

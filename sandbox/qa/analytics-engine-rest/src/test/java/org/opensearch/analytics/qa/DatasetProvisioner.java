@@ -68,6 +68,29 @@ public final class DatasetProvisioner {
     /** The per-shard segment count produced by {@link SegmentLayout#MULTI_SEGMENT} (one flush each). */
     public static final int MULTI_SEGMENT_COUNT = 2;
 
+    /**
+     * Storage mode for provisioned indices, selected by the {@code tests.analytics.storage} system
+     * property ({@code parquet} = default). {@code docvalues} makes Lucene the PRIMARY data format so
+     * the distributed engine scans through the doc-values leaf (no parquet in the read path). Only
+     * datasets whose columns are within the DV leaf's v1 type scope (numeric/keyword/date/boolean,
+     * single-valued, no text projection) can run under {@code docvalues}; others fail at index
+     * creation by capability assignment. The dedicated {@code integTestDvStorage} cluster task runs
+     * the v1-fit subset with this property set.
+     */
+    public enum StorageMode {
+        PARQUET,
+        DOCVALUES;
+
+        static StorageMode fromSystemProperty() {
+            String v = System.getProperty("tests.analytics.storage", "parquet");
+            return switch (v) {
+                case "parquet" -> PARQUET;
+                case "docvalues" -> DOCVALUES;
+                default -> throw new IllegalArgumentException("tests.analytics.storage must be parquet or docvalues, got [" + v + "]");
+            };
+        }
+    }
+
     private DatasetProvisioner() {
         // utility class
     }
@@ -108,12 +131,12 @@ public final class DatasetProvisioner {
             // index may not exist — ignore
         }
 
-        // Load mapping, inject parquet settings, create index
+        // Load mapping, inject storage settings (parquet default; docvalues = lucene primary), create index
         String mappingPath = dataset.indexNames.size() == 1
             ? dataset.mappingResourcePath()
             : "datasets/" + dataset.name + "/mapping_" + indexName + ".json";
         String mapping = loadResource(mappingPath);
-        String indexBody = injectParquetSettings(mapping);
+        String indexBody = injectStorageSettings(mapping);
         if (numberOfShards > 0) {
             indexBody = overrideNumberOfShards(indexBody, numberOfShards);
         }
@@ -253,15 +276,19 @@ public final class DatasetProvisioner {
      * {@code "No backend can evaluate filter predicate [OTHER_FUNCTION] on fields [...:text]"}
      * because the Lucene backend never gets enrolled as a candidate.
      */
-    private static String injectParquetSettings(String mappingBody) {
-        return mappingBody.replace(
-            "\"number_of_shards\"",
-            "\"index.pluggable.dataformat.enabled\": true, "
+    private static String injectStorageSettings(String mappingBody) {
+        // docvalues mode: Lucene is the PRIMARY format (columns live in Lucene doc values, scanned by
+        // the doc-values leaf — no parquet). parquet mode: parquet primary + lucene secondary (the
+        // standard layout; secondary lucene keeps match()/text-search functions viable).
+        String storageSettings = StorageMode.fromSystemProperty() == StorageMode.DOCVALUES
+            ? "\"index.pluggable.dataformat.enabled\": true, "
+                + "\"index.pluggable.dataformat\": \"composite\", "
+                + "\"index.composite.primary_data_format\": \"lucene\", "
+            : "\"index.pluggable.dataformat.enabled\": true, "
                 + "\"index.pluggable.dataformat\": \"composite\", "
                 + "\"index.composite.primary_data_format\": \"parquet\", "
-                + "\"index.composite.secondary_data_formats\": [\"lucene\"], "
-                + "\"number_of_shards\""
-        );
+                + "\"index.composite.secondary_data_formats\": [\"lucene\"], ";
+        return mappingBody.replace("\"number_of_shards\"", storageSettings + "\"number_of_shards\"");
     }
 
     /**
