@@ -79,6 +79,71 @@ public class DocValuesLeafIT extends AnalyticsRestTestCase {
         assertDvMatchesParquet("| stats distinct_count(category) as dc");
     }
 
+    /**
+     * The rest of the differential corpus (spec: >=15 queries): delegated+residual mixes, keyword
+     * group-bys (utf8 mode), IS NULL semantics, ranges, avg over ints, multi-key grouping. Batched
+     * in one test to keep cluster spin-up cost sane; each query asserts independently.
+     */
+    public void testDifferentialCorpus() throws Exception {
+        provisionBoth();
+        String[] corpus = {
+            // delegated keyword + residual numeric in one WHERE
+            "| where category = 'a' and amount > 100 | stats count() as n, sum(amount) as s",
+            // keyword group-by with keyword filter (delegated) — group keys decode via utf8
+            "| where category != 'd' | stats count() as n by category | sort category",
+            // is-null / is-not-null semantics must agree with the parquet path
+            "| where isnull(rating) | stats count() as n by category | sort category",
+            "| where isnotnull(rating) | stats count() as n, sum(rating) as s by category | sort category",
+            // numeric range (residual) + avg over int column
+            "| where amount >= 100 and amount < 400 | stats avg(rating) as m by category | sort category",
+            // double column arithmetic
+            "| stats sum(price) as p, avg(price) as ap",
+            // date range residual filter
+            "| where ts > '2023-11-14 22:30:00' | stats count() as n",
+            // multi-key group-by (keyword + int bucket)
+            "| stats count() as n by category, rating | sort category, rating",
+            // count over the keyword column itself
+            "| stats count(category) as n",
+            // min/max over dates grouped by keyword
+            "| stats min(ts) as lo, max(ts) as hi by category | sort category" };
+        for (String tail : corpus) {
+            assertDvMatchesParquet(tail);
+        }
+    }
+
+    /**
+     * v1 exclusion (spec J3): an unsupported mapping type (`ip`) must fail CLEARLY — never a silent
+     * wrong answer. On a lucene-primary index the exclusion fires at the earliest possible point:
+     * the composite capability assignment rejects INDEX CREATION because the lucene format claims
+     * no ip capabilities, so a bad column can never even reach the scan. (The DV leaf's own typed
+     * DocValuesLeafUnsupportedException remains the backstop for types that map but don't decode.)
+     */
+    public void testUnsupportedTypeFailsClearly() throws Exception {
+        String index = "dv_leaf_ip_excl";
+        try {
+            client().performRequest(new Request("DELETE", "/" + index));
+        } catch (Exception ignored) {}
+        String body = "{"
+            + "\"settings\": {"
+            + "  \"number_of_shards\": 1, \"number_of_replicas\": 0,"
+            + "  \"index.pluggable.dataformat.enabled\": true,"
+            + "  \"index.pluggable.dataformat\": \"composite\","
+            + "  \"index.composite.primary_data_format\": \"lucene\""
+            + "},"
+            + "\"mappings\": {\"properties\": {"
+            + "  \"addr\": { \"type\": \"ip\" },"
+            + "  \"amount\": { \"type\": \"long\" }"
+            + "}}}";
+        Request create = new Request("PUT", "/" + index);
+        create.setJsonEntity(body);
+        var e = expectThrows(org.opensearch.client.ResponseException.class, () -> client().performRequest(create));
+        assertEquals(400, e.getResponse().getStatusLine().getStatusCode());
+        assertTrue(
+            "rejection must name the unsupported field: " + e.getMessage(),
+            e.getMessage().contains("addr") && e.getMessage().contains("ip")
+        );
+    }
+
     /** Repeated queries must not leak reader leases; force-merge requires all readers released. */
     public void testRepeatedQueriesReleaseLeases() throws Exception {
         provisionBoth();
