@@ -98,7 +98,10 @@ public class AnalyticsSearchTransportService {
             if (backend == null) {
                 return;
             }
-            backend.registerLeafBridge(new DistributedLeafBridge(indicesService, clusterService, backend, searchService));
+            // The lucene backend serves the doc-values (JAVA_CURSOR) leaf for lucene-primary indices;
+            // optional — without it those indices fail clearly at open, parquet leaves are unaffected.
+            org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin luceneBackend = capabilityRegistry.getBackend("lucene");
+            backend.registerLeafBridge(new DistributedLeafBridge(indicesService, clusterService, backend, searchService, luceneBackend));
         } catch (Exception e) {
             // Distributed engine is opt-in; a backend without leaf-bridge support must not block startup.
             org.apache.logging.log4j.LogManager.getLogger(AnalyticsSearchTransportService.class)

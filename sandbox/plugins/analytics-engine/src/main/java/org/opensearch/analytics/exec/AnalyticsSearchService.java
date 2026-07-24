@@ -646,6 +646,57 @@ public class AnalyticsSearchService implements AutoCloseable {
     }
 
     /**
+     * Doc-values leaf entrypoint (JAVA_CURSOR mode): Lucene executes the scan and Java decodes doc
+     * values into Arrow batches the Rust leaf pulls. Used when the shard's PRIMARY data format is
+     * lucene (no parquet in the read path). Acquires the reader lease here and ties its release to
+     * cursor close — the Rust {@code JavaCursorStream} fires {@code leaf_close} on drop in every
+     * path (success, error, cancel), so the lease provably follows the stream lifetime.
+     *
+     * @param acceptingBackend the backend implementing {@code openDocValuesLeafCursor} (lucene)
+     * @param arrowSchemaPtr borrowed FFI_ArrowSchema* with the projected output schema (call-scoped)
+     */
+    public AnalyticsSearchBackendPlugin.LeafCursor openDocValuesLeaf(
+        AnalyticsSearchBackendPlugin acceptingBackend,
+        IndexShard shard,
+        Task task,
+        byte[] substrait,
+        DelegationDescriptor delegation,
+        long arrowSchemaPtr
+    ) throws IOException {
+        GatedCloseable<Reader> gatedReader = shard.getReaderProvider().acquireReader();
+        try {
+            ShardScanExecutionContext ctx = buildLeafContext(shard, task, gatedReader.get(), substrait);
+            AnalyticsSearchBackendPlugin.LeafCursor inner = acceptingBackend.openDocValuesLeafCursor(ctx, delegation, arrowSchemaPtr);
+            return new AnalyticsSearchBackendPlugin.LeafCursor() {
+                @Override
+                public long next() throws Exception {
+                    return inner.next();
+                }
+
+                @Override
+                public void close() {
+                    try {
+                        inner.close();
+                    } finally {
+                        try {
+                            gatedReader.close();
+                        } catch (Exception e) {
+                            LOGGER.warn("openDocValuesLeaf: failed to release reader for shard " + shard.shardId(), e);
+                        }
+                    }
+                }
+            };
+        } catch (Exception e) {
+            try {
+                gatedReader.close();
+            } catch (Exception suppressed) {
+                e.addSuppressed(suppressed);
+            }
+            throw e;
+        }
+    }
+
+    /**
      * Builds the leaf-scan {@link ShardScanExecutionContext} for {@link #openDistributedLeaf}, setting
      * the same shard-derived fields as {@link #buildContext} (the delegation handle build reads
      * mapperService / queryCache / queryCachingPolicy / namedWriteableRegistry off it). Table name is a

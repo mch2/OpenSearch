@@ -55,6 +55,19 @@ public class LuceneDataFormat extends DataFormat {
         new FieldTypeCapabilities(KeywordFieldMapper.CONTENT_TYPE, Set.of(FULL_TEXT_SEARCH, STORED_FIELDS, COLUMNAR_STORAGE)),
         new FieldTypeCapabilities(MatchOnlyTextFieldMapper.CONTENT_TYPE, Set.of(FULL_TEXT_SEARCH, STORED_FIELDS)),
 
+        // Numeric / date / boolean — doc values (analytics DV leaf) + point-range search. Enables
+        // Lucene as the PRIMARY data format of a doc-values-backed analytics index: the composite
+        // engine's capability assignment requires the primary to claim COLUMNAR_STORAGE (doc_values)
+        // and the search capability (POINT_RANGE / FULL_TEXT_SEARCH) or mapping parse fails.
+        new FieldTypeCapabilities("long", Set.of(COLUMNAR_STORAGE, POINT_RANGE)),
+        new FieldTypeCapabilities("integer", Set.of(COLUMNAR_STORAGE, POINT_RANGE)),
+        new FieldTypeCapabilities("short", Set.of(COLUMNAR_STORAGE, POINT_RANGE)),
+        new FieldTypeCapabilities("byte", Set.of(COLUMNAR_STORAGE, POINT_RANGE)),
+        new FieldTypeCapabilities("double", Set.of(COLUMNAR_STORAGE, POINT_RANGE)),
+        new FieldTypeCapabilities("float", Set.of(COLUMNAR_STORAGE, POINT_RANGE)),
+        new FieldTypeCapabilities("date", Set.of(COLUMNAR_STORAGE, POINT_RANGE)),
+        new FieldTypeCapabilities("boolean", Set.of(COLUMNAR_STORAGE, FULL_TEXT_SEARCH)),
+
         // Metadata fields
         new FieldTypeCapabilities(SourceFieldMapper.CONTENT_TYPE, Set.of(STORED_FIELDS)),
         new FieldTypeCapabilities(NestedPathFieldMapper.NAME, Set.of(FULL_TEXT_SEARCH)),

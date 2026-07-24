@@ -372,15 +372,63 @@ public interface AnalyticsSearchBackendPlugin {
          * <p>{@code descriptor} is the serialized {@code DelegationDescriptor} (empty = no delegation);
          * when present the leaf runs the INDEXED path — register the Lucene {@code FilterDelegationHandle}
          * (keyed by {@code queryId}) and build an indexed session using {@code treeShape}/{@code predicateCount}.
+         *
+         * <p>{@code arrowSchemaPtr} is a borrowed Arrow C-Data {@code FFI_ArrowSchema*} carrying the
+         * leaf's PROJECTED output schema, valid only for the duration of this call (0 = none). The
+         * doc-values leaf imports it to derive its column specs; NATIVE leaves ignore it.
          */
-        Opened open(long queryId, String indexUuid, int shardId, byte[] substrait, byte[] descriptor, int treeShape, int predicateCount)
-            throws Exception;
+        Opened open(
+            long queryId,
+            String indexUuid,
+            int shardId,
+            byte[] substrait,
+            byte[] descriptor,
+            int treeShape,
+            int predicateCount,
+            long arrowSchemaPtr
+        ) throws Exception;
 
         /** Pull one batch from a JAVA_CURSOR; returns an Arrow C-Data {@code FFI_ArrowArray} pointer, or 0 at EOS. */
         long next(long cursor) throws Exception;
 
         /** Release a JAVA_CURSOR's reader/context. */
         void close(long cursor);
+    }
+
+    /**
+     * Opens a doc-values-backed leaf cursor for the distributed path (Lucene executes the scan,
+     * Java bulk-decodes doc values into Arrow batches, DataFusion pulls them via {@link LeafBridge}
+     * mode JAVA_CURSOR). Implemented by the Lucene backend; the engine's leaf bridge calls this when
+     * the target index's primary data format is doc-values-backed.
+     *
+     * <p>{@code ctx} is the same {@code ShardScanExecutionContext} the delegation path uses (reader +
+     * mapperService + allocator + shardId). {@code delegation} carries the Lucene-delegated predicates
+     * ({@code null} = full scan). {@code arrowSchemaPtr} is a borrowed Arrow C-Data
+     * {@code FFI_ArrowSchema*} with the PROJECTED output schema — valid only for the duration of this
+     * call; the implementation must import it before returning.
+     *
+     * @return a pull cursor producing Arrow C-Data batches matching the projected schema
+     */
+    default LeafCursor openDocValuesLeafCursor(CommonExecutionContext ctx, DelegationDescriptor delegation, long arrowSchemaPtr) {
+        throw new UnsupportedOperationException("openDocValuesLeafCursor not implemented for [" + name() + "]");
+    }
+
+    /**
+     * Pull cursor over a Java-produced Arrow batch stream (the {@code JAVA_CURSOR} leaf mode). The
+     * native side pulls one batch per {@link #next} call and imports it via the Arrow C-Data
+     * interface using the projected schema advertised at open time.
+     */
+    interface LeafCursor {
+        /**
+         * Produce the next batch and return the exported {@code FFI_ArrowArray} pointer, or 0 at
+         * end-of-stream. Ownership of the batch CONTENTS transfers to the caller (which must import
+         * it before the next call); the exported struct wrapper stays owned by the cursor and is
+         * released on the following {@code next()} / {@link #close()}.
+         */
+        long next() throws Exception;
+
+        /** Release all cursor resources (pending exports, per-segment decoders). Idempotent. */
+        void close();
     }
 
     /**

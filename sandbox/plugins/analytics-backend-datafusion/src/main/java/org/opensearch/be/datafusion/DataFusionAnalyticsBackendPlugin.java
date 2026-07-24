@@ -495,6 +495,23 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
         this.plugin = plugin;
     }
 
+    /**
+     * Formats this backend's capabilities apply to: the native formats (parquet) PLUS "lucene" —
+     * a doc-values-backed index ({@code index.composite.primary_data_format: lucene}) resolves every
+     * field's docValueFormat to "lucene", and DataFusion consumes those columns through the
+     * doc-values leaf (JAVA_CURSOR pull over Arrow batches), so the planner must consider DataFusion
+     * viable over that format. For parquet-primary indices this is a no-op: DataFusion is already
+     * viable there via the parquet format, and it declares no Index/FullText caps, so Lucene keeps
+     * exclusive ownership of inverted-index scans and match() delegation.
+     */
+    private Set<String> capabilityFormats() {
+        Set<String> formats = new HashSet<>(plugin.getSupportedFormats());
+        formats.add(LUCENE_DV_FORMAT);
+        return Set.copyOf(formats);
+    }
+
+    private static final String LUCENE_DV_FORMAT = "lucene";
+
     @Override
     public String name() {
         return plugin.name();
@@ -521,7 +538,7 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
                             JoinCapability.JoinKind.ANTI,
                             JoinCapability.JoinKind.CROSS
                         ),
-                        Set.copyOf(plugin.getSupportedFormats())
+                        capabilityFormats()
                     )
                 );
             }
@@ -548,7 +565,7 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
                             WindowFunction.NTH_VALUE,
                             WindowFunction.PATTERN
                         ),
-                        Set.copyOf(plugin.getSupportedFormats())
+                        capabilityFormats()
                     )
                 );
             }
@@ -576,13 +593,13 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
 
             @Override
             public Set<ScanCapability> scanCapabilities() {
-                Set<String> formats = Set.copyOf(plugin.getSupportedFormats());
+                Set<String> formats = capabilityFormats();
                 return Set.of(new ScanCapability.DocValues(formats, Set.copyOf(SUPPORTED_FIELD_TYPES)));
             }
 
             @Override
             public Set<FilterCapability> filterCapabilities() {
-                Set<String> formats = Set.copyOf(plugin.getSupportedFormats());
+                Set<String> formats = capabilityFormats();
                 Set<FilterCapability> caps = new HashSet<>();
                 for (ScalarFunction op : STANDARD_FILTER_OPS) {
                     for (FieldType type : SUPPORTED_FIELD_TYPES) {
@@ -604,7 +621,7 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
 
             @Override
             public Set<ProjectCapability> projectCapabilities() {
-                Set<String> formats = Set.copyOf(plugin.getSupportedFormats());
+                Set<String> formats = capabilityFormats();
                 Set<ProjectCapability> caps = new HashSet<>();
                 for (ScalarFunction op : STANDARD_PROJECT_OPS) {
                     // PPL rex extract-mode multi-match returns array<varchar>; the planner
@@ -632,7 +649,7 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
 
             @Override
             public Set<AggregateCapability> aggregateCapabilities() {
-                Set<String> formats = Set.copyOf(plugin.getSupportedFormats());
+                Set<String> formats = capabilityFormats();
                 Set<AggregateCapability> caps = new HashSet<>();
                 for (AggregateFunction func : AGG_FUNCTIONS) {
                     for (FieldType type : SUPPORTED_FIELD_TYPES) {
@@ -1102,9 +1119,10 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
                     byte[] substrait,
                     byte[] descriptor,
                     int treeShape,
-                    int predicateCount
+                    int predicateCount,
+                    long arrowSchemaPtr
                 ) throws Exception {
-                    var opened = bridge.open(queryId, indexUuid, shardId, substrait, descriptor, treeShape, predicateCount);
+                    var opened = bridge.open(queryId, indexUuid, shardId, substrait, descriptor, treeShape, predicateCount, arrowSchemaPtr);
                     return new org.opensearch.be.datafusion.distributed.LeafBridgeCallbacks.LeafBridge.Opened(
                         opened.mode(),
                         opened.handle()

@@ -234,6 +234,9 @@ impl ShardScanExec {
                 s.spawn(|| -> Result<SendableRecordBatchStream> {
                     let opened = crate::distributed::leaf_bridge::open_fragment(
                         query_id, &index_uuid, shard_id, &substrait, &descriptor, tree_shape, predicate_count,
+                        // Advertise the projected output schema so a doc-values (JAVA_CURSOR) leaf
+                        // decodes exactly the coordinator-planned columns. NATIVE leaves ignore it.
+                        Some(schema.as_ref()),
                     )
                     .map_err(|e| exec_datafusion_err!("openFragment(shard={shard_id}) failed: {e}"))?;
                     match opened {

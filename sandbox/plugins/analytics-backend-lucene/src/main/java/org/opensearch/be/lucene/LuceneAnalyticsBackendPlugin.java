@@ -284,6 +284,109 @@ public class LuceneAnalyticsBackendPlugin implements AnalyticsSearchBackendPlugi
         );
     }
 
+    // ---- Doc-values leaf (distributed JAVA_CURSOR path) ----
+
+    /**
+     * Opens the doc-values leaf cursor (spec J1): builds the Lucene query from the delegation
+     * descriptor (MatchAll when none), derives the projected column specs from the C-Data schema
+     * the native leaf advertised, and returns a pull cursor over Arrow batches. The reader lease is
+     * NOT owned here — the engine's leaf bridge holds it and releases on cursor close (the
+     * {@code leaf_close} upcall).
+     */
+    @Override
+    public AnalyticsSearchBackendPlugin.LeafCursor openDocValuesLeafCursor(
+        CommonExecutionContext ctx,
+        org.opensearch.analytics.spi.DelegationDescriptor delegation,
+        long arrowSchemaPtr
+    ) {
+        ShardScanExecutionContext shardCtx = (ShardScanExecutionContext) ctx;
+        IndexReaderProvider.Reader reader = shardCtx.getReader();
+        LuceneReader luceneReader = reader.getReader(plugin.getDataFormat(), LuceneReader.class);
+        if (luceneReader == null) {
+            throw new org.opensearch.analytics.spi.DocValuesLeafUnsupportedException(
+                org.opensearch.analytics.spi.DocValuesLeafUnsupportedException.Reason.NO_LUCENE_READER,
+                "shard " + shardCtx.getShardId() + " has no Lucene reader (lucene not a configured data format)"
+            );
+        }
+        if (arrowSchemaPtr == 0) {
+            throw new IllegalStateException("doc-values leaf requires the projected schema pointer from the native leaf");
+        }
+        org.apache.arrow.memory.BufferAllocator allocator = shardCtx.getAllocator();
+        // Import the projected output schema the coordinator planned (authoritative for column set,
+        // order, and Arrow types — including Utf8View and Timestamp precision).
+        org.apache.arrow.vector.types.pojo.Schema projectedSchema = org.apache.arrow.c.Data.importSchema(
+            allocator,
+            org.apache.arrow.c.ArrowSchema.wrap(arrowSchemaPtr),
+            null
+        );
+        List<org.opensearch.be.lucene.dv.DvColumnSpec> specs = org.opensearch.be.lucene.dv.DvColumnSpec.derive(
+            projectedSchema,
+            shardCtx.getMapperService()
+        );
+        IndexSearcher searcher = luceneReader.searcher(shardCtx.getQueryCache(), shardCtx.getQueryCachingPolicy());
+        org.apache.lucene.search.Query query = buildDvLeafQuery(delegation, shardCtx, searcher);
+        int batchSize = 8192;
+        org.opensearch.be.lucene.dv.LuceneColumnBatchSource source = new org.opensearch.be.lucene.dv.LuceneColumnBatchSource(
+            specs,
+            batchSize
+        );
+        try {
+            return new org.opensearch.be.lucene.dv.DocValuesFragmentExecutor(
+                allocator,
+                searcher,
+                query,
+                projectedSchema,
+                source,
+                batchSize,
+                null // reader lease is released by the engine's bridge on leaf_close
+            );
+        } catch (java.io.IOException e) {
+            source.close();
+            throw new RuntimeException("failed to open doc-values leaf on shard " + shardCtx.getShardId(), e);
+        }
+    }
+
+    /**
+     * Delegation descriptor → one Lucene query: each delegated expression deserializes to a
+     * QueryBuilder (same wire format the FilterDelegationHandle consumes) and multiple expressions
+     * AND together — the DV leaf only accepts CONJUNCTIVE delegation, which the caller enforces.
+     * No delegation → MatchAll (full scan; residual predicates run in DataFusion above the scan).
+     */
+    private org.apache.lucene.search.Query buildDvLeafQuery(
+        org.opensearch.analytics.spi.DelegationDescriptor delegation,
+        ShardScanExecutionContext shardCtx,
+        IndexSearcher searcher
+    ) {
+        if (delegation == null || delegation.delegatedExpressions().isEmpty()) {
+            return new org.apache.lucene.search.MatchAllDocsQuery();
+        }
+        if (delegation.treeShape() == org.opensearch.analytics.spi.FilterTreeShape.INTERLEAVED_BOOLEAN_EXPRESSION) {
+            throw new org.opensearch.analytics.spi.DocValuesLeafUnsupportedException(
+                org.opensearch.analytics.spi.DocValuesLeafUnsupportedException.Reason.UNSUPPORTED_DELEGATION,
+                "doc-values leaf supports conjunctive delegation only; got " + delegation.treeShape()
+            );
+        }
+        QueryShardContext queryShardContext = buildMinimalQueryShardContext(shardCtx, searcher);
+        try {
+            org.apache.lucene.search.BooleanQuery.Builder builder = new org.apache.lucene.search.BooleanQuery.Builder();
+            int clauses = 0;
+            for (DelegatedExpression expr : delegation.delegatedExpressions()) {
+                org.opensearch.core.common.io.stream.StreamInput raw = org.opensearch.core.common.io.stream.StreamInput.wrap(
+                    expr.getExpressionBytes()
+                );
+                org.opensearch.core.common.io.stream.StreamInput in =
+                    new org.opensearch.core.common.io.stream.NamedWriteableAwareStreamInput(raw, shardCtx.getNamedWriteableRegistry());
+                QueryBuilder queryBuilder = in.readNamedWriteable(QueryBuilder.class);
+                org.apache.lucene.search.Query q = queryBuilder.toQuery(queryShardContext);
+                builder.add(q, org.apache.lucene.search.BooleanClause.Occur.FILTER);
+                clauses++;
+            }
+            return clauses == 1 ? builder.build().clauses().getFirst().query() : builder.build();
+        } catch (java.io.IOException e) {
+            throw new IllegalStateException("Failed to materialize delegated predicates for the doc-values leaf", e);
+        }
+    }
+
     // ---- Serializers ----
 
     @Override

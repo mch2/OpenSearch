@@ -763,6 +763,7 @@ public final class NativeBridge {
                     long.class,
                     int.class,
                     int.class,
+                    long.class, // arrow schema ptr (projected leaf output schema; 0 = none)
                     seg,
                     seg
                 )
@@ -784,6 +785,7 @@ public final class NativeBridge {
                     ValueLayout.JAVA_LONG, // descriptor len
                     ValueLayout.JAVA_INT, // tree_shape
                     ValueLayout.JAVA_INT, // predicate_count
+                    ValueLayout.JAVA_LONG, // arrow schema ptr (FFI_ArrowSchema*, 0 = none)
                     ValueLayout.ADDRESS, // out_mode
                     ValueLayout.ADDRESS // out_handle
                 ),

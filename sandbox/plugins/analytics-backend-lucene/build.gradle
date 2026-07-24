@@ -32,6 +32,8 @@ configurations {
 configurations.all {
     resolutionStrategy {
         force "com.google.flatbuffers:flatbuffers-java:${versions.flatbuffers}"
+        // arrow-vector's transitive slf4j (2.0.16) conflicts with the repo-wide pin.
+        force "org.slf4j:slf4j-api:${versions.slf4j}"
     }
 }
 sourceSets.main.compileClasspath += configurations.calciteCompile
@@ -83,6 +85,10 @@ dependencies {
     // provided at runtime by analytics-engine in production but not on the unit-test JVM.
     testRuntimeOnly "org.apache.arrow:arrow-format:${versions.arrow}"
     testRuntimeOnly "com.google.flatbuffers:flatbuffers-java:${versions.flatbuffers}"
+    // The dv decode unit tests build real Arrow vectors on-heap.
+    testImplementation "org.apache.arrow:arrow-vector:${versions.arrow}"
+    testImplementation "org.apache.arrow:arrow-memory-core:${versions.arrow}"
+    testRuntimeOnly "org.apache.arrow:arrow-memory-unsafe:${versions.arrow}"
 
     // Calcite annotation compatibility
     testCompileOnly 'org.immutables:value-annotations:2.8.8'
@@ -90,6 +96,11 @@ dependencies {
 
 test {
     systemProperty 'tests.security.manager', 'false'
+    // Arrow's unsafe allocation manager (dv decode tests) needs reflective nio access.
+    jvmArgs '--add-opens=java.base/java.nio=ALL-UNNAMED'
+    jvmArgs '--add-opens=java.base/sun.nio.ch=ALL-UNNAMED'
+    jvmArgs '--add-opens=java.base/sun.misc=ALL-UNNAMED'
+    jvmArgs '-Darrow.memory.debug.allocator=false'
 }
 
 tasks.withType(JavaCompile).configureEach {

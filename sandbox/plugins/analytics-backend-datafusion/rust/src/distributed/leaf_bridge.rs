@@ -35,12 +35,16 @@ pub const LEAF_MODE_NATIVE: i32 = 1;
 pub const LEAF_MODE_JAVA_CURSOR: i32 = 2;
 
 /// `openFragment(query_id, index_uuid*, len, shard_id, substrait*, len, descriptor*, len, tree_shape,
-///  predicate_count, out_mode*, out_handle*) -> 0|neg`.
+///  predicate_count, schema_ptr, out_mode*, out_handle*) -> 0|neg`.
 /// Java runs the unchanged AnalyticsSearchService setup and writes:
 ///   *out_mode   = LEAF_MODE_NATIVE | LEAF_MODE_JAVA_CURSOR
 ///   *out_handle = a SessionContextHandle ptr (NATIVE) or an opaque Java cursor id (JAVA_CURSOR)
 /// `substrait` is the shard-local leaf fragment (empty = plain full scan); `descriptor` is the
 /// Java-serialized DelegationDescriptor (empty = no delegation) used to build the FilterDelegationHandle.
+/// `schema_ptr` is a borrowed `FFI_ArrowSchema*` describing the leaf's PROJECTED output schema (the
+/// coordinator-derived column set + types the parent operators bind to); Java imports it during the
+/// upcall (consuming the release callback) so a doc-values leaf decodes exactly those columns. May be
+/// 0 when the caller has no schema to advertise (never on the JAVA_CURSOR path).
 type OpenFragmentFn = unsafe extern "C" fn(
     i64,
     *const u8,
@@ -52,6 +56,7 @@ type OpenFragmentFn = unsafe extern "C" fn(
     i64,
     i32,
     i32,
+    i64,
     *mut i32,
     *mut i64,
 ) -> i32;
@@ -102,7 +107,10 @@ pub enum LeafOpen {
 ///
 /// `substrait` is the shard-local leaf fragment (empty = plain full scan). `descriptor` is the
 /// Java-serialized DelegationDescriptor (empty = no delegation); `tree_shape`/`predicate_count`
-/// classify the delegated filter for the indexed executor.
+/// classify the delegated filter for the indexed executor. `schema` is the leaf's projected output
+/// schema, exported to Arrow C-Data for the duration of the call so the JVM side can derive column
+/// specs (the doc-values leaf decodes exactly these columns). Java must import (consume) the struct
+/// during the upcall; the export is dropped when this function returns.
 #[allow(clippy::too_many_arguments)]
 pub fn open_fragment(
     query_id: i64,
@@ -112,11 +120,26 @@ pub fn open_fragment(
     descriptor: &[u8],
     tree_shape: i32,
     predicate_count: i32,
+    schema: Option<&arrow::datatypes::Schema>,
 ) -> Result<LeafOpen, String> {
     let cb: OpenFragmentFn = load(&OPEN_FRAGMENT)
         .ok_or_else(|| "leaf bridge not registered (Java did not call df_register_leaf_bridge)".to_string())?;
     let mut mode: i32 = 0;
     let mut handle: i64 = 0;
+    // Export the projected schema to a C-Data struct passed BY POINTER for the synchronous upcall.
+    // Java's Data.importField consumes the release callback iff it imports; if Java never touches it
+    // (older bridge / error path), dropping `ffi_schema` here still frees it — no leak either way.
+    let ffi_schema: Option<arrow::ffi::FFI_ArrowSchema> = match schema {
+        Some(s) => Some(
+            arrow::ffi::FFI_ArrowSchema::try_from(s)
+                .map_err(|e| format!("leaf schema -> FFI export failed: {e}"))?,
+        ),
+        None => None,
+    };
+    let schema_ptr: i64 = ffi_schema
+        .as_ref()
+        .map(|s| s as *const arrow::ffi::FFI_ArrowSchema as i64)
+        .unwrap_or(0);
     let rc = unsafe {
         cb(
             query_id,
@@ -129,10 +152,12 @@ pub fn open_fragment(
             descriptor.len() as i64,
             tree_shape,
             predicate_count,
+            schema_ptr,
             &mut mode as *mut i32,
             &mut handle as *mut i64,
         )
     };
+    drop(ffi_schema);
     if rc != 0 {
         return Err(format!("Java openFragment(query_id={query_id}, shard_id={shard_id}) failed with code {rc}"));
     }

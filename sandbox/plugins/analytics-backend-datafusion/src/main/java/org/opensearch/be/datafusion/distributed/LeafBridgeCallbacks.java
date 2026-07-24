@@ -60,9 +60,21 @@ public final class LeafBridgeCallbacks {
          * <p>{@code descriptor} is the serialized {@code DelegationDescriptor} (empty = no delegation);
          * when present the leaf runs the INDEXED path — Java registers the {@code FilterDelegationHandle}
          * (keyed by {@code queryId}) and builds an indexed session with {@code treeShape}/{@code predicateCount}.
+         *
+         * <p>{@code arrowSchemaPtr} is a borrowed {@code FFI_ArrowSchema*} carrying the leaf's PROJECTED
+         * output schema (0 = none advertised). Only valid for the duration of this call; a doc-values
+         * leaf must import it before returning (the Rust caller drops the export afterwards).
          */
-        Opened open(long queryId, String indexUuid, int shardId, byte[] substrait, byte[] descriptor, int treeShape, int predicateCount)
-            throws Exception;
+        Opened open(
+            long queryId,
+            String indexUuid,
+            int shardId,
+            byte[] substrait,
+            byte[] descriptor,
+            int treeShape,
+            int predicateCount,
+            long arrowSchemaPtr
+        ) throws Exception;
 
         /** Pull one batch from a JAVA_CURSOR; returns the FFI_ArrowArray pointer, or 0 at EOS. */
         long next(long cursor) throws Exception;
@@ -81,7 +93,8 @@ public final class LeafBridgeCallbacks {
 
     /**
      * FFM upcall (matches Rust {@code OpenFragmentFn = fn(i64, *const u8, i64, i32, *const u8, i64,
-     * *mut i32, *mut i64) -> i32}). Writes mode + handle through the out-pointers; returns 0 / negative.
+     * *const u8, i64, i32, i32, i64, *mut i32, *mut i64) -> i32}). Writes mode + handle through the
+     * out-pointers; returns 0 / negative.
      */
     public static int openFragment(
         long queryId,
@@ -94,6 +107,7 @@ public final class LeafBridgeCallbacks {
         long descriptorLen,
         int treeShape,
         int predicateCount,
+        long arrowSchemaPtr,
         MemorySegment outMode,
         MemorySegment outHandle
     ) {
@@ -108,7 +122,16 @@ public final class LeafBridgeCallbacks {
                 : new String(indexUuidPtr.reinterpret(indexUuidLen).toArray(ValueLayout.JAVA_BYTE), StandardCharsets.UTF_8);
             byte[] substrait = substraitLen <= 0 ? new byte[0] : substraitPtr.reinterpret(substraitLen).toArray(ValueLayout.JAVA_BYTE);
             byte[] descriptor = descriptorLen <= 0 ? new byte[0] : descriptorPtr.reinterpret(descriptorLen).toArray(ValueLayout.JAVA_BYTE);
-            LeafBridge.Opened opened = bridge.open(queryId, indexUuid, shardId, substrait, descriptor, treeShape, predicateCount);
+            LeafBridge.Opened opened = bridge.open(
+                queryId,
+                indexUuid,
+                shardId,
+                substrait,
+                descriptor,
+                treeShape,
+                predicateCount,
+                arrowSchemaPtr
+            );
             // Raw `*mut` pointers arrive as zero-length segments across FFM; widen to the written
             // size before set() or the bounds check trips (byteSize 0, new length 4/8).
             outMode.reinterpret(Integer.BYTES).set(ValueLayout.JAVA_INT, 0, opened.mode());
