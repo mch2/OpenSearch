@@ -76,17 +76,27 @@ public final class DatasetProvisioner {
      * single-valued, no text projection) can run under {@code docvalues}; others fail at index
      * creation by capability assignment. The dedicated {@code integTestDvStorage} cluster task runs
      * the v1-fit subset with this property set.
+     *
+     * <p>{@code plain} provisions a completely NORMAL index — regular InternalEngine, no
+     * {@code index.pluggable.dataformat} at all — opted into analytics via
+     * {@code index.analytics.scan.enabled} (the plain-index reader bridge; see
+     * analytics-plain-index-spec.md). Same v1 type-scope constraint as {@code docvalues}. The
+     * {@code integTestPlainStorage} cluster task runs the corpus this way.
      */
     public enum StorageMode {
         PARQUET,
-        DOCVALUES;
+        DOCVALUES,
+        PLAIN;
 
         static StorageMode fromSystemProperty() {
             String v = System.getProperty("tests.analytics.storage", "parquet");
             return switch (v) {
                 case "parquet" -> PARQUET;
                 case "docvalues" -> DOCVALUES;
-                default -> throw new IllegalArgumentException("tests.analytics.storage must be parquet or docvalues, got [" + v + "]");
+                case "plain" -> PLAIN;
+                default -> throw new IllegalArgumentException(
+                    "tests.analytics.storage must be parquet, docvalues, or plain, got [" + v + "]"
+                );
             };
         }
     }
@@ -278,16 +288,21 @@ public final class DatasetProvisioner {
      */
     private static String injectStorageSettings(String mappingBody) {
         // docvalues mode: Lucene is the PRIMARY format (columns live in Lucene doc values, scanned by
-        // the doc-values leaf — no parquet). parquet mode: parquet primary + lucene secondary (the
-        // standard layout; secondary lucene keeps match()/text-search functions viable).
-        String storageSettings = StorageMode.fromSystemProperty() == StorageMode.DOCVALUES
-            ? "\"index.pluggable.dataformat.enabled\": true, "
+        // the doc-values leaf — no parquet). plain mode: NO pluggable dataformat at all — a normal
+        // InternalEngine index opted into analytics via the reader bridge (the enabled:false is
+        // explicit because the harness sets a cluster-level composite default that would otherwise
+        // apply). parquet mode: parquet primary + lucene secondary (the standard layout; secondary
+        // lucene keeps match()/text-search functions viable).
+        String storageSettings = switch (StorageMode.fromSystemProperty()) {
+            case DOCVALUES -> "\"index.pluggable.dataformat.enabled\": true, "
                 + "\"index.pluggable.dataformat\": \"composite\", "
-                + "\"index.composite.primary_data_format\": \"lucene\", "
-            : "\"index.pluggable.dataformat.enabled\": true, "
+                + "\"index.composite.primary_data_format\": \"lucene\", ";
+            case PLAIN -> "\"index.pluggable.dataformat.enabled\": false, " + "\"index.analytics.scan.enabled\": true, ";
+            case PARQUET -> "\"index.pluggable.dataformat.enabled\": true, "
                 + "\"index.pluggable.dataformat\": \"composite\", "
                 + "\"index.composite.primary_data_format\": \"parquet\", "
                 + "\"index.composite.secondary_data_formats\": [\"lucene\"], ";
+        };
         return mappingBody.replace("\"number_of_shards\"", storageSettings + "\"number_of_shards\"");
     }
 

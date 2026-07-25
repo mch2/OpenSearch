@@ -9,6 +9,7 @@
 package org.opensearch.index.engine.dataformat;
 
 import org.opensearch.common.annotation.ExperimentalApi;
+import org.opensearch.common.lucene.index.OpenSearchDirectoryReader;
 
 import java.util.Objects;
 import java.util.Set;
@@ -45,6 +46,29 @@ public abstract class DataFormat {
      * @return the supported field type capabilities
      */
     public abstract Set<FieldTypeCapabilities> supportedFields();
+
+    /**
+     * Adapts a live shard {@link OpenSearchDirectoryReader} into this format's analytics reader type
+     * (e.g. the Lucene backend's {@code LuceneReader}), returned as an opaque {@link Object} so the
+     * server does not compile-depend on the plugin type. Used by the PLAIN-index analytics reader
+     * bridge in {@code IndexShard.getReaderProvider()}: a normal index's Lucene segments are scanned
+     * directly by the analytics doc-values leaf, with the analytics backend casting this object back
+     * to its concrete reader via {@code IndexReaderProvider.Reader.getReader(format, type)}.
+     *
+     * <p>Default returns {@code null} — a format that cannot back analytics scans (or is not the
+     * Lucene format) contributes no entry to the reader map. Only the Lucene {@code DataFormat}
+     * overrides this. Constructing the reader here (plugin-side) keeps {@code LuceneReader} out of
+     * the server's compile classpath.
+     *
+     * @param directoryReader the shard's point-in-time reader (already carrying the shard's soft-delete
+     *                        and security wrappers, since the bridge acquires it via
+     *                        {@code IndexShard.acquireSearcher})
+     * @return the format-specific analytics reader, or {@code null} if unsupported
+     */
+    @ExperimentalApi
+    public Object adaptDirectoryReaderForAnalytics(OpenSearchDirectoryReader directoryReader) {
+        return null;
+    }
 
     @Override
     public final boolean equals(Object o) {

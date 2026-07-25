@@ -258,6 +258,34 @@ testClusters.integTestDvStorage {
     setting 'analytics.query.distributed_engine', 'true'
 }
 
+// ── PLAIN-index analytics: normal InternalEngine indices (no pluggable dataformat) scanned
+//    through the doc-values leaf via the reader bridge (analytics-plain-index-spec.md).
+//    Runs the same v1-fit query-shape corpus as the docvalues variant, plus the dedicated
+//    plain-index seam tests. distributed_engine on (the DV leaf only runs distributed).
+task integTestPlainStorage(type: RestIntegTestTask) {
+    description = 'Runs v1-compatible query-shape ITs against PLAIN (InternalEngine) indices via the analytics reader bridge'
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    filter {
+        includeTestsMatching 'org.opensearch.analytics.qa.PlainIndexAnalyticsIT'
+        includeTestsMatching 'org.opensearch.analytics.qa.PplClickBenchIT'
+        includeTestsMatching 'org.opensearch.analytics.qa.AggregationsPplIT'
+        includeTestsMatching 'org.opensearch.analytics.qa.StatsCommandIT'
+        includeTestsMatching 'org.opensearch.analytics.qa.DistinctCountIT'
+        includeTestsMatching 'org.opensearch.analytics.qa.SingleShardAggregationIT'
+    }
+    systemProperty 'tests.security.manager', 'false'
+    // Provision plain indices (index.analytics.scan.enabled); DV leaf requires the distributed engine.
+    systemProperty 'tests.analytics.storage', 'plain'
+}
+check.dependsOn(integTestPlainStorage)
+
+testClusters.integTestPlainStorage {
+    numberOfNodes = 2
+    configureAnalyticsCluster(delegate)
+    setting 'analytics.query.distributed_engine', 'true'
+}
+
 // ── Query cache variant: all_segments=true for cache testing ─────────────────
 task integTestQueryCache(type: RestIntegTestTask) {
     description = 'Runs query cache tests with all_segments=true to bypass segment size threshold'

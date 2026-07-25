@@ -163,9 +163,27 @@ public final class DistributedLeafBridge implements AnalyticsSearchBackendPlugin
         return new Opened(LEAF_MODE_NATIVE, nativePtr);
     }
 
-    /** True when the shard's index stores its columns as Lucene doc values (lucene primary format). */
+    /**
+     * True when this shard should be scanned through the doc-values leaf (JAVA_CURSOR) rather than
+     * the native parquet/indexed session. Two cases:
+     * <ol>
+     *   <li>Composite index with Lucene as the PRIMARY data format (columns live in Lucene doc
+     *       values, no parquet) — the original dv-leaf path.</li>
+     *   <li>PLAIN index (regular InternalEngine, no {@code index.pluggable.dataformat}) with
+     *       analytics scanning opted in via {@code index.analytics.scan.enabled}. Here the shard's
+     *       normal Lucene segments — same BKD points + doc values a regular index always writes —
+     *       are scanned directly; DSL, merges, and the engine are all untouched (analytics is an
+     *       additional reader, not a different engine). The reader bridge lives in
+     *       {@link IndexShard#getReaderProvider()}.</li>
+     * </ol>
+     */
     private static boolean isDocValuesPrimary(IndexShard shard) {
-        return LUCENE_FORMAT.equals(shard.indexSettings().getSettings().get(PRIMARY_DATA_FORMAT_SETTING));
+        if (LUCENE_FORMAT.equals(shard.indexSettings().getSettings().get(PRIMARY_DATA_FORMAT_SETTING))) {
+            return true;
+        }
+        return org.opensearch.analytics.settings.AnalyticsQuerySettings.PLAIN_INDEX_SCAN_ENABLED.get(
+            shard.indexSettings().getSettings()
+        );
     }
 
     @Override

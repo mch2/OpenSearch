@@ -162,6 +162,26 @@ public final class AnalyticsQuerySettings {
         Setting.Property.Dynamic
     );
 
+    /**
+     * Opt-in, per-index: scan a PLAIN index (regular InternalEngine, no
+     * {@code index.pluggable.dataformat}) through the analytics doc-values leaf. When true, the
+     * distributed engine routes the shard's normal Lucene segments to the JAVA_CURSOR path
+     * ({@link org.opensearch.analytics.exec.DistributedLeafBridge}) via the reader bridge in
+     * {@code IndexShard.getReaderProvider()}. DSL, merges, and the engine are untouched — analytics
+     * is an additional reader, not a different engine.
+     *
+     * <p>Default {@code false} is a ROLLOUT lever, not the intended architecture: the end state is
+     * automatic — any plain index with doc-valued fields is analytics-scannable with zero config.
+     * Flipping this default to {@code true} is the only change that requires; keep it that way (do
+     * not grow settings that ossify the opt-in into the design).
+     */
+    public static final Setting<Boolean> PLAIN_INDEX_SCAN_ENABLED = Setting.boolSetting(
+        "index.analytics.scan.enabled",
+        false,
+        Setting.Property.IndexScope,
+        Setting.Property.Dynamic
+    );
+
     public static List<Setting<?>> all() {
         return List.of(
             DELEGATION_BLOCKED_PREDICATES,
@@ -172,7 +192,8 @@ public final class AnalyticsQuerySettings {
             DISTRIBUTED_PARTIAL_REDUCE,
             DISTRIBUTED_FORCE_PARTITIONED_JOINS,
             DISTRIBUTED_CARDINALITY_TASK_COUNT_FACTOR,
-            DISTRIBUTED_MAX_TASKS_PER_STAGE
+            DISTRIBUTED_MAX_TASKS_PER_STAGE,
+            PLAIN_INDEX_SCAN_ENABLED
         );
     }
 

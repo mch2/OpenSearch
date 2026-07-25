@@ -9,6 +9,7 @@
 package org.opensearch.be.lucene;
 
 import org.opensearch.common.annotation.ExperimentalApi;
+import org.opensearch.common.lucene.index.OpenSearchDirectoryReader;
 import org.opensearch.index.engine.dataformat.DataFormat;
 import org.opensearch.index.engine.dataformat.FieldTypeCapabilities;
 import org.opensearch.index.mapper.DocCountFieldMapper;
@@ -103,5 +104,21 @@ public class LuceneDataFormat extends DataFormat {
     @Override
     public Set<FieldTypeCapabilities> supportedFields() {
         return SUPPORTED_FIELDS;
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>Plain-index analytics reader bridge: wraps the shard's live {@link OpenSearchDirectoryReader}
+     * in a {@link LuceneReader} for the doc-values leaf. The {@code generationToSegmentName} map is
+     * EMPTY — writer generations are a composite-engine concept a plain InternalEngine never produces,
+     * and the dv read path ({@code dv/}, {@code LuceneScanInstructionHandler}) iterates the reader's
+     * leaves directly without consulting it. (If a delegation path ever needs generations on a plain
+     * index, that is a separate follow-on; an empty map here would surface as a resolve miss, not a
+     * silent wrong answer.)
+     */
+    @Override
+    public Object adaptDirectoryReaderForAnalytics(OpenSearchDirectoryReader directoryReader) {
+        return new LuceneReader(directoryReader, java.util.Map.of());
     }
 }

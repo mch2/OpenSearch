@@ -147,6 +147,7 @@ import org.opensearch.index.engine.RefreshFailedEngineException;
 import org.opensearch.index.engine.SafeCommitInfo;
 import org.opensearch.index.engine.Segment;
 import org.opensearch.index.engine.SegmentsStats;
+import org.opensearch.index.engine.dataformat.DataFormat;
 import org.opensearch.index.engine.dataformat.DataFormatRegistry;
 import org.opensearch.index.engine.exec.IndexReaderProvider;
 import org.opensearch.index.engine.exec.Indexer;
@@ -6303,7 +6304,121 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
     }
 
     public IndexReaderProvider getReaderProvider() {
-        return getIndexer();
+        // Composite/pluggable-format indices: the DataFormatAwareEngine indexer IS the reader
+        // provider (it owns per-format EngineReaderManagers). Unchanged.
+        Indexer indexer = getIndexer();
+        if (indexer instanceof EngineBackedIndexer == false) {
+            return indexer;
+        }
+        // PLAIN index (regular InternalEngine): EngineBackedIndexer.acquireReader() throws. When
+        // analytics scanning is opted in for this index, return a shard-hosted reader bridge that
+        // acquires the shard's normal point-in-time searcher and exposes it to the analytics
+        // doc-values leaf — no engine swap, DSL/merges untouched (analytics is an additional reader).
+        // Otherwise keep the indexer (its throwing stub), so nothing changes for non-analytics indices.
+        // Read the opt-in by raw key: the setting is defined in the analytics-engine plugin
+        // (index.analytics.scan.enabled) and server must not depend on the plugin. Default false.
+        if (indexSettings.getSettings().getAsBoolean("index.analytics.scan.enabled", false)) {
+            return new PlainIndexAnalyticsReaderProvider();
+        }
+        return indexer;
+    }
+
+    /**
+     * Reader bridge that lets the analytics doc-values leaf scan a PLAIN index (regular
+     * {@link org.opensearch.index.engine.InternalEngine}) without swapping its engine. Acquires the
+     * shard's point-in-time searcher via {@link #acquireSearcher(String)} — so analytics inherits the
+     * shard's soft-delete and security (doc/field-level) reader wrappers and the same NRT refresh
+     * point as {@code _search}, seeing data as of the last refresh — and adapts its Lucene
+     * {@link OpenSearchDirectoryReader} into the Lucene backend's analytics reader via
+     * {@link DataFormat#adaptDirectoryReaderForAnalytics}. The {@link GatedCloseable} releases the
+     * engine searcher exactly once on close, in every path (the dv-leaf lifecycle fires this on stream
+     * drop — success, error, cancel), so a leaked searcher (which would block shard close) cannot occur.
+     */
+    private final class PlainIndexAnalyticsReaderProvider implements IndexReaderProvider {
+        @Override
+        public GatedCloseable<IndexReaderProvider.Reader> acquireReader() throws IOException {
+            final Engine.Searcher searcher = acquireSearcher("analytics-dv");
+            boolean success = false;
+            try {
+                if (searcher.getIndexReader() instanceof OpenSearchDirectoryReader == false) {
+                    throw new IllegalStateException(
+                        "analytics plain-index scan expected an OpenSearchDirectoryReader but got "
+                            + searcher.getIndexReader().getClass().getName()
+                    );
+                }
+                OpenSearchDirectoryReader osReader = (OpenSearchDirectoryReader) searcher.getIndexReader();
+                DataFormat luceneFormat = dataFormatRegistry == null ? null : dataFormatRegistry.format("lucene");
+                if (luceneFormat == null) {
+                    throw new IllegalStateException("analytics plain-index scan requires the 'lucene' data format to be registered");
+                }
+                Object luceneReader = luceneFormat.adaptDirectoryReaderForAnalytics(osReader);
+                if (luceneReader == null) {
+                    throw new IllegalStateException("'lucene' data format did not produce an analytics reader for this shard");
+                }
+                IndexReaderProvider.Reader reader = new PlainIndexAnalyticsReader(luceneFormat, luceneReader);
+                GatedCloseable<IndexReaderProvider.Reader> gated = new GatedCloseable<>(reader, searcher::close);
+                success = true;
+                return gated;
+            } finally {
+                if (success == false) {
+                    searcher.close();
+                }
+            }
+        }
+    }
+
+    /**
+     * {@link IndexReaderProvider.Reader} over a plain index's Lucene searcher. Exposes only the
+     * 'lucene' format's adapted reader (the analytics {@code LuceneReader}); other formats have no
+     * entry. {@code catalogSnapshot()} is unsupported on this path — the plain-index dv leaf scans
+     * the reader's leaves directly and never consults a composite {@link CatalogSnapshot}.
+     */
+    private static final class PlainIndexAnalyticsReader implements IndexReaderProvider.Reader {
+        private final DataFormat luceneFormat;
+        private final Object luceneReader;
+
+        PlainIndexAnalyticsReader(DataFormat luceneFormat, Object luceneReader) {
+            this.luceneFormat = luceneFormat;
+            this.luceneReader = luceneReader;
+        }
+
+        @Override
+        public CatalogSnapshot catalogSnapshot() {
+            // The dv-leaf plain-index scan does not use a catalog snapshot (no composite segment
+            // metadata exists for a plain index); it iterates the DirectoryReader's leaves directly.
+            throw new UnsupportedOperationException("catalogSnapshot is not available for the plain-index analytics reader");
+        }
+
+        @Override
+        public Object reader(DataFormat format) {
+            return luceneFormat.equals(format) ? luceneReader : null;
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        public <R> R getReader(DataFormat format, Class<R> readerType) {
+            if (luceneFormat.equals(format) == false) {
+                return null;
+            }
+            if (readerType.isInstance(luceneReader) == false) {
+                throw new IllegalArgumentException(
+                    "Reader for format ["
+                        + format.name()
+                        + "] is "
+                        + luceneReader.getClass().getName()
+                        + ", expected "
+                        + readerType.getName()
+                );
+            }
+            return (R) luceneReader;
+        }
+
+        @Override
+        public void close() {
+            // No-op: the engine searcher's lifecycle is owned by the GatedCloseable returned from
+            // acquireReader() (which calls searcher::close). This Reader holds no resource of its own —
+            // the adapted LuceneReader borrows the searcher's DirectoryReader, it does not own it.
+        }
     }
 
     /**
