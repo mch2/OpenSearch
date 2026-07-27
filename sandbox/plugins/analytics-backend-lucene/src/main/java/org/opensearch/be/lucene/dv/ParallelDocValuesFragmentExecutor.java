@@ -66,10 +66,28 @@ public final class ParallelDocValuesFragmentExecutor implements AnalyticsSearchB
     }
 
     /** Poison pill marking one producer's completion. */
-    private static final ArrowArray[] SENTINEL_HOLDER = new ArrowArray[0];
+    private static final Object SENTINEL_HOLDER = new Object();
+
+    /**
+     * One decoded batch waiting in the queue: the exported array and — for dictionary-encoded
+     * batches, whose physical schema differs from the advertised one — the per-batch schema export
+     * the consumer imports with (mirrors the sequential {@link DocValuesFragmentExecutor}). Both C
+     * structs are owned by whoever dequeues them and closed on the following pull / on close().
+     */
+    private static final class QueuedBatch {
+        final ArrowArray array;
+        final org.apache.arrow.c.ArrowSchema schema; // null in utf8 mode (advertised schema is authoritative)
+
+        QueuedBatch(ArrowArray array, org.apache.arrow.c.ArrowSchema schema) {
+            this.array = array;
+            this.schema = schema;
+        }
+    }
 
     private final BufferAllocator allocator;
     private final Schema projectedSchema;
+    /** Physical batch schema (== projected in utf8 mode; dictionary-encoded otherwise). */
+    private final Schema physicalSchema;
     private final Runnable onClose;
 
     private final BlockingQueue<Object> queue;
@@ -80,6 +98,7 @@ public final class ParallelDocValuesFragmentExecutor implements AnalyticsSearchB
 
     /** The previous pull's export, released on the following next()/close() (deferred close). */
     private ArrowArray pendingExport;
+    private org.apache.arrow.c.ArrowSchema pendingSchemaExport;
     private boolean exhausted;
 
     // Fragment counters (shared across producers).
@@ -120,12 +139,14 @@ public final class ParallelDocValuesFragmentExecutor implements AnalyticsSearchB
         this.queue = new ArrayBlockingQueue<>(Math.max(2, threads * 2));
         this.liveProducers = new AtomicInteger(threads);
 
+        Schema physical = projectedSchema;
         for (int t = 0; t < threads; t++) {
             List<LeafReaderContext> mine = new ArrayList<>();
             for (int i = t; i < leaves.size(); i += threads) {
                 mine.add(leaves.get(i)); // round-robin partition — balances segment sizes on average
             }
             ColumnBatchSource source = sourceFactory.get();
+            physical = source.physicalSchema(projectedSchema); // identical across sources (same specs)
             synchronized (sources) {
                 sources.add(source);
             }
@@ -136,6 +157,7 @@ public final class ParallelDocValuesFragmentExecutor implements AnalyticsSearchB
             producer.setDaemon(true);
             producers.add(producer);
         }
+        this.physicalSchema = physical;
         producers.forEach(Thread::start);
     }
 
@@ -196,7 +218,7 @@ public final class ParallelDocValuesFragmentExecutor implements AnalyticsSearchB
     /** Decode + export one batch and push it (blocking = backpressure). */
     private void emit(LeafReaderContext leaf, ColumnBatchSource source, int[] docBuffer, int count) throws IOException,
         InterruptedException {
-        try (VectorSchemaRoot root = VectorSchemaRoot.create(projectedSchema, allocator)) {
+        try (VectorSchemaRoot root = VectorSchemaRoot.create(physicalSchema, allocator)) {
             root.allocateNew();
             source.decodeBatch(leaf, docBuffer, count, root);
             root.setRowCount(count);
@@ -205,18 +227,31 @@ public final class ParallelDocValuesFragmentExecutor implements AnalyticsSearchB
             for (FieldVector v : root.getFieldVectors()) {
                 bytesEmitted.add(v.getBufferSize());
             }
+            // Dictionary mode: the physical schema differs from the advertised one, so export it per
+            // batch (with THIS producer's per-batch dictionary provider) alongside the array — the
+            // consumer imports with it and casts to the advertised schema (see JavaCursorStream).
+            org.apache.arrow.vector.dictionary.DictionaryProvider dictionaries = source.dictionaryProvider();
             ArrowArray array = ArrowArray.allocateNew(allocator);
+            org.apache.arrow.c.ArrowSchema schemaStruct = null;
             boolean queued = false;
             try {
-                Data.exportVectorSchemaRoot(allocator, root, null, array);
+                if (physicalSchema != projectedSchema) {
+                    schemaStruct = org.apache.arrow.c.ArrowSchema.allocateNew(allocator);
+                    Data.exportSchema(allocator, physicalSchema, dictionaries, schemaStruct);
+                }
+                Data.exportVectorSchemaRoot(allocator, root, dictionaries, array);
                 // Blocking put = producer suspension when the consumer is slow. On close(),
                 // the interrupt unblocks us and the catch in runProducer exits cleanly.
-                queue.put(array);
+                queue.put(new QueuedBatch(array, schemaStruct));
                 queued = true;
             } finally {
                 if (queued == false) {
                     array.release();
                     array.close();
+                    if (schemaStruct != null) {
+                        schemaStruct.release();
+                        schemaStruct.close();
+                    }
                 }
             }
         }
@@ -251,9 +286,10 @@ public final class ParallelDocValuesFragmentExecutor implements AnalyticsSearchB
                 }
                 continue;
             }
-            ArrowArray array = (ArrowArray) item;
-            pendingExport = array;
-            return array.memoryAddress();
+            QueuedBatch batch = (QueuedBatch) item;
+            pendingExport = batch.array;
+            pendingSchemaExport = batch.schema;
+            return batch.array.memoryAddress();
         }
     }
 
@@ -275,6 +311,14 @@ public final class ParallelDocValuesFragmentExecutor implements AnalyticsSearchB
         return 0L;
     }
 
+    @Override
+    public long currentSchemaPtr() {
+        // MUST delegate: a dictionary-mode batch's physical schema differs from the advertised one;
+        // dropping this pointer makes the native importer read an Int32 dictionary array as Utf8View
+        // (2 buffers vs variadic-view layout) and panic. Zero in utf8 mode (advertised is authoritative).
+        return pendingSchemaExport == null ? 0L : pendingSchemaExport.memoryAddress();
+    }
+
     private static Exception asException(Throwable t) {
         return t instanceof Exception e ? e : new RuntimeException(t);
     }
@@ -283,6 +327,28 @@ public final class ParallelDocValuesFragmentExecutor implements AnalyticsSearchB
         if (pendingExport != null) {
             pendingExport.close();
             pendingExport = null;
+        }
+        if (pendingSchemaExport != null) {
+            pendingSchemaExport.close();
+            pendingSchemaExport = null;
+        }
+    }
+
+    /**
+     * Reclaim a queued item Rust never consumed: release() runs its still-armed C release callback
+     * (freeing the buffers back to the allocator), then close() frees the wrapper. Sentinels hold no
+     * memory. Applies to both the array and any per-batch dictionary schema struct.
+     */
+    private static void releaseQueued(Object item) {
+        if (item == SENTINEL_HOLDER) {
+            return;
+        }
+        QueuedBatch batch = (QueuedBatch) item;
+        batch.array.release();
+        batch.array.close();
+        if (batch.schema != null) {
+            batch.schema.release();
+            batch.schema.close();
         }
     }
 
@@ -347,11 +413,7 @@ public final class ParallelDocValuesFragmentExecutor implements AnalyticsSearchB
         }
         Object item;
         while ((item = queue.poll()) != null) {
-            if (item != SENTINEL_HOLDER) {
-                ArrowArray array = (ArrowArray) item;
-                array.release();
-                array.close();
-            }
+            releaseQueued(item);
         }
         for (Thread p : producers) {
             try {
@@ -367,11 +429,7 @@ public final class ParallelDocValuesFragmentExecutor implements AnalyticsSearchB
         // A producer may have completed an export between our drain and its interrupt landing;
         // sweep once more after join so nothing armed remains queued.
         while ((item = queue.poll()) != null) {
-            if (item != SENTINEL_HOLDER) {
-                ArrowArray array = (ArrowArray) item;
-                array.release();
-                array.close();
-            }
+            releaseQueued(item);
         }
         synchronized (sources) {
             for (ColumnBatchSource source : sources) {

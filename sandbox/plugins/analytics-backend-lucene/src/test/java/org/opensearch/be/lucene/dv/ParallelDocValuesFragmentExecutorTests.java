@@ -14,6 +14,8 @@ import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.BigIntVector;
+import org.apache.arrow.vector.IntVector;
+import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
@@ -21,6 +23,7 @@ import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.document.NumericDocValuesField;
+import org.apache.lucene.document.SortedDocValuesField;
 import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.IndexWriterConfig;
@@ -28,6 +31,7 @@ import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.MatchAllDocsQuery;
 import org.apache.lucene.store.ByteBuffersDirectory;
 import org.apache.lucene.store.Directory;
+import org.apache.lucene.util.BytesRef;
 import org.opensearch.test.OpenSearchTestCase;
 
 import java.util.ArrayList;
@@ -93,6 +97,82 @@ public class ParallelDocValuesFragmentExecutorTests extends OpenSearchTestCase {
             }
         }
         return values;
+    }
+
+    /**
+     * Dictionary keyword mode under parallelism (the regression this guards: dictionary mode used to
+     * force parallelism=1, serializing every string group-by). Each producer owns its own source and
+     * per-batch dictionaries and exports a per-batch physical schema alongside the array; the consumer
+     * imports with {@link ParallelDocValuesFragmentExecutor#currentSchemaPtr()} and the decoded terms
+     * must equal the corpus multiset. A dropped schema pointer would make the importer read the Int32
+     * index array as the advertised Utf8 and fail — so a green round-trip proves the plumbing.
+     */
+    public void testParallelDictionaryKeywordRoundTrip() throws Exception {
+        Field k = new Field("k", FieldType.nullable(new ArrowType.Utf8()), null);
+        Schema advertised = new Schema(List.of(k));
+        String[] palette = { "alpha", "bravo", "charlie", "delta" };
+        List<String> expected = new ArrayList<>();
+        try (Directory dir = new ByteBuffersDirectory(); BufferAllocator alloc = new RootAllocator()) {
+            try (IndexWriter writer = new IndexWriter(dir, new IndexWriterConfig())) {
+                for (int seg = 0; seg < 8; seg++) {
+                    for (int i = 0; i < 50; i++) {
+                        Document doc = new Document();
+                        String term = palette[(seg + i) % palette.length];
+                        doc.add(new SortedDocValuesField("k", new BytesRef(term)));
+                        expected.add(term);
+                        writer.addDocument(doc);
+                    }
+                    writer.commit();
+                }
+            }
+            try (DirectoryReader reader = DirectoryReader.open(dir)) {
+                IndexSearcher searcher = new IndexSearcher(reader);
+                AtomicInteger closes = new AtomicInteger();
+                ParallelDocValuesFragmentExecutor cursor = new ParallelDocValuesFragmentExecutor(
+                    alloc,
+                    searcher,
+                    new MatchAllDocsQuery(),
+                    advertised,
+                    () -> new LuceneColumnBatchSource(
+                        List.of(new DvColumnSpec(k, DvColumnSpec.DecodeKind.KEYWORD_ORD)),
+                        16,
+                        LuceneColumnBatchSource.KeywordEncoding.DICTIONARY,
+                        alloc
+                    ),
+                    16,
+                    4,
+                    closes::incrementAndGet
+                );
+                List<String> values = new ArrayList<>();
+                long ptr;
+                while ((ptr = cursor.next()) != 0) {
+                    long schemaPtr = cursor.currentSchemaPtr();
+                    assertTrue("dictionary mode must ship a per-batch schema pointer", schemaPtr != 0);
+                    try (
+                        ArrowArray array = ArrowArray.wrap(ptr);
+                        ArrowSchema schema = ArrowSchema.wrap(schemaPtr);
+                        org.apache.arrow.c.CDataDictionaryProvider provider = new org.apache.arrow.c.CDataDictionaryProvider()
+                    ) {
+                        try (VectorSchemaRoot imported = Data.importVectorSchemaRoot(alloc, array, schema, provider)) {
+                            IntVector indices = (IntVector) imported.getVector(0);
+                            org.apache.arrow.vector.dictionary.Dictionary dict = provider.lookup(
+                                indices.getField().getDictionary().getId()
+                            );
+                            VarCharVector dictVector = (VarCharVector) dict.getVector();
+                            for (int i = 0; i < imported.getRowCount(); i++) {
+                                assertFalse(indices.isNull(i));
+                                values.add(new String(dictVector.get(indices.get(i)), java.nio.charset.StandardCharsets.UTF_8));
+                            }
+                        }
+                    }
+                }
+                cursor.close();
+                assertEquals("lease cleanup must run exactly once", 1, closes.get());
+                values.sort(null);
+                expected.sort(null);
+                assertEquals("parallel dictionary multiset must equal the corpus", expected, values);
+            }
+        }
     }
 
     public void testParallelScanProducesSameMultisetAsSequential() throws Exception {
