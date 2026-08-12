@@ -18,6 +18,7 @@ import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.message.ParameterizedMessage;
 import org.opensearch.analytics.exec.VectorUtils;
 import org.opensearch.analytics.planner.rel.OpenSearchLateMaterialization;
+import org.opensearch.analytics.spi.CancellableExchangeSink;
 import org.opensearch.analytics.spi.ExchangeSink;
 
 import java.util.List;
@@ -200,12 +201,23 @@ public final class Stitcher {
                 // ownership of output, so a close-time failure must not propagate out of finish()
                 // (it runs on a shard's GatherListener callback thread) — log and swallow it.
                 try {
+                    // End-of-input BEFORE close. The parent reduce's pipeline breaker (SortExec/
+                    // TopK/aggregate) emits only once it observes EOF, and close() waits on that
+                    // same drain — so closing without this waits out the teardown timeout on
+                    // every late-materialization query.
+                    parentSink.endOfInput();
                     parentSink.close();
                 } catch (Exception e) {
                     logger.warn(new ParameterizedMessage("[Stitcher] parentSink.close() failed after emit for {} rows", totalRows), e);
                 }
                 logger.debug("[Stitcher] emitted rows={}", totalRows);
             } else {
+                // A fetch failure is not normal input completion. Abort a cancellable parent
+                // before closing it, so its native stream reports an error instead of reading
+                // close as graceful EOF and completing the top-level query successfully.
+                if (parentSink instanceof CancellableExchangeSink cancellable) {
+                    cancellable.cancel();
+                }
                 try {
                     parentSink.close();
                 } catch (Exception ignore) {}

@@ -554,6 +554,106 @@ public class DatafusionReduceSinkTests extends OpenSearchTestCase {
         }
     }
 
+    /**
+     * Reproduces {@code Stitcher.finish()}: signal end-of-input, then tear down immediately
+     * without waiting for the drain. The reduce runs a SUM — a pipeline breaker that emits
+     * only after end-of-input — so {@code close()} must let the aggregate finish rather than
+     * cancelling it pre-emit. Without {@link ExchangeSink#endOfInput()} the drain has no way
+     * to learn its input is done, and {@code close()} burns the full 5s teardown timeout.
+     */
+    public void testEndOfInputBeforeCloseCompletesDrainWithoutStall() throws Exception {
+        NativeBridge.initTokioRuntimeManager(2);
+        Path spillDir = createTempDir("datafusion-spill");
+        long runtimePtr = NativeBridge.createGlobalRuntime(64 * 1024 * 1024, 0L, spillDir.toString(), 32 * 1024 * 1024);
+        NativeRuntimeHandle runtimeHandle = new NativeRuntimeHandle(runtimePtr);
+
+        try (RootAllocator alloc = new RootAllocator(Long.MAX_VALUE)) {
+            Schema inputSchema = new Schema(List.of(new Field("x", FieldType.nullable(new ArrowType.Int(64, true)), null)));
+            CapturingSink downstream = new CapturingSink();
+            ExchangeSinkContext ctx = new ExchangeSinkContext(
+                "q-eof-before-close",
+                0,
+                4242L,
+                buildSumSubstraitBytes(DatafusionReduceSink.INPUT_ID),
+                alloc,
+                List.of(new ExchangeSinkContext.ChildInput(0, buildPassthroughSubstraitBytes(DatafusionReduceSink.INPUT_ID))),
+                downstream
+            );
+
+            DatafusionReduceSink sink = new DatafusionReduceSink(ctx, runtimeHandle);
+            PlainActionFuture<Void> drainDone = PlainActionFuture.newFuture();
+            Thread.ofVirtual().start(() -> sink.reduce(drainDone));
+            // Pin the close to the REDUCING branch — a close that races ahead of reduce()
+            // would tear down inline and never exercise the teardown cycle.
+            assertBusy(() -> assertEquals(DatafusionReduceSink.SinkState.REDUCING, sink.state.get()));
+
+            sink.feed(makeBatch(alloc, inputSchema, new long[] { 1L, 2L, 3L }));
+            sink.feed(makeBatch(alloc, inputSchema, new long[] { 4L, 5L, 6L }));
+            sink.feed(makeBatch(alloc, inputSchema, new long[] { 7L, 8L, 9L }));
+
+            long startNanos = System.nanoTime();
+            sink.endOfInput();
+            sink.close();
+            long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+
+            drainDone.actionGet(10, TimeUnit.SECONDS);
+            logger.info("[measure] endOfInput()+close() took {}ms", elapsedMillis);
+            assertTrue(
+                "close() after endOfInput() must not burn the 5s teardown timeout, took " + elapsedMillis + "ms",
+                elapsedMillis < 4000
+            );
+            assertEquals("SUM(1..9) must survive teardown", 45L, downstream.total);
+        } finally {
+            runtimeHandle.close();
+        }
+    }
+
+    /**
+     * A bare {@code close()} during REDUCING — no {@code endOfInput()} — is an abort, and must
+     * cancel up front rather than wait out the EOF window first. Guards the abort path's latency,
+     * which the existing cancel tests do not assert: they still pass when close() waits the full
+     * EOF budget before cancelling, just ~60x slower.
+     */
+    public void testCloseWithoutEndOfInputCancelsPromptly() throws Exception {
+        NativeBridge.initTokioRuntimeManager(2);
+        Path spillDir = createTempDir("datafusion-spill");
+        long runtimePtr = NativeBridge.createGlobalRuntime(64 * 1024 * 1024, 0L, spillDir.toString(), 32 * 1024 * 1024);
+        NativeRuntimeHandle runtimeHandle = new NativeRuntimeHandle(runtimePtr);
+
+        try (RootAllocator alloc = new RootAllocator(Long.MAX_VALUE)) {
+            CapturingSink downstream = new CapturingSink();
+            ExchangeSinkContext ctx = new ExchangeSinkContext(
+                "q-abort-close",
+                0,
+                4242L,
+                buildSumSubstraitBytes(DatafusionReduceSink.INPUT_ID),
+                alloc,
+                List.of(new ExchangeSinkContext.ChildInput(0, buildPassthroughSubstraitBytes(DatafusionReduceSink.INPUT_ID))),
+                downstream
+            );
+
+            DatafusionReduceSink sink = new DatafusionReduceSink(ctx, runtimeHandle);
+            PlainActionFuture<Void> drainDone = PlainActionFuture.newFuture();
+            Thread.ofVirtual().start(() -> sink.reduce(drainDone));
+            assertBusy(() -> assertEquals(DatafusionReduceSink.SinkState.REDUCING, sink.state.get()));
+
+            long startNanos = System.nanoTime();
+            sink.close();
+            long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+
+            drainDone.actionGet(10, TimeUnit.SECONDS);
+            logger.info("[measure] abort close() took {}ms", elapsedMillis);
+            assertTrue(
+                "abort close() must cancel immediately, not wait out the EOF window; took " + elapsedMillis + "ms",
+                elapsedMillis < 2000
+            );
+            assertEquals("aborted reduce must not emit a partial aggregate", 0, downstream.totalRows);
+            assertTrue("teardown must run on the abort path", sink.torndown.get());
+        } finally {
+            runtimeHandle.close();
+        }
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     /**

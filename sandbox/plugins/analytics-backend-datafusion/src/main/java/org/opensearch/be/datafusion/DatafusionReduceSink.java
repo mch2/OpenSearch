@@ -81,6 +81,22 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
     /** Guards the teardown body so concurrent + sequential close paths don't run it twice. */
     final java.util.concurrent.atomic.AtomicBoolean torndown = new java.util.concurrent.atomic.AtomicBoolean();
 
+    /** Window for the drain to finish on its own after input EOF, before close() falls back
+     *  to cancel. Together with {@link #CANCEL_GRACE_MILLIS} this keeps close()'s worst case
+     *  at the same 5s the cancel-first teardown had. */
+    static final long EOF_DRAIN_TIMEOUT_MILLIS = 4_000L;
+
+    /** Grace period for teardown to complete after the fallback cancel fires. */
+    static final long CANCEL_GRACE_MILLIS = 1_000L;
+
+    /** Teardown budget on the abort path, where cancel fires up front. Unchanged from
+     *  cancel-first teardown. */
+    static final long ABORT_TEARDOWN_TIMEOUT_MILLIS = 5_000L;
+
+    /** True once a producer signalled {@link #endOfInput()}. Distinguishes a graceful close
+     *  (wait for the drain) from a bare abort close (cancel immediately). */
+    private volatile boolean inputEnded;
+
     /** Signalled when reduce's finally completes teardown. closeImpl awaits this
      *  when cancelled during REDUCING state so the allocator isn't closed prematurely. */
     private final java.util.concurrent.CountDownLatch reduceDone = new java.util.concurrent.CountDownLatch(1);
@@ -183,6 +199,28 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
     @Override
     public boolean isConsumerDone() {
         return sendersByChildStageId.size() == 1 && sendersByChildStageId.values().iterator().next().isReceiverDropped();
+    }
+
+    /**
+     * Closes every input sender, which drops each mpsc and lets the native plan observe
+     * end-of-input — a pipeline breaker (SortExec/TopK/aggregate) needs that before it will
+     * emit. Blocking close is safe here: this runs on the producer's own thread after its
+     * last {@code feed()} returned, so that thread is not holding a sender read lock.
+     *
+     * <p>Multi-input callers signal per-partition EOF via {@link #sinkForChild(int)} as each
+     * child stage terminates and never reach this; it exists for the single-input producer
+     * (Stitcher) that holds the sink directly.
+     */
+    @Override
+    public void endOfInput() {
+        inputEnded = true;
+        for (DatafusionPartitionSender sender : sendersByChildStageId.values()) {
+            try {
+                sender.close();
+            } catch (Exception e) {
+                logger.warn("[reduce-sink] error signalling input EOF: taskId={}", ctx.taskId(), e);
+            }
+        }
     }
 
     @Override
@@ -363,12 +401,31 @@ public class DatafusionReduceSink extends AbstractDatafusionReduceSink implement
     protected Exception closeImpl() {
         SinkState before = state.compareAndExchange(SinkState.READY, SinkState.DONE);
         if (before == SinkState.REDUCING) {
-            // Drain in flight — fire cancel so it unblocks, then wait for reduce's
-            // finally to complete teardown (releases Arrow batches from the allocator).
-            fireCancelQuery();
+            // Drain in flight. Which teardown we owe depends on whether the producer finished.
+            //
+            // No endOfInput() means this close() is an abort — a bare close() during REDUCING
+            // is how callers signal "stop now". Cancel immediately, as cancel-first teardown
+            // always did: waiting would only stall the abort, and letting a pipeline breaker
+            // emit over partially-fed input would hand back a partial result as if the query
+            // had completed.
+            //
+            // After endOfInput() the drain finishes on its own — the breaker has seen EOF and
+            // emits within milliseconds — so wait for it rather than aborting the plan
+            // pre-emit, which is what produced the zero-row results. Cancel stays as the
+            // fallback for a drain stuck on something else, so close() still cannot hang.
+            // Either way the worst case is the same 5s cancel-first teardown had.
             try {
-                if (!reduceDone.await(5, java.util.concurrent.TimeUnit.SECONDS)) {
-                    logger.warn("[reduce-sink] timed out waiting for reduce teardown: taskId={}", ctx.taskId());
+                if (inputEnded == false) {
+                    fireCancelQuery();
+                    if (!reduceDone.await(ABORT_TEARDOWN_TIMEOUT_MILLIS, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                        logger.warn("[reduce-sink] timed out waiting for reduce teardown: taskId={}", ctx.taskId());
+                    }
+                } else if (!reduceDone.await(EOF_DRAIN_TIMEOUT_MILLIS, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                    logger.warn("[reduce-sink] reduce did not finish after input EOF; falling back to cancel: taskId={}", ctx.taskId());
+                    fireCancelQuery();
+                    if (!reduceDone.await(CANCEL_GRACE_MILLIS, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                        logger.warn("[reduce-sink] timed out waiting for reduce teardown: taskId={}", ctx.taskId());
+                    }
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();

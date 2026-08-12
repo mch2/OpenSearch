@@ -52,6 +52,11 @@ public final class OrdinalAppendingSink implements ExchangeSink {
     }
 
     @Override
+    public void endOfInput() {
+        delegate.endOfInput();
+    }
+
+    @Override
     public void close() {
         delegate.close();
     }

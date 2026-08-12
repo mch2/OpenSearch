@@ -69,6 +69,21 @@ public interface ExchangeSink {
     }
 
     /**
+     * Signal that no more batches will be fed, without releasing resources. Distinct from
+     * {@link #close()}: a sink whose consumer is a pipeline breaker (SortExec/TopK/aggregate)
+     * cannot emit until it observes end-of-input, and a {@code close()} that waits on its own
+     * drain cannot also be what unblocks it. Producers that feed a sink directly call this
+     * after their last {@link #feed}, then {@link #close()}.
+     *
+     * <p>Idempotent. Default no-op — sinks with no such dependency need not override.
+     *
+     * <p>Multi-input sinks already express this per-partition via
+     * {@link MultiInputExchangeSink#sinkForChild(int)}; this covers the single-input case,
+     * where the producer holds the sink directly and has no child stage id to route through.
+     */
+    default void endOfInput() {}
+
+    /**
      * Signal that no more batches will be fed. Releases resources.
      */
     void close();
