@@ -376,4 +376,17 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
         // And the rendering that contradicted the old predicate.
         assertRowsEqual("source=" + index + " | where isnull(node) | fields id, node", row("4", null));
     }
+
+    /**
+     * The null test on an intermediate object, where the expansion has to descend into a sub-object's
+     * leaves rather than test the sub-struct. Every fixture doc populates {@code city.location}, so
+     * the predicate must keep all 3 and its negation none — a no-op would have kept all 3 either way,
+     * which is why the negation is asserted too.
+     */
+    public void testNullPredicatesOnIntermediateObjectField() throws IOException {
+        assertRowsEqual("source=" + DATASET.indexName + " | where isnotnull(city.location) | stats count()", row(3));
+        assertRowsEqual("source=" + DATASET.indexName + " | where isnull(city.location) | stats count()", row(0));
+        // ...and on the top-level object that contains it.
+        assertRowsEqual("source=" + DATASET.indexName + " | where isnotnull(city) | stats count()", row(3));
+    }
 }
