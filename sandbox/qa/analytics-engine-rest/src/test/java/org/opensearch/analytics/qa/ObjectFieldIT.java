@@ -437,7 +437,10 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
     /**
      * Null semantics with a document that has no object at all, and one where only part of the
      * object is populated. Pins that the predicate, the aggregate, and the rendered value all agree —
-     * they are computed by three different mechanisms, so they can drift apart:
+     * they are computed by three different mechanisms, so they can drift apart. The rule is that an
+     * object is null exactly when every one of its leaves is null — {@code owner-only} and
+     * {@code branch-only} each populate a different single leaf, so neither a struct that is always
+     * valid nor one whose nullness tracks one particular leaf would produce these counts:
      *
      * <ul>
      *   <li>rendering: {@code ArrowValues.structToMap} skips null children and returns null when the
@@ -474,6 +477,7 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
             "{\"index\":{}}\n{\"id\":\"both\",\"account\":{\"owner\":\"alice\",\"branch\":{\"code\":\"NYC\"}}}\n"
                 + "{\"index\":{}}\n{\"id\":\"neither\"}\n"
                 + "{\"index\":{}}\n{\"id\":\"owner-only\",\"account\":{\"owner\":\"bob\"}}\n"
+                + "{\"index\":{}}\n{\"id\":\"branch-only\",\"account\":{\"branch\":{\"code\":\"LAX\"}}}\n"
         );
         bulk.setOptions(bulk.getOptions().toBuilder().addHeader("Content-Type", "application/x-ndjson"));
         client().performRequest(bulk);
@@ -482,6 +486,7 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
         assertRowsEqual(
             "source=" + index + " | sort id | fields id, account",
             row("both", Map.of("owner", "alice", "branch", Map.of("code", "NYC"))),
+            row("branch-only", Map.of("branch", Map.of("code", "LAX"))),
             row("neither", null),
             row("owner-only", Map.of("owner", "bob"))
         );
@@ -489,19 +494,21 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
         assertRowsEqual(
             "source=" + index + " | sort id | fields id, account.branch",
             row("both", Map.of("code", "NYC")),
+            row("branch-only", Map.of("code", "LAX")),
             row("neither", null),
             row("owner-only", null)
         );
 
         // The predicate must agree with the rendering rather than with the struct's validity.
-        assertRowsEqual("source=" + index + " | where isnotnull(account) | stats count()", row(2));
+        assertRowsEqual("source=" + index + " | where isnotnull(account) | stats count()", row(3));
         assertRowsEqual("source=" + index + " | where isnull(account) | stats count()", row(1));
-        assertRowsEqual("source=" + index + " | where isnotnull(account.branch) | stats count()", row(1));
+        assertRowsEqual("source=" + index + " | where isnotnull(account.branch) | stats count()", row(2));
         assertRowsEqual("source=" + index + " | where isnull(account.branch) | stats count()", row(2));
 
-        // And so must the aggregate: doc 2 has no object, so it is not counted.
-        assertRowsEqual("source=" + index + " | stats count(account)", row(2));
-        assertRowsEqual("source=" + index + " | stats count()", row(3));
+        // And so must the aggregate. 3 of 4, which pins the rule as "non-null when ANY leaf is":
+        // an always-valid struct would count 4, and summing populated leaves would count 5.
+        assertRowsEqual("source=" + index + " | stats count(account)", row(3));
+        assertRowsEqual("source=" + index + " | stats count()", row(4));
     }
 
 
