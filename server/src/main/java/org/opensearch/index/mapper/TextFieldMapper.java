@@ -1040,7 +1040,7 @@ public class TextFieldMapper extends ParametrizedFieldMapper {
         CopyTo copyTo,
         Builder builder
     ) {
-        super(simpleName, mappedFieldType, multiFields, copyTo);
+        super(simpleName, mappedFieldType, multiFields, copyTo, builder);
         assert mappedFieldType.getTextSearchInfo().isTokenized();
         assert mappedFieldType.hasDocValues() == false;
         if (fieldType.indexOptions() == IndexOptions.NONE && fieldType().fielddata()) {
@@ -1104,7 +1104,7 @@ public class TextFieldMapper extends ParametrizedFieldMapper {
         if (value == null) {
             return;
         }
-        context.documentInput().addField(fieldType(), value);
+        addFieldForPluggableFormat(context, value);
     }
 
     @Override
@@ -1284,6 +1284,10 @@ public class TextFieldMapper extends ParametrizedFieldMapper {
         mapperBuilder.freqFilter.toXContent(builder, includeDefaults);
         mapperBuilder.indexPrefixes.toXContent(builder, includeDefaults);
         mapperBuilder.indexPhrases.toXContent(builder, includeDefaults);
+        // Base-class parameters are likewise outside the fixed list above. Omitting multi_value here
+        // set the shape on the field type but dropped it from the mapping, so it was lost on the
+        // round-trip through cluster state.
+        mapperBuilder.multiValue.toXContent(builder, includeDefaults);
         // Plugin-contributed parameters are not part of the fixed backwards-compatibility list above and are serialized explicitly.
         for (Parameter<?> pluginMappingParameter : mapperBuilder.pluginMappingParameters()) {
             pluginMappingParameter.toXContent(builder, includeDefaults);

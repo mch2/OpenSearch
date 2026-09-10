@@ -612,7 +612,7 @@ public class IpFieldMapper extends ParametrizedFieldMapper {
     private final Version indexCreatedVersion;
 
     private IpFieldMapper(String simpleName, MappedFieldType mappedFieldType, MultiFields multiFields, CopyTo copyTo, Builder builder) {
-        super(simpleName, mappedFieldType, multiFields, copyTo, builder.isPluggableDataFormat());
+        super(simpleName, mappedFieldType, multiFields, copyTo, builder);
         this.ignoreMalformedByDefault = builder.ignoreMalformedByDefault;
         this.indexed = builder.indexed.getValue();
         this.hasDocValues = builder.hasDocValues.getValue();
@@ -671,7 +671,7 @@ public class IpFieldMapper extends ParametrizedFieldMapper {
         if (address == null) {
             return;
         }
-        context.documentInput().addField(fieldType(), address);
+        addFieldForPluggableFormat(context, address);
     }
 
     @Override

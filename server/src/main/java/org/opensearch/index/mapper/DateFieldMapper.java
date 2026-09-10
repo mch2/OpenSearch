@@ -808,7 +808,7 @@ public final class DateFieldMapper extends ParametrizedFieldMapper {
         Resolution resolution,
         Builder builder
     ) {
-        super(simpleName, mappedFieldType, multiFields, copyTo, builder.isPluggableDataFormat());
+        super(simpleName, mappedFieldType, multiFields, copyTo, builder);
         this.store = builder.store.getValue();
         this.indexed = builder.index.getValue();
         this.hasDocValues = builder.docValues.getValue();
@@ -875,7 +875,7 @@ public final class DateFieldMapper extends ParametrizedFieldMapper {
         if (timestamp == null) {
             return;
         }
-        context.documentInput().addField(fieldType(), timestamp);
+        addFieldForPluggableFormat(context, timestamp);
     }
 
     private Long parseTimestamp(ParseContext context) throws IOException {

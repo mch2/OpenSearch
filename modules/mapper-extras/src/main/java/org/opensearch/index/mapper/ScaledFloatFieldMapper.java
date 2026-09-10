@@ -414,7 +414,7 @@ public class ScaledFloatFieldMapper extends ParametrizedFieldMapper {
         CopyTo copyTo,
         Builder builder
     ) {
-        super(simpleName, mappedFieldType, multiFields, copyTo, builder.isPluggableDataFormat());
+        super(simpleName, mappedFieldType, multiFields, copyTo, builder);
         this.indexed = builder.indexed.getValue();
         this.hasDocValues = builder.hasDocValues.getValue();
         this.stored = builder.stored.getValue();
@@ -484,7 +484,7 @@ public class ScaledFloatFieldMapper extends ParametrizedFieldMapper {
         if (scaledValue == null) {
             return;
         }
-        context.documentInput().addField(fieldType(), scaledValue);
+        addFieldForPluggableFormat(context, scaledValue);
     }
 
     private Long parseScaledValue(ParseContext context) throws IOException {

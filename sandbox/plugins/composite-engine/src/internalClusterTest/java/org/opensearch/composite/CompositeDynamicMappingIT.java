@@ -519,6 +519,204 @@ public class CompositeDynamicMappingIT extends OpenSearchIntegTestCase {
         assertFalse(fieldOf(event, "name").containsKey("multi_value"));
     }
 
+    /**
+     * Every type the Parquet format registers must accept a declared array and write a LIST column.
+     * Failing here means a type's mapper or its {@code ParquetField} is unwired — and an unwired mapper
+     * accepts {@code multi_value: true} and silently ignores it, which is worse than rejecting.
+     */
+    public void testDeclaredArrayWorksForEveryParquetType() throws Exception {
+        Map<String, List<Object>> byType = new java.util.LinkedHashMap<>();
+        byType.put("keyword", List.of("a", "b"));
+        byType.put("text", List.of("alpha beta", "gamma"));
+        byType.put("match_only_text", List.of("alpha beta", "gamma"));
+        byType.put("long", List.of(1, 2));
+        byType.put("integer", List.of(1, 2));
+        byType.put("short", List.of(1, 2));
+        byType.put("byte", List.of(1, 2));
+        byType.put("double", List.of(1.5, 2.5));
+        byType.put("float", List.of(1.5, 2.5));
+        byType.put("half_float", List.of(1.5, 2.5));
+        byType.put("unsigned_long", List.of(1, 2));
+        byType.put("boolean", List.of(true, false));
+        byType.put("date", List.of("2026-01-01T00:00:00Z", "2026-06-15T12:30:00Z"));
+        byType.put("date_nanos", List.of("2026-01-01T00:00:00Z", "2026-06-15T12:30:00Z"));
+        byType.put("ip", List.of("10.0.0.1", "192.168.1.1"));
+
+        List<String> unwired = new ArrayList<>();
+        for (Map.Entry<String, List<Object>> entry : byType.entrySet()) {
+            String type = entry.getKey();
+            String indexName = "test-alltypes-" + type.replace('_', '-');
+            assertTrue(
+                client().admin()
+                    .indices()
+                    .prepareCreate(indexName)
+                    .setSettings(parquetPrimaryLuceneSecondarySettings())
+                    .setMapping("f", "type=" + type + ",multi_value=true")
+                    .get()
+                    .isAcknowledged()
+            );
+            ensureGreen(indexName);
+
+            if (Boolean.TRUE.equals(clusterStateFieldMapping(indexName, "f").get("multi_value")) == false) {
+                unwired.add(type + " (mapping ignored multi_value)");
+                continue;
+            }
+            assertEquals(RestStatus.CREATED, client().prepareIndex(indexName).setSource("f", entry.getValue()).get().status());
+            List<Map<String, Object>> rows = refreshFlushAndReadParquetRows(indexName);
+            assertEquals(type + " should write one row", 1, rows.size());
+            Object column = rows.get(0).get("f");
+            if (column == null) {
+                // Distinguish "arrays are broken for this type" from "this type writes no column at
+                // all", which is a pre-existing storage gap rather than anything to do with arrays.
+                if (writesAScalarColumn(type, entry.getValue().get(0))) {
+                    unwired.add(type + " (writes a scalar column but not a list)");
+                }
+                continue;
+            }
+            if (isListColumnPlaceholder(column) == false) {
+                unwired.add(type + " (column is not a LIST: " + column + ")");
+            }
+        }
+        assertEquals("types accepting multi_value without storing a list", List.of(), unwired);
+    }
+
+    /** Whether this type writes a column at all when mapped single-valued. */
+    private boolean writesAScalarColumn(String type, Object value) throws Exception {
+        String indexName = "test-scalarbase-" + type.replace('_', '-');
+        assertTrue(
+            client().admin()
+                .indices()
+                .prepareCreate(indexName)
+                .setSettings(parquetPrimaryLuceneSecondarySettings())
+                .setMapping("f", "type=" + type)
+                .get()
+                .isAcknowledged()
+        );
+        ensureGreen(indexName);
+        assertEquals(RestStatus.CREATED, client().prepareIndex(indexName).setSource("f", value).get().status());
+        List<Map<String, Object>> rows = refreshFlushAndReadParquetRows(indexName);
+        return rows.size() == 1 && rows.get(0).get("f") != null;
+    }
+
+    /**
+     * A realistic OpenTelemetry log record whose only complication is array-valued attributes — no
+     * nested objects, no arrays of objects. Several semantic conventions are defined as arrays
+     * ({@code http.request.header.<key>} and {@code process.command_args} are both {@code string[]}),
+     * and they arrive under the wildcard {@code attributes.*} that no template can enumerate.
+     *
+     * <p>Uses the dynamic templates from data-prepper's logs-otel-v1 index template, so the mapping
+     * decisions here are the ones a real OTel pipeline would produce.
+     */
+    public void testOtelLogRecordWithArrayAttributes() throws Exception {
+        String indexName = "test-otel-logs";
+        String mapping = "{"
+            + "\"date_detection\":false,"
+            + "\"dynamic_templates\":["
+            + "{\"long_attributes\":{\"path_match\":\"attributes.*\",\"match_mapping_type\":\"long\","
+            + "\"mapping\":{\"type\":\"long\"}}},"
+            + "{\"double_attributes\":{\"path_match\":\"attributes.*\",\"match_mapping_type\":\"double\","
+            + "\"mapping\":{\"type\":\"double\"}}},"
+            + "{\"string_attributes\":{\"path_match\":\"attributes.*\",\"match_mapping_type\":\"string\","
+            + "\"mapping\":{\"type\":\"keyword\",\"ignore_above\":256}}}"
+            + "],"
+            + "\"properties\":{"
+            + "\"@timestamp\":{\"type\":\"date_nanos\"},"
+            + "\"body\":{\"type\":\"text\"},"
+            + "\"traceId\":{\"type\":\"keyword\"}"
+            + "}}";
+        assertTrue(
+            client().admin()
+                .indices()
+                .prepareCreate(indexName)
+                .setSettings(parquetPrimaryLuceneSecondarySettings())
+                .setMapping(mapping)
+                .get()
+                .isAcknowledged()
+        );
+        ensureGreen(indexName);
+
+        // Attribute keys are flattened to one path segment, which is what keeps `attributes.*` matching.
+        Map<String, Object> attributes = new java.util.LinkedHashMap<>();
+        attributes.put("http@request@header@accept", List.of("application/json", "text/html"));
+        attributes.put("process@command_args", List.of("python", "app.py", "--port", "8080"));
+        attributes.put("http@response@status_code", 200);
+        attributes.put("http@route", "/cart");
+
+        assertEquals(
+            RestStatus.CREATED,
+            client().prepareIndex(indexName)
+                .setSource(
+                    "@timestamp",
+                    "2026-01-01T00:00:00.000000000Z",
+                    "body",
+                    "GET /cart 200",
+                    "traceId",
+                    "0af7651916cd43dd8448eb211c80319c",
+                    "attributes",
+                    attributes
+                )
+                .get()
+                .status()
+        );
+
+        Map<String, Object> mapped = nestedFieldMapping(indexName, "attributes");
+        for (String arrayAttribute : List.of("http@request@header@accept", "process@command_args")) {
+            assertEquals(arrayAttribute + " arrived as an array", "keyword", fieldOf(mapped, arrayAttribute).get("type"));
+            assertEquals(
+                arrayAttribute + " should be declared multi-valued",
+                Boolean.TRUE,
+                fieldOf(mapped, arrayAttribute).get("multi_value")
+            );
+            assertEquals("the template's own settings still apply", 256, fieldOf(mapped, arrayAttribute).get("ignore_above"));
+        }
+        for (String scalarAttribute : List.of("http@response@status_code", "http@route")) {
+            assertFalse(
+                scalarAttribute + " arrived as a scalar and must stay single-valued",
+                fieldOf(mapped, scalarAttribute).containsKey("multi_value")
+            );
+        }
+
+        List<Map<String, Object>> rows = refreshFlushAndReadParquetRows(indexName);
+        assertEquals(1, rows.size());
+        Map<String, Object> row = rows.get(0);
+        assertTrue(isListColumnPlaceholder(row.get("attributes.http@request@header@accept")));
+        assertTrue(isListColumnPlaceholder(row.get("attributes.process@command_args")));
+        assertEquals(200L, ((Number) row.get("attributes.http@response@status_code")).longValue());
+        assertEquals("/cart", row.get("attributes.http@route"));
+        assertEquals("0af7651916cd43dd8448eb211c80319c", row.get("traceId"));
+    }
+
+    /**
+     * KNOWN GAP, and a larger one than multi-value. The OpenTelemetry span shape declares
+     * {@code events} and {@code links} as {@code nested}, and the pluggable data format rejects
+     * {@code nested} outright at mapping time. So an OTel span cannot be ingested into a Parquet index
+     * at all today, independent of any array work — a span's array-valued <em>attributes</em> are fine
+     * (see {@link #testOtelLogRecordWithArrayAttributes}), but its event and link structures are not.
+     */
+    public void testOtelSpanWithNestedEventsIsRejected() throws Exception {
+        String indexName = "test-otel-span-nested";
+        String mapping = "{\"properties\":{"
+            + "\"traceId\":{\"type\":\"keyword\"},"
+            + "\"spanId\":{\"type\":\"keyword\"},"
+            + "\"name\":{\"type\":\"keyword\"},"
+            + "\"events\":{\"type\":\"nested\",\"properties\":{"
+            + "\"time\":{\"type\":\"date_nanos\"},\"name\":{\"type\":\"keyword\"}}}"
+            + "}}";
+        Exception error = expectThrows(
+            Exception.class,
+            () -> client().admin()
+                .indices()
+                .prepareCreate(indexName)
+                .setSettings(parquetPrimaryLuceneSecondarySettings())
+                .setMapping(mapping)
+                .get()
+        );
+        assertThat(
+            org.opensearch.ExceptionsHelper.stackTrace(error),
+            org.hamcrest.Matchers.containsString("nested type is not supported with pluggable data format")
+        );
+    }
+
     private void createParquetIndex(String indexName) {
         assertTrue(
             client().admin().indices().prepareCreate(indexName).setSettings(parquetPrimaryLuceneSecondarySettings()).get().isAcknowledged()

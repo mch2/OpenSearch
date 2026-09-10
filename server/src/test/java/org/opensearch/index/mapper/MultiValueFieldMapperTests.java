@@ -145,19 +145,18 @@ public class MultiValueFieldMapperTests extends MapperServiceTestCase {
     // enumerate which attribute keys hold arrays.
 
     @LockFeatureFlag(FeatureFlags.PLUGGABLE_DATAFORMAT_EXPERIMENTAL_FLAG)
-    public void testDynamicStringArrayBecomesTextAndStaysScalar() throws IOException {
+    public void testDynamicStringArrayBecomesMultiValuedText() throws IOException {
         // An unmapped string with no template maps to `text` on a pluggable index
-        // (builderSupplierForText), and text has no parquet list writer, so detection cannot make it
-        // an array. Reaching an array-shaped string field requires a template that maps to keyword —
-        // which is what the OpenTelemetry template does. Pinned so a change to the dynamic string
-        // default is a deliberate decision rather than a surprise.
+        // (builderSupplierForText). The OpenTelemetry template maps attributes to keyword instead, but
+        // either way the array shape is recorded.
         MapperService service = createMapperService(pluggableSettings(), mapping(b -> {}));
         ParsedDocument parsed = service.documentMapper().parse(source(b -> b.array("tags", "prod", "blue")), new CapturingDocumentInput());
         merge(service, dynamicMapping(parsed.dynamicMappingsUpdate()));
 
         FieldMapper tags = (FieldMapper) service.documentMapper().mappers().getMapper("tags");
         assertEquals("text", tags.typeName());
-        assertFalse(tags.fieldType().isMultiValued());
+        assertTrue(tags.fieldType().isMultiValued());
+        assertThat(service.documentMapper().mappingSource().string(), containsString("\"multi_value\":true"));
     }
 
     @LockFeatureFlag(FeatureFlags.PLUGGABLE_DATAFORMAT_EXPERIMENTAL_FLAG)
@@ -239,20 +238,40 @@ public class MultiValueFieldMapperTests extends MapperServiceTestCase {
     }
 
     @LockFeatureFlag(FeatureFlags.PLUGGABLE_DATAFORMAT_EXPERIMENTAL_FLAG)
-    public void testArrayOfObjectsLeavesLeafFieldsScalar() throws IOException {
-        // The array wraps objects, so the leaves inside them each hold one value. Array-ness must not
-        // leak from the enclosing array down to those leaves.
+    public void testArrayOfObjectsWithDistinctLeavesStaysScalar() throws IOException {
+        // Position inside an array is not evidence that any one leaf repeats: each object here
+        // contributes a different leaf, so both hold one value.
         MapperService service = createMapperService(pluggableSettings(), mapping(b -> {}));
         ParsedDocument parsed = service.documentMapper().parse(source(b -> {
             b.startArray("events");
-            b.startObject().field("name", "start").endObject();
-            b.startObject().field("name", "stop").endObject();
+            b.startObject().field("start", "a").endObject();
+            b.startObject().field("stop", "b").endObject();
             b.endArray();
         }), new CapturingDocumentInput());
         merge(service, dynamicMapping(parsed.dynamicMappingsUpdate()));
 
-        FieldMapper name = (FieldMapper) service.documentMapper().mappers().getMapper("events.name");
-        assertFalse("a leaf inside an array of objects holds one value per object", name.fieldType().isMultiValued());
+        assertFalse(((FieldMapper) service.documentMapper().mappers().getMapper("events.start")).fieldType().isMultiValued());
+        assertFalse(((FieldMapper) service.documentMapper().mappers().getMapper("events.stop")).fieldType().isMultiValued());
+    }
+
+    @LockFeatureFlag(FeatureFlags.PLUGGABLE_DATAFORMAT_EXPERIMENTAL_FLAG)
+    public void testArrayOfObjectsRepeatingALeafIsRejected() throws IOException {
+        // KNOWN GAP. Two objects both carrying `name` give events.name two values in one document, but
+        // the field is created from the first object — before there is evidence the leaf repeats — so it
+        // is created single-valued and the second value is refused. Declaring multi_value up front is
+        // the workaround; amending the shape within the document that created the field would be the
+        // fix, and is safe because no file has been written yet.
+        MapperService service = createMapperService(pluggableSettings(), mapping(b -> {}));
+        MapperParsingException error = expectThrows(MapperParsingException.class, () -> service.documentMapper().parse(source(b -> {
+            b.startArray("events");
+            b.startObject().field("name", "start").endObject();
+            b.startObject().field("name", "stop").endObject();
+            b.endArray();
+        }), new CapturingDocumentInput()));
+        assertThat(
+            org.opensearch.ExceptionsHelper.stackTrace(error),
+            containsString("declare [multi_value: true] when creating the field mapping")
+        );
     }
 
     public void testDetectionAlsoAppliesWithoutThePluggableDataFormat() throws IOException {
