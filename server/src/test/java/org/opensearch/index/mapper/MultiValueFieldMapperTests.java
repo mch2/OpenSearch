@@ -238,9 +238,10 @@ public class MultiValueFieldMapperTests extends MapperServiceTestCase {
     }
 
     @LockFeatureFlag(FeatureFlags.PLUGGABLE_DATAFORMAT_EXPERIMENTAL_FLAG)
-    public void testArrayOfObjectsWithDistinctLeavesStaysScalar() throws IOException {
-        // Position inside an array is not evidence that any one leaf repeats: each object here
-        // contributes a different leaf, so both hold one value.
+    public void testArrayOfObjectsDeclaresEveryLeafArrayShaped() throws IOException {
+        // Each object here contributes a different leaf, so neither actually repeats — both are still
+        // declared array-shaped. The enclosing array is taken as the declaration of intent; the exact
+        // alternative would mean buffering the array to count each leaf before creating any mapper.
         MapperService service = createMapperService(pluggableSettings(), mapping(b -> {}));
         ParsedDocument parsed = service.documentMapper().parse(source(b -> {
             b.startArray("events");
@@ -250,15 +251,12 @@ public class MultiValueFieldMapperTests extends MapperServiceTestCase {
         }), new CapturingDocumentInput());
         merge(service, dynamicMapping(parsed.dynamicMappingsUpdate()));
 
-        assertFalse(((FieldMapper) service.documentMapper().mappers().getMapper("events.start")).fieldType().isMultiValued());
-        assertFalse(((FieldMapper) service.documentMapper().mappers().getMapper("events.stop")).fieldType().isMultiValued());
+        assertTrue(((FieldMapper) service.documentMapper().mappers().getMapper("events.start")).fieldType().isMultiValued());
+        assertTrue(((FieldMapper) service.documentMapper().mappers().getMapper("events.stop")).fieldType().isMultiValued());
     }
 
     @LockFeatureFlag(FeatureFlags.PLUGGABLE_DATAFORMAT_EXPERIMENTAL_FLAG)
     public void testArrayOfObjectsRepeatingALeafBecomesMultiValued() throws IOException {
-        // In-process the amendment works, but it does not reach a real cluster: see
-        // CompositeDynamicMappingIT.testArrayOfObjectsRepeatingALeafIsRejected. Kept because it pins the
-        // intended semantics and the mechanism, both of which the eventual fix has to preserve.
         // Under the default `object` mapping these two values belong to one multi-valued field —
         // OpenSearch flattens the objects and discards which value came from which. Nothing about the
         // first object reveals that `name` will appear again, so the shape is amended when the second
@@ -323,15 +321,17 @@ public class MultiValueFieldMapperTests extends MapperServiceTestCase {
         );
     }
 
-    public void testDetectionAlsoAppliesWithoutThePluggableDataFormat() throws IOException {
-        // Array-ness is recorded regardless of storage format, so a caller can tell a multi-valued
-        // field from a single-valued one on a Lucene-backed index too.
+    public void testDetectionDoesNotApplyWithoutThePluggableDataFormat() throws IOException {
+        // Lucene needs no declaration, so stamping one would change the mapping output of every existing
+        // index. The parameter is still accepted when declared explicitly — see
+        // testMultiValueIsAcceptedOnAnyIndex — but detection stays out of the way.
         MapperService service = createMapperService(getIndexSettings(), mapping(b -> {}));
         ParsedDocument parsed = service.documentMapper().parse(source(b -> b.array("codes", 1, 2)), new CapturingDocumentInput());
         merge(service, dynamicMapping(parsed.dynamicMappingsUpdate()));
 
         FieldMapper codes = (FieldMapper) service.documentMapper().mappers().getMapper("codes");
-        assertTrue(codes.fieldType().isMultiValued());
+        assertFalse(codes.fieldType().isMultiValued());
+        assertThat(service.documentMapper().mappingSource().string(), not(containsString("multi_value")));
     }
 
     @LockFeatureFlag(FeatureFlags.PLUGGABLE_DATAFORMAT_EXPERIMENTAL_FLAG)

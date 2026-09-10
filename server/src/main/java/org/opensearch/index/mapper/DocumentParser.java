@@ -1542,9 +1542,7 @@ final class DocumentParser {
                 );
             } else {
                 assert token.isValue();
-                // This value is an element of an array of values, so the leaf holds every element of
-                // that array — which is what lets a field created here declare itself multi-valued.
-                parseValue(context, mapper, lastFieldName, token, paths, true);
+                parseValue(context, mapper, lastFieldName, token, paths);
             }
         }
         if (sawElement == false) {
@@ -1586,21 +1584,6 @@ final class DocumentParser {
         XContentParser.Token token,
         String[] paths
     ) throws IOException {
-        parseValue(context, parentMapper, currentFieldName, token, paths, false);
-    }
-
-    /**
-     * @param withinValueArray true when this value is an element of an array of values, so a field
-     *                         created here holds every element of that array
-     */
-    private static void parseValue(
-        final ParseContext context,
-        ObjectMapper parentMapper,
-        String currentFieldName,
-        XContentParser.Token token,
-        String[] paths,
-        boolean withinValueArray
-    ) throws IOException {
         if (currentFieldName == null) {
             throw new MapperParsingException(
                 "object mapping ["
@@ -1618,7 +1601,7 @@ final class DocumentParser {
             currentFieldName = paths[paths.length - 1];
             Tuple<Integer, ObjectMapper> parentMapperTuple = getDynamicParentMapper(context, paths, parentMapper);
             parentMapper = parentMapperTuple.v2();
-            parseDynamicValue(context, parentMapper, currentFieldName, token, withinValueArray);
+            parseDynamicValue(context, parentMapper, currentFieldName, token);
             for (int i = 0; i < parentMapperTuple.v1(); i++) {
                 context.path().remove();
             }
@@ -1797,21 +1780,6 @@ final class DocumentParser {
         String currentFieldName,
         XContentParser.Token token
     ) throws IOException {
-        parseDynamicValue(context, parentMapper, currentFieldName, token, false);
-    }
-
-    /**
-     * @param withinValueArray true when the value is an element of an array of values. A field created
-     *                         under that condition is declared multi-valued, so a pluggable columnar
-     *                         format stores it as a list rather than a scalar column.
-     */
-    private static void parseDynamicValue(
-        final ParseContext context,
-        ObjectMapper parentMapper,
-        String currentFieldName,
-        XContentParser.Token token,
-        boolean withinValueArray
-    ) throws IOException {
         ObjectMapper.Dynamic dynamic = dynamicOrDefault(parentMapper, context);
         if (dynamic == ObjectMapper.Dynamic.STRICT) {
             throw new StrictDynamicMappingException(dynamic.name().toLowerCase(Locale.ROOT), parentMapper.fullPath(), currentFieldName);
@@ -1839,7 +1807,7 @@ final class DocumentParser {
             }
             return;
         }
-        if (withinValueArray) {
+        if (holdsMultipleValues(context)) {
             declareMultiValue(builder);
         }
         final Mapper.BuilderContext builderContext = new Mapper.BuilderContext(context.indexSettings().getSettings(), context.path());
@@ -1850,15 +1818,29 @@ final class DocumentParser {
     }
 
     /**
-     * Declares a dynamically created leaf multi-valued because the document presented it as an array of
-     * values. Lucene does not care — a posting list holds any number of terms — but a pluggable columnar
+     * Whether a leaf created at this point in the document is array-shaped, which is true anywhere
+     * inside a JSON array. Both shapes that a JSON array can take produce a multi-valued field, because
+     * a non-nested object array is flattened: {@code "events": {"name": [1,2]}} and
+     * {@code "events": [{"name":1},{"name":2}]} both leave {@code events.name} holding two values.
+     *
+     * <p>An array of objects can leave a given leaf holding one value —
+     * {@code [{"bar":1},{"baz":2}]} — and that leaf is still declared array-shaped. The alternative is
+     * buffering the array to count each leaf before creating any mapper, and the enclosing structure is
+     * a reasonable declaration of intent on its own.
+     *
+     * <p>Restricted to indices using a pluggable data format. Lucene needs no declaration — a posting
+     * list holds any number of terms — so stamping one there would change the mapping output of every
+     * existing index for no benefit. A {@code nested} object is not a concern here because a pluggable
+     * data format rejects {@code nested} at mapping time.
+     */
+    private static boolean holdsMultipleValues(ParseContext context) {
+        return context.indexSettings().isPluggableDataFormatEnabled() && context.isWithinFieldArray();
+    }
+
+    /**
+     * Declares a dynamically created leaf multi-valued. Lucene does not care, but a pluggable columnar
      * format fixes a column's type per file, so the shape has to be decided when the field is created
      * rather than discovered later.
-     *
-     * <p>Only an array of <em>values</em> qualifies. An array of objects says nothing about any one
-     * leaf: {@code "foo": [{"bar":1},{"baz":2}]} gives {@code bar} and {@code baz} one value each. A
-     * leaf that does repeat across objects ({@code [{"name":1},{"name":2}]}) is rejected at parse time
-     * and needs {@code multi_value: true} declared in the mapping.
      *
      * <p>Detection is what makes wildcard mappings workable. An OpenTelemetry index template maps
      * {@code attributes.*} through a dynamic template and cannot enumerate which attribute keys hold

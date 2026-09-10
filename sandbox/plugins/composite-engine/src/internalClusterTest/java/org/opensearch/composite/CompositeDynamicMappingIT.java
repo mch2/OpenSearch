@@ -442,11 +442,11 @@ public class CompositeDynamicMappingIT extends OpenSearchIntegTestCase {
     }
 
     /**
-     * An array of objects whose leaves each appear once is detected per leaf, and none of them becomes
-     * multi-valued: {@code [{"bar":1},{"baz":2}]} gives {@code bar} and {@code baz} one value apiece.
-     * Position inside an array says nothing about whether any single leaf repeats.
+     * Every leaf under an array of objects is declared array-shaped, including one that happens to appear
+     * once — {@code [{"bar":1},{"baz":2}]}. The enclosing array is taken as the declaration; distinguishing
+     * exactly would mean buffering the array to count each leaf before any mapper exists.
      */
-    public void testArrayOfObjectsWithDistinctLeavesStaysSingleValued() throws Exception {
+    public void testArrayOfObjectsDeclaresEveryLeafArrayShaped() throws Exception {
         String indexName = "test-detect-object-array-distinct";
         createParquetIndex(indexName);
 
@@ -456,35 +456,36 @@ public class CompositeDynamicMappingIT extends OpenSearchIntegTestCase {
         );
 
         Map<String, Object> events = nestedFieldMapping(indexName, "events");
-        assertFalse(fieldOf(events, "bar").containsKey("multi_value"));
-        assertFalse(fieldOf(events, "baz").containsKey("multi_value"));
+        assertEquals(Boolean.TRUE, fieldOf(events, "bar").get("multi_value"));
+        assertEquals(Boolean.TRUE, fieldOf(events, "baz").get("multi_value"));
     }
 
     /**
-     * KNOWN GAP, shape B: {@code events} is the array and each object carries its own {@code name}.
-     * Under the default {@code object} mapping OpenSearch flattens this to the same index state as
-     * shape A ({@code "events": {"name": [1,2]}}) — one field holding two values — so it needs the same
-     * LIST column. It is refused instead.
-     *
-     * <p>The shape can only be learned when the second object's {@code name} arrives, and on the parse
-     * that creates the field {@code ParquetDocumentInput.addField} discards values for a field whose
-     * type has no data-format capability yet, so nothing observes the repeat. The retry after the
-     * mapping update sees a field already fixed scalar. Closing this needs the decision made where the
-     * field is created — either by treating any leaf under an array of objects as array-shaped, or by
-     * buffering the array to count leaf occurrences first.
+     * Shape B: {@code events} is the array and each object carries its own {@code name}. Under the
+     * default {@code object} mapping OpenSearch flattens this to the same index state as shape A
+     * ({@code "events": {"name": [1,2]}}) — one field holding two values, sibling pairing discarded — so
+     * it needs the same LIST column. The enclosing array is what declares the shape, so it is known when
+     * the field is created rather than when a repeat is observed.
      */
-    public void testArrayOfObjectsRepeatingALeafIsRejected() throws Exception {
+    public void testArrayOfObjectsRepeatingALeafBecomesMultiValued() throws Exception {
         String indexName = "test-detect-object-array-repeated";
         createParquetIndex(indexName);
 
-        Exception error = expectThrows(
-            Exception.class,
-            () -> client().prepareIndex(indexName).setSource("events", List.of(Map.of("name", 1), Map.of("name", 2))).get()
+        assertEquals(
+            RestStatus.CREATED,
+            client().prepareIndex(indexName).setSource("events", List.of(Map.of("name", 1), Map.of("name", 2))).get().status()
         );
-        assertThat(
-            org.opensearch.ExceptionsHelper.stackTrace(error),
-            org.hamcrest.Matchers.containsString("declare [multi_value: true] when creating the field mapping")
+
+        Map<String, Object> events = nestedFieldMapping(indexName, "events");
+        assertEquals(
+            "the two objects' name values belong to one multi-valued field",
+            Boolean.TRUE,
+            fieldOf(events, "name").get("multi_value")
         );
+
+        List<Map<String, Object>> rows = refreshFlushAndReadParquetRows(indexName);
+        assertEquals(1, rows.size());
+        assertTrue(isListColumnPlaceholder(rows.get(0).get("events.name")));
     }
 
     /** Shape A: the leaf itself is the array. Detected at creation, since the value is literally one. */
