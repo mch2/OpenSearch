@@ -42,6 +42,7 @@ import org.opensearch.OpenSearchParseException;
 import org.opensearch.Version;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.common.CheckedBiConsumer;
+import org.opensearch.common.Explicit;
 import org.opensearch.common.collect.Tuple;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.common.time.DateFormatter;
@@ -1806,11 +1807,53 @@ final class DocumentParser {
             }
             return;
         }
+        if (holdsMultipleValues(context)) {
+            declareMultiValue(builder);
+        }
         final Mapper.BuilderContext builderContext = new Mapper.BuilderContext(context.indexSettings().getSettings(), context.path());
         Mapper mapper = builder.build(builderContext);
         context.addDynamicMapper(mapper);
 
         parseObjectOrField(context, mapper);
+    }
+
+    /**
+     * Whether a leaf created at this point in the document is array-shaped, which is true anywhere
+     * inside a JSON array. Both shapes that a JSON array can take produce a multi-valued field, because
+     * a non-nested object array is flattened: {@code "events": {"name": [1,2]}} and
+     * {@code "events": [{"name":1},{"name":2}]} both leave {@code events.name} holding two values.
+     *
+     * <p>An array of objects can leave a given leaf holding one value —
+     * {@code [{"bar":1},{"baz":2}]} — and that leaf is still declared array-shaped. The alternative is
+     * buffering the array to count each leaf before creating any mapper, and the enclosing structure is
+     * a reasonable declaration of intent on its own.
+     *
+     * <p>Restricted to indices using a pluggable data format. Lucene needs no declaration — a posting
+     * list holds any number of terms — so stamping one there would change the mapping output of every
+     * existing index for no benefit. A {@code nested} object is not a concern here because a pluggable
+     * data format rejects {@code nested} at mapping time.
+     */
+    private static boolean holdsMultipleValues(ParseContext context) {
+        return context.indexSettings().isPluggableDataFormatEnabled() && context.isWithinFieldArray();
+    }
+
+    /**
+     * Declares a dynamically created leaf multi-valued. Lucene does not care, but a pluggable columnar
+     * format fixes a column's type per file, so the shape has to be decided when the field is created
+     * rather than discovered later.
+     *
+     * <p>Detection is what makes wildcard mappings workable. An OpenTelemetry index template maps
+     * {@code attributes.*} through a dynamic template and cannot enumerate which attribute keys hold
+     * arrays, so those fields can only be declared array-shaped by observing the first document.
+     *
+     * <p>No-op unless the field type carries a {@code multi_value} parameter, which mappers expose
+     * only when the pluggable data format is enabled. That keeps the detection inert for ordinary
+     * Lucene-backed indices, where the mapping would gain a parameter that changes nothing.
+     */
+    private static void declareMultiValue(Mapper.Builder<?> builder) {
+        if (builder instanceof ParametrizedFieldMapper.Builder parametrized) {
+            parametrized.setParameterValue(ParametrizedFieldMapper.MULTI_VALUE_PARAM, new Explicit<>(true, true));
+        }
     }
 
     /**

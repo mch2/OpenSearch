@@ -89,6 +89,13 @@ public abstract class ParametrizedFieldMapper extends FieldMapper {
     protected final boolean pluggableDataFormat;
 
     /**
+     * The resolved {@code multi_value} declaration. Held here rather than on each concrete mapper so
+     * the parameter, its merge rules, and the field-type stamping all live in one place — see
+     * {@link Builder#multiValue}.
+     */
+    protected final Explicit<Boolean> multiValue;
+
+    /**
      * Creates a new ParametrizedFieldMapper
      */
     protected ParametrizedFieldMapper(String simpleName, MappedFieldType mappedFieldType, MultiFields multiFields, CopyTo copyTo) {
@@ -107,6 +114,25 @@ public abstract class ParametrizedFieldMapper extends FieldMapper {
     ) {
         super(simpleName, new FieldType(), mappedFieldType, multiFields, copyTo);
         this.pluggableDataFormat = pluggableDataFormat;
+        this.multiValue = NOT_MULTI_VALUE;
+    }
+
+    /**
+     * Creates a new ParametrizedFieldMapper from its builder, adopting the builder's data-format flag
+     * and {@code multi_value} declaration and stamping the shape onto {@code mappedFieldType} so every
+     * consumer can read it through {@link MappedFieldType#isMultiValued()}.
+     */
+    protected ParametrizedFieldMapper(
+        String simpleName,
+        MappedFieldType mappedFieldType,
+        MultiFields multiFields,
+        CopyTo copyTo,
+        Builder builder
+    ) {
+        super(simpleName, new FieldType(), mappedFieldType, multiFields, copyTo);
+        this.pluggableDataFormat = builder.isPluggableDataFormat();
+        this.multiValue = builder.multiValue.getValue();
+        mappedFieldType.setMultiValued(this.multiValue.value());
     }
 
     /**
@@ -128,17 +154,46 @@ public abstract class ParametrizedFieldMapper extends FieldMapper {
 
     public abstract ParametrizedFieldMapper.Builder getMergeBuilder();
 
+    /** Name of the mapping parameter declaring a field multi-valued. */
+    public static final String MULTI_VALUE_PARAM = "multi_value";
+
+    /** The value of an undeclared {@code multi_value}: single-valued, and not explicitly stated. */
+    static final Explicit<Boolean> NOT_MULTI_VALUE = new Explicit<>(false, false);
+
     /**
-     * Creates the immutable {@code multi_value} mapping parameter. Omitted values preserve the
-     * existing mapping during merges, while an explicit attempt to change the field shape fails.
+     * Creates the immutable {@code multi_value} mapping parameter, shared by every parametrized
+     * mapper. The shape is fixed when the field is created: an omitted value preserves the existing
+     * mapping during a merge, and an explicit attempt to change it fails.
+     *
+     * <p>The initializer reads the base class's own field rather than a concrete mapper's, which is what
+     * lets one declaration serve every field type.
      */
-    protected static Parameter<Explicit<Boolean>> multiValueParameter(Function<FieldMapper, Explicit<Boolean>> initializer) {
-        return Parameter.explicitBoolParam("multi_value", false, initializer, false)
+    private static Parameter<Explicit<Boolean>> multiValueParameter() {
+        return Parameter.explicitBoolParam(
+            MULTI_VALUE_PARAM,
+            false,
+            m -> m instanceof ParametrizedFieldMapper parametrized ? parametrized.multiValue : NOT_MULTI_VALUE,
+            false
+        )
             .setMergeValueNormalizer((current, incoming) -> incoming.explicit() ? incoming : current)
-            .setMergeValidator((previous, next) -> Objects.equals(previous.value(), next.value()));
+            .setMergeValidator((previous, next) -> Objects.equals(previous.value(), next.value()))
+            // Serialize only a declared shape, including under include_defaults. Every mapper carries
+            // this parameter now, so the usual "configured or include_defaults" rule would stamp
+            // `multi_value: false` onto every field of every type — the merge builder's init() marks
+            // each parameter configured as it copies values across, and include_defaults enumerates
+            // them all. An absent parameter already means single-valued, so emitting it adds nothing
+            // and would change the mapping output of every existing field type.
+            .setSerializerCheck((includeDefaults, isConfigured, value) -> value.explicit());
     }
 
-    /** Adds one parsed value after enforcing the mapping-time field cardinality. */
+    /**
+     * Adds one parsed value, enforcing the field's declared cardinality.
+     *
+     * <p>A second value for a single-valued field is an error: the column shape was fixed when the field
+     * was created, and files already written hold scalar columns. A field arriving inside a JSON array is
+     * declared array-shaped at creation instead, so this only fires when a later document presents an
+     * array for a field an earlier document established as scalar.
+     */
     protected final void addFieldForPluggableFormat(ParseContext context, Object value) {
         MappedFieldType fieldType = fieldType();
         if (fieldType.isMultiValued() == false && context.documentInput().getFieldCount(fieldType.name()) > 0) {
@@ -773,6 +828,31 @@ public abstract class ParametrizedFieldMapper extends FieldMapper {
             super(name);
         }
 
+        /**
+         * The {@code multi_value} declaration, available on every parametrized mapper without each one
+         * declaring it. Appended by {@link #allParameters()} rather than by subclasses, the same way
+         * plugin-contributed parameters are supplied.
+         */
+        final Parameter<Explicit<Boolean>> multiValue = multiValueParameter();
+
+        /**
+         * Every parameter that participates in parsing, merging and serialization: the mapper's own
+         * {@link #getParameters()} plus the built-in ones this base class contributes. A subclass that
+         * already declares {@code multi_value} itself is respected and not given a duplicate.
+         */
+        final List<Parameter<?>> allParameters() {
+            List<Parameter<?>> declared = getParameters();
+            for (Parameter<?> param : declared) {
+                if (MULTI_VALUE_PARAM.equals(param.name)) {
+                    return declared;
+                }
+            }
+            List<Parameter<?>> all = new ArrayList<>(declared.size() + 1);
+            all.addAll(declared);
+            all.add(multiValue);
+            return List.copyOf(all);
+        }
+
         /** Plugin-contributed parameters supplied at construction; appended to {@link #getParameters()} by subclasses. */
         private List<Parameter<?>> pluginMappingParameters = List.of();
 
@@ -821,7 +901,7 @@ public abstract class ParametrizedFieldMapper extends FieldMapper {
          * {@link IllegalArgumentException} rather than silently corrupting the parameter.
          */
         public void setParameterValue(String name, Object value) {
-            for (Parameter<?> param : getParameters()) {
+            for (Parameter<?> param : allParameters()) {
                 if (param.name.equals(name)) {
                     setCheckedValue(param, value);
                     return;
@@ -864,7 +944,7 @@ public abstract class ParametrizedFieldMapper extends FieldMapper {
          * Initialises all parameters from an existing mapper
          */
         public Builder init(FieldMapper initializer) {
-            for (Parameter<?> param : getParameters()) {
+            for (Parameter<?> param : allParameters()) {
                 param.init(initializer);
             }
             for (Mapper subField : initializer.multiFields) {
@@ -879,7 +959,7 @@ public abstract class ParametrizedFieldMapper extends FieldMapper {
         }
 
         private void merge(FieldMapper in, Conflicts conflicts) {
-            for (Parameter<?> param : getParameters()) {
+            for (Parameter<?> param : allParameters()) {
                 param.merge(in, conflicts);
             }
             for (Mapper newSubField : in.multiFields) {
@@ -890,7 +970,7 @@ public abstract class ParametrizedFieldMapper extends FieldMapper {
         }
 
         private void validate() {
-            for (Parameter<?> param : getParameters()) {
+            for (Parameter<?> param : allParameters()) {
                 param.validate();
             }
         }
@@ -914,7 +994,7 @@ public abstract class ParametrizedFieldMapper extends FieldMapper {
          * Writes the current builder parameter values as XContent
          */
         public final void toXContent(XContentBuilder builder, boolean includeDefaults) throws IOException {
-            for (Parameter<?> parameter : getParameters()) {
+            for (Parameter<?> parameter : allParameters()) {
                 parameter.toXContent(builder, includeDefaults);
             }
         }
@@ -928,7 +1008,7 @@ public abstract class ParametrizedFieldMapper extends FieldMapper {
         public final void parse(String name, ParserContext parserContext, Map<String, Object> fieldNode) {
             Map<String, Parameter<?>> paramsMap = new HashMap<>();
             Map<String, Parameter<?>> deprecatedParamsMap = new HashMap<>();
-            for (Parameter<?> param : getParameters()) {
+            for (Parameter<?> param : allParameters()) {
                 paramsMap.put(param.name, param);
                 for (String deprecatedName : param.deprecatedNames) {
                     deprecatedParamsMap.put(deprecatedName, param);

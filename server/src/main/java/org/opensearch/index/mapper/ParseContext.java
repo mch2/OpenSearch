@@ -371,6 +371,11 @@ public abstract class ParseContext implements Iterable<ParseContext.Document> {
         }
 
         @Override
+        public boolean isWithinFieldArray() {
+            return in.isWithinFieldArray();
+        }
+
+        @Override
         public void incrementFieldArrayDepth() {
             in.incrementFieldArrayDepth();
         }
@@ -667,6 +672,11 @@ public abstract class ParseContext implements Iterable<ParseContext.Document> {
         }
 
         @Override
+        public boolean isWithinFieldArray() {
+            return this.currentArrayDepth > 0;
+        }
+
+        @Override
         public void incrementFieldArrayDepth() {
             this.currentArrayDepth++;
         }
@@ -887,6 +897,9 @@ public abstract class ParseContext implements Iterable<ParseContext.Document> {
     public abstract void decrementFieldCurrentDepth();
 
     public abstract void checkFieldDepthLimit();
+
+    /** True while parsing anything inside a JSON array, at any depth. */
+    public abstract boolean isWithinFieldArray();
 
     public abstract void incrementFieldArrayDepth();
 

@@ -184,7 +184,7 @@ public class BinaryFieldMapper extends ParametrizedFieldMapper {
         CopyTo copyTo,
         Builder builder
     ) {
-        super(simpleName, mappedFieldType, multiFields, copyTo);
+        super(simpleName, mappedFieldType, multiFields, copyTo, builder);
         this.stored = builder.stored.getValue();
         this.hasDocValues = builder.hasDocValues.getValue();
     }
@@ -224,7 +224,7 @@ public class BinaryFieldMapper extends ParametrizedFieldMapper {
         if (value == null) {
             return;
         }
-        context.documentInput().addField(fieldType(), value);
+        addFieldForPluggableFormat(context, value);
     }
 
     private byte[] parseBinaryValue(ParseContext context) throws IOException {
