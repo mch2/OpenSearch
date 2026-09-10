@@ -37,16 +37,17 @@ public class MultiValueFieldMapperTests extends MapperServiceTestCase {
         }));
     }
 
-    @LockFeatureFlag(FeatureFlags.PLUGGABLE_DATAFORMAT_EXPERIMENTAL_FLAG)
-    public void testNonPluggableIndexRejectsMultiValueParameter() {
-        MapperParsingException error = expectThrows(
-            MapperParsingException.class,
-            () -> createDocumentMapper(
-                getIndexSettings(),
-                mapping(b -> b.startObject("field").field("type", "keyword").field("multi_value", true).endObject())
-            )
+    public void testMultiValueIsAcceptedOnAnyIndex() throws IOException {
+        // The declaration is a fact about the data, not about the storage format, so it is accepted
+        // without the pluggable data format. Lucene ignores it — a posting list holds any number of
+        // terms — but recording it lets a caller know the field's shape.
+        MapperService service = createMapperService(
+            getIndexSettings(),
+            mapping(b -> b.startObject("field").field("type", "keyword").field("multi_value", true).endObject())
         );
-        assertThat(error.getMessage(), containsString("unknown parameter [multi_value]"));
+        FieldMapper field = (FieldMapper) service.documentMapper().mappers().getMapper("field");
+        assertTrue(field.fieldType().isMultiValued());
+        assertThat(service.documentMapper().mappingSource().string(), containsString("\"multi_value\":true"));
     }
 
     @LockFeatureFlag(FeatureFlags.PLUGGABLE_DATAFORMAT_EXPERIMENTAL_FLAG)
@@ -134,6 +135,135 @@ public class MultiValueFieldMapperTests extends MapperServiceTestCase {
             .orElseThrow();
         assertEquals(List.of(), emptyValue);
         assertNull(parsed.dynamicMappingsUpdate());
+    }
+
+    // ── dynamic detection ───────────────────────────────────────────────────────────────────────
+    //
+    // A field's shape is fixed when the field is created, so a dynamically created field has to be
+    // declared array-shaped from the document that creates it. This is what makes wildcard mappings
+    // workable: an OpenTelemetry template routes `attributes.*` through a dynamic template and cannot
+    // enumerate which attribute keys hold arrays.
+
+    @LockFeatureFlag(FeatureFlags.PLUGGABLE_DATAFORMAT_EXPERIMENTAL_FLAG)
+    public void testDynamicStringArrayBecomesTextAndStaysScalar() throws IOException {
+        // An unmapped string with no template maps to `text` on a pluggable index
+        // (builderSupplierForText), and text has no parquet list writer, so detection cannot make it
+        // an array. Reaching an array-shaped string field requires a template that maps to keyword —
+        // which is what the OpenTelemetry template does. Pinned so a change to the dynamic string
+        // default is a deliberate decision rather than a surprise.
+        MapperService service = createMapperService(pluggableSettings(), mapping(b -> {}));
+        ParsedDocument parsed = service.documentMapper().parse(source(b -> b.array("tags", "prod", "blue")), new CapturingDocumentInput());
+        merge(service, dynamicMapping(parsed.dynamicMappingsUpdate()));
+
+        FieldMapper tags = (FieldMapper) service.documentMapper().mappers().getMapper("tags");
+        assertEquals("text", tags.typeName());
+        assertFalse(tags.fieldType().isMultiValued());
+    }
+
+    @LockFeatureFlag(FeatureFlags.PLUGGABLE_DATAFORMAT_EXPERIMENTAL_FLAG)
+    public void testDynamicFieldFromScalarStaysScalar() throws IOException {
+        MapperService service = createMapperService(pluggableSettings(), mapping(b -> {}));
+        ParsedDocument parsed = service.documentMapper().parse(source(b -> b.field("count", 1)), new CapturingDocumentInput());
+        merge(service, dynamicMapping(parsed.dynamicMappingsUpdate()));
+
+        FieldMapper count = (FieldMapper) service.documentMapper().mappers().getMapper("count");
+        assertFalse(count.fieldType().isMultiValued());
+        assertThat(service.documentMapper().mappingSource().string(), not(containsString("multi_value")));
+    }
+
+    @LockFeatureFlag(FeatureFlags.PLUGGABLE_DATAFORMAT_EXPERIMENTAL_FLAG)
+    public void testSingleElementArrayIsStillDeclaredMultiValued() throws IOException {
+        // The producer contract: emit the array form on the first document even when it holds one
+        // value, and the field is array-shaped from then on.
+        MapperService service = createMapperService(pluggableSettings(), mapping(b -> {}));
+        ParsedDocument parsed = service.documentMapper().parse(source(b -> b.array("codes", 7)), new CapturingDocumentInput());
+        merge(service, dynamicMapping(parsed.dynamicMappingsUpdate()));
+
+        FieldMapper codes = (FieldMapper) service.documentMapper().mappers().getMapper("codes");
+        assertTrue(codes.fieldType().isMultiValued());
+        assertThat(service.documentMapper().mappingSource().string(), containsString("\"multi_value\":true"));
+    }
+
+    @LockFeatureFlag(FeatureFlags.PLUGGABLE_DATAFORMAT_EXPERIMENTAL_FLAG)
+    public void testDetectionAppliesThroughADynamicTemplate() throws IOException {
+        // The OpenTelemetry template shape: a path_match wildcard over attributes.* that maps strings
+        // to keyword. Detection has to add array-ness on top of whatever the template specifies,
+        // because the template cannot name the individual attribute keys.
+        MapperService service = createMapperService(pluggableSettings(), topMapping(b -> {
+            b.startArray("dynamic_templates");
+            b.startObject();
+            b.startObject("string_attributes");
+            b.field("path_match", "attributes.*");
+            b.field("match_mapping_type", "string");
+            b.startObject("mapping").field("type", "keyword").field("ignore_above", 256).endObject();
+            b.endObject();
+            b.endObject();
+            b.endArray();
+        }));
+
+        ParsedDocument parsed = service.documentMapper().parse(source(b -> {
+            b.startObject("attributes");
+            b.array("tags", "prod", "blue");
+            b.field("host", "node-1");
+            b.endObject();
+        }), new CapturingDocumentInput());
+        merge(service, dynamicMapping(parsed.dynamicMappingsUpdate()));
+
+        FieldMapper arrayAttribute = (FieldMapper) service.documentMapper().mappers().getMapper("attributes.tags");
+        FieldMapper scalarAttribute = (FieldMapper) service.documentMapper().mappers().getMapper("attributes.host");
+
+        assertTrue("template-mapped attribute arriving as an array is multi-valued", arrayAttribute.fieldType().isMultiValued());
+        assertFalse("template-mapped attribute arriving as a scalar stays scalar", scalarAttribute.fieldType().isMultiValued());
+        assertEquals("keyword", arrayAttribute.typeName());
+        assertThat(
+            "the template's own settings still apply to the array field",
+            service.documentMapper().mappingSource().string(),
+            containsString("\"ignore_above\":256")
+        );
+    }
+
+    @LockFeatureFlag(FeatureFlags.PLUGGABLE_DATAFORMAT_EXPERIMENTAL_FLAG)
+    public void testDetectionCoversNonStringElementTypes() throws IOException {
+        MapperService service = createMapperService(pluggableSettings(), mapping(b -> {}));
+        ParsedDocument parsed = service.documentMapper().parse(source(b -> {
+            b.array("codes", 1, 2);
+            b.array("ratios", 1.5, 2.5);
+            b.array("flags", true, false);
+        }), new CapturingDocumentInput());
+        merge(service, dynamicMapping(parsed.dynamicMappingsUpdate()));
+
+        for (String field : List.of("codes", "ratios", "flags")) {
+            FieldMapper mapper = (FieldMapper) service.documentMapper().mappers().getMapper(field);
+            assertTrue(field + " should be multi-valued", mapper.fieldType().isMultiValued());
+        }
+    }
+
+    @LockFeatureFlag(FeatureFlags.PLUGGABLE_DATAFORMAT_EXPERIMENTAL_FLAG)
+    public void testArrayOfObjectsLeavesLeafFieldsScalar() throws IOException {
+        // The array wraps objects, so the leaves inside them each hold one value. Array-ness must not
+        // leak from the enclosing array down to those leaves.
+        MapperService service = createMapperService(pluggableSettings(), mapping(b -> {}));
+        ParsedDocument parsed = service.documentMapper().parse(source(b -> {
+            b.startArray("events");
+            b.startObject().field("name", "start").endObject();
+            b.startObject().field("name", "stop").endObject();
+            b.endArray();
+        }), new CapturingDocumentInput());
+        merge(service, dynamicMapping(parsed.dynamicMappingsUpdate()));
+
+        FieldMapper name = (FieldMapper) service.documentMapper().mappers().getMapper("events.name");
+        assertFalse("a leaf inside an array of objects holds one value per object", name.fieldType().isMultiValued());
+    }
+
+    public void testDetectionAlsoAppliesWithoutThePluggableDataFormat() throws IOException {
+        // Array-ness is recorded regardless of storage format, so a caller can tell a multi-valued
+        // field from a single-valued one on a Lucene-backed index too.
+        MapperService service = createMapperService(getIndexSettings(), mapping(b -> {}));
+        ParsedDocument parsed = service.documentMapper().parse(source(b -> b.array("codes", 1, 2)), new CapturingDocumentInput());
+        merge(service, dynamicMapping(parsed.dynamicMappingsUpdate()));
+
+        FieldMapper codes = (FieldMapper) service.documentMapper().mappers().getMapper("codes");
+        assertTrue(codes.fieldType().isMultiValued());
     }
 
     @LockFeatureFlag(FeatureFlags.PLUGGABLE_DATAFORMAT_EXPERIMENTAL_FLAG)

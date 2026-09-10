@@ -2130,7 +2130,7 @@ public class NumberFieldMapper extends ParametrizedFieldMapper {
     private final boolean coerceByDefault;
 
     private NumberFieldMapper(String simpleName, MappedFieldType mappedFieldType, MultiFields multiFields, CopyTo copyTo, Builder builder) {
-        super(simpleName, mappedFieldType, multiFields, copyTo, builder.isPluggableDataFormat());
+        super(simpleName, mappedFieldType, multiFields, copyTo, builder);
         this.type = builder.type;
         this.indexed = builder.indexed.getValue();
         this.hasDocValues = builder.hasDocValues.getValue();
@@ -2187,7 +2187,7 @@ public class NumberFieldMapper extends ParametrizedFieldMapper {
         if (numericValue == null) {
             return;
         }
-        context.documentInput().addField(fieldType(), numericValue);
+        addFieldForPluggableFormat(context, numericValue);
     }
 
     @Override

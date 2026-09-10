@@ -42,6 +42,7 @@ import org.opensearch.OpenSearchParseException;
 import org.opensearch.Version;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.common.CheckedBiConsumer;
+import org.opensearch.common.Explicit;
 import org.opensearch.common.collect.Tuple;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.common.time.DateFormatter;
@@ -1541,7 +1542,9 @@ final class DocumentParser {
                 );
             } else {
                 assert token.isValue();
-                parseValue(context, mapper, lastFieldName, token, paths);
+                // withinLeafArray=true: the document presented this leaf as a JSON array, which is
+                // what lets a dynamically created field declare itself multi-valued.
+                parseValue(context, mapper, lastFieldName, token, paths, true);
             }
         }
         if (sawElement == false) {
@@ -1583,6 +1586,23 @@ final class DocumentParser {
         XContentParser.Token token,
         String[] paths
     ) throws IOException {
+        parseValue(context, parentMapper, currentFieldName, token, paths, false);
+    }
+
+    /**
+     * Parses one leaf value.
+     *
+     * @param withinLeafArray true when this value is an element of a JSON array, so a field created
+     *                        dynamically here is declared multi-valued rather than scalar
+     */
+    private static void parseValue(
+        final ParseContext context,
+        ObjectMapper parentMapper,
+        String currentFieldName,
+        XContentParser.Token token,
+        String[] paths,
+        boolean withinLeafArray
+    ) throws IOException {
         if (currentFieldName == null) {
             throw new MapperParsingException(
                 "object mapping ["
@@ -1600,7 +1620,7 @@ final class DocumentParser {
             currentFieldName = paths[paths.length - 1];
             Tuple<Integer, ObjectMapper> parentMapperTuple = getDynamicParentMapper(context, paths, parentMapper);
             parentMapper = parentMapperTuple.v2();
-            parseDynamicValue(context, parentMapper, currentFieldName, token);
+            parseDynamicValue(context, parentMapper, currentFieldName, token, withinLeafArray);
             for (int i = 0; i < parentMapperTuple.v1(); i++) {
                 context.path().remove();
             }
@@ -1779,6 +1799,21 @@ final class DocumentParser {
         String currentFieldName,
         XContentParser.Token token
     ) throws IOException {
+        parseDynamicValue(context, parentMapper, currentFieldName, token, false);
+    }
+
+    /**
+     * @param withinLeafArray true when the value being parsed is an element of a JSON array. A field
+     *                        created under that condition is declared multi-valued, so a pluggable
+     *                        columnar format stores it as a list rather than a scalar column.
+     */
+    private static void parseDynamicValue(
+        final ParseContext context,
+        ObjectMapper parentMapper,
+        String currentFieldName,
+        XContentParser.Token token,
+        boolean withinLeafArray
+    ) throws IOException {
         ObjectMapper.Dynamic dynamic = dynamicOrDefault(parentMapper, context);
         if (dynamic == ObjectMapper.Dynamic.STRICT) {
             throw new StrictDynamicMappingException(dynamic.name().toLowerCase(Locale.ROOT), parentMapper.fullPath(), currentFieldName);
@@ -1806,11 +1841,34 @@ final class DocumentParser {
             }
             return;
         }
+        if (withinLeafArray) {
+            declareMultiValue(builder);
+        }
         final Mapper.BuilderContext builderContext = new Mapper.BuilderContext(context.indexSettings().getSettings(), context.path());
         Mapper mapper = builder.build(builderContext);
         context.addDynamicMapper(mapper);
 
         parseObjectOrField(context, mapper);
+    }
+
+    /**
+     * Declares a dynamically created leaf multi-valued because the document presented it as a JSON
+     * array. Lucene does not care — a posting list holds any number of terms — but a pluggable
+     * columnar format fixes a column's type per file, so the shape has to be decided when the field
+     * is created rather than discovered later.
+     *
+     * <p>Detection is what makes wildcard mappings workable. An OpenTelemetry index template maps
+     * {@code attributes.*} through a dynamic template and cannot enumerate which attribute keys hold
+     * arrays, so those fields can only be declared array-shaped by observing the first document.
+     *
+     * <p>No-op unless the field type carries a {@code multi_value} parameter, which mappers expose
+     * only when the pluggable data format is enabled. That keeps the detection inert for ordinary
+     * Lucene-backed indices, where the mapping would gain a parameter that changes nothing.
+     */
+    private static void declareMultiValue(Mapper.Builder<?> builder) {
+        if (builder instanceof ParametrizedFieldMapper.Builder parametrized) {
+            parametrized.setParameterValue(ParametrizedFieldMapper.MULTI_VALUE_PARAM, new Explicit<>(true, true));
+        }
     }
 
     /**
