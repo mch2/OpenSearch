@@ -255,19 +255,68 @@ public class MultiValueFieldMapperTests extends MapperServiceTestCase {
     }
 
     @LockFeatureFlag(FeatureFlags.PLUGGABLE_DATAFORMAT_EXPERIMENTAL_FLAG)
-    public void testArrayOfObjectsRepeatingALeafIsRejected() throws IOException {
-        // KNOWN GAP. Two objects both carrying `name` give events.name two values in one document, but
-        // the field is created from the first object — before there is evidence the leaf repeats — so it
-        // is created single-valued and the second value is refused. Declaring multi_value up front is
-        // the workaround; amending the shape within the document that created the field would be the
-        // fix, and is safe because no file has been written yet.
+    public void testArrayOfObjectsRepeatingALeafBecomesMultiValued() throws IOException {
+        // In-process the amendment works, but it does not reach a real cluster: see
+        // CompositeDynamicMappingIT.testArrayOfObjectsRepeatingALeafIsRejected. Kept because it pins the
+        // intended semantics and the mechanism, both of which the eventual fix has to preserve.
+        // Under the default `object` mapping these two values belong to one multi-valued field —
+        // OpenSearch flattens the objects and discards which value came from which. Nothing about the
+        // first object reveals that `name` will appear again, so the shape is amended when the second
+        // value arrives. Safe because this same document created the field: the mapping update has not
+        // been applied and no file has been written.
         MapperService service = createMapperService(pluggableSettings(), mapping(b -> {}));
-        MapperParsingException error = expectThrows(MapperParsingException.class, () -> service.documentMapper().parse(source(b -> {
+        CapturingDocumentInput input = new CapturingDocumentInput();
+        ParsedDocument parsed = service.documentMapper().parse(source(b -> {
             b.startArray("events");
             b.startObject().field("name", "start").endObject();
             b.startObject().field("name", "stop").endObject();
             b.endArray();
-        }), new CapturingDocumentInput()));
+        }), input);
+
+        assertEquals("both values belong to the one field", 2L, input.getFieldCount("events.name"));
+        merge(service, dynamicMapping(parsed.dynamicMappingsUpdate()));
+
+        FieldMapper name = (FieldMapper) service.documentMapper().mappers().getMapper("events.name");
+        assertTrue(name.fieldType().isMultiValued());
+        assertThat(service.documentMapper().mappingSource().string(), containsString("\"multi_value\":true"));
+    }
+
+    @LockFeatureFlag(FeatureFlags.PLUGGABLE_DATAFORMAT_EXPERIMENTAL_FLAG)
+    public void testArrayOfObjectsRepeatingANumericLeafBecomesMultiValued() throws IOException {
+        // Same as the text case, on a numeric leaf, so a per-type serialization gap cannot hide.
+        MapperService service = createMapperService(pluggableSettings(), mapping(b -> {}));
+        ParsedDocument parsed = service.documentMapper().parse(source(b -> {
+            b.startArray("events");
+            b.startObject().field("name", 1).endObject();
+            b.startObject().field("name", 2).endObject();
+            b.endArray();
+        }), new CapturingDocumentInput());
+
+        assertThat(
+            "the published mapping update must carry the amended shape",
+            org.opensearch.core.common.Strings.toString(
+                org.opensearch.core.xcontent.MediaTypeRegistry.JSON,
+                parsed.dynamicMappingsUpdate()
+            ),
+            containsString("\"multi_value\":true")
+        );
+        merge(service, dynamicMapping(parsed.dynamicMappingsUpdate()));
+        assertTrue(((FieldMapper) service.documentMapper().mappers().getMapper("events.name")).fieldType().isMultiValued());
+    }
+
+    @LockFeatureFlag(FeatureFlags.PLUGGABLE_DATAFORMAT_EXPERIMENTAL_FLAG)
+    public void testSecondValueForAFieldAnEarlierDocumentCreatedIsRejected() throws IOException {
+        // The shape can only be amended while it is still provisional. Once an earlier document has
+        // fixed the field as scalar, files exist that were written as scalar columns, so a later
+        // multi-value document has to be refused rather than silently changing the column type.
+        MapperService service = createMapperService(pluggableSettings(), mapping(b -> {}));
+        ParsedDocument first = service.documentMapper().parse(source(b -> b.field("tags", "solo")), new CapturingDocumentInput());
+        merge(service, dynamicMapping(first.dynamicMappingsUpdate()));
+
+        MapperParsingException error = expectThrows(
+            MapperParsingException.class,
+            () -> service.documentMapper().parse(source(b -> b.array("tags", "one", "two")), new CapturingDocumentInput())
+        );
         assertThat(
             org.opensearch.ExceptionsHelper.stackTrace(error),
             containsString("declare [multi_value: true] when creating the field mapping")

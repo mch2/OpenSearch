@@ -461,16 +461,19 @@ public class CompositeDynamicMappingIT extends OpenSearchIntegTestCase {
     }
 
     /**
-     * KNOWN GAP. An array of objects that repeats the same leaf gives that leaf two values in one
-     * document, but the field is created from the first object — before there is any evidence the leaf
-     * repeats — so it is created single-valued and the second value is rejected.
+     * KNOWN GAP, shape B: {@code events} is the array and each object carries its own {@code name}.
+     * Under the default {@code object} mapping OpenSearch flattens this to the same index state as
+     * shape A ({@code "events": {"name": [1,2]}}) — one field holding two values — so it needs the same
+     * LIST column. It is refused instead.
      *
-     * <p>This is the OpenTelemetry {@code events} shape, so it needs an answer. The narrow fix is to
-     * amend the shape when the repeat is found in the <em>same</em> document that created the field:
-     * the mapping update has not been applied yet, so no scalar file exists to reconcile against. That
-     * is a strictly smaller and safer case than amending a field an earlier document created.
+     * <p>The shape can only be learned when the second object's {@code name} arrives, and on the parse
+     * that creates the field {@code ParquetDocumentInput.addField} discards values for a field whose
+     * type has no data-format capability yet, so nothing observes the repeat. The retry after the
+     * mapping update sees a field already fixed scalar. Closing this needs the decision made where the
+     * field is created — either by treating any leaf under an array of objects as array-shaped, or by
+     * buffering the array to count leaf occurrences first.
      */
-    public void testArrayOfObjectsRepeatingALeafIsRejectedForNow() throws Exception {
+    public void testArrayOfObjectsRepeatingALeafIsRejected() throws Exception {
         String indexName = "test-detect-object-array-repeated";
         createParquetIndex(indexName);
 
@@ -484,7 +487,25 @@ public class CompositeDynamicMappingIT extends OpenSearchIntegTestCase {
         );
     }
 
-    /** Declaring the shape up front is the workaround for the gap above. */
+    /** Shape A: the leaf itself is the array. Detected at creation, since the value is literally one. */
+    public void testObjectWithAnArrayValuedLeafBecomesMultiValued() throws Exception {
+        String indexName = "test-detect-object-array-valued-leaf";
+        createParquetIndex(indexName);
+
+        assertEquals(
+            RestStatus.CREATED,
+            client().prepareIndex(indexName).setSource("events", Map.of("name", List.of(1, 2))).get().status()
+        );
+
+        Map<String, Object> events = nestedFieldMapping(indexName, "events");
+        assertEquals(Boolean.TRUE, fieldOf(events, "name").get("multi_value"));
+
+        List<Map<String, Object>> rows = refreshFlushAndReadParquetRows(indexName);
+        assertEquals(1, rows.size());
+        assertTrue(isListColumnPlaceholder(rows.get(0).get("events.name")));
+    }
+
+    /** Declaring the shape up front works too, and is what a template would do. */
     public void testArrayOfObjectsRepeatingALeafWorksWhenDeclared() throws Exception {
         String indexName = "test-declared-object-array";
         assertTrue(

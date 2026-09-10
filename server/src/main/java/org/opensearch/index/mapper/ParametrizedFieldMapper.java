@@ -161,20 +161,27 @@ public abstract class ParametrizedFieldMapper extends FieldMapper {
     static final Explicit<Boolean> NOT_MULTI_VALUE = new Explicit<>(false, false);
 
     /**
+     * The shape to serialize for {@code mapper}, taken from its field type so an amended shape is
+     * included. Counts as stated when the mapping declared it or when the field is multi-valued.
+     */
+    private static Explicit<Boolean> declaredMultiValue(FieldMapper mapper) {
+        boolean multiValued = mapper.fieldType().isMultiValued();
+        boolean declared = mapper instanceof ParametrizedFieldMapper parametrized && parametrized.multiValue.explicit();
+        return new Explicit<>(multiValued, declared || multiValued);
+    }
+
+    /**
      * Creates the immutable {@code multi_value} mapping parameter, shared by every parametrized
      * mapper. The shape is fixed when the field is created: an omitted value preserves the existing
      * mapping during a merge, and an explicit attempt to change it fails.
      *
-     * <p>The initializer reads the base class's own field rather than a concrete mapper's, which is
-     * what lets one declaration serve every field type.
+     * <p>The value is read back from the field type rather than from the mapper's own field, so that
+     * amending a provisional shape mid-document (see {@link #addFieldForPluggableFormat}) reaches the
+     * serialized mapping as well as storage. Explicitness is retained separately: a shape is stated
+     * either because the mapping declared it or because it ended up multi-valued.
      */
     private static Parameter<Explicit<Boolean>> multiValueParameter() {
-        return Parameter.explicitBoolParam(
-            MULTI_VALUE_PARAM,
-            false,
-            m -> m instanceof ParametrizedFieldMapper parametrized ? parametrized.multiValue : NOT_MULTI_VALUE,
-            false
-        )
+        return Parameter.explicitBoolParam(MULTI_VALUE_PARAM, false, ParametrizedFieldMapper::declaredMultiValue, false)
             .setMergeValueNormalizer((current, incoming) -> incoming.explicit() ? incoming : current)
             .setMergeValidator((previous, next) -> Objects.equals(previous.value(), next.value()))
             // Serialize only a declared shape, including under include_defaults. Every mapper carries
@@ -186,17 +193,70 @@ public abstract class ParametrizedFieldMapper extends FieldMapper {
             .setSerializerCheck((includeDefaults, isConfigured, value) -> value.explicit());
     }
 
-    /** Adds one parsed value after enforcing the mapping-time field cardinality. */
+    /**
+     * Adds one parsed value, enforcing the field's declared cardinality.
+     *
+     * <p>A second value for a single-valued field is normally an error: the field's column shape is
+     * already fixed, and earlier documents were written as scalars. The exception is a field this same
+     * document created — its mapping update has not been applied and no file has been written, so the
+     * shape can still be amended.
+     *
+     * <p>That exception does not reach the case it was written for. An array of objects repeating a leaf
+     * ({@code "events": [{"name":1},{"name":2}]}) is two values of one field under the default
+     * {@code object} mapping, but on the parse that creates the field
+     * {@code ParquetDocumentInput.addField} discards both values — the field type carries no data-format
+     * capability until the mapping update is applied — so the count never rises and this guard never
+     * fires. By the retry that follows the mapping update the field is fixed scalar and amending it
+     * would be a cross-document change. Closing that shape needs the decision made where the field is
+     * created, not where its values arrive.
+     */
     protected final void addFieldForPluggableFormat(ParseContext context, Object value) {
         MappedFieldType fieldType = fieldType();
         if (fieldType.isMultiValued() == false && context.documentInput().getFieldCount(fieldType.name()) > 0) {
-            throw new MapperParsingException(
-                "Field ["
-                    + fieldType.name()
-                    + "] is single-valued; declare [multi_value: true] when creating the field mapping to accept multiple values"
-            );
+            if (createdByThisDocument(context)) {
+                amendToMultiValued(context);
+            } else {
+                throw new MapperParsingException(
+                    "Field ["
+                        + fieldType.name()
+                        + "] is single-valued; declare [multi_value: true] when creating the field mapping to accept multiple values"
+                );
+            }
         }
-        context.documentInput().addField(fieldType, value);
+        context.documentInput().addField(fieldType(), value);
+    }
+
+    /** Whether this mapper was created by the document currently being parsed rather than by the mapping. */
+    private boolean createdByThisDocument(ParseContext context) {
+        for (Mapper dynamic : context.getDynamicMappers()) {
+            if (dynamic == this) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Re-declares this document-created field multi-valued.
+     *
+     * <p>Marking the field type is what storage consults, and {@link #declaredMultiValue} reads the
+     * shape back from it when the mapping is serialized, so the amendment reaches cluster state through
+     * the dynamic mapper this document already published.
+     *
+     * <p>Every provisional mapper for the field is marked, not just this one. An array of objects
+     * creates a separate mapper per object — the second object's leaf does not resolve to the first
+     * object's mapper, because dynamic mappers are not yet in the field lookup — and only one of them
+     * survives into the mapping. They all describe the same field, so marking them all means the shape
+     * holds whichever one wins.
+     */
+    private void amendToMultiValued(ParseContext context) {
+        String name = fieldType().name();
+        fieldType().setMultiValued(true);
+        for (Mapper dynamic : context.getDynamicMappers()) {
+            if (dynamic instanceof FieldMapper fieldMapper && name.equals(fieldMapper.name())) {
+                fieldMapper.fieldType().setMultiValued(true);
+            }
+        }
     }
 
     @Override
