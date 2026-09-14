@@ -383,3 +383,36 @@ tasks.register('restTest', Test) {
     // Inherit OpenSearch test base properties
     systemProperty 'tests.artifact', 'analytics-engine-rest'
 }
+
+// ── Long-lived local dev cluster ─────────────────────────────────────────────
+// A single analytics node kept running outside any test lifecycle, so Data Prepper
+// (or curl) can ingest into it and PPL can be driven by hand:
+//
+//   ./gradlew -Dsandbox.enabled=true :sandbox:qa:analytics-engine-rest:runAnalytics
+//   ./gradlew -Dsandbox.enabled=true :sandbox:qa:analytics-engine-rest:runAnalytics --preserve-data
+//
+// Same plugin set and JVM flags as the IT clusters, so behaviour matches what the
+// suites assert. Binds 127.0.0.1:9200 only — containers reach it via
+// mustang-bridge-fwd.py (see MUSTANG-SETUP.md in the observability-stack repo).
+//
+// Without --preserve-data the data dir is wiped on every start, which is usually
+// what you want for a clean ingest but will drop any indices already there.
+testClusters {
+    runAnalytics {
+        testDistribution = 'archive'
+        // No numberOfNodes: the default is already 1, and setting it explicitly is
+        // rejected ("Cannot shrink cluster ... to have 1 nodes as it already has 1").
+        configureAnalyticsCluster(delegate)
+        // The IT clusters run for minutes on fixture-sized data and inherit 512m. This one is a
+        // long-lived ingest target — pointed at Data Prepper it died after ~15h in a GC death
+        // spiral (JvmGcMonitorService reporting ~900ms collecting per second, no OOM, gradle
+        // then failing the task with "OpenSearch cluster died"). Size it for real ingest.
+        jvmArgs '-Xms2g', '-Xmx2g'
+    }
+}
+
+tasks.register('runAnalytics', org.opensearch.gradle.testclusters.RunTask) {
+    description = 'Runs a single long-lived analytics node on 127.0.0.1:9200 for local ingest'
+    group = 'Verification'
+    useCluster testClusters.runAnalytics
+}

@@ -445,6 +445,13 @@ public class OpenSearchSchemaBuilder {
                 // when absent, which buildLeafType treats as "not a scaled_float".
                 double scalingFactor = parseScalingFactor(fieldProps.get(SCALING_FACTOR_FIELD));
                 childType = buildLeafType(fieldType, (String) fieldProps.get("format"), scalingFactor, typeFactory);
+                // …including multi_value, which addLeafFields wraps in an ARRAY above. The struct
+                // field and its backing leaf column are paired by dotted name in
+                // ObjectStructMaterializer, so make_struct would reject an ARRAY column bound to a
+                // scalar struct field. Only reachable for an object whose leaf is multi-valued.
+                if (childType != null && Boolean.TRUE.equals(fieldProps.get("multi_value"))) {
+                    childType = typeFactory.createTypeWithNullability(typeFactory.createArrayType(childType, -1), true);
+                }
             }
             if (childType == null) {
                 // Unsupported sub-field (geo_point, nested, …) — dropped from the struct for the

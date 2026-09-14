@@ -276,6 +276,19 @@ public class PlannerImpl {
         // LogicalCorrelate that the marking phase rejects with "unmarked child [LogicalCorrelate]".
         // Strip that limit while the subquery is still an identifiable EXISTS RexSubQuery so the
         // decorrelation below can fold it into a standard join.
+        // Nothing to remove — and running the phase anyway is actively harmful. The postProcess
+        // below decorrelates unconditionally, and mvexpand's Correlate+Uncollect is a *legitimate*
+        // correlate that RelDecorrelator cannot remove: it leaves the Correlate in place but
+        // relocates the Filter above it into the correlate's RIGHT input, giving
+        // Correlate(scan, Filter(Uncollect)). OpenSearchCorrelateRule only recognises a bare
+        // Uncollect there, so the Correlate is never marked and OpenSearchProjectRule fails with
+        // "Project rule encountered unmarked child [LogicalCorrelate]" — i.e. every
+        // `mvexpand <field> | where <field> …` query. The decorrelator exists solely to clean up
+        // correlates the three *_SUB_QUERY_TO_CORRELATE rules introduce, so gate the whole phase on
+        // there being a RexSubQuery for them to convert.
+        if (containsSubQuery(input) == false) {
+            return input;
+        }
         RelNode prepared = stripExistsSubqueryLimits(input);
         return HepPhase.named("subquery-remove")
             .addRuleCollection(
@@ -296,6 +309,30 @@ public class PlannerImpl {
                 )
             )
             .run(prepared, listener);
+    }
+
+    /**
+     * Whether any node carries a {@link RexSubQuery} for the {@code *_SUB_QUERY_TO_CORRELATE} rules
+     * to convert. Calcite only exposes per-node overloads, and only these three node types can hold
+     * one, so the walk checks each in turn.
+     */
+    private static boolean containsSubQuery(RelNode node) {
+        for (Project project : RelNodeUtils.findNodes(node, Project.class)) {
+            if (RexUtil.SubQueryFinder.containsSubQuery(project)) {
+                return true;
+            }
+        }
+        for (Filter filter : RelNodeUtils.findNodes(node, Filter.class)) {
+            if (RexUtil.SubQueryFinder.containsSubQuery(filter)) {
+                return true;
+            }
+        }
+        for (Join join : RelNodeUtils.findNodes(node, Join.class)) {
+            if (RexUtil.SubQueryFinder.containsSubQuery(join)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

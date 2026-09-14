@@ -1675,7 +1675,15 @@ fn derive_schema_from_partial_plan(
             .parquet
             .schema_force_view_types;
         let arrow_schema = if view_types {
-            datafusion::datasource::file_format::parquet::transform_schema_to_view(&arrow_schema)
+            // Recursive, not DataFusion's `transform_schema_to_view`: that rewrites top-level
+            // fields only, so a `List<Utf8>` column stayed `List<Utf8>` here while the data node
+            // registered its table through `transform_schema_to_view_recursive` and produced
+            // `List<Utf8View>`. The synthetic leaf then disagreed with the producer's batches and
+            // the reduce stage's Arrow C Data import read the view child's buffers as Utf8 offsets:
+            //   IllegalStateException: Offset buffer for type Utf8 is malformed: start: 4, end: 0
+            // surfacing as `RefCnt has gone negative`. Scalars were unaffected because DataFusion
+            // hardcodes `(Utf8, Utf8View)` binding compatibility — but that does not recurse.
+            crate::schema_coerce::transform_schema_to_view_recursive(&arrow_schema)
         } else {
             arrow_schema
         };
@@ -1842,6 +1850,22 @@ fn collect_reads(rel: &substrait::proto::Rel, out: &mut Vec<substrait::proto::Re
         }
         Some(RelType::Set(s)) => {
             for input in &s.inputs {
+                collect_reads(input, out);
+            }
+        }
+        // Extension rels wrap a normal input, and the multi-value expand
+        // (MULTI_VALUE_EXPAND_TYPE_URL) puts the parquet ReadRel underneath one. Missing these
+        // arms means the read is invisible here, no synthetic MemTable is registered for it, and
+        // planning the producer plan on the coordinator fails with "No table named '<index>'" —
+        // reachable only with more than one shard, since a single shard has no reduce stage to
+        // derive a producer schema for.
+        Some(RelType::ExtensionSingle(e)) => {
+            if let Some(input) = e.input.as_ref() {
+                collect_reads(input, out);
+            }
+        }
+        Some(RelType::ExtensionMulti(e)) => {
+            for input in &e.inputs {
                 collect_reads(input, out);
             }
         }

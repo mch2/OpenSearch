@@ -966,7 +966,7 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
     }
 
     private static final class MultiValueExpandDetail implements Extension.SingleRelDetail {
-        private static final String TYPE_URL = "opensearch://analytics/multi_value_expand/v1";
+        static final String TYPE_URL = "opensearch://analytics/multi_value_expand/v1";
         private final MultiValueExpandSpec spec;
 
         private MultiValueExpandDetail(MultiValueExpandSpec spec) {
@@ -1167,13 +1167,90 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
 
     // ── Plan serde helpers ──────────────────────────────────────────────────────
 
-    /** Decodes serialized Substrait bytes into a model-level {@link Plan}. */
+    /**
+     * Decodes serialized Substrait bytes into a model-level {@link Plan}.
+     *
+     * <p>Uses a converter that understands the multi-value expand {@code ExtensionSingleRel}.
+     * Isthmus's stock {@code newExtensionSingle} keeps the detail as an opaque {@code Any}, so the
+     * decoded rel reports an <em>empty</em> record type. Any rel stacked on top then fails to
+     * reference its columns — {@code attachFragmentOnTop} decoding an inner expand for a FINAL
+     * aggregate throws {@code Field reference offset (0) must be less than number of fields in
+     * struct (0)}. Reachable only with more than one shard, where a reduce fragment is attached.
+     */
     private Plan decodePlan(byte[] bytes) {
         try {
             io.substrait.proto.Plan proto = io.substrait.proto.Plan.parseFrom(bytes);
-            return new ProtoPlanConverter(extensions).from(proto);
+            return new MultiValueAwarePlanConverter(extensions).from(proto);
         } catch (InvalidProtocolBufferException e) {
             throw new IllegalArgumentException("Failed to decode Substrait plan bytes", e);
+        }
+    }
+
+    /** {@link ProtoPlanConverter} whose rel converter can rebuild a multi-value expand detail. */
+    private static final class MultiValueAwarePlanConverter extends ProtoPlanConverter {
+        MultiValueAwarePlanConverter(io.substrait.extension.SimpleExtension.ExtensionCollection extensions) {
+            super(extensions);
+        }
+
+        @Override
+        protected io.substrait.relation.ProtoRelConverter getProtoRelConverter(io.substrait.extension.ExtensionLookup lookup) {
+            return new io.substrait.relation.ProtoRelConverter(lookup, extensionCollection) {
+                @Override
+                protected ExtensionSingle newExtensionSingle(io.substrait.proto.ExtensionSingleRel rel) {
+                    if (MultiValueExpandDetail.TYPE_URL.equals(rel.getDetail().getTypeUrl()) == false) {
+                        return super.newExtensionSingle(rel);
+                    }
+                    return ExtensionSingle.from(new DecodedMultiValueExpandDetail(rel.getDetail()), from(rel.getInput())).build();
+                }
+            };
+        }
+    }
+
+    /**
+     * The decode-side counterpart of {@link MultiValueExpandDetail}. The 16-byte payload carries no
+     * output type, so the record type is derived from the input the same way the producer derives
+     * it: the expanded column's LIST type collapses to its element type, in place or appended.
+     */
+    private static final class DecodedMultiValueExpandDetail implements Extension.SingleRelDetail {
+        private final Any detail;
+        private final int fieldIndex;
+        private final boolean append;
+
+        DecodedMultiValueExpandDetail(Any detail) {
+            this.detail = detail;
+            ByteBuffer payload = detail.getValue().asReadOnlyByteBuffer();
+            if (payload.remaining() != 16) {
+                throw new IllegalArgumentException("multi-value expand payload must be 16 bytes, got " + payload.remaining());
+            }
+            this.fieldIndex = payload.getInt(0);
+            this.append = payload.getInt(8) == 1;
+        }
+
+        @Override
+        public Type.Struct deriveRecordType(Rel input) {
+            Type.Struct inputType = input.getRecordType();
+            List<Type> fields = new java.util.ArrayList<>(inputType.fields());
+            if (fieldIndex < 0 || fieldIndex >= fields.size()) {
+                throw new IllegalArgumentException(
+                    "multi-value expand field index " + fieldIndex + " is outside " + fields.size() + " columns"
+                );
+            }
+            Type expanded = fields.get(fieldIndex);
+            if (expanded instanceof Type.ListType list) {
+                expanded = list.elementType();
+            }
+            if (append) {
+                fields.add(expanded);
+            } else {
+                fields.set(fieldIndex, expanded);
+            }
+            return Type.Struct.builder().addAllFields(fields).nullable(inputType.nullable()).build();
+        }
+
+        /** Round-trips the payload unchanged — this rel is decoded only to be re-serialized. */
+        @Override
+        public Any toProto(io.substrait.relation.RelProtoConverter converter) {
+            return detail;
         }
     }
 

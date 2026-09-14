@@ -80,7 +80,16 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
 
     private static final Logger LOGGER = LogManager.getLogger(DataFusionAnalyticsBackendPlugin.class);
 
-    private static final Set<EngineCapability> ENGINE_CAPS = Set.of(EngineCapability.SORT, EngineCapability.UNION, EngineCapability.VALUES);
+    // MULTI_VALUE_EXPAND: the explode crosses the wire as a Substrait ExtensionSingleRel and is
+    // reconstructed on the shard as DataFusion's LogicalPlan::Unnest (see substrait_consumer.rs).
+    // Substrait has no UnnestRel and datafusion-substrait implements neither direction, so the
+    // extension rel is the only route — and only this backend can consume it.
+    private static final Set<EngineCapability> ENGINE_CAPS = Set.of(
+        EngineCapability.SORT,
+        EngineCapability.UNION,
+        EngineCapability.VALUES,
+        EngineCapability.MULTI_VALUE_EXPAND
+    );
 
     private static final Set<FieldType> SUPPORTED_FIELD_TYPES = new HashSet<>();
     static {
