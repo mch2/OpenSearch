@@ -60,6 +60,8 @@ import org.opensearch.analytics.planner.rules.OpenSearchTopKRewriter;
 import org.opensearch.analytics.planner.rules.OpenSearchUnionRule;
 import org.opensearch.analytics.planner.rules.OpenSearchUnionSplitRule;
 import org.opensearch.analytics.planner.rules.OpenSearchValuesCharNormalizeRule;
+import org.opensearch.analytics.planner.rules.OpenSearchUncollectRule;
+import org.opensearch.analytics.planner.rules.OpenSearchCorrelateRule;
 import org.opensearch.analytics.planner.rules.OpenSearchValuesRule;
 
 import java.util.List;
@@ -526,7 +528,9 @@ public class PlannerImpl {
                     new OpenSearchJoinRule(context),
                     new OpenSearchSortRule(context),
                     new OpenSearchUnionRule(context),
-                    new OpenSearchValuesRule(context)
+                    new OpenSearchValuesRule(context),
+                    new OpenSearchUncollectRule(context),
+                    new OpenSearchCorrelateRule(context)
                 )
             )
             .run(input, listener);
