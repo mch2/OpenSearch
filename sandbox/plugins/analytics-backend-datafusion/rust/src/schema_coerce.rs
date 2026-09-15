@@ -119,6 +119,45 @@ fn rewrite_data_type_to_view(data_type: &DataType) -> DataType {
     }
 }
 
+/// **The** conversion to use when turning a Substrait-declared schema into the physical Arrow
+/// schema a data node actually produces. Prefer this over composing the pieces by hand.
+///
+/// Substrait has no view types — its type list is Boolean, I8..I64, FP32/64, String, Binary,
+/// FixedChar, FixedBinary, Decimal, Date, Time, Timestamp, Interval*, UUID, Struct, List, Map and
+/// UserDefined. Views are an Arrow *physical layout*, not a logical type, so any schema derived from
+/// a declaration is view-less, while a data node running with `schema_force_view_types` emits
+/// `Utf8View`/`BinaryView` — including inside LIST children.
+///
+/// Comparing the two directly is a recurring defect. `List<Utf8>` declared against `List<Utf8View>`
+/// produced survives plan-time binding and then corrupts the Arrow C Data export, because the view
+/// child's buffers are read as a `Utf8` child's offsets:
+///
+/// ```text
+/// IllegalStateException: Offset buffer for type Utf8 is malformed: start: 4, end: 0
+/// ```
+///
+/// reaching the user as `RefCnt has gone negative` from the failed import's cleanup. Scalars survive
+/// only because DataFusion hardcodes `(Utf8, Utf8View) => true` binding compatibility — **and that
+/// arm does not recurse**, so nested types get no such reprieve.
+///
+/// Two traps this exists to close:
+///   1. DataFusion's own `transform_schema_to_view` rewrites top-level fields only, so a
+///      `List<Utf8>` column passes through it unchanged. Use
+///      [`transform_schema_to_view_recursive`], which this does.
+///   2. The widening must precede [`coerce_inferred_schema`], whose narrowings would otherwise be
+///      re-widened (or vice versa) depending on order.
+///
+/// Callers needing extra path-specific coercion (e.g. unsupported timestamp precisions) should apply
+/// it to the input before calling, not reorder the steps here.
+pub fn physical_schema_for_declaration(schema: &Schema, force_view_types: bool) -> SchemaRef {
+    let widened = if force_view_types {
+        transform_schema_to_view_recursive(schema)
+    } else {
+        schema.clone()
+    };
+    coerce_inferred_schema(Arc::new(widened))
+}
+
 /// Rewrite the schema to forms Substrait can bind against:
 ///   - `BinaryView` → `Binary`
 ///   - `UInt64`     → `Int64`

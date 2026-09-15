@@ -1674,21 +1674,12 @@ fn derive_schema_from_partial_plan(
             .execution
             .parquet
             .schema_force_view_types;
-        let arrow_schema = if view_types {
-            // Recursive, not DataFusion's `transform_schema_to_view`: that rewrites top-level
-            // fields only, so a `List<Utf8>` column stayed `List<Utf8>` here while the data node
-            // registered its table through `transform_schema_to_view_recursive` and produced
-            // `List<Utf8View>`. The synthetic leaf then disagreed with the producer's batches and
-            // the reduce stage's Arrow C Data import read the view child's buffers as Utf8 offsets:
-            //   IllegalStateException: Offset buffer for type Utf8 is malformed: start: 4, end: 0
-            // surfacing as `RefCnt has gone negative`. Scalars were unaffected because DataFusion
-            // hardcodes `(Utf8, Utf8View)` binding compatibility — but that does not recurse.
-            crate::schema_coerce::transform_schema_to_view_recursive(&arrow_schema)
-        } else {
-            arrow_schema
-        };
+        // Timestamp precision first: it is specific to this path (parquet-declared precisions the
+        // engine cannot represent) and independent of the view widening below.
         let arrow_schema = coerce_unsupported_timestamp_precision(&arrow_schema);
-        let arrow_schema = crate::schema_coerce::coerce_inferred_schema(Arc::new(arrow_schema));
+        // Then the shared declaration → physical conversion. Doing this by hand here is what
+        // declared `List<Utf8>` against a producer emitting `List<Utf8View>`; see the helper's docs.
+        let arrow_schema = crate::schema_coerce::physical_schema_for_declaration(&arrow_schema, view_types);
         let table = MemTable::try_new(arrow_schema, vec![vec![]])?;
         // Plan may scan the same table twice; the second register is a no-op.
         let _ = ctx.register_table(&table_name, Arc::new(table));

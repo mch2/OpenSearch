@@ -145,6 +145,14 @@ public class PlannerImpl {
             // predicate, putting the leaf references in scope. See ObjectNullPredicateExpander.
             modifiedRelNode = ObjectNullPredicateExpander.rewrite(modifiedRelNode).orElse(modifiedRelNode);
         }
+        // Before the aggregate split: expanding a LIST group key here lets Calcite's type derivation
+        // carry the element type into BOTH fragments. Done per-fragment (as the backend's
+        // MultiValueRelRewriter does) the shard emits elements while the coordinator still declares
+        // the LIST, and the reduce sink fails on the type mismatch.
+        modifiedRelNode = MultiValueGroupKeyExpander.rewrite(
+            modifiedRelNode,
+            RelBuilder.proto(Contexts.empty()).create(modifiedRelNode.getCluster(), null)
+        ).orElse(modifiedRelNode);
         modifiedRelNode = decomposeAggregates(modifiedRelNode, listener);
         modifiedRelNode = reorderJoins(modifiedRelNode, context, listener);
         modifiedRelNode = mark(modifiedRelNode, context, listener);

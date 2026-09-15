@@ -598,7 +598,12 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
     private static RelNode preprocessForSubstrait(RelNode rel) {
         RelNode preprocessed = UntypedNullPreprocessor.rewrite(rel);
         preprocessed = PplAggregateCallRewriter.rewrite(preprocessed);
-        preprocessed = MultiValueRelRewriter.rewrite(preprocessed);
+        // Deliberately NOT MultiValueRelRewriter: the analytics engine now expands LIST group keys
+        // before the aggregate split (MultiValueGroupKeyExpander), so doing it again here would
+        // insert a second explode over data the shard already expanded — and the per-fragment timing
+        // is what made multi-shard `stats … by <array>` fail in the first place. Left in the tree
+        // because the single-fragment path it was written for is still exercised by its unit tests.
+
         preprocessed = PplWindowCallRewriter.rewrite(preprocessed);
         preprocessed = ItemTypeRebuilder.rewrite(preprocessed);
         preprocessed = CastToVarcharRewriter.rewrite(preprocessed);

@@ -141,12 +141,7 @@ pub(crate) fn widen_schema_from_plan(
         .execution
         .parquet
         .schema_force_view_types;
-    let expected = if force_view {
-        crate::schema_coerce::transform_schema_to_view_recursive(&expected)
-    } else {
-        expected
-    };
-    let expected = crate::schema_coerce::coerce_inferred_schema(Arc::new(expected));
+    let expected = crate::schema_coerce::physical_schema_for_declaration(&expected, force_view);
     crate::schema_coerce::append_missing_nullable(inferred, &expected)
         .unwrap_or_else(|| Arc::clone(inferred))
 }
