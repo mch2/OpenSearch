@@ -2162,3 +2162,280 @@ fn test_deferred_three_files_different_schemas() {
     }
     assert_eq!(extra_vals, vec!["NULL", "x2", "x3", "NULL", "x5", "x6"]);
 }
+
+// ============================================================================
+// Native struct storage — OpenSearch `object` fields written as Parquet structs
+// ============================================================================
+
+use arrow::buffer::NullBuffer;
+use arrow::datatypes::Fields;
+
+/// An `object` column as the writer produces it: a nullable struct whose validity says whether the
+/// document had the object at all, over one child per mapped leaf.
+fn object_column(children: Vec<(Field, ArrayRef)>, present: Vec<bool>) -> (Field, ArrayRef) {
+    let fields: Vec<Field> = children.iter().map(|(f, _)| f.clone()).collect();
+    let arrays: Vec<ArrayRef> = children.into_iter().map(|(_, a)| a).collect();
+    let array = StructArray::try_new(
+        Fields::from(fields.clone()),
+        arrays,
+        Some(NullBuffer::from(present)),
+    )
+    .unwrap();
+    (
+        Field::new("meta", DataType::Struct(Fields::from(fields)), true),
+        Arc::new(array) as ArrayRef,
+    )
+}
+
+fn batch_of(row_ids: Vec<i64>, object: (Field, ArrayRef)) -> RecordBatch {
+    let (object_field, object_array) = object;
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("__row_id__", DataType::Int64, false),
+        object_field,
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![Arc::new(Int64Array::from(row_ids)), object_array],
+    )
+    .unwrap()
+}
+
+fn struct_column_of(path: &str, column: &str) -> StructArray {
+    let file = File::open(path).unwrap();
+    let mut reader = ParquetRecordBatchReaderBuilder::try_new(file)
+        .unwrap()
+        .build()
+        .unwrap();
+    let batch = reader.next().expect("merged file has a batch").unwrap();
+    let idx = batch.schema().index_of(column).unwrap();
+    batch
+        .column(idx)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .expect("column should read back as a struct")
+        .clone()
+}
+
+/// A struct that gains a sub-field between segments — routine under dynamic mapping, and what the
+/// merge could not do before: the union schema was taken from whichever segment was read first, so
+/// the wider batch had nowhere to put its extra child.
+#[test]
+fn merge_unions_struct_children_across_segments() {
+    let dir = tempdir().unwrap();
+    let narrow = dir.path().join("a.parquet").to_string_lossy().to_string();
+    let wide = dir.path().join("b.parquet").to_string_lossy().to_string();
+    let output = dir
+        .path()
+        .join("merged.parquet")
+        .to_string_lossy()
+        .to_string();
+
+    // Segment A knew only `meta.top`; segment B was written after `meta.name` was mapped.
+    write_parquet(
+        &narrow,
+        &batch_of(
+            vec![0, 1],
+            object_column(
+                vec![(
+                    Field::new("top", DataType::Int32, true),
+                    Arc::new(Int32Array::from(vec![10, 20])) as ArrayRef,
+                )],
+                vec![true, true],
+            ),
+        ),
+    );
+    write_parquet(
+        &wide,
+        &batch_of(
+            vec![0],
+            object_column(
+                vec![
+                    (
+                        Field::new("top", DataType::Int32, true),
+                        Arc::new(Int32Array::from(vec![30])) as ArrayRef,
+                    ),
+                    (
+                        Field::new("name", DataType::Utf8, true),
+                        Arc::new(StringArray::from(vec!["c"])) as ArrayRef,
+                    ),
+                ],
+                vec![true],
+            ),
+        ),
+    );
+
+    merge_unsorted(
+        &[narrow.clone(), wide.clone()],
+        &output,
+        "struct-union-index",
+        0,
+    )
+    .unwrap();
+
+    assert_eq!(count_rows(&output), 3, "all rows survive the merge");
+    assert_eq!(
+        read_all_int64(&output, "__row_id__"),
+        vec![0, 1, 2],
+        "row ids are reassigned sequentially"
+    );
+
+    let meta = struct_column_of(&output, "meta");
+    let top = meta
+        .column_by_name("top")
+        .unwrap()
+        .as_primitive::<arrow::datatypes::Int32Type>();
+    assert_eq!(
+        (top.value(0), top.value(1), top.value(2)),
+        (10, 20, 30),
+        "the shared child keeps every segment's values"
+    );
+
+    let name = meta.column_by_name("name").unwrap().as_string::<i32>();
+    assert!(
+        name.is_null(0) && name.is_null(1),
+        "rows from the segment that predates the sub-field read null"
+    );
+    assert_eq!(
+        name.value(2),
+        "c",
+        "rows from the segment that has it keep their value"
+    );
+}
+
+/// An absent object must survive the merge as a null struct, not a struct of nulls: only the former
+/// answers `isnull(meta)` true.
+#[test]
+fn merge_keeps_an_absent_object_null() {
+    let dir = tempdir().unwrap();
+    let first = dir.path().join("a.parquet").to_string_lossy().to_string();
+    let second = dir.path().join("b.parquet").to_string_lossy().to_string();
+    let output = dir
+        .path()
+        .join("merged.parquet")
+        .to_string_lossy()
+        .to_string();
+
+    write_parquet(
+        &first,
+        &batch_of(
+            vec![0, 1],
+            object_column(
+                vec![(
+                    Field::new("top", DataType::Int32, true),
+                    Arc::new(Int32Array::from(vec![Some(10), None])) as ArrayRef,
+                )],
+                vec![true, false],
+            ),
+        ),
+    );
+    write_parquet(
+        &second,
+        &batch_of(
+            vec![0],
+            object_column(
+                vec![
+                    (
+                        Field::new("top", DataType::Int32, true),
+                        Arc::new(Int32Array::from(vec![Some(30)])) as ArrayRef,
+                    ),
+                    (
+                        Field::new("name", DataType::Utf8, true),
+                        Arc::new(StringArray::from(vec![Some("c")])) as ArrayRef,
+                    ),
+                ],
+                vec![true],
+            ),
+        ),
+    );
+
+    merge_unsorted(&[first, second], &output, "struct-null-index", 0).unwrap();
+
+    let meta = struct_column_of(&output, "meta");
+    assert!(!meta.is_null(0), "row 0 had the object");
+    assert!(
+        meta.is_null(1),
+        "row 1 never had the object and must not become an empty one"
+    );
+    assert!(!meta.is_null(2), "row 2 had the object");
+}
+
+/// Nested objects are structs of structs; the union has to reach any depth.
+#[test]
+fn merge_unions_a_nested_struct_child() {
+    let dir = tempdir().unwrap();
+    let narrow = dir.path().join("a.parquet").to_string_lossy().to_string();
+    let wide = dir.path().join("b.parquet").to_string_lossy().to_string();
+    let output = dir
+        .path()
+        .join("merged.parquet")
+        .to_string_lossy()
+        .to_string();
+
+    let inner_narrow = StructArray::try_new(
+        Fields::from(vec![Field::new("depth", DataType::Int32, true)]),
+        vec![Arc::new(Int32Array::from(vec![1])) as ArrayRef],
+        Some(NullBuffer::from(vec![true])),
+    )
+    .unwrap();
+    write_parquet(
+        &narrow,
+        &batch_of(
+            vec![0],
+            object_column(
+                vec![(
+                    Field::new(
+                        "props",
+                        DataType::Struct(Fields::from(vec![Field::new(
+                            "depth",
+                            DataType::Int32,
+                            true,
+                        )])),
+                        true,
+                    ),
+                    Arc::new(inner_narrow) as ArrayRef,
+                )],
+                vec![true],
+            ),
+        ),
+    );
+
+    let inner_wide_fields = Fields::from(vec![
+        Field::new("depth", DataType::Int32, true),
+        Field::new("label", DataType::Utf8, true),
+    ]);
+    let inner_wide = StructArray::try_new(
+        inner_wide_fields.clone(),
+        vec![
+            Arc::new(Int32Array::from(vec![2])) as ArrayRef,
+            Arc::new(StringArray::from(vec!["deep"])) as ArrayRef,
+        ],
+        Some(NullBuffer::from(vec![true])),
+    )
+    .unwrap();
+    write_parquet(
+        &wide,
+        &batch_of(
+            vec![0],
+            object_column(
+                vec![(
+                    Field::new("props", DataType::Struct(inner_wide_fields), true),
+                    Arc::new(inner_wide) as ArrayRef,
+                )],
+                vec![true],
+            ),
+        ),
+    );
+
+    merge_unsorted(&[narrow, wide], &output, "struct-nested-index", 0).unwrap();
+
+    let props = struct_column_of(&output, "meta")
+        .column_by_name("props")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap()
+        .clone();
+    let label = props.column_by_name("label").unwrap().as_string::<i32>();
+    assert!(label.is_null(0), "grandchild is null where it was unmapped");
+    assert_eq!(label.value(1), "deep");
+}
