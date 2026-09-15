@@ -66,34 +66,6 @@ pub fn read_format_version(metadata: &FileMetaData) -> String {
 /// - **Dependency Inversion**: Depends on NativeSettings abstraction
 pub struct WriterPropertiesBuilder;
 
-/// Returns the type that column properties apply to. Parquet encodes a LIST column's leaf, not
-/// the list wrapper, so encoding/compression decisions must be made on the element type.
-fn effective_type(dt: &arrow::datatypes::DataType) -> &arrow::datatypes::DataType {
-    use arrow::datatypes::DataType::*;
-    match dt {
-        List(f) | LargeList(f) | FixedSizeList(f, _) => effective_type(f.data_type()),
-        other => other,
-    }
-}
-
-/// Builds the parquet `ColumnPath` for a top-level Arrow field.
-///
-/// `ColumnPath::from(String)` yields a single-segment path, which only matches primitive columns.
-/// A LIST column's leaf lives at `<field>.list.element`, so per-column encoding, compression, and
-/// bloom-filter settings silently no-op for lists unless the full path is spelled out. The
-/// `list`/`element` segment names match what the arrow-rs writer emits for `DataType::List`.
-fn column_path_for(field: &arrow::datatypes::Field) -> parquet::schema::types::ColumnPath {
-    use arrow::datatypes::DataType::*;
-    let mut parts = vec![field.name().clone()];
-    let mut current = field.data_type();
-    while let List(child) | LargeList(child) | FixedSizeList(child, _) = current {
-        parts.push("list".to_string());
-        parts.push(child.name().clone());
-        current = child.data_type();
-    }
-    parquet::schema::types::ColumnPath::new(parts)
-}
-
 /// Maps an Arrow DataType to a lowercase string key used for cluster-level type config lookups.
 fn arrow_type_key(dt: &arrow::datatypes::DataType) -> String {
     use arrow::datatypes::DataType::*;
@@ -115,6 +87,78 @@ fn arrow_type_key(dt: &arrow::datatypes::DataType) -> String {
         Timestamp(_, _) => "timestamp".into(),
         _ => format!("{:?}", dt).to_lowercase(),
     }
+}
+
+/// One Parquet leaf column: the dotted mapping name a user configures it by, the `ColumnPath` the
+/// writer addresses it by, and the Arrow type its encoding must be valid for.
+///
+/// The two names differ for a multi-valued field: `events` is configured as `events` but written at
+/// `events.list.element`, so `name` omits the synthetic list segments that `path` must carry.
+struct LeafColumn<'a> {
+    name: String,
+    path: parquet::schema::types::ColumnPath,
+    data_type: &'a arrow::datatypes::DataType,
+    type_key: String,
+}
+
+/// Flattens `schema` to its Parquet leaf columns.
+///
+/// Only a struct is descended into: an OpenSearch `object` is stored as one, so `meta.top` is a
+/// leaf of the `meta` group rather than a column of its own, and the per-field settings that name
+/// it (`index.parquet.encoding.field: [meta.top]`) have to reach that leaf. The dotted name is
+/// exactly what those settings already use, so nothing about the setting changes.
+///
+/// A `ColumnPath` built from a String is a single part, so `"meta.top".into()` addresses a
+/// top-level column literally named `meta.top` and silently matches nothing once the object is a
+/// struct. The path is therefore built part by part.
+fn collect_leaf_columns(schema: &ArrowSchema) -> Vec<LeafColumn<'_>> {
+    let mut leaves = Vec::with_capacity(schema.fields().len());
+    for field in schema.fields() {
+        collect_leaves_of(field, &[], &[], &mut leaves);
+    }
+    leaves
+}
+
+/// Descends `field` to its Parquet leaves, tracking the mapping name and the column path
+/// separately because a LIST inserts `list`/`element` segments into the latter only.
+///
+/// Both wrappers are transparent to configuration: a struct is a group node with no encoding of its
+/// own, and a LIST encodes its element rather than the wrapper. So `events` and `meta.top` are each
+/// configured as one leaf, keyed off the type actually written.
+fn collect_leaves_of<'a>(
+    field: &'a arrow::datatypes::Field,
+    name_ancestors: &[String],
+    path_ancestors: &[String],
+    leaves: &mut Vec<LeafColumn<'a>>,
+) {
+    use arrow::datatypes::DataType::{FixedSizeList, LargeList, List, Struct};
+
+    let mut name_parts: Vec<String> = name_ancestors.to_vec();
+    name_parts.push(field.name().clone());
+    let mut path_parts: Vec<String> = path_ancestors.to_vec();
+    path_parts.push(field.name().clone());
+
+    // Unwrap to the element the writer actually encodes. The `list`/`element` segment names match
+    // what the arrow-rs writer emits, and only the path carries them.
+    let mut current = field;
+    while let List(child) | LargeList(child) | FixedSizeList(child, _) = current.data_type() {
+        path_parts.push("list".to_string());
+        path_parts.push(child.name().clone());
+        current = child.as_ref();
+    }
+
+    if let Struct(children) = current.data_type() {
+        for child in children {
+            collect_leaves_of(child, &name_parts, &path_parts, leaves);
+        }
+        return;
+    }
+    leaves.push(LeafColumn {
+        name: name_parts.join("."),
+        path: parquet::schema::types::ColumnPath::new(path_parts),
+        data_type: current.data_type(),
+        type_key: arrow_type_key(current.data_type()),
+    });
 }
 
 impl WriterPropertiesBuilder {
@@ -224,28 +268,9 @@ impl WriterPropertiesBuilder {
         config: &NativeSettings,
         schema: &ArrowSchema,
     ) -> Result<parquet::file::properties::WriterPropertiesBuilder, String> {
-        // Key config decisions off the element type and address the column by its full leaf path,
-        // so a LIST column is configured like the scalar column of its element type.
-        type FieldEntry<'a> = (
-            &'a arrow::datatypes::DataType,
-            String,
-            parquet::schema::types::ColumnPath,
-        );
-        let type_map: std::collections::HashMap<&str, FieldEntry<'_>> = schema
-            .fields()
-            .iter()
-            .map(|f| {
-                let element_type = effective_type(f.data_type());
-                (
-                    f.name().as_str(),
-                    (
-                        element_type,
-                        arrow_type_key(element_type),
-                        column_path_for(f),
-                    ),
-                )
-            })
-            .collect();
+        let leaves = collect_leaf_columns(schema);
+        let type_map: std::collections::HashMap<&str, &LeafColumn<'_>> =
+            leaves.iter().map(|l| (l.name.as_str(), l)).collect();
 
         let mut field_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
         if let Some(fc) = &config.field_configs {
@@ -253,8 +278,8 @@ impl WriterPropertiesBuilder {
                 field_names.insert(name.as_str());
             }
         }
-        for f in schema.fields() {
-            field_names.insert(f.name().as_str());
+        for leaf in &leaves {
+            field_names.insert(leaf.name.as_str());
         }
 
         for field_name in field_names {
@@ -264,7 +289,11 @@ impl WriterPropertiesBuilder {
                 .and_then(|m| m.get(field_name));
 
             let (arrow_type, type_key, column_path) = match type_map.get(field_name) {
-                Some(v) => (v.0, Some(v.1.as_str()), v.2.clone()),
+                Some(leaf) => (
+                    leaf.data_type,
+                    Some(leaf.type_key.as_str()),
+                    leaf.path.clone(),
+                ),
                 None => {
                     return Err(format!(
                         "Field '{}' in field_configs does not exist in schema",
@@ -495,6 +524,134 @@ mod tests {
                 .map(|(name, dt)| Field::new(name, dt, true))
                 .collect::<Vec<Field>>(),
         )
+    }
+
+    /// A schema shaped like an OpenSearch `object`: one struct column over the given leaves.
+    fn schema_with_object(object: &str, leaves: Vec<(&str, ArrowDataType)>) -> ArrowSchema {
+        let children: Vec<Field> = leaves
+            .into_iter()
+            .map(|(name, dt)| Field::new(name, dt, true))
+            .collect();
+        ArrowSchema::new(vec![Field::new(
+            object,
+            ArrowDataType::Struct(children.into()),
+            true,
+        )])
+    }
+
+    fn leaf_path(parts: &[&str]) -> parquet::schema::types::ColumnPath {
+        parquet::schema::types::ColumnPath::new(parts.iter().map(|p| p.to_string()).collect())
+    }
+
+    #[test]
+    fn test_object_leaves_are_configured_by_their_dotted_name() {
+        // `index.parquet.compression.field: [meta.name]` must reach the leaf of the `meta` group.
+        // Before the walk, the path was built from the dotted string as a single part, which
+        // addresses a top-level column literally named "meta.name" — nothing in the file.
+        let mut field_configs = HashMap::new();
+        field_configs.insert(
+            "meta.name".to_string(),
+            FieldConfig {
+                compression_type: Some("SNAPPY".to_string()),
+                ..Default::default()
+            },
+        );
+        let config = NativeSettings {
+            field_configs: Some(field_configs),
+            ..Default::default()
+        };
+        let schema = schema_with_object(
+            "meta",
+            vec![("name", ArrowDataType::Utf8), ("top", ArrowDataType::Int32)],
+        );
+
+        let props = WriterPropertiesBuilder::build(&config, &schema).unwrap();
+
+        assert_eq!(
+            props.compression(&leaf_path(&["meta", "name"])),
+            Compression::SNAPPY,
+            "the configured leaf takes the field-level compression"
+        );
+        assert_ne!(
+            props.compression(&leaf_path(&["meta", "top"])),
+            Compression::SNAPPY,
+            "its sibling is untouched"
+        );
+    }
+
+    #[test]
+    fn test_type_defaults_reach_object_leaves() {
+        // The utf8 default (ZSTD) is applied per column, so it has to be applied at each leaf
+        // rather than at the struct — a group node carries no encoding or compression of its own.
+        let schema = schema_with_object("meta", vec![("name", ArrowDataType::Utf8)]);
+        let props = WriterPropertiesBuilder::build(&NativeSettings::default(), &schema).unwrap();
+        assert!(
+            matches!(
+                props.compression(&leaf_path(&["meta", "name"])),
+                Compression::ZSTD(_)
+            ),
+            "utf8 leaf should get the utf8 default compression"
+        );
+    }
+
+    #[test]
+    fn test_nested_object_leaf_path_is_fully_qualified() {
+        let inner = Field::new(
+            "props",
+            ArrowDataType::Struct(vec![Field::new("depth", ArrowDataType::Int32, true)].into()),
+            true,
+        );
+        let schema = ArrowSchema::new(vec![Field::new(
+            "meta",
+            ArrowDataType::Struct(vec![inner].into()),
+            true,
+        )]);
+
+        let mut field_configs = HashMap::new();
+        field_configs.insert(
+            "meta.props.depth".to_string(),
+            FieldConfig {
+                compression_type: Some("SNAPPY".to_string()),
+                ..Default::default()
+            },
+        );
+        let config = NativeSettings {
+            field_configs: Some(field_configs),
+            ..Default::default()
+        };
+
+        let props = WriterPropertiesBuilder::build(&config, &schema).unwrap();
+        assert_eq!(
+            props.compression(&leaf_path(&["meta", "props", "depth"])),
+            Compression::SNAPPY
+        );
+    }
+
+    #[test]
+    fn test_config_naming_the_object_itself_is_rejected() {
+        // A struct is a group node: it has no encoding or compression, so configuring `meta`
+        // cannot be honoured. Failing loudly beats silently dropping the setting — the same
+        // treatment a name that is not in the schema at all already gets.
+        let mut field_configs = HashMap::new();
+        field_configs.insert(
+            "meta".to_string(),
+            FieldConfig {
+                compression_type: Some("SNAPPY".to_string()),
+                ..Default::default()
+            },
+        );
+        let config = NativeSettings {
+            field_configs: Some(field_configs),
+            ..Default::default()
+        };
+        let schema = schema_with_object("meta", vec![("name", ArrowDataType::Utf8)]);
+
+        let error = WriterPropertiesBuilder::build(&config, &schema).unwrap_err();
+        assert!(
+            error.contains("meta"),
+            "error should name the offending field, got: {}",
+            error
+        );
     }
 
     #[test]
