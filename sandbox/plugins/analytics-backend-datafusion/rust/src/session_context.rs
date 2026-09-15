@@ -574,6 +574,7 @@ pub async fn prepare_partial_plan(
     handle: &mut SessionContextHandle,
     substrait_bytes: &[u8],
 ) -> Result<(), datafusion::common::DataFusionError> {
+    use crate::substrait_consumer::from_substrait_plan;
     use prost::Message;
     use substrait::proto::Plan;
 

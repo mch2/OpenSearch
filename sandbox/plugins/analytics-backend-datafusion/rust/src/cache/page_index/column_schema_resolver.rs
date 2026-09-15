@@ -76,15 +76,17 @@ pub fn resolve_predicate_parquet_columns_pair(
 /// # Nested columns
 ///
 /// `parquet_column_index` returns `None` for a nested Arrow root. That is deliberate in
-/// parquet-rs: parquet's physical schema is flat, so a `List`/`Map`/`Struct` root can span
-/// several leaves and it will not pick one. An array column named `tags` is therefore stored
-/// at `tags.list.element` and nothing in the file is named `tags`.
+/// parquet-rs: parquet's physical schema is flat, so a `List`/`Map`/`Struct` root can span several
+/// leaves and it will not pick one. Both of OpenSearch's composite shapes hit this — an `object`
+/// named `city` is a group whose leaves are `city.name`, `city.pop`, …, and a multi-valued `tags` is
+/// stored at `tags.list.element`. Nothing in the file is named `city` or `tags`.
 ///
-/// Left unhandled, the column is silently omitted from the scoped page index, the reader is
-/// handed a placeholder byte range for it, and the decompressor fails with `Src size is
-/// incorrect` or `the offset to copy is not contained in the decompressed buffer`. So a nested
-/// root is expanded to every physical leaf beneath it. `arrow_schema` is derived from this
-/// file's footer, giving a 1:1 root↔`get_column_root_idx` correspondence.
+/// A predicate on one of the object's leaves reads it with `get_field(city, 'name')`, so the column
+/// this sees is the struct root. Left unhandled, it is silently omitted from the scoped page index,
+/// the reader is handed a placeholder byte range for it, and the decompressor fails with `Src size
+/// is incorrect` or `the offset to copy is not contained in the decompressed buffer`. So a nested
+/// root is expanded to every physical leaf beneath it. `arrow_schema` is derived from this file's
+/// footer, giving a 1:1 root↔`get_column_root_idx` correspondence.
 pub(super) fn resolve_with_schema(
     arrow_schema: &SchemaRef,
     metadata: &ParquetMetaData,
@@ -100,13 +102,6 @@ pub(super) fn resolve_with_schema(
             set.insert(idx);
             continue;
         }
-
-        // parquet-rs intentionally does not resolve nested Arrow fields through
-        // `parquet_column()`: LIST/MAP/STRUCT roots may map to one or more physical
-        // leaves. Since `arrow_schema` is derived from this file's footer, its root
-        // index matches `SchemaDescriptor::get_column_root_idx`; include every leaf
-        // under the requested root so any projected nested field receives a real
-        // OffsetIndex rather than a scoped-out placeholder.
         if let Some((root_idx, _)) = arrow_schema.fields().find(name) {
             for leaf_idx in 0..parquet_schema.num_columns() {
                 if parquet_schema.get_column_root_idx(leaf_idx) == root_idx {
@@ -122,52 +117,66 @@ pub(super) fn resolve_with_schema(
 mod tests {
     use super::*;
     use arrow::array::builder::ListBuilder;
-    use arrow::array::{ArrayRef, Int32Array, RecordBatch, StringBuilder};
-    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::array::{ArrayRef, Int32Array, RecordBatch, StringArray, StringBuilder, StructArray};
+    use arrow::datatypes::{DataType, Field, Fields, Schema};
     use bytes::Bytes;
     use datafusion::parquet::arrow::ArrowWriter;
     use datafusion::parquet::file::properties::WriterProperties;
     use parquet::file::reader::{FileReader, SerializedFileReader};
 
-    /// One scalar `id` column and one `tags` LIST<Utf8> column, so the file has two physical
-    /// leaves: `id` and `tags.list.element`. Nothing in the file is named `tags`.
-    fn list_column_parquet() -> (Bytes, SchemaRef) {
-        // Name the child `element`, matching what ParquetField.toArrowField writes, rather than
-        // arrow's default `item` — the leaf path is part of what this test pins.
+    /// One scalar `id`, one `tags` LIST<Utf8> and one `city` STRUCT<name, pop>, so the file has four
+    /// physical leaves: `id`, `tags.list.element`, `city.name` and `city.pop`. Nothing in the file is
+    /// named `tags` or `city` — both are group nodes, which is the case this resolver exists for.
+    fn nested_columns_parquet() -> Bytes {
+        // Name the list child `element`, matching what ParquetField.toArrowField writes, rather than
+        // arrow's default `item` — the leaf path is part of what these tests pin.
         let mut tags = ListBuilder::new(StringBuilder::new()).with_field(Arc::new(Field::new(
             "element",
             DataType::Utf8,
             true,
         )));
-        for row in 0..8 {
+        for row in 0..2 {
             tags.values().append_value(format!("t{row}"));
             tags.values().append_value("shared");
             tags.append(true);
         }
         let tags: ArrayRef = Arc::new(tags.finish());
-        let ids: ArrayRef = Arc::new(Int32Array::from((0..8).collect::<Vec<i32>>()));
+
+        let children = Fields::from(vec![
+            Field::new("name", DataType::Utf8, true),
+            Field::new("pop", DataType::Int32, true),
+        ]);
+        let city: ArrayRef = Arc::new(
+            StructArray::try_new(
+                children.clone(),
+                vec![
+                    Arc::new(StringArray::from(vec!["seattle", "denver"])) as ArrayRef,
+                    Arc::new(Int32Array::from(vec![750, 700])) as ArrayRef,
+                ],
+                None,
+            )
+            .unwrap(),
+        );
+        let ids: ArrayRef = Arc::new(Int32Array::from(vec![0, 1]));
 
         let schema: SchemaRef = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Int32, false),
             Field::new("tags", tags.data_type().clone(), true),
+            Field::new("city", DataType::Struct(children), true),
         ]));
-        let batch = RecordBatch::try_new(Arc::clone(&schema), vec![ids, tags]).unwrap();
+        let batch = RecordBatch::try_new(Arc::clone(&schema), vec![ids, tags, city]).unwrap();
 
         let mut buf: Vec<u8> = Vec::new();
-        let mut w = ArrowWriter::try_new(
-            &mut buf,
-            Arc::clone(&schema),
-            Some(WriterProperties::builder().build()),
-        )
-        .unwrap();
-        w.write(&batch).unwrap();
-        w.close().unwrap();
-        (Bytes::from(buf), schema)
+        let mut writer =
+            ArrowWriter::try_new(&mut buf, schema, Some(WriterProperties::builder().build()))
+                .unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        Bytes::from(buf)
     }
 
     fn file_metadata_and_schema() -> (ParquetMetaData, SchemaRef) {
-        let (bytes, _) = list_column_parquet();
-        let reader = SerializedFileReader::new(bytes).unwrap();
+        let reader = SerializedFileReader::new(nested_columns_parquet()).unwrap();
         let metadata = reader.metadata().clone();
         let file_schema: SchemaRef = Arc::new(
             parquet::arrow::parquet_to_arrow_schema(
@@ -179,23 +188,46 @@ mod tests {
         (metadata, file_schema)
     }
 
+    fn leaf_paths(metadata: &ParquetMetaData, cols: &[usize]) -> Vec<String> {
+        let mut paths: Vec<String> = cols
+            .iter()
+            .map(|i| {
+                metadata
+                    .file_metadata()
+                    .schema_descr()
+                    .column(*i)
+                    .path()
+                    .string()
+            })
+            .collect();
+        paths.sort();
+        paths
+    }
+
+    #[test]
+    fn struct_root_resolves_to_every_leaf_beneath_it() {
+        // A predicate on one of the object's leaves reads it with get_field(city, 'name'), so the
+        // column name that reaches here is the struct root. Without the expansion this returns
+        // empty: parquet-rs refuses to map `city` to a leaf, the column is scoped out, and the
+        // reader is later handed a placeholder byte range for it.
+        let (metadata, file_schema) = file_metadata_and_schema();
+        let cols = resolve_with_schema(&file_schema, &metadata, &["city".to_string()]);
+        assert_eq!(
+            leaf_paths(&metadata, &cols),
+            vec!["city.name", "city.pop"],
+            "both leaves of the object must be in scope"
+        );
+    }
+
     #[test]
     fn list_root_resolves_to_its_physical_leaf() {
-        // Without the nested-root expansion this returns empty: parquet-rs refuses to map the
-        // `tags` root to a leaf, the column is scoped out, and the reader is later handed a
-        // placeholder byte range for it.
+        // Same expansion, the other composite shape: a multi-valued field is written one level down
+        // at `tags.list.element`, so nothing in the file answers to `tags`.
         let (metadata, file_schema) = file_metadata_and_schema();
         let cols = resolve_with_schema(&file_schema, &metadata, &["tags".to_string()]);
         assert_eq!(
-            cols.len(),
-            1,
-            "expected exactly the tags.list.element leaf, got {cols:?}"
-        );
-
-        let leaf = metadata.file_metadata().schema_descr().column(cols[0]);
-        assert_eq!(
-            leaf.path().string(),
-            "tags.list.element",
+            leaf_paths(&metadata, &cols),
+            vec!["tags.list.element"],
             "resolved leaf should be the list's element path"
         );
     }
@@ -204,34 +236,28 @@ mod tests {
     fn scalar_column_still_resolves_directly() {
         let (metadata, file_schema) = file_metadata_and_schema();
         let cols = resolve_with_schema(&file_schema, &metadata, &["id".to_string()]);
-        assert_eq!(cols.len(), 1);
-        assert_eq!(
-            metadata
-                .file_metadata()
-                .schema_descr()
-                .column(cols[0])
-                .path()
-                .string(),
-            "id"
-        );
+        assert_eq!(leaf_paths(&metadata, &cols), vec!["id"]);
     }
 
     #[test]
-    fn mixed_scalar_and_list_names_resolve_together() {
+    fn mixed_scalar_and_nested_names_resolve_together() {
         let (metadata, file_schema) = file_metadata_and_schema();
-        let mut cols = resolve_with_schema(
+        let cols = resolve_with_schema(
             &file_schema,
             &metadata,
-            &["id".to_string(), "tags".to_string()],
+            &["id".to_string(), "city".to_string(), "tags".to_string()],
         );
-        cols.sort_unstable();
-        assert_eq!(cols, vec![0, 1], "both leaves in scope");
+        assert_eq!(
+            leaf_paths(&metadata, &cols),
+            vec!["city.name", "city.pop", "id", "tags.list.element"],
+            "a scalar, a struct and a list resolve in one pass"
+        );
     }
 
     #[test]
     fn absent_column_is_skipped_rather_than_expanded() {
-        // Schema evolution: a column in the query but not in this file must contribute nothing,
-        // and must not accidentally match a root index.
+        // Schema evolution: a column in the query but not in this file must contribute nothing, and
+        // must not accidentally match a root index.
         let (metadata, file_schema) = file_metadata_and_schema();
         let cols = resolve_with_schema(&file_schema, &metadata, &["not_in_this_file".to_string()]);
         assert!(

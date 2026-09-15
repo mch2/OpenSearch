@@ -360,8 +360,8 @@ public class OpenSearchSchemaBuilder {
                     // Shapeless object — `{"type": "object"}` with no properties, which is what
                     // dynamic mapping leaves before any document populates it. Nothing is known
                     // about its shape, but the field must stay addressable and resolve to null, as
-                    // vanilla does. A field-less ROW gives that: ObjectStructMaterializer finds no
-                    // leaves to assemble and emits a typed NULL. Note the parent of a shapeless
+                    // vanilla does. A field-less ROW gives that: ObjectLeafProjector has no column to
+                    // read it from and emits a typed NULL. Note the parent of a shapeless
                     // child does NOT carry it in its own struct type (buildObjectType skips it), so
                     // `fields outer` omits it while `fields outer.shapeless` returns null — again
                     // matching vanilla.
@@ -372,9 +372,9 @@ public class OpenSearchSchemaBuilder {
                     addLeafFields(builder, typeFactory, nested, fieldName);
                     // Also expose the object itself as a struct (ROW) column, so a query can
                     // address the whole object (`fields nested_metadata`, `stats … by obj`) and
-                    // not just its leaves. The object has no physical storage — the scan reads
-                    // the leaves — so ObjectStructMaterializer strips this column from the scan
-                    // and re-assembles it with make_struct in a project directly above it.
+                    // not just its leaves. This is the column that is physically stored; the flat
+                    // leaves above are not, so ObjectLeafProjector strips them from the scan and
+                    // reads each one back out of the struct with get_field.
                     RelDataType structType = buildObjectType(typeFactory, nested, fieldName);
                     if (structType != null) {
                         builder.add(fieldName, structType);
@@ -417,7 +417,7 @@ public class OpenSearchSchemaBuilder {
      * sub-field, recursing for sub-objects. Field names are the <em>local</em> names (the struct
      * nesting already carries the path), while the flat leaf columns added by
      * {@link #addLeafFields} keep their dotted paths — that dotted convention is how
-     * {@code ObjectStructMaterializer} pairs a struct field back to its backing column.
+     * {@code ObjectLeafProjector} pairs a flat leaf column back to its field in the struct.
      *
      * <p>Returns {@code null} when the object contributes no supported field, so callers omit the
      * column entirely rather than declaring an empty struct.
@@ -445,10 +445,10 @@ public class OpenSearchSchemaBuilder {
                 // when absent, which buildLeafType treats as "not a scaled_float".
                 double scalingFactor = parseScalingFactor(fieldProps.get(SCALING_FACTOR_FIELD));
                 childType = buildLeafType(fieldType, (String) fieldProps.get("format"), scalingFactor, typeFactory);
-                // …including multi_value, which addLeafFields wraps in an ARRAY above. The struct
-                // field and its backing leaf column are paired by dotted name in
-                // ObjectStructMaterializer, so make_struct would reject an ARRAY column bound to a
-                // scalar struct field. Only reachable for an object whose leaf is multi-valued.
+                // …including multi_value, which addLeafFields wraps in an ARRAY above. Storage does
+                // the same one level down — ArrowSchemaBuilder files the LIST leaf as a child of the
+                // object's struct — so the ROW field has to be an ARRAY or the declared type would
+                // disagree with the column. Only reachable for an object whose leaf is multi-valued.
                 if (childType != null && Boolean.TRUE.equals(fieldProps.get("multi_value"))) {
                     childType = typeFactory.createTypeWithNullability(typeFactory.createArrayType(childType, -1), true);
                 }

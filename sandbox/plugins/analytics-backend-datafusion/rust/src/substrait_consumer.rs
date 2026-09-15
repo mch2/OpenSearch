@@ -6,18 +6,37 @@
  * compatible open source license.
  */
 
+//! The default Substrait consumer, plus the two things OpenSearch plans express that it declines.
+//!
+//! One is a reference to a field *inside* a struct: an OpenSearch `object` is stored as a Parquet
+//! struct, so a query naming a sub-field is reaching into one. Calcite expresses that as
+//! `RexFieldAccess` and isthmus serializes it the way Substrait means it — a `StructField` whose
+//! `child` names the field one level down — which the default consumer rejects outright with
+//! `"Direct reference StructField with child is not supported"`. `consume_field_reference` walks the
+//! chain, resolving each index to its field name against the type it sits in, and builds the
+//! `get_field` calls DataFusion represents struct access with.
+//!
+//! The other is the multi-value expand, which crosses the wire as an `ExtensionSingleRel`.
+//!
+//! Everything else delegates to [`DefaultSubstraitConsumer`].
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use datafusion::arrow::datatypes::DataType;
 use datafusion::catalog::TableProvider;
-use datafusion::common::{not_impl_err, substrait_err, DFSchema, TableReference};
+use datafusion::common::{not_impl_err, substrait_err, Column, DFSchema, Result, TableReference};
 use datafusion::execution::{FunctionRegistry, SessionState};
+use datafusion::functions::core::expr_fn::get_field;
 use datafusion::functions_nested::expr_fn::{array_distinct, array_slice};
 use datafusion::logical_expr::{col, lit, Expr, LogicalPlan, LogicalPlanBuilder};
 use datafusion_substrait::extensions::Extensions;
 use datafusion_substrait::logical_plan::consumer::{
     from_substrait_plan_with_consumer, DefaultSubstraitConsumer, SubstraitConsumer,
 };
+use substrait::proto::expression::field_reference::{ReferenceType, RootType};
+use substrait::proto::expression::reference_segment;
+use substrait::proto::expression::FieldReference;
 use substrait::proto::{ExtensionSingleRel, Plan};
 
 pub const MULTI_VALUE_EXPAND_TYPE_URL: &str = "opensearch://analytics/multi_value_expand/v1";
@@ -101,6 +120,85 @@ impl SubstraitConsumer for OpenSearchSubstraitConsumer<'_> {
 
     fn get_outer_schema(&self, steps_out: usize) -> Option<Arc<DFSchema>> {
         self.default.get_outer_schema(steps_out)
+    }
+
+    /// A reference to a field of the row, or to a field inside a struct of that row.
+    ///
+    /// Substrait spells the latter as a chain: the outer `StructField` picks the struct column, its
+    /// `child` picks the field within, and so on to any depth. Each index is resolved to a name
+    /// against the type it indexes, because DataFusion addresses struct fields by name.
+    async fn consume_field_reference(
+        &self,
+        expr: &FieldReference,
+        input_schema: &DFSchema,
+    ) -> Result<Expr> {
+        let Some(ReferenceType::DirectReference(direct)) = &expr.reference_type else {
+            return substrait_err!("unsupported field reference type");
+        };
+        let Some(reference_segment::ReferenceType::StructField(root)) = &direct.reference_type
+        else {
+            return substrait_err!("field reference must be a struct field");
+        };
+
+        // Only a root reference names a column of this input; an outer reference indexes an
+        // enclosing query's schema instead.
+        let is_root = matches!(&expr.root_type, Some(RootType::RootReference(_)) | None);
+
+        // Bounds-check ahead of anything that indexes the schema, the delegation below included: the
+        // plan is wire input and `qualified_field` indexes without checking, so a malformed
+        // reference would panic across the FFM boundary rather than fail the query.
+        let root_index = root.field as usize;
+        if is_root && root_index >= input_schema.fields().len() {
+            return substrait_err!(
+                "field reference {} is out of range for an input of {} columns",
+                root_index,
+                input_schema.fields().len()
+            );
+        }
+
+        // A reference with no child is a plain column, which the default consumer already handles —
+        // including outer references, whose schema this does not have.
+        if root.child.is_none() {
+            return self.default.consume_field_reference(expr, input_schema).await;
+        }
+
+        // Dereferencing only works against a column of this input.
+        if is_root == false {
+            return substrait_err!(
+                "nested struct field references are only supported against the current input"
+            );
+        }
+
+        let (qualifier, field) = input_schema.qualified_field(root_index);
+        let mut value = Expr::Column(Column::from((qualifier, field)));
+        let mut data_type = field.data_type().clone();
+        let mut segment = root.child.as_deref();
+
+        while let Some(next) = segment {
+            let Some(reference_segment::ReferenceType::StructField(step)) = &next.reference_type
+            else {
+                return substrait_err!("only struct fields can be dereferenced");
+            };
+            let DataType::Struct(fields) = &data_type else {
+                return substrait_err!(
+                    "cannot read field {} of non-struct type {}",
+                    step.field,
+                    data_type
+                );
+            };
+            let Some(child) = fields.get(step.field as usize) else {
+                return substrait_err!(
+                    "struct has no field at index {} (it has {})",
+                    step.field,
+                    fields.len()
+                );
+            };
+            value = get_field(value, child.name().clone());
+            data_type = child.data_type().clone();
+            segment = step.child.as_deref();
+        }
+
+        Ok(value)
     }
 
     async fn consume_extension_single(
@@ -377,5 +475,108 @@ mod tests {
             payload.extend_from_slice(&value.to_be_bytes());
         }
         assert!(ExpandSpec::decode(&payload).is_err());
+    }
+}
+#[cfg(test)]
+mod field_reference_tests {
+    use super::*;
+    use datafusion::arrow::datatypes::{Field, Fields, Schema};
+    use datafusion::prelude::SessionContext;
+    use substrait::proto::expression::field_reference::RootReference;
+    use substrait::proto::expression::reference_segment::StructField;
+    use substrait::proto::expression::ReferenceSegment;
+
+    /// `id BIGINT, city STRUCT<name UTF8, props STRUCT<zone UTF8>>`
+    fn schema() -> DFSchema {
+        let props = DataType::Struct(Fields::from(vec![Field::new("zone", DataType::Utf8, true)]));
+        let city = DataType::Struct(Fields::from(vec![
+            Field::new("name", DataType::Utf8, true),
+            Field::new("props", props, true),
+        ]));
+        DFSchema::try_from(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("city", city, true),
+        ]))
+        .unwrap()
+    }
+
+    /// A reference to column `field`, optionally dereferencing the given child indexes below it.
+    fn reference(field: i32, children: &[i32]) -> FieldReference {
+        let mut segment: Option<Box<ReferenceSegment>> = None;
+        for index in children.iter().rev() {
+            segment = Some(Box::new(ReferenceSegment {
+                reference_type: Some(reference_segment::ReferenceType::StructField(Box::new(
+                    StructField {
+                        field: *index,
+                        child: segment,
+                    },
+                ))),
+            }));
+        }
+        FieldReference {
+            reference_type: Some(ReferenceType::DirectReference(ReferenceSegment {
+                reference_type: Some(reference_segment::ReferenceType::StructField(Box::new(
+                    StructField {
+                        field,
+                        child: segment,
+                    },
+                ))),
+            })),
+            root_type: Some(RootType::RootReference(RootReference {})),
+        }
+    }
+
+    async fn consume(reference: &FieldReference) -> Result<Expr> {
+        let ctx = SessionContext::new();
+        let state = ctx.state();
+        let extensions = Extensions::default();
+        let consumer = OpenSearchSubstraitConsumer::new(&extensions, &state);
+        consumer.consume_field_reference(reference, &schema()).await
+    }
+
+    /// No child: an ordinary column, same as the default consumer produces.
+    #[tokio::test]
+    async fn a_plain_column_reference_is_a_column() {
+        let expr = consume(&reference(0, &[])).await.unwrap();
+        assert_eq!(format!("{expr}"), "id");
+    }
+
+    /// One child: the case the default consumer declines.
+    #[tokio::test]
+    async fn a_struct_field_reference_reads_the_field() {
+        let expr = consume(&reference(1, &[0])).await.unwrap();
+        assert_eq!(format!("{expr}"), "get_field(city, Utf8(\"name\"))");
+    }
+
+    /// A chain reads through the sub-object, resolving each index against the type it indexes.
+    #[tokio::test]
+    async fn a_chained_reference_reads_through_a_sub_object() {
+        let expr = consume(&reference(1, &[1, 0])).await.unwrap();
+        assert_eq!(
+            format!("{expr}"),
+            "get_field(get_field(city, Utf8(\"props\")), Utf8(\"zone\"))"
+        );
+    }
+
+    /// A child index past the end of the struct is a malformed plan, not a panic.
+    #[tokio::test]
+    async fn an_out_of_range_child_is_an_error() {
+        let error = consume(&reference(1, &[7])).await.unwrap_err().to_string();
+        assert!(error.contains("no field at index 7"), "got: {error}");
+    }
+
+    /// So is a root index past the end of the input — the plan arrives over the wire, and
+    /// `qualified_field` would otherwise panic across the FFM boundary.
+    #[tokio::test]
+    async fn an_out_of_range_root_is_an_error() {
+        let error = consume(&reference(9, &[])).await.unwrap_err().to_string();
+        assert!(error.contains("out of range"), "got: {error}");
+    }
+
+    /// Dereferencing something that is not a struct is an error, not a wrong answer.
+    #[tokio::test]
+    async fn dereferencing_a_scalar_is_an_error() {
+        let error = consume(&reference(0, &[0])).await.unwrap_err().to_string();
+        assert!(error.contains("non-struct"), "got: {error}");
     }
 }

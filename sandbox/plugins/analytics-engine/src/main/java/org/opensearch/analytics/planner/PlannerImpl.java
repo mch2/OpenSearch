@@ -130,21 +130,12 @@ public class PlannerImpl {
 
         RelNode modifiedRelNode = rawRelNode;
         modifiedRelNode = removeSubQueries(modifiedRelNode, listener);
-        // Must run before trimFields — see ObjectStructMaterializer. Whether it fired also tells the
-        // null-predicate expander below whether there is any make_struct in the plan to expand.
-        Optional<RelNode> objectStructs = ObjectStructMaterializer.rewrite(modifiedRelNode);
-        modifiedRelNode = objectStructs.orElse(modifiedRelNode);
+        // Must run before trimFields — see ObjectLeafProjector.
+        modifiedRelNode = ObjectLeafProjector.rewrite(modifiedRelNode).orElse(modifiedRelNode);
         modifiedRelNode = trimFields(modifiedRelNode);
         modifiedRelNode = extractLiteralAgg(modifiedRelNode, listener);
         modifiedRelNode = reduceExpressions(modifiedRelNode, listener);
         modifiedRelNode = pushdownRules(modifiedRelNode, listener);
-        if (objectStructs.isPresent()) {
-            // Only reachable when an object was materialized — no make_struct means nothing to
-            // expand, and the walk would visit every expression of every node for nothing. Placed
-            // after pushdown because FILTER_PROJECT_TRANSPOSE is what inlines make_struct into the
-            // predicate, putting the leaf references in scope. See ObjectNullPredicateExpander.
-            modifiedRelNode = ObjectNullPredicateExpander.rewrite(modifiedRelNode).orElse(modifiedRelNode);
-        }
         // Before the aggregate split: expanding a LIST group key here lets Calcite's type derivation
         // carry the element type into BOTH fragments. Done per-fragment (as the backend's
         // MultiValueRelRewriter does) the shard emits elements while the coordinator still declares

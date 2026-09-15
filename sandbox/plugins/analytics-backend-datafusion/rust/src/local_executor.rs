@@ -27,6 +27,7 @@
 
 use std::sync::Arc;
 
+use crate::substrait_consumer::from_substrait_plan;
 use arrow_array::RecordBatch;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::catalog::streaming::StreamingTable;

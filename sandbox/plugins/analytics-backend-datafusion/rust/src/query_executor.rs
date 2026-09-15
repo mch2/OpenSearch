@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 
+use crate::substrait_consumer::from_substrait_plan;
 use datafusion::execution::cache::cache_manager::{CacheManagerConfig, CachedFileList};
 use datafusion::execution::cache::{CacheAccessor, DefaultListFilesCache};
 use datafusion::execution::context::SessionContext;

@@ -14,6 +14,11 @@ import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.calcite.rel.type.RelDataType;
+import org.apache.calcite.rel.type.RelDataTypeField;
+import org.apache.calcite.sql.type.SqlTypeName;
+
+import java.util.ArrayList;
+import java.util.List;
 
 import java.util.List;
 
@@ -32,24 +37,42 @@ public final class ArrowCalciteTypes {
     private ArrowCalciteTypes() {}
 
     /**
-     * Convert a named Calcite field to a complete Arrow field, including LIST children.
+     * Convert a Calcite {@link RelDataType} to the corresponding Arrow {@link Field} named
+     * {@code name}.
+     *
+     * <p>Preferred over {@link #toArrow} for building a schema, because the two composite shapes
+     * carry their members in the Field's children rather than in its ArrowType: a ROW — what an
+     * OpenSearch {@code object} becomes — and an ARRAY — what a multi-valued field becomes. Either
+     * one built without children describes an empty composite, which the receiving side cannot
+     * populate.
      */
-    public static Field toArrowField(String name, RelDataType type) {
-        if (type.getSqlTypeName() == org.apache.calcite.sql.type.SqlTypeName.ARRAY) {
-            RelDataType component = type.getComponentType();
+    public static Field toArrowField(String name, RelDataType t) {
+        if (t.getSqlTypeName() == SqlTypeName.ROW) {
+            List<Field> children = new ArrayList<>(t.getFieldCount());
+            for (RelDataTypeField child : t.getFieldList()) {
+                children.add(toArrowField(child.getName(), child.getType()));
+            }
+            return new Field(name, FieldType.nullable(ArrowType.Struct.INSTANCE), children);
+        }
+        if (t.getSqlTypeName() == SqlTypeName.ARRAY) {
+            RelDataType component = t.getComponentType();
             if (component == null) {
-                throw new IllegalArgumentException("ARRAY type has no component: " + type);
+                throw new IllegalArgumentException("ARRAY type has no component: " + t);
             }
             return new Field(name, FieldType.nullable(ArrowType.List.INSTANCE), List.of(toArrowField("element", component)));
         }
-        return Field.nullable(name, toArrow(type));
+        return Field.nullable(name, toArrow(t));
     }
 
     /**
      * Convert a Calcite {@link RelDataType} to the corresponding Arrow type.
+     *
+     * <p>A ROW yields a bare struct type with no members; use {@link #toArrowField} when the
+     * sub-fields matter, which is whenever a schema is being built.
      */
     public static ArrowType toArrow(RelDataType t) {
         return switch (t.getSqlTypeName()) {
+            case ROW -> ArrowType.Struct.INSTANCE;
             case BIGINT -> new ArrowType.Int(64, true);
             case INTEGER -> new ArrowType.Int(32, true);
             // Match the wire Arrow type the data node emits: ShortParquetField -> Int(16),

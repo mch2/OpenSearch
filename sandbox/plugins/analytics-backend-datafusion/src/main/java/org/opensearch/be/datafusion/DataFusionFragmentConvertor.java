@@ -564,7 +564,11 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
 
         io.substrait.proto.Rel inputRel = io.substrait.proto.Rel.newBuilder().setRead(readRel).build();
         PlanRel planRel = PlanRel.newBuilder()
-            .setRoot(io.substrait.proto.RelRoot.newBuilder().setInput(inputRel).addAllNames(rowType.getFieldNames()).build())
+            // Flattened, not rowType.getFieldNames(): a struct column contributes its own name plus
+            // one per field at every level, and emitting only the top level fails with "Named schema
+            // must contain names for all fields". Reachable as soon as an `object` column is in the
+            // row type.
+            .setRoot(io.substrait.proto.RelRoot.newBuilder().setInput(inputRel).addAllNames(flattenNamesForSubstrait(rowType)).build())
             .build();
 
         byte[] bytes = SubstraitPlanProtoRewriter.rewrite(io.substrait.proto.Plan.newBuilder().addRelations(planRel).build()).toByteArray();
@@ -901,12 +905,7 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
         ) {
             @Override
             public List<CallConverter> getCallConverters() {
-                // Struct construction is offered before signature matching — see
-                // MakeStructCallConverter for why the matcher can't handle it.
-                List<CallConverter> converters = new ArrayList<>();
-                converters.add(new MakeStructCallConverter(extensions, typeConverter));
-                converters.addAll(super.getCallConverters());
-                return converters;
+                return super.getCallConverters();
             }
         };
         return new SubstraitRelVisitor(converterProvider) {

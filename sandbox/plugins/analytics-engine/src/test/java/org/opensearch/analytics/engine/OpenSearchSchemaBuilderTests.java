@@ -280,8 +280,8 @@ public class OpenSearchSchemaBuilderTests extends OpenSearchTestCase {
         assertNotNull(table);
 
         RelDataType rowType = table.getRowType(new org.apache.calcite.jdbc.JavaTypeFactoryImpl());
-        // 2 supported leaves + the struct-typed `customer` parent column (the object itself is
-        // now addressable; ObjectStructMaterializer assembles it from these leaves).
+        // 2 supported leaves + the struct-typed `customer` parent column. Both are declared: the
+        // object is the stored column, and ObjectLeafProjector reads each leaf back out of it.
         assertEquals("2 supported nested leaves plus the object parent", 3, rowType.getFieldCount());
         assertFieldType(rowType, "customer.id", SqlTypeName.VARCHAR);
         assertFieldType(rowType, "customer.age", SqlTypeName.INTEGER);

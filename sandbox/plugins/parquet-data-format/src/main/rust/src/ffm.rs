@@ -810,6 +810,70 @@ pub unsafe extern "C" fn parquet_free_merge_result(
 // Parquet reader (for test verification)
 // ---------------------------------------------------------------------------
 
+/// Renders one value of `array` as JSON, descending into a struct.
+///
+/// An OpenSearch `object` is stored as a struct, so it renders as a nested JSON object and a
+/// document that did not carry the object renders as `null` — the distinction the struct's validity
+/// bit records. Types with no case here render as a `<unsupported:…>` marker naming the type, which
+/// is enough for a test to see what it got.
+fn value_to_json(array: &dyn arrow::array::Array, row_idx: usize) -> serde_json::Value {
+    if array.is_null(row_idx) {
+        return serde_json::Value::Null;
+    }
+    match array.data_type() {
+        arrow::datatypes::DataType::Int32 => {
+            let arr = array
+                .as_any()
+                .downcast_ref::<arrow::array::Int32Array>()
+                .unwrap();
+            serde_json::Value::Number(arr.value(row_idx).into())
+        }
+        arrow::datatypes::DataType::Int64 => {
+            let arr = array
+                .as_any()
+                .downcast_ref::<arrow::array::Int64Array>()
+                .unwrap();
+            serde_json::Value::Number(arr.value(row_idx).into())
+        }
+        arrow::datatypes::DataType::Utf8 => {
+            let arr = array
+                .as_any()
+                .downcast_ref::<arrow::array::StringArray>()
+                .unwrap();
+            serde_json::Value::String(arr.value(row_idx).to_string())
+        }
+        arrow::datatypes::DataType::Boolean => {
+            let arr = array
+                .as_any()
+                .downcast_ref::<arrow::array::BooleanArray>()
+                .unwrap();
+            serde_json::Value::Bool(arr.value(row_idx))
+        }
+        arrow::datatypes::DataType::Float64 => {
+            let arr = array
+                .as_any()
+                .downcast_ref::<arrow::array::Float64Array>()
+                .unwrap();
+            serde_json::json!(arr.value(row_idx))
+        }
+        arrow::datatypes::DataType::Struct(fields) => {
+            let arr = array
+                .as_any()
+                .downcast_ref::<arrow::array::StructArray>()
+                .unwrap();
+            let mut obj = serde_json::Map::new();
+            for (child_idx, child) in fields.iter().enumerate() {
+                obj.insert(
+                    child.name().clone(),
+                    value_to_json(arr.column(child_idx).as_ref(), row_idx),
+                );
+            }
+            serde_json::Value::Object(obj)
+        }
+        other => serde_json::Value::String(format!("<unsupported:{}>", other)),
+    }
+}
+
 /// Reads a parquet file and returns its contents as a JSON string.
 /// Each row is a JSON object. The result is a JSON array of objects.
 /// The JSON bytes are written into `out_buf`, actual length into `out_len`.
@@ -823,8 +887,6 @@ pub unsafe extern "C" fn parquet_read_as_json(
     buf_capacity: i64,
     out_len: *mut i64,
 ) -> i64 {
-    use arrow::array::Array;
-
     let filename = str_from_raw(file_ptr, file_len)
         .map_err(|e| format!("parquet_read_as_json: {}", e))?
         .to_string();
@@ -845,52 +907,10 @@ pub unsafe extern "C" fn parquet_read_as_json(
         for row_idx in 0..batch.num_rows() {
             let mut obj = serde_json::Map::new();
             for (col_idx, field) in schema.fields().iter().enumerate() {
-                let col = batch.column(col_idx);
-                let val = if col.is_null(row_idx) {
-                    serde_json::Value::Null
-                } else {
-                    match col.data_type() {
-                        arrow::datatypes::DataType::Int32 => {
-                            let arr = col
-                                .as_any()
-                                .downcast_ref::<arrow::array::Int32Array>()
-                                .unwrap();
-                            serde_json::Value::Number(arr.value(row_idx).into())
-                        }
-                        arrow::datatypes::DataType::Int64 => {
-                            let arr = col
-                                .as_any()
-                                .downcast_ref::<arrow::array::Int64Array>()
-                                .unwrap();
-                            serde_json::Value::Number(arr.value(row_idx).into())
-                        }
-                        arrow::datatypes::DataType::Utf8 => {
-                            let arr = col
-                                .as_any()
-                                .downcast_ref::<arrow::array::StringArray>()
-                                .unwrap();
-                            serde_json::Value::String(arr.value(row_idx).to_string())
-                        }
-                        arrow::datatypes::DataType::Boolean => {
-                            let arr = col
-                                .as_any()
-                                .downcast_ref::<arrow::array::BooleanArray>()
-                                .unwrap();
-                            serde_json::Value::Bool(arr.value(row_idx))
-                        }
-                        arrow::datatypes::DataType::Float64 => {
-                            let arr = col
-                                .as_any()
-                                .downcast_ref::<arrow::array::Float64Array>()
-                                .unwrap();
-                            serde_json::json!(arr.value(row_idx))
-                        }
-                        _ => {
-                            serde_json::Value::String(format!("<unsupported:{}>", col.data_type()))
-                        }
-                    }
-                };
-                obj.insert(field.name().clone(), val);
+                obj.insert(
+                    field.name().clone(),
+                    value_to_json(batch.column(col_idx), row_idx),
+                );
             }
             rows.push(serde_json::Value::Object(obj));
         }

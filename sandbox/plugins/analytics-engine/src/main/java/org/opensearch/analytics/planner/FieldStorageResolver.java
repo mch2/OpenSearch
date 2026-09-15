@@ -83,15 +83,37 @@ public class FieldStorageResolver {
             String fieldName = pathPrefix.isEmpty() ? entry.getKey() : pathPrefix + "." + entry.getKey();
             Map<String, Object> fieldProps = (Map<String, Object>) entry.getValue();
             String fieldType = (String) fieldProps.get("type");
-            if (fieldType == null) {
+            if (fieldType == null || "object".equals(fieldType)) {
                 // Implicit "object" type — OpenSearch infers it from presence of "properties".
-                // Recurse into the sub-mapping; object fields themselves have no storage.
                 Map<String, Object> nested = (Map<String, Object>) fieldProps.get("properties");
-                if (nested != null) {
-                    populateFromProperties(nested, fieldName, primaryFormat, luceneAvailable);
-                    continue;
+                if (nested == null) {
+                    if ("object".equals(fieldType)) {
+                        // Shapeless object: `{"type": "object"}` before any document gave it a
+                        // shape. It has no column, and a query naming it resolves to null, so it
+                        // contributes no storage.
+                        continue;
+                    }
+                    throw new IllegalStateException("Field [" + fieldName + "] has no type in mapping");
                 }
-                throw new IllegalStateException("Field [" + fieldName + "] has no type in mapping");
+                populateFromProperties(nested, fieldName, primaryFormat, luceneAvailable);
+                // The object itself is a column now — the primary format stores it as a struct, so
+                // a scan can read the whole object and not only its leaves. Doc values only: a
+                // struct is not inverted or stored, and `index: false` on a sub-field says nothing
+                // about the parent.
+                this.fieldStorage.put(
+                    fieldName,
+                    new FieldStorageInfo(
+                        fieldName,
+                        "object",
+                        FieldType.OBJECT,
+                        List.of(primaryFormat),
+                        List.of(),
+                        List.of(),
+                        false,
+                        (String) null
+                    )
+                );
+                continue;
             }
             this.fieldStorage.put(fieldName, resolveField(fieldName, fieldType, fieldProps, primaryFormat, luceneAvailable));
         }
@@ -114,6 +136,20 @@ public class FieldStorageResolver {
             }
         }
         return new FieldStorageResolver(union);
+    }
+
+    /**
+     * Storage info for one field by name, or null when the index's mapping does not declare it.
+     *
+     * <p>For fields the scan reads as columns, {@code resolve} is the right entry point. This one is
+     * for a field named in a way that never becomes a column reference: a text-relevance predicate
+     * carries its field as a string literal ({@code query_string(['process.name'], …)}), and an
+     * object's leaf is not a column of the scan at all — the object is, and the leaf is read out of
+     * it. Such a predicate is served by an inverted index at the dotted name regardless, so what it
+     * needs is the mapping's answer, not the scan's row type.
+     */
+    public FieldStorageInfo lookup(String fieldName) {
+        return fieldStorage.get(fieldName);
     }
 
     /** Resolves storage info for the requested fields in order. */
