@@ -70,7 +70,7 @@ public class ObjectFieldMultiShardIT extends AnalyticsRestTestCase {
         assertEquals("reduced counts must cover every document", DISTINCT_CITIES, total);
     }
 
-    /** An intermediate object as the group key — the nested make_struct path, across shards. */
+    /** An intermediate object as the group key — a sub-object read from the struct, across shards. */
     public void testGroupByIntermediateObjectFieldAtTwoShards() throws IOException {
         assertEquals(
             DISTINCT_CITIES,

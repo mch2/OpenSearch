@@ -12,10 +12,14 @@ import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.IntVector;
+import org.apache.arrow.vector.VarCharVector;
+import org.apache.arrow.vector.complex.StructVector;
+import org.apache.arrow.vector.types.FloatingPointPrecision;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.types.pojo.Schema;
+import org.apache.arrow.vector.util.Text;
 import org.opensearch.test.OpenSearchTestCase;
 
 import java.util.List;
@@ -183,6 +187,153 @@ public class ManagedVSRTests extends OpenSearchTestCase {
         assertTrue(names.contains("val"));
         assertTrue(names.contains("f1"));
         assertTrue(names.contains("f2"));
+        cleanup(vsr);
+    }
+
+    // ---- object fields, stored as Arrow structs ----
+
+    /** A struct-shaped schema: an {@code object} named "city" over the given leaves. */
+    private Schema objectSchema(List<Field> children) {
+        return new Schema(
+            List.of(
+                new Field("val", FieldType.nullable(new ArrowType.Int(32, true)), null),
+                new Field("city", FieldType.nullable(ArrowType.Struct.INSTANCE), children)
+            )
+        );
+    }
+
+    private ManagedVSR createVSR(String id, Schema withSchema) {
+        BufferAllocator child = rootAllocator.newChildAllocator(id, 0, Long.MAX_VALUE);
+        return new ManagedVSR(id, withSchema, child);
+    }
+
+    public void testObjectLeafIsAddressedByItsDottedName() {
+        Schema withObject = objectSchema(List.of(new Field("name", FieldType.nullable(new ArrowType.Utf8()), null)));
+        ManagedVSR vsr = createVSR("test-struct-leaf", withObject);
+
+        // The whole point: callers keep writing to "city.name" without knowing it is a struct child.
+        FieldVector leaf = vsr.getVector("city.name");
+        assertNotNull(leaf);
+        assertTrue(leaf instanceof VarCharVector);
+        // The struct itself is not a writable column — values go to its leaves.
+        assertNull(vsr.getVector("city"));
+        cleanup(vsr);
+    }
+
+    public void testNestedObjectLeafIsAddressedByItsFullPath() {
+        Field inner = new Field(
+            "location",
+            FieldType.nullable(ArrowType.Struct.INSTANCE),
+            List.of(new Field("lat", FieldType.nullable(new ArrowType.FloatingPoint(FloatingPointPrecision.DOUBLE)), null))
+        );
+        ManagedVSR vsr = createVSR("test-struct-nested", objectSchema(List.of(inner)));
+        assertNotNull(vsr.getVector("city.location.lat"));
+        cleanup(vsr);
+    }
+
+    public void testMarkingAnObjectPresentMakesItReadable() {
+        Schema withObject = objectSchema(List.of(new Field("name", FieldType.nullable(new ArrowType.Utf8()), null)));
+        ManagedVSR vsr = createVSR("test-struct-present", withObject);
+
+        ((VarCharVector) vsr.getVector("city.name")).setSafe(0, new Text("seattle"));
+        vsr.markObjectsPresent("city.name", 0);
+        vsr.setRowCount(1);
+
+        StructVector city = vsr.getStruct("city");
+        assertFalse("a row with a written leaf must have its object marked present", city.isNull(0));
+        cleanup(vsr);
+    }
+
+    public void testAnUnwrittenObjectStaysNull() {
+        // A document that omitted the object must read back as one null, not as an object whose
+        // every leaf happens to be null: only the former answers isnull(city) true.
+        Schema withObject = objectSchema(List.of(new Field("name", FieldType.nullable(new ArrowType.Utf8()), null)));
+        ManagedVSR vsr = createVSR("test-struct-absent", withObject);
+
+        ((IntVector) vsr.getVector("val")).setSafe(0, 7);
+        vsr.setRowCount(1);
+
+        StructVector city = vsr.getStruct("city");
+        assertTrue(city.isNull(0));
+        cleanup(vsr);
+    }
+
+    public void testClearingAnObjectUndoesThePresenceMark() {
+        Schema withObject = objectSchema(List.of(new Field("name", FieldType.nullable(new ArrowType.Utf8()), null)));
+        ManagedVSR vsr = createVSR("test-struct-scrub", withObject);
+
+        ((VarCharVector) vsr.getVector("city.name")).setSafe(0, new Text("seattle"));
+        vsr.markObjectsPresent("city.name", 0);
+        vsr.clearObjectsPresent("city.name", 0);
+        vsr.setRowCount(1);
+
+        StructVector city = vsr.getStruct("city");
+        assertTrue("a scrubbed row must not read as carrying an empty object", city.isNull(0));
+        cleanup(vsr);
+    }
+
+    public void testAddingASubFieldToAnExistingObject() {
+        // Dynamic mapping introducing city.zip mid-flight grows the struct rather than adding a
+        // top-level column.
+        Schema withObject = objectSchema(List.of(new Field("name", FieldType.nullable(new ArrowType.Utf8()), null)));
+        ManagedVSR vsr = createVSR("test-struct-grow", withObject);
+
+        ((VarCharVector) vsr.getVector("city.name")).setSafe(0, new Text("seattle"));
+        vsr.markObjectsPresent("city.name", 0);
+        vsr.setRowCount(1);
+
+        vsr.addStructChild("city", new Field("zip", FieldType.nullable(new ArrowType.Utf8()), null));
+
+        assertNotNull(vsr.getVector("city.zip"));
+        assertEquals(
+            "the value written before the sub-field existed survives",
+            "seattle",
+            ((VarCharVector) vsr.getVector("city.name")).getObject(0).toString()
+        );
+        // The exported schema has to agree with the vectors, or the C-interface handoff would
+        // describe a struct with fewer children than it carries.
+        Field city = vsr.getSchema().findField("city");
+        assertEquals(2, city.getChildren().size());
+        cleanup(vsr);
+    }
+
+    public void testAddingASubObjectBringsItsOwnChildren() {
+        Schema withObject = objectSchema(List.of(new Field("name", FieldType.nullable(new ArrowType.Utf8()), null)));
+        ManagedVSR vsr = createVSR("test-struct-grow-nested", withObject);
+
+        vsr.addStructChild(
+            "city",
+            new Field(
+                "location",
+                FieldType.nullable(ArrowType.Struct.INSTANCE),
+                List.of(new Field("lat", FieldType.nullable(new ArrowType.FloatingPoint(FloatingPointPrecision.DOUBLE)), null))
+            )
+        );
+
+        assertNotNull("a new sub-object must arrive with its leaves", vsr.getVector("city.location.lat"));
+        assertTrue(vsr.hasStruct("city.location"));
+        cleanup(vsr);
+    }
+
+    public void testAddingASubFieldTwiceIsANoOp() {
+        Schema withObject = objectSchema(List.of(new Field("name", FieldType.nullable(new ArrowType.Utf8()), null)));
+        ManagedVSR vsr = createVSR("test-struct-idempotent", withObject);
+
+        ((VarCharVector) vsr.getVector("city.name")).setSafe(0, new Text("seattle"));
+        vsr.setRowCount(1);
+        vsr.addStructChild("city", new Field("name", FieldType.nullable(new ArrowType.Utf8()), null));
+
+        assertEquals("re-adding must not discard values", "seattle", ((VarCharVector) vsr.getVector("city.name")).getObject(0).toString());
+        cleanup(vsr);
+    }
+
+    public void testAddingASubFieldToSomethingThatIsNotAnObjectFails() {
+        Schema withObject = objectSchema(List.of(new Field("name", FieldType.nullable(new ArrowType.Utf8()), null)));
+        ManagedVSR vsr = createVSR("test-struct-not-object", withObject);
+        expectThrows(
+            IllegalArgumentException.class,
+            () -> vsr.addStructChild("val", new Field("x", FieldType.nullable(new ArrowType.Utf8()), null))
+        );
         cleanup(vsr);
     }
 }

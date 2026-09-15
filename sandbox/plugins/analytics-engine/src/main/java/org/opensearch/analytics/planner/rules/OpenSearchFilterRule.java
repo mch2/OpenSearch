@@ -19,7 +19,9 @@ import org.apache.calcite.sql.SqlKind;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.planner.CapabilityRegistry;
+import org.opensearch.analytics.planner.FieldStorageResolver;
 import org.opensearch.analytics.planner.FilterPredicateGuard;
+import org.opensearch.analytics.planner.IndexResolution;
 import org.opensearch.analytics.planner.PlannerContext;
 import org.opensearch.analytics.planner.RelNodeUtils;
 import org.opensearch.analytics.planner.rel.AnnotatedPredicate;
@@ -87,7 +89,12 @@ public class OpenSearchFilterRule extends RelOptRule {
         FilterPredicateGuard.validate(filter.getCondition(), context.getMaxFilterPredicateCount());
 
         // Annotate every leaf predicate with viable backends.
-        RexNode annotatedCondition = annotateCondition(filter.getCondition(), childFieldStorage, childViableBackends);
+        RexNode annotatedCondition = annotateCondition(
+            filter.getCondition(),
+            childFieldStorage,
+            childViableBackends,
+            mappingFieldStorage(child)
+        );
 
         // Compute operator-level viable backends: must be viable for child AND handle predicates
         List<String> viableBackends = computeFilterViableBackends(annotatedCondition, childViableBackends);
@@ -113,6 +120,34 @@ public class OpenSearchFilterRule extends RelOptRule {
         );
     }
 
+    /**
+     * Field storage as the index mapping declares it, for the table this filter reads.
+     *
+     * <p>Distinct from the child's output field storage, which describes the columns the scan
+     * produces. A field named as a string literal by a text-relevance predicate need not be one of
+     * those — an object's leaf never is — so resolving it needs the mapping. Returns null when the
+     * table cannot be resolved, which leaves the previous behaviour in place.
+     */
+    private FieldStorageResolver mappingFieldStorage(RelNode child) {
+        try {
+            String tableName = RelNodeUtils.findTableName(child);
+            if (tableName == null) {
+                return null;
+            }
+            IndexResolution resolution = IndexResolution.resolve(
+                tableName,
+                context.getClusterState(),
+                context.getIndexNameExpressionResolver()
+            );
+            return context.getCapabilityRegistry().resolveFieldStorage(resolution.concreteIndices());
+        } catch (RuntimeException resolutionFailure) {
+            // A filter over something that is not a resolvable index (a VALUES list, a join of
+            // derived inputs). Nothing to look up; the caller falls back to the scan's own storage.
+            LOGGER.debug("No mapping-backed field storage for filter input", resolutionFailure);
+            return null;
+        }
+    }
+
     // ---- Predicate annotation ----
 
     /**
@@ -120,18 +155,23 @@ public class OpenSearchFilterRule extends RelOptRule {
      * preserved — we recurse into their children. Leaf predicates are wrapped in
      * {@link AnnotatedPredicate} with viable backends resolved from child's field storage.
      */
-    private RexNode annotateCondition(RexNode condition, List<FieldStorageInfo> fieldStorageInfos, List<String> childViableBackends) {
+    private RexNode annotateCondition(
+        RexNode condition,
+        List<FieldStorageInfo> fieldStorageInfos,
+        List<String> childViableBackends,
+        FieldStorageResolver mappingFieldStorage
+    ) {
         if (!(condition instanceof RexCall rexCall)) {
             return condition;
         }
         if (rexCall.getKind() == SqlKind.AND || rexCall.getKind() == SqlKind.OR || rexCall.getKind() == SqlKind.NOT) {
             List<RexNode> annotatedOperands = new ArrayList<>();
             for (RexNode operand : rexCall.getOperands()) {
-                annotatedOperands.add(annotateCondition(operand, fieldStorageInfos, childViableBackends));
+                annotatedOperands.add(annotateCondition(operand, fieldStorageInfos, childViableBackends, mappingFieldStorage));
             }
             return rexCall.clone(rexCall.getType(), annotatedOperands);
         }
-        List<String> viableBackends = resolveViableBackends(rexCall, fieldStorageInfos, childViableBackends);
+        List<String> viableBackends = resolveViableBackends(rexCall, fieldStorageInfos, childViableBackends, mappingFieldStorage);
         // TODO: viableBackends here is computed from each backend's declared FilterCapability
         // (see resolveViableBackends below). Today a backend can advertise a function as
         // filter-capable without actually shipping a DelegatedPredicateSerializer for it; the
@@ -152,7 +192,8 @@ public class OpenSearchFilterRule extends RelOptRule {
     private List<String> resolveViableBackends(
         RexCall predicate,
         List<FieldStorageInfo> fieldStorageInfos,
-        List<String> childViableBackends
+        List<String> childViableBackends,
+        FieldStorageResolver mappingFieldStorage
     ) {
         PredicateContents contents = new PredicateContents(new HashSet<>(), new ArrayList<>());
         for (RexNode operand : predicate.getOperands()) {
@@ -219,10 +260,19 @@ public class OpenSearchFilterRule extends RelOptRule {
                                 break;
                             }
                         }
+                        if (storageInfo == null && mappingFieldStorage != null) {
+                            // Not a column of the scan, which does not make it unknown. A leaf of an
+                            // `object` is the case that matters: the object is the column and the leaf
+                            // is read out of it, so the leaf never appears in the scan's row type.
+                            // A text-relevance predicate is served by an inverted index at the dotted
+                            // name and does not care how the object is stored, so the mapping is the
+                            // authority on whether the field exists and what type it is.
+                            storageInfo = mappingFieldStorage.lookup(fieldName);
+                        }
                         if (storageInfo == null) {
-                            // An explicitly-named literal field absent from the scan's schema is an
-                            // unknown field. (Wildcard/regex field tokens never reach here: they are
-                            // classified as patterns and handled by the empty-literals branch above.)
+                            // Declared by neither the scan nor the mapping — genuinely unknown.
+                            // (Wildcard/regex field tokens never reach here: they are classified as
+                            // patterns and handled by the empty-literals branch above.)
                             throw new IllegalArgumentException("Field [" + fieldName + "] not found.");
                         }
                         viableSet.retainAll(registry.filterBackendsForField(function, storageInfo));

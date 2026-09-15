@@ -15,6 +15,7 @@ import org.apache.arrow.vector.BaseVariableWidthVector;
 import org.apache.arrow.vector.BigIntVector;
 import org.apache.arrow.vector.BitVectorHelper;
 import org.apache.arrow.vector.FieldVector;
+import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.logging.log4j.LogManager;
@@ -251,6 +252,11 @@ public class VSRManager implements AutoCloseable {
                     );
                 }
                 parquetField.createField(fieldType, activeVSR, pair.getValue());
+                // A value inside an object only survives export if the enclosing structs are marked
+                // present for this row; an unmarked struct is a null object and its children are
+                // dropped. Done here rather than in each ParquetField because this is where the row
+                // index lives, and it is the one place every field write passes through.
+                activeVSR.markObjectsPresent(fieldType.name(), rowIndex);
                 writtenFields++;
             }
             BigIntVector rowIdVector = (BigIntVector) activeVSR.getVector(DocumentInput.ROW_ID_FIELD);
@@ -296,10 +302,37 @@ public class VSRManager implements AutoCloseable {
     private void scrubPartialRow(ParquetDocumentInput doc, ManagedVSR activeVSR, int rowIndex, int writtenFields, boolean rowIdWritten) {
         List<FieldValuePair> fields = doc.getFinalInput();
         for (int i = 0; i < writtenFields; i++) {
-            scrubVector(activeVSR.getVector(fields.get(i).getFieldType().name()), rowIndex);
+            String fieldName = fields.get(i).getFieldType().name();
+            scrubVector(activeVSR.getVector(fieldName), rowIndex);
+            // Clear the enclosing objects too. The whole row is being discarded, so a struct left
+            // marked present would make the next document reusing this index carry an object of
+            // all-null leaves instead of no object.
+            scrubObjects(activeVSR, fieldName, rowIndex);
         }
         if (rowIdWritten) {
             scrubVector(activeVSR.getVector(DocumentInput.ROW_ID_FIELD), rowIndex);
+        }
+    }
+
+    /**
+     * Clears the presence bits of the objects enclosing {@code fieldName} at {@code rowIndex}, under
+     * the same non-throwing guarantee as {@link #scrubVector}. No-op for a top-level column.
+     */
+    private void scrubObjects(ManagedVSR activeVSR, String fieldName, int rowIndex) {
+        try {
+            activeVSR.clearObjectsPresent(fieldName, rowIndex);
+        } catch (RuntimeException | Error scrubFailure) {
+            logger.warn(
+                () -> new ParameterizedMessage(
+                    "[Gen: {}] Failed to scrub partial row {} for the objects enclosing [{}] in {}; "
+                        + "the next row may read as carrying an empty object",
+                    writerGeneration,
+                    rowIndex,
+                    fieldName,
+                    fileName
+                ),
+                scrubFailure
+            );
         }
     }
 
@@ -360,22 +393,62 @@ public class VSRManager implements AutoCloseable {
      * when the mapping version advances. No-op if every field in {@code newSchema} is
      * already present in the active VSR.
      *
+     * <p>Reconciles inside an {@code object} as well: dynamic mapping adding {@code city.zip} grows
+     * an existing struct rather than adding a top-level column, so a check on top-level names alone
+     * would report no change and the next document's write would fail on a missing vector.
+     *
      * @param newSchema the schema to reconcile against
      */
     public boolean reconcileSchema(Schema newSchema) {
         ManagedVSR activeVSR = managedVSR.get();
         boolean changed = false;
         for (Field schemaField : newSchema.getFields()) {
-            if (activeVSR.getVector(schemaField.getName()) == null) {
-                Field field = new Field(schemaField.getName(), schemaField.getFieldType(), null);
-                activeVSR.addFieldVector(field);
-                changed = true;
-            }
+            changed |= reconcileField(activeVSR, schemaField, null);
         }
         if (changed) {
             vsrPool.updateSchema(activeVSR.getSchema());
         } else {
             logger.debug("no changes in schema despite change in mapping version");
+        }
+        return changed;
+    }
+
+    /**
+     * Adds {@code schemaField} to the active VSR if it is not there yet, descending into an object
+     * whose struct already exists to reconcile its sub-fields.
+     *
+     * @param parentPath dotted path of the enclosing object, or null at the top level
+     * @return true if any vector was added
+     */
+    private boolean reconcileField(ManagedVSR activeVSR, Field schemaField, String parentPath) {
+        String path = parentPath == null ? schemaField.getName() : parentPath + "." + schemaField.getName();
+        boolean isObject = schemaField.getType() instanceof ArrowType.Struct;
+
+        if (isObject == false) {
+            if (activeVSR.getVector(path) != null) {
+                return false;
+            }
+            if (parentPath == null) {
+                activeVSR.addFieldVector(new Field(schemaField.getName(), schemaField.getFieldType(), null));
+            } else {
+                activeVSR.addStructChild(parentPath, new Field(schemaField.getName(), schemaField.getFieldType(), null));
+            }
+            return true;
+        }
+
+        // A whole new object arrives with its children, so one add covers the subtree. Otherwise
+        // recurse — the struct is there but may be missing sub-fields mapped since it was created.
+        if (activeVSR.hasStruct(path) == false) {
+            if (parentPath == null) {
+                activeVSR.addFieldVector(schemaField);
+            } else {
+                activeVSR.addStructChild(parentPath, schemaField);
+            }
+            return true;
+        }
+        boolean changed = false;
+        for (Field child : schemaField.getChildren()) {
+            changed |= reconcileField(activeVSR, child, path);
         }
         return changed;
     }

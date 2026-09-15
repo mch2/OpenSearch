@@ -72,6 +72,20 @@ pub fn resolve_predicate_parquet_columns_pair(
 
 /// Resolve predicate column names → parquet leaf indices against a specific arrow
 /// schema, via the same `StatisticsConverter` mapping DataFusion's pruner uses.
+///
+/// # Nested columns
+///
+/// `parquet_column_index` returns `None` for a nested Arrow root. That is deliberate in
+/// parquet-rs: parquet's physical schema is flat, so a `Struct` root spans several leaves and it
+/// will not pick one. An OpenSearch `object` named `city` is stored as a group whose leaves are
+/// `city.name`, `city.pop`, …, and nothing in the file is named `city`.
+///
+/// A predicate on one of the object's leaves reads it with `get_field(city, 'name')`, so the column
+/// this sees is the struct root. Left unhandled, it is silently omitted from the scoped page index,
+/// the reader is handed a placeholder byte range for it, and the decompressor fails with `Src size
+/// is incorrect` or `the offset to copy is not contained in the decompressed buffer`. So a nested
+/// root is expanded to every physical leaf beneath it. `arrow_schema` is derived from this file's
+/// footer, giving a 1:1 root↔`get_column_root_idx` correspondence.
 pub(super) fn resolve_with_schema(
     arrow_schema: &SchemaRef,
     metadata: &ParquetMetaData,
@@ -80,11 +94,143 @@ pub(super) fn resolve_with_schema(
     let parquet_schema = metadata.file_metadata().schema_descr();
     let mut set = HashSet::new();
     for name in predicate_column_names {
-        if let Ok(conv) = StatisticsConverter::try_new(name, arrow_schema, parquet_schema) {
-            if let Some(idx) = conv.parquet_column_index() {
-                set.insert(idx);
+        let resolved = StatisticsConverter::try_new(name, arrow_schema, parquet_schema)
+            .ok()
+            .and_then(|conv| conv.parquet_column_index());
+        if let Some(idx) = resolved {
+            set.insert(idx);
+            continue;
+        }
+        if let Some((root_idx, _)) = arrow_schema.fields().find(name) {
+            for leaf_idx in 0..parquet_schema.num_columns() {
+                if parquet_schema.get_column_root_idx(leaf_idx) == root_idx {
+                    set.insert(leaf_idx);
+                }
             }
         }
     }
     set.into_iter().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::array::{ArrayRef, Int32Array, RecordBatch, StringArray, StructArray};
+    use arrow::datatypes::{DataType, Field, Fields, Schema};
+    use bytes::Bytes;
+    use datafusion::parquet::arrow::ArrowWriter;
+    use datafusion::parquet::file::properties::WriterProperties;
+    use parquet::file::reader::{FileReader, SerializedFileReader};
+
+    /// One scalar `id` column and one `city` struct column, so the file has three physical leaves:
+    /// `id`, `city.name`, and `city.pop`. Nothing in the file is named `city` — that is a group node.
+    fn struct_column_parquet() -> Bytes {
+        let children = Fields::from(vec![
+            Field::new("name", DataType::Utf8, true),
+            Field::new("pop", DataType::Int32, true),
+        ]);
+        let city: ArrayRef = Arc::new(
+            StructArray::try_new(
+                children.clone(),
+                vec![
+                    Arc::new(StringArray::from(vec!["seattle", "denver"])) as ArrayRef,
+                    Arc::new(Int32Array::from(vec![750, 700])) as ArrayRef,
+                ],
+                None,
+            )
+            .unwrap(),
+        );
+        let ids: ArrayRef = Arc::new(Int32Array::from(vec![0, 1]));
+
+        let schema: SchemaRef = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("city", DataType::Struct(children), true),
+        ]));
+        let batch = RecordBatch::try_new(Arc::clone(&schema), vec![ids, city]).unwrap();
+
+        let mut buf: Vec<u8> = Vec::new();
+        let mut writer =
+            ArrowWriter::try_new(&mut buf, schema, Some(WriterProperties::builder().build()))
+                .unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        Bytes::from(buf)
+    }
+
+    fn file_metadata_and_schema() -> (ParquetMetaData, SchemaRef) {
+        let reader = SerializedFileReader::new(struct_column_parquet()).unwrap();
+        let metadata = reader.metadata().clone();
+        let file_schema: SchemaRef = Arc::new(
+            parquet::arrow::parquet_to_arrow_schema(
+                metadata.file_metadata().schema_descr(),
+                metadata.file_metadata().key_value_metadata(),
+            )
+            .unwrap(),
+        );
+        (metadata, file_schema)
+    }
+
+    fn leaf_paths(metadata: &ParquetMetaData, cols: &[usize]) -> Vec<String> {
+        let mut paths: Vec<String> = cols
+            .iter()
+            .map(|i| {
+                metadata
+                    .file_metadata()
+                    .schema_descr()
+                    .column(*i)
+                    .path()
+                    .string()
+            })
+            .collect();
+        paths.sort();
+        paths
+    }
+
+    #[test]
+    fn struct_root_resolves_to_every_leaf_beneath_it() {
+        // A predicate on one of the object's leaves reads it with get_field(city, 'name'), so the
+        // column name that reaches here is the struct root. Without the expansion this returns
+        // empty: parquet-rs refuses to map `city` to a leaf, the column is scoped out, and the
+        // reader is later handed a placeholder byte range for it.
+        let (metadata, file_schema) = file_metadata_and_schema();
+        let cols = resolve_with_schema(&file_schema, &metadata, &["city".to_string()]);
+        assert_eq!(
+            leaf_paths(&metadata, &cols),
+            vec!["city.name", "city.pop"],
+            "both leaves of the object must be in scope"
+        );
+    }
+
+    #[test]
+    fn scalar_column_still_resolves_directly() {
+        let (metadata, file_schema) = file_metadata_and_schema();
+        let cols = resolve_with_schema(&file_schema, &metadata, &["id".to_string()]);
+        assert_eq!(leaf_paths(&metadata, &cols), vec!["id"]);
+    }
+
+    #[test]
+    fn mixed_scalar_and_struct_names_resolve_together() {
+        let (metadata, file_schema) = file_metadata_and_schema();
+        let cols = resolve_with_schema(
+            &file_schema,
+            &metadata,
+            &["id".to_string(), "city".to_string()],
+        );
+        assert_eq!(
+            leaf_paths(&metadata, &cols),
+            vec!["city.name", "city.pop", "id"]
+        );
+    }
+
+    #[test]
+    fn absent_column_is_skipped_rather_than_expanded() {
+        // Schema evolution: a column in the query but not in this file must contribute nothing, and
+        // must not accidentally match a root index.
+        let (metadata, file_schema) = file_metadata_and_schema();
+        let cols = resolve_with_schema(&file_schema, &metadata, &["not_in_this_file".to_string()]);
+        assert!(
+            cols.is_empty(),
+            "absent column should resolve to nothing, got {cols:?}"
+        );
+    }
 }

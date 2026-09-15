@@ -53,8 +53,8 @@ public class MockDataFusionBackend extends MockBackend implements SearchBackEndP
         SUPPORTED_TYPES.addAll(FieldType.keyword());
         SUPPORTED_TYPES.addAll(FieldType.date());
         SUPPORTED_TYPES.add(FieldType.BOOLEAN);
-        // Calcite ROW maps to FieldType.OBJECT — needed for make_struct's return type to
-        // resolve a capable backend in OpenSearchProjectRule.
+        // Calcite ROW maps to FieldType.OBJECT — needed for the object column itself to resolve a
+        // capable backend when the scan reads it.
         SUPPORTED_TYPES.add(FieldType.OBJECT);
     }
 
@@ -210,8 +210,8 @@ public class MockDataFusionBackend extends MockBackend implements SearchBackEndP
         ScalarFunction.UPPER,
         ScalarFunction.SIN,
         ScalarFunction.ABS,
-        // Object materialization: make_struct over the flat dotted leaves (ObjectStructMaterializer).
-        ScalarFunction.MAKE_STRUCT
+        // Object leaves read out of the struct the scan produces (ObjectLeafProjector).
+        ScalarFunction.GET_FIELD
     );
 
     private static final Set<ProjectCapability> PROJECT_CAPS;

@@ -11,7 +11,14 @@ package org.opensearch.analytics.planner;
 import org.apache.arrow.vector.types.FloatingPointPrecision;
 import org.apache.arrow.vector.types.TimeUnit;
 import org.apache.arrow.vector.types.pojo.ArrowType;
+import org.apache.arrow.vector.types.pojo.Field;
+import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.calcite.rel.type.RelDataType;
+import org.apache.calcite.rel.type.RelDataTypeField;
+import org.apache.calcite.sql.type.SqlTypeName;
+
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Bidirectional Arrow ↔ Calcite type converter for single types.
@@ -28,10 +35,34 @@ public final class ArrowCalciteTypes {
     private ArrowCalciteTypes() {}
 
     /**
+     * Convert a Calcite {@link RelDataType} to the corresponding Arrow {@link Field} named
+     * {@code name}.
+     *
+     * <p>Preferred over {@link #toArrow} for building a schema, because a ROW — the shape an
+     * OpenSearch {@code object} takes — carries its sub-fields in the Field's children, not in its
+     * ArrowType. A struct Field built without them describes a struct with no members, which the
+     * receiving side cannot populate.
+     */
+    public static Field toArrowField(String name, RelDataType t) {
+        if (t.getSqlTypeName() == SqlTypeName.ROW) {
+            List<Field> children = new ArrayList<>(t.getFieldCount());
+            for (RelDataTypeField child : t.getFieldList()) {
+                children.add(toArrowField(child.getName(), child.getType()));
+            }
+            return new Field(name, FieldType.nullable(ArrowType.Struct.INSTANCE), children);
+        }
+        return Field.nullable(name, toArrow(t));
+    }
+
+    /**
      * Convert a Calcite {@link RelDataType} to the corresponding Arrow type.
+     *
+     * <p>A ROW yields a bare struct type with no members; use {@link #toArrowField} when the
+     * sub-fields matter, which is whenever a schema is being built.
      */
     public static ArrowType toArrow(RelDataType t) {
         return switch (t.getSqlTypeName()) {
+            case ROW -> ArrowType.Struct.INSTANCE;
             case BIGINT -> new ArrowType.Int(64, true);
             case INTEGER -> new ArrowType.Int(32, true);
             // Match the wire Arrow type the data node emits: ShortParquetField -> Int(16),
