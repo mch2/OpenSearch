@@ -89,6 +89,54 @@ fn arrow_type_key(dt: &arrow::datatypes::DataType) -> String {
     }
 }
 
+/// One Parquet leaf column: the dotted name a user configures it by, the `ColumnPath` the writer
+/// addresses it by, and the Arrow type its encoding must be valid for.
+struct LeafColumn<'a> {
+    name: String,
+    path: parquet::schema::types::ColumnPath,
+    data_type: &'a arrow::datatypes::DataType,
+    type_key: String,
+}
+
+/// Flattens `schema` to its Parquet leaf columns.
+///
+/// Only a struct is descended into: an OpenSearch `object` is stored as one, so `meta.top` is a
+/// leaf of the `meta` group rather than a column of its own, and the per-field settings that name
+/// it (`index.parquet.encoding.field: [meta.top]`) have to reach that leaf. The dotted name is
+/// exactly what those settings already use, so nothing about the setting changes.
+///
+/// A `ColumnPath` built from a String is a single part, so `"meta.top".into()` addresses a
+/// top-level column literally named `meta.top` and silently matches nothing once the object is a
+/// struct. The path is therefore built part by part.
+fn collect_leaf_columns(schema: &ArrowSchema) -> Vec<LeafColumn<'_>> {
+    let mut leaves = Vec::with_capacity(schema.fields().len());
+    for field in schema.fields() {
+        collect_leaves_of(field, &[], &mut leaves);
+    }
+    leaves
+}
+
+fn collect_leaves_of<'a>(
+    field: &'a arrow::datatypes::Field,
+    ancestors: &[String],
+    leaves: &mut Vec<LeafColumn<'a>>,
+) {
+    let mut parts: Vec<String> = ancestors.to_vec();
+    parts.push(field.name().clone());
+    if let arrow::datatypes::DataType::Struct(children) = field.data_type() {
+        for child in children {
+            collect_leaves_of(child, &parts, leaves);
+        }
+        return;
+    }
+    leaves.push(LeafColumn {
+        name: parts.join("."),
+        path: parquet::schema::types::ColumnPath::new(parts),
+        data_type: field.data_type(),
+        type_key: arrow_type_key(field.data_type()),
+    });
+}
+
 impl WriterPropertiesBuilder {
     /// Builds WriterProperties from a NativeSettings.
     ///
@@ -196,17 +244,9 @@ impl WriterPropertiesBuilder {
         config: &NativeSettings,
         schema: &ArrowSchema,
     ) -> Result<parquet::file::properties::WriterPropertiesBuilder, String> {
-        let type_map: std::collections::HashMap<&str, (&arrow::datatypes::DataType, String)> =
-            schema
-                .fields()
-                .iter()
-                .map(|f| {
-                    (
-                        f.name().as_str(),
-                        (f.data_type(), arrow_type_key(f.data_type())),
-                    )
-                })
-                .collect();
+        let leaves = collect_leaf_columns(schema);
+        let type_map: std::collections::HashMap<&str, &LeafColumn<'_>> =
+            leaves.iter().map(|l| (l.name.as_str(), l)).collect();
 
         let mut field_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
         if let Some(fc) = &config.field_configs {
@@ -214,8 +254,8 @@ impl WriterPropertiesBuilder {
                 field_names.insert(name.as_str());
             }
         }
-        for f in schema.fields() {
-            field_names.insert(f.name().as_str());
+        for leaf in &leaves {
+            field_names.insert(leaf.name.as_str());
         }
 
         for field_name in field_names {
@@ -224,8 +264,12 @@ impl WriterPropertiesBuilder {
                 .as_ref()
                 .and_then(|m| m.get(field_name));
 
-            let (arrow_type, type_key) = match type_map.get(field_name) {
-                Some(v) => (v.0, Some(v.1.as_str())),
+            let (arrow_type, type_key, column_path) = match type_map.get(field_name) {
+                Some(leaf) => (
+                    leaf.data_type,
+                    Some(leaf.type_key.as_str()),
+                    leaf.path.clone(),
+                ),
                 None => {
                     return Err(format!(
                         "Field '{}' in field_configs does not exist in schema",
@@ -283,18 +327,15 @@ impl WriterPropertiesBuilder {
                         | Encoding::BYTE_STREAM_SPLIT
                         | Encoding::RLE
                 ) {
-                    builder =
-                        builder.set_column_dictionary_enabled(field_name.to_string().into(), false);
-                    builder = builder.set_column_encoding(field_name.to_string().into(), enc);
+                    builder = builder.set_column_dictionary_enabled(column_path.clone(), false);
+                    builder = builder.set_column_encoding(column_path.clone(), enc);
                 } else if matches!(enc, Encoding::RLE_DICTIONARY) {
                     // RLE_DICTIONARY means use dictionary encoding - just ensure it's enabled
-                    builder =
-                        builder.set_column_dictionary_enabled(field_name.to_string().into(), true);
+                    builder = builder.set_column_dictionary_enabled(column_path.clone(), true);
                 } else {
                     // PLAIN: explicitly disable dictionary so the writer uses plain encoding
-                    builder =
-                        builder.set_column_dictionary_enabled(field_name.to_string().into(), false);
-                    builder = builder.set_column_encoding(field_name.to_string().into(), enc);
+                    builder = builder.set_column_dictionary_enabled(column_path.clone(), false);
+                    builder = builder.set_column_encoding(column_path.clone(), enc);
                 }
             }
 
@@ -326,7 +367,7 @@ impl WriterPropertiesBuilder {
                 };
 
             if let Some(comp) = compression {
-                builder = builder.set_column_compression(field_name.to_string().into(), comp);
+                builder = builder.set_column_compression(column_path.clone(), comp);
             }
 
             // Bloom filter: field-level > type-level > global. Applied per-column.
@@ -338,8 +379,7 @@ impl WriterPropertiesBuilder {
                 })
                 .unwrap_or(config.get_bloom_filter_enabled());
             if bf_enabled {
-                builder =
-                    builder.set_column_bloom_filter_enabled(field_name.to_string().into(), true);
+                builder = builder.set_column_bloom_filter_enabled(column_path.clone(), true);
                 let bf_fpp = index_cfg
                     .and_then(|fc| fc.bloom_filter_fpp)
                     .or_else(|| {
@@ -347,8 +387,7 @@ impl WriterPropertiesBuilder {
                             .and_then(|t| config.type_bloom_filter_fpp.as_ref()?.get(t).copied())
                     })
                     .unwrap_or(config.get_bloom_filter_fpp());
-                builder =
-                    builder.set_column_bloom_filter_fpp(field_name.to_string().into(), bf_fpp);
+                builder = builder.set_column_bloom_filter_fpp(column_path.clone(), bf_fpp);
                 let bf_ndv = index_cfg
                     .and_then(|fc| fc.bloom_filter_ndv)
                     .or_else(|| {
@@ -356,8 +395,7 @@ impl WriterPropertiesBuilder {
                             .and_then(|t| config.type_bloom_filter_ndv.as_ref()?.get(t).copied())
                     })
                     .unwrap_or(config.get_bloom_filter_ndv());
-                builder =
-                    builder.set_column_bloom_filter_ndv(field_name.to_string().into(), bf_ndv);
+                builder = builder.set_column_bloom_filter_ndv(column_path.clone(), bf_ndv);
             }
         }
         Ok(builder)
@@ -462,6 +500,134 @@ mod tests {
                 .map(|(name, dt)| Field::new(name, dt, true))
                 .collect::<Vec<Field>>(),
         )
+    }
+
+    /// A schema shaped like an OpenSearch `object`: one struct column over the given leaves.
+    fn schema_with_object(object: &str, leaves: Vec<(&str, ArrowDataType)>) -> ArrowSchema {
+        let children: Vec<Field> = leaves
+            .into_iter()
+            .map(|(name, dt)| Field::new(name, dt, true))
+            .collect();
+        ArrowSchema::new(vec![Field::new(
+            object,
+            ArrowDataType::Struct(children.into()),
+            true,
+        )])
+    }
+
+    fn leaf_path(parts: &[&str]) -> parquet::schema::types::ColumnPath {
+        parquet::schema::types::ColumnPath::new(parts.iter().map(|p| p.to_string()).collect())
+    }
+
+    #[test]
+    fn test_object_leaves_are_configured_by_their_dotted_name() {
+        // `index.parquet.compression.field: [meta.name]` must reach the leaf of the `meta` group.
+        // Before the walk, the path was built from the dotted string as a single part, which
+        // addresses a top-level column literally named "meta.name" — nothing in the file.
+        let mut field_configs = HashMap::new();
+        field_configs.insert(
+            "meta.name".to_string(),
+            FieldConfig {
+                compression_type: Some("SNAPPY".to_string()),
+                ..Default::default()
+            },
+        );
+        let config = NativeSettings {
+            field_configs: Some(field_configs),
+            ..Default::default()
+        };
+        let schema = schema_with_object(
+            "meta",
+            vec![("name", ArrowDataType::Utf8), ("top", ArrowDataType::Int32)],
+        );
+
+        let props = WriterPropertiesBuilder::build(&config, &schema).unwrap();
+
+        assert_eq!(
+            props.compression(&leaf_path(&["meta", "name"])),
+            Compression::SNAPPY,
+            "the configured leaf takes the field-level compression"
+        );
+        assert_ne!(
+            props.compression(&leaf_path(&["meta", "top"])),
+            Compression::SNAPPY,
+            "its sibling is untouched"
+        );
+    }
+
+    #[test]
+    fn test_type_defaults_reach_object_leaves() {
+        // The utf8 default (ZSTD) is applied per column, so it has to be applied at each leaf
+        // rather than at the struct — a group node carries no encoding or compression of its own.
+        let schema = schema_with_object("meta", vec![("name", ArrowDataType::Utf8)]);
+        let props = WriterPropertiesBuilder::build(&NativeSettings::default(), &schema).unwrap();
+        assert!(
+            matches!(
+                props.compression(&leaf_path(&["meta", "name"])),
+                Compression::ZSTD(_)
+            ),
+            "utf8 leaf should get the utf8 default compression"
+        );
+    }
+
+    #[test]
+    fn test_nested_object_leaf_path_is_fully_qualified() {
+        let inner = Field::new(
+            "props",
+            ArrowDataType::Struct(vec![Field::new("depth", ArrowDataType::Int32, true)].into()),
+            true,
+        );
+        let schema = ArrowSchema::new(vec![Field::new(
+            "meta",
+            ArrowDataType::Struct(vec![inner].into()),
+            true,
+        )]);
+
+        let mut field_configs = HashMap::new();
+        field_configs.insert(
+            "meta.props.depth".to_string(),
+            FieldConfig {
+                compression_type: Some("SNAPPY".to_string()),
+                ..Default::default()
+            },
+        );
+        let config = NativeSettings {
+            field_configs: Some(field_configs),
+            ..Default::default()
+        };
+
+        let props = WriterPropertiesBuilder::build(&config, &schema).unwrap();
+        assert_eq!(
+            props.compression(&leaf_path(&["meta", "props", "depth"])),
+            Compression::SNAPPY
+        );
+    }
+
+    #[test]
+    fn test_config_naming_the_object_itself_is_rejected() {
+        // A struct is a group node: it has no encoding or compression, so configuring `meta`
+        // cannot be honoured. Failing loudly beats silently dropping the setting — the same
+        // treatment a name that is not in the schema at all already gets.
+        let mut field_configs = HashMap::new();
+        field_configs.insert(
+            "meta".to_string(),
+            FieldConfig {
+                compression_type: Some("SNAPPY".to_string()),
+                ..Default::default()
+            },
+        );
+        let config = NativeSettings {
+            field_configs: Some(field_configs),
+            ..Default::default()
+        };
+        let schema = schema_with_object("meta", vec![("name", ArrowDataType::Utf8)]);
+
+        let error = WriterPropertiesBuilder::build(&config, &schema).unwrap_err();
+        assert!(
+            error.contains("meta"),
+            "error should name the offending field, got: {}",
+            error
+        );
     }
 
     #[test]
