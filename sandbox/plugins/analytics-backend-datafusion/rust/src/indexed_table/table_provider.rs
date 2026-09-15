@@ -60,6 +60,7 @@ use super::partitioning::{
     PartitionAssignment, SegmentChunk, SegmentLayout,
 };
 use super::stream::{IndexedExec, RowGroupInfo};
+use super::struct_pruning::FlatStructRead;
 use crate::datafusion_query_config::DatafusionQueryConfig;
 use crate::indexed_table::metrics::StreamMetrics;
 use crate::indexed_table::page_pruner::StatsPruneTree;
@@ -197,6 +198,12 @@ pub struct IndexedTableConfig {
     pub query_config: Arc<DatafusionQueryConfig>,
     /// Full-schema column indices referenced by BoolNode Predicate leaves.
     pub predicate_columns: Vec<usize>,
+    /// The BoolNode Predicate leaf expressions themselves.
+    ///
+    /// `predicate_columns` says which columns the evaluator needs; these say how it reaches into
+    /// them, which is what decides whether an `object` can be read as just the sub-fields the query
+    /// named. See `struct_pruning`.
+    pub predicate_exprs: Vec<Arc<dyn datafusion::physical_expr::PhysicalExpr>>,
     /// When true, the `___row_id` column in the output projection is computed
     /// from position (global_base + rg.first_row + position_in_rg) instead of
     /// being read from parquet. Other projected columns are read normally.
@@ -436,6 +443,7 @@ impl TableProvider for IndexedTableProvider {
             metrics,
             inner_parquet_metrics: Arc::new(std::sync::Mutex::new(Vec::new())),
             io_stats: Arc::new(ReadIoStats::default()),
+            flat_struct_read: None,
             row_id_output_index,
             dynamic_filters: Vec::new(),
             advertised_ordering,
@@ -465,6 +473,10 @@ pub struct QueryShardExec {
     metrics: ExecutionPlanMetricsSet,
     inner_parquet_metrics: Arc<std::sync::Mutex<Vec<MetricsSet>>>,
     io_stats: Arc<ReadIoStats>,
+    /// How to read an `object` as only the sub-fields the plan named, when it named any. `None`
+    /// reads every struct column whole, which is what happens until `try_swapping_with_projection`
+    /// has seen the projection above this scan. See `struct_pruning`.
+    flat_struct_read: Option<Arc<FlatStructRead>>,
     /// Column index in the OUTPUT schema where computed `___row_id` should be
     /// injected. `None` means no row ID computation (normal data path).
     row_id_output_index: Option<usize>,
@@ -551,6 +563,71 @@ impl ExecutionPlan for QueryShardExec {
     ) -> Result<Arc<dyn ExecutionPlan>> {
         Ok(self)
     }
+    /// Absorbs the leaf accesses of the projection above this scan, so an `object` is read as only
+    /// the sub-fields the query named rather than in full.
+    ///
+    /// The projection itself is returned unchanged over a scan that knows the leaf set — nothing
+    /// about the batch it produces changes, because `struct_pruning` rebuilds the struct before
+    /// anything downstream sees it. That is what keeps this hook from having to reason about the
+    /// output schema, the advertised ordering, or where the row-id column sits.
+    fn try_swapping_with_projection(
+        &self,
+        projection: &datafusion::physical_plan::projection::ProjectionExec,
+    ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+        // Already absorbed — returning a new plan again would have the rule chase its own output.
+        if self.flat_struct_read.is_some() {
+            return Ok(None);
+        }
+        let Some(read_indices) = self.projection.clone() else {
+            // Reading every column: nothing was projected away, so there is nothing to narrow
+            // against. (A COUNT(*)-shaped read has `Some(vec![])` and is handled below.)
+            return Ok(None);
+        };
+
+        // Everything downstream that touches these columns: the projection, and every predicate the
+        // evaluator will apply. Missing one would silently read its leaf as absent.
+        let mut exprs: Vec<Arc<dyn datafusion::physical_expr::PhysicalExpr>> = projection
+            .expr()
+            .iter()
+            .map(|e| Arc::clone(&e.expr))
+            .collect();
+        exprs.extend(self.config.predicate_exprs.iter().map(Arc::clone));
+        if let Some(ref predicate) = self.predicate {
+            exprs.push(Arc::clone(predicate));
+        }
+        exprs.extend(self.dynamic_filters.iter().map(Arc::clone));
+
+        let Some(flat) =
+            super::struct_pruning::plan_flat_struct_read(&exprs, &self.full_schema, &read_indices)
+        else {
+            return Ok(None);
+        };
+
+        let narrowed = Arc::new(QueryShardExec {
+            config: Arc::clone(&self.config),
+            full_schema: Arc::clone(&self.full_schema),
+            projected_schema: Arc::clone(&self.projected_schema),
+            projection: self.projection.clone(),
+            assignments: self.assignments.clone(),
+            properties: Arc::clone(&self.properties),
+            predicate: self.predicate.clone(),
+            metrics: self.metrics.clone(),
+            inner_parquet_metrics: Arc::clone(&self.inner_parquet_metrics),
+            io_stats: Arc::clone(&self.io_stats),
+            flat_struct_read: Some(Arc::new(flat)),
+            row_id_output_index: self.row_id_output_index,
+            dynamic_filters: self.dynamic_filters.clone(),
+            advertised_ordering: self.advertised_ordering.clone(),
+        }) as Arc<dyn ExecutionPlan>;
+
+        Ok(Some(Arc::new(
+            datafusion::physical_plan::projection::ProjectionExec::try_new(
+                projection.expr().to_vec(),
+                narrowed,
+            )?,
+        )))
+    }
+
     fn metrics(&self) -> Option<MetricsSet> {
         let mut combined = self.metrics.clone_inner();
         if let Ok(inner) = self.inner_parquet_metrics.lock() {
@@ -738,6 +815,7 @@ impl ExecutionPlan for QueryShardExec {
                 dynamic_filter: dynamic_filter.clone(),
                 cancellation_token: self.config.cancellation_token.clone(),
                 seg_arrow_schema: segment.arrow_schema.clone(),
+                flat_struct_read: self.flat_struct_read.clone(),
             };
             streams.push(exec.execute(0, Arc::clone(&context))?);
         }
@@ -816,6 +894,14 @@ impl QueryShardExec {
             metrics: ExecutionPlanMetricsSet::new(),
             inner_parquet_metrics: Arc::clone(&self.inner_parquet_metrics),
             io_stats: Arc::clone(&self.io_stats),
+            // A dynamic filter arrives after the leaf set was fixed, so it may name a sub-field the
+            // read would not fetch — which reads null and prunes row groups that should have
+            // survived. Keep the narrowed read only when every filter is already covered.
+            flat_struct_read: self
+                .flat_struct_read
+                .as_ref()
+                .filter(|flat| flat.covers(&dynamic_filters))
+                .cloned(),
             row_id_output_index: self.row_id_output_index,
             dynamic_filters,
             advertised_ordering: self.advertised_ordering.clone(),
@@ -858,6 +944,7 @@ mod tests {
                 crate::datafusion_query_config::DatafusionQueryConfig::test_default(),
             ),
             predicate_columns: vec![],
+            predicate_exprs: vec![],
             emit_row_ids: false,
             prune_tree_config: None,
             sort_fields: vec![],
