@@ -53,6 +53,7 @@ mod row_id_strategies;
 mod schema_drift;
 mod sort_reverse_row_id;
 mod streaming_at_scale;
+mod struct_projection;
 
 // ── Test fixture: parquet table with 16 rows ────────────────────────
 //
@@ -313,6 +314,7 @@ async fn run_tree_and_plan(
         pushdown_predicate: None,
         query_config: std::sync::Arc::new(qc),
         predicate_columns: vec![],
+        predicate_exprs: vec![],
         emit_row_ids: false,
         prune_tree_config: None,
         sort_fields: vec![],

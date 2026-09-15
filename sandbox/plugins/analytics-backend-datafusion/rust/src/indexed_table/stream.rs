@@ -372,6 +372,9 @@ pub struct IndexedExec {
     pub(crate) store_url: datafusion::execution::object_store::ObjectStoreUrl,
     pub(crate) row_groups: Vec<RowGroupInfo>,
     pub(crate) projection: Option<Vec<usize>>,
+    /// How to read an `object` as only the sub-fields the plan named. `None` reads struct columns
+    /// whole. See `struct_pruning`.
+    pub(crate) flat_struct_read: Option<Arc<super::struct_pruning::FlatStructRead>>,
     pub(crate) properties: Arc<PlanProperties>,
     pub(crate) metadata: Arc<ParquetMetaData>,
     pub(crate) predicate: Option<Arc<dyn datafusion::physical_expr::PhysicalExpr>>,
@@ -488,6 +491,7 @@ impl ExecutionPlan for IndexedExec {
             self.store_url.clone(),
             index_reader,
             self.projection.clone(),
+            self.flat_struct_read.clone(),
             Arc::clone(&self.metadata),
             self.predicate.clone(),
             self.stream_metrics.clone(),
@@ -516,6 +520,8 @@ struct IndexedStream {
     store_url: datafusion::execution::object_store::ObjectStoreUrl,
     index_reader: IndexReader,
     projection: Option<Vec<usize>>,
+    /// See `struct_pruning`. `None` reads struct columns whole.
+    flat_struct_read: Option<Arc<super::struct_pruning::FlatStructRead>>,
     current_stream: Option<SendableRecordBatchStream>,
     current_inner_plan: Option<Arc<dyn ExecutionPlan>>,
     current_mask: Option<BooleanArray>,
@@ -591,6 +597,7 @@ impl IndexedStream {
         store_url: datafusion::execution::object_store::ObjectStoreUrl,
         index_reader: IndexReader,
         projection: Option<Vec<usize>>,
+        flat_struct_read: Option<Arc<super::struct_pruning::FlatStructRead>>,
         metadata: Arc<ParquetMetaData>,
         predicate: Option<Arc<dyn datafusion::physical_expr::PhysicalExpr>>,
         metrics: StreamMetrics,
@@ -621,6 +628,7 @@ impl IndexedStream {
             store_url,
             index_reader,
             projection,
+            flat_struct_read,
             current_stream: None,
             current_inner_plan: None,
             current_mask: None,
@@ -684,6 +692,7 @@ impl IndexedStream {
             full_schema: self.full_schema.clone(),
             metadata: Arc::clone(&self.metadata),
             projection: self.projection.clone(),
+            flat_struct_read: self.flat_struct_read.clone(),
             predicate: self.predicate.clone(),
             io_stats: self
                 .metrics
@@ -713,6 +722,13 @@ impl IndexedStream {
     /// batch if no rows survived (callers filter those out before
     /// push_batch). Advances per-batch offsets (mask/batch) in lockstep.
     fn finalize_batch(&mut self, batch: RecordBatch) -> Result<RecordBatch> {
+        // An `object` read as only the sub-fields the plan named arrives as one column per leaf.
+        // Rebuild the struct here, before anything else looks at the batch, so the evaluator and the
+        // projection fixup below both see the shape they were built against. See `struct_pruning`.
+        let batch = match self.flat_struct_read {
+            Some(ref flat) => flat.reassemble(&batch)?,
+            None => batch,
+        };
         let batch_len = batch.num_rows();
 
         // Ask the evaluator for a refinement-stage mask on the UNFILTERED
