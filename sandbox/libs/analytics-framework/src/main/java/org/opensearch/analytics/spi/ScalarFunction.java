@@ -457,14 +457,14 @@ public enum ScalarFunction {
     /** PPL range_bucket(value, data_min, data_max, start_param, end_param). VARCHAR label. */
     RANGE_BUCKET(Category.SCALAR, SqlKind.OTHER_FUNCTION),
 
-    // ── Composite (object / struct) construction ─────────────────────
+    // ── Composite (object / struct) access ───────────────────────────
     /**
-     * {@code make_struct('name0', v0, 'name1', v1, ...)} → ROW. Materializes an OpenSearch
-     * {@code object} field from the flat dotted leaf columns a scan produces
-     * (see {@code ObjectStructMaterializer}). Nests for sub-objects.
-     * See {@link MakeStructFunction}.
+     * {@code get_field(struct, 'name')} → the value of one field of a struct. Reads a leaf of an
+     * OpenSearch {@code object} out of the struct the scan produces, so a query can keep addressing
+     * the leaf by its dotted name (see {@code ObjectLeafProjector}). Nests for sub-objects.
+     * See {@link GetFieldFunction}.
      */
-    MAKE_STRUCT(Category.SCALAR, SqlKind.OTHER_FUNCTION);
+    GET_FIELD(Category.SCALAR, SqlKind.OTHER_FUNCTION);
 
     /**
      * Category of scalar function.

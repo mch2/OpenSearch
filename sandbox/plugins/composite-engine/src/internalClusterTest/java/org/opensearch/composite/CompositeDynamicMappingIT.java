@@ -235,6 +235,176 @@ public class CompositeDynamicMappingIT extends OpenSearchIntegTestCase {
         ensureNoActiveMerges(indexName);
     }
 
+    /**
+     * An {@code object} field is stored as a native Parquet struct: one group node whose leaves are
+     * the object's sub-fields, rather than unrelated dotted columns. The reader then hands the object
+     * back assembled, and a document that omitted it reads as one null instead of as a row of
+     * coincidentally-null leaves.
+     */
+    public void testObjectFieldIsStoredAsAStruct() throws Exception {
+        String indexName = "test-object-struct";
+
+        assertTrue(
+            client().admin()
+                .indices()
+                .prepareCreate(indexName)
+                .setSettings(parquetPrimaryLuceneSecondarySettings())
+                .setMapping(
+                    "{\"properties\":{\"id\":{\"type\":\"integer\"},"
+                        + "\"city\":{\"properties\":{\"name\":{\"type\":\"keyword\"},\"pop\":{\"type\":\"long\"}}}}}"
+                )
+                .get()
+                .isAcknowledged()
+        );
+        ensureGreen(indexName);
+
+        client().prepareIndex(indexName).setSource("id", 1, "city", Map.of("name", "seattle", "pop", 750_000)).get();
+        // No `city` at all — the object is absent, not empty.
+        client().prepareIndex(indexName).setSource("id", 2).get();
+
+        client().admin().indices().prepareRefresh(indexName).get();
+        client().admin().indices().prepareFlush(indexName).get();
+
+        IndexShard shard = getIndexShard(indexName);
+        Path parquetDir = shard.shardPath().getDataPath().resolve("parquet");
+        try (GatedCloseable<List<Path>> parquetFilesRef = listParquetFiles(parquetDir, shard)) {
+            List<Map<String, Object>> rows = readAllParquetRows(parquetFilesRef.get());
+            assertEquals(2, rows.size());
+
+            Map<String, Object> withCity = rowById(rows, 1);
+            assertFalse("a struct must not be read back as a flat dotted column", withCity.containsKey("city.name"));
+            Object city = withCity.get("city");
+            assertTrue("city should read back as a nested object, was: " + city, city instanceof Map);
+            @SuppressWarnings("unchecked")
+            Map<String, Object> cityMap = (Map<String, Object>) city;
+            assertEquals("seattle", cityMap.get("name"));
+            assertEquals(750_000L, ((Number) cityMap.get("pop")).longValue());
+
+            Map<String, Object> withoutCity = rowById(rows, 2);
+            assertNull("a document that omitted the object must read null, not an empty object", withoutCity.get("city"));
+        }
+        ensureNoActiveMerges(indexName);
+    }
+
+    /** A sub-object nests another struct, to any depth. */
+    public void testNestedObjectIsStoredAsNestedStructs() throws Exception {
+        String indexName = "test-object-struct-nested";
+
+        assertTrue(
+            client().admin().indices().prepareCreate(indexName).setSettings(parquetPrimaryLuceneSecondarySettings()).get().isAcknowledged()
+        );
+        ensureGreen(indexName);
+
+        client().prepareIndex(indexName).setSource("id", 1, "city", Map.of("name", "seattle", "location", Map.of("zone", "west"))).get();
+        client().admin().indices().prepareRefresh(indexName).get();
+        client().admin().indices().prepareFlush(indexName).get();
+
+        IndexShard shard = getIndexShard(indexName);
+        Path parquetDir = shard.shardPath().getDataPath().resolve("parquet");
+        try (GatedCloseable<List<Path>> parquetFilesRef = listParquetFiles(parquetDir, shard)) {
+            List<Map<String, Object>> rows = readAllParquetRows(parquetFilesRef.get());
+            assertEquals(1, rows.size());
+            @SuppressWarnings("unchecked")
+            Map<String, Object> city = (Map<String, Object>) rows.get(0).get("city");
+            assertEquals("seattle", city.get("name"));
+            @SuppressWarnings("unchecked")
+            Map<String, Object> location = (Map<String, Object>) city.get("location");
+            assertEquals("west", location.get("zone"));
+        }
+        ensureNoActiveMerges(indexName);
+    }
+
+    /**
+     * Dynamic mapping adding a sub-field grows the live struct rather than adding a column, so the
+     * VSR has to reconcile inside the object. Rows written before the sub-field existed read null for
+     * it; rows after keep their value.
+     */
+    public void testSubFieldMappedMidStreamGrowsTheStruct() throws Exception {
+        String indexName = "test-object-struct-dynamic";
+
+        assertTrue(
+            client().admin().indices().prepareCreate(indexName).setSettings(parquetPrimaryLuceneSecondarySettings()).get().isAcknowledged()
+        );
+        ensureGreen(indexName);
+
+        client().prepareIndex(indexName).setSource("id", 1, "city", Map.of("name", "seattle")).get();
+        // `city.zip` is mapped only now, while the writer already holds a struct for `city`.
+        client().prepareIndex(indexName).setSource("id", 2, "city", Map.of("name", "denver", "zip", "80202")).get();
+
+        client().admin().indices().prepareRefresh(indexName).get();
+        client().admin().indices().prepareFlush(indexName).get();
+
+        IndexShard shard = getIndexShard(indexName);
+        Path parquetDir = shard.shardPath().getDataPath().resolve("parquet");
+        try (GatedCloseable<List<Path>> parquetFilesRef = listParquetFiles(parquetDir, shard)) {
+            List<Map<String, Object>> rows = readAllParquetRows(parquetFilesRef.get());
+            assertEquals(2, rows.size());
+
+            @SuppressWarnings("unchecked")
+            Map<String, Object> first = (Map<String, Object>) rowById(rows, 1).get("city");
+            assertEquals("seattle", first.get("name"));
+            assertNull("the sub-field did not exist when this document was indexed", first.get("zip"));
+
+            @SuppressWarnings("unchecked")
+            Map<String, Object> second = (Map<String, Object>) rowById(rows, 2).get("city");
+            assertEquals("denver", second.get("name"));
+            assertEquals("80202", second.get("zip"));
+        }
+        ensureNoActiveMerges(indexName);
+    }
+
+    /**
+     * A multi-field hangs off a leaf, under {@code fields} rather than {@code properties}, so it is
+     * not part of the object's shape and stays a column of its own under its full dotted name.
+     *
+     * <p>Filed in the struct instead, it would give the struct a child that nothing in the query
+     * layer declares, and the analytics engine rejects a scan whose struct carries fields its schema
+     * does not: "Field 'exception' in Substrait schema has a different type ... than the
+     * corresponding field in the table schema".
+     */
+    public void testMultiFieldUnderAnObjectStaysItsOwnColumn() throws Exception {
+        String indexName = "test-object-struct-multifield";
+
+        assertTrue(
+            client().admin()
+                .indices()
+                .prepareCreate(indexName)
+                .setSettings(parquetPrimaryLuceneSecondarySettings())
+                .setMapping(
+                    "{\"properties\":{\"id\":{\"type\":\"integer\"},\"exception\":{\"properties\":{"
+                        + "\"message\":{\"type\":\"text\",\"fields\":{\"keyword\":{\"type\":\"keyword\"}}}}}}}"
+                )
+                .get()
+                .isAcknowledged()
+        );
+        ensureGreen(indexName);
+
+        client().prepareIndex(indexName).setSource("id", 1, "exception", Map.of("message", "boom")).get();
+        client().admin().indices().prepareRefresh(indexName).get();
+        client().admin().indices().prepareFlush(indexName).get();
+
+        IndexShard shard = getIndexShard(indexName);
+        Path parquetDir = shard.shardPath().getDataPath().resolve("parquet");
+        try (GatedCloseable<List<Path>> parquetFilesRef = listParquetFiles(parquetDir, shard)) {
+            Map<String, Object> row = readAllParquetRows(parquetFilesRef.get()).get(0);
+
+            @SuppressWarnings("unchecked")
+            Map<String, Object> exception = (Map<String, Object>) row.get("exception");
+            assertEquals("the object's own sub-field is a struct child", "boom", exception.get("message"));
+            assertFalse("the multi-field must not become a struct child", exception.containsKey("message.keyword"));
+            assertEquals("the multi-field keeps its own dotted column", "boom", row.get("exception.message.keyword"));
+        }
+        ensureNoActiveMerges(indexName);
+    }
+
+    /** Finds the row with the given {@code id}. */
+    private Map<String, Object> rowById(List<Map<String, Object>> rows, int id) {
+        return rows.stream()
+            .filter(row -> row.get("id") != null && ((Number) row.get("id")).intValue() == id)
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("no row with id " + id + " in " + rows));
+    }
+
     // ══════════════════════════════════════════════════════════════════════
     // Private helpers: index settings
     // ══════════════════════════════════════════════════════════════════════

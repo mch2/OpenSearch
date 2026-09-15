@@ -35,6 +35,7 @@ import org.opensearch.cluster.ClusterState;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Plan-shape tests for the QTF (late-materialization) post-CBO rewriter, v2.
@@ -485,6 +486,44 @@ public class LateMaterializationPlanShapeTests extends BasePlannerRulesTests {
         assertQtfDeclined("SELECT URL FROM hits ORDER BY (CounterID + 1) LIMIT 10", 2);
     }
 
+    // ── Objects ────────────────────────────────────────────────────────
+
+    /**
+     * QTF over an index that has an {@code object} field, selecting only ordinary columns.
+     *
+     * <p>The object is stored as a struct, so the scan reads it as one column and a projection above
+     * the scan reads each leaf back out with {@code get_field}. That projection sits exactly where
+     * QTF looks for its below-chain, and it must not stop QTF from firing or change what it narrows
+     * the scan to — the query never mentions the object.
+     */
+    public void testQtfFires_indexWithAnObjectField() {
+        RelNode optimized = optimize(
+            "SELECT URL, EventDate FROM hits ORDER BY EventDate LIMIT 10",
+            2,
+            List.of(DATAFUSION, LUCENE),
+            ClickBench.FIELDS_WITH_OBJECT
+        );
+        Inspector ctx = new Inspector(optimized);
+        assertNotNull("QTF should still fire when the index has an object field.\nPlan:\n" + RelOptUtil.toString(optimized), ctx.wrapper);
+        assertEquals(
+            "the scan should narrow to the sort key, not carry the object\nPlan:\n" + RelOptUtil.toString(optimized),
+            List.of("EventDate", OpenSearchLateMaterialization.ROW_ID_FIELD),
+            fieldNames(ctx.scan.getRowType().getFieldList())
+        );
+    }
+
+    /** Selecting one of the object's leaves: the fetch list must carry the object it is read from. */
+    public void testQtfFires_selectingAnObjectLeaf() {
+        RelNode optimized = optimize(
+            "SELECT \"Client.Name\", EventDate FROM hits ORDER BY EventDate LIMIT 10",
+            2,
+            List.of(DATAFUSION, LUCENE),
+            ClickBench.FIELDS_WITH_OBJECT
+        );
+        Inspector ctx = new Inspector(optimized);
+        assertNotNull("QTF should fire when selecting an object leaf.\nPlan:\n" + RelOptUtil.toString(optimized), ctx.wrapper);
+    }
+
     // ── Composable assert API ──────────────────────────────────────────
 
     private void assertQtfFired(String sql, int shardCount, Expect... expectations) {
@@ -762,7 +801,16 @@ public class LateMaterializationPlanShapeTests extends BasePlannerRulesTests {
     }
 
     private RelNode optimize(String sql, int shardCount, List<AnalyticsSearchBackendPlugin> backends) {
-        ClusterState state = SqlPlannerTestFixture.clusterStateWith(ClickBench.INDEX, ClickBench.BASIC_FIELDS, "parquet", shardCount);
+        return optimize(sql, shardCount, backends, ClickBench.BASIC_FIELDS);
+    }
+
+    private RelNode optimize(
+        String sql,
+        int shardCount,
+        List<AnalyticsSearchBackendPlugin> backends,
+        Map<String, Map<String, Object>> fields
+    ) {
+        ClusterState state = SqlPlannerTestFixture.clusterStateWith(ClickBench.INDEX, fields, "parquet", shardCount);
         PlannerContext context = new PlannerContext(new CapabilityRegistry(backends, FieldStorageResolver::new), state, false);
         RelNode parsed = SqlPlannerTestFixture.parseSql(sql, state);
         return PlannerImpl.runAllOptimizations(parsed, context);

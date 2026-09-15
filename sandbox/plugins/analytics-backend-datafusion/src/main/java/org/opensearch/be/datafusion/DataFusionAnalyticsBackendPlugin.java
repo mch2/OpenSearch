@@ -469,16 +469,14 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
     );
 
     /**
-     * CAST and SAFE_CAST effectively can return anything, so they get registered as everything
+     * CAST and SAFE_CAST effectively can return anything, so they get registered as everything.
+     * GET_FIELD too: it returns whatever the object's sub-field is typed as.
      */
-    private static final Set<ScalarFunction> POLYMORPHIC_RETURN_PROJECT_OPS = Set.of(ScalarFunction.CAST, ScalarFunction.SAFE_CAST);
-
-    /**
-     * {@code MAKE_STRUCT} returns OBJECT rather than a scalar, so capability lookup — which keys on
-     * return type — needs it declared here rather than in SUPPORTED_FIELD_TYPES. Widening that set
-     * would wrongly claim filter/sort/aggregate support over structs.
-     */
-    private static final Set<ScalarFunction> OBJECT_RETURNING_PROJECT_OPS = Set.of(ScalarFunction.MAKE_STRUCT);
+    private static final Set<ScalarFunction> POLYMORPHIC_RETURN_PROJECT_OPS = Set.of(
+        ScalarFunction.CAST,
+        ScalarFunction.SAFE_CAST,
+        ScalarFunction.GET_FIELD
+    );
 
     private static final Set<AggregateFunction> AGG_FUNCTIONS = Set.of(
         AggregateFunction.SUM,
@@ -597,7 +595,12 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
             @Override
             public Set<ScanCapability> scanCapabilities() {
                 Set<String> formats = Set.copyOf(plugin.getSupportedFormats());
-                return Set.of(new ScanCapability.DocValues(formats, Set.copyOf(SUPPORTED_FIELD_TYPES)));
+                // OBJECT is scannable but is deliberately not in SUPPORTED_FIELD_TYPES: an object
+                // is stored as a struct and read as one column, while most operations over a struct
+                // are meaningless (no ordering, no arithmetic) and would be wrongly claimed.
+                Set<FieldType> scannable = new HashSet<>(SUPPORTED_FIELD_TYPES);
+                scannable.add(FieldType.OBJECT);
+                return Set.of(new ScanCapability.DocValues(formats, Set.copyOf(scannable)));
             }
 
             @Override
@@ -618,6 +621,19 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
                     // predicate against a MAP column is forced through an ITEM lookup that
                     // emits a value-typed scalar before substrait emission.
                     caps.add(new FilterCapability.Standard(op, Set.of(FieldType.MAP), formats));
+                }
+                // OBJECT-typed fields enter the filter rule the same way MAP ones do. An object is
+                // stored as a struct, so `where city.population > 500000` is
+                // `get_field(city, 'population') > 500000` once the predicate moves through the
+                // projection that reads the leaf, and the filter rule's field-index collection sees
+                // the OBJECT column rather than the extracted scalar. Without this the WHERE rejects
+                // with "No backend can evaluate filter predicate [GREATER_THAN] on fields
+                // [city:object]". Sound for the same reason: every viable predicate against an
+                // object column is forced through a get_field that yields a value-typed scalar
+                // before substrait emission — except the null predicates, which read the struct's
+                // own validity and are meaningful on it directly.
+                for (ScalarFunction op : STANDARD_FILTER_OPS) {
+                    caps.add(new FilterCapability.Standard(op, Set.of(FieldType.OBJECT), formats));
                 }
                 return Set.copyOf(caps);
             }
@@ -641,9 +657,6 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
                 }
                 for (ScalarFunction op : MAP_RETURNING_PROJECT_OPS) {
                     caps.add(new ProjectCapability.Scalar(op, Set.of(FieldType.MAP), formats, true));
-                }
-                for (ScalarFunction op : OBJECT_RETURNING_PROJECT_OPS) {
-                    caps.add(new ProjectCapability.Scalar(op, Set.of(FieldType.OBJECT), formats, true));
                 }
                 for (ScalarFunction op : POLYMORPHIC_RETURN_PROJECT_OPS) {
                     for (FieldType ft : FieldType.values()) {

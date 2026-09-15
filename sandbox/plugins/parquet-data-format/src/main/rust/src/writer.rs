@@ -382,6 +382,32 @@ lazy_static! {
     pub static ref SETTINGS_STORE: DashMap<String, NativeSettings> = DashMap::new();
 }
 
+/// Resolves a sort-key column name to its array, descending into an `object`.
+///
+/// An `object` is stored as a struct, so a sort key naming one of its leaves (`city.name`) is a
+/// child of the `city` group rather than a column of its own. Resolved against the schema level by
+/// level rather than by splitting the name on dots, because a dot in a column name does not imply a
+/// struct — the derived-source companion of a keyword is literally named
+/// `_ignored_source.city.name`, and that is a single top-level column.
+fn resolve_sort_array(batch: &RecordBatch, name: &str) -> Option<Arc<dyn arrow::array::Array>> {
+    if let Ok(index) = batch.schema().index_of(name) {
+        return Some(batch.column(index).clone());
+    }
+    let (root, mut rest) = name.split_once('.')?;
+    let mut current = batch.column(batch.schema().index_of(root).ok()?).clone();
+    loop {
+        let struct_array = current
+            .as_any()
+            .downcast_ref::<arrow::array::StructArray>()?;
+        if let Some(child) = struct_array.column_by_name(rest) {
+            return Some(child.clone());
+        }
+        let (next, remainder) = rest.split_once('.')?;
+        current = struct_array.column_by_name(next)?.clone();
+        rest = remainder;
+    }
+}
+
 pub struct NativeParquetWriter;
 
 impl NativeParquetWriter {
@@ -873,38 +899,36 @@ impl NativeParquetWriter {
     /// Sort a batch using RowConverter: converts sort columns into compact
     /// byte-comparable rows, sorts indices by comparing those rows, then
     /// reorders all columns via take.
+    ///
+    /// `take` reorders a struct column as a whole, so an `object` needs no special handling here;
+    /// only naming one of its leaves as a sort key does (see `resolve_sort_array`).
     fn sort_batch(
         batch: &RecordBatch,
         sort_columns: &[String],
         reverse_sorts: &[bool],
         nulls_first: &[bool],
     ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
-        let sort_fields: Vec<SortField> = sort_columns
+        let sort_arrays: Vec<Arc<dyn arrow::array::Array>> = sort_columns
+            .iter()
+            .map(|col_name| {
+                resolve_sort_array(batch, col_name)
+                    .ok_or_else(|| format!("Sort column '{}' not found in schema", col_name).into())
+            })
+            .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+
+        let sort_fields: Vec<SortField> = sort_arrays
             .iter()
             .enumerate()
-            .map(|(i, col_name)| {
-                let col_index = batch
-                    .schema()
-                    .index_of(col_name)
-                    .map_err(|_| format!("Sort column '{}' not found in schema", col_name))?;
-                let data_type = batch.schema().field(col_index).data_type().clone();
+            .map(|(i, array)| {
                 let options = arrow::compute::SortOptions {
                     descending: reverse_sorts.get(i).copied().unwrap_or(false),
                     nulls_first: nulls_first.get(i).copied().unwrap_or(false),
                 };
-                Ok(SortField::new_with_options(data_type, options))
-            })
-            .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
-
-        let converter = RowConverter::new(sort_fields)?;
-
-        let sort_arrays: Vec<Arc<dyn arrow::array::Array>> = sort_columns
-            .iter()
-            .map(|col_name| {
-                let col_index = batch.schema().index_of(col_name).unwrap();
-                batch.column(col_index).clone()
+                SortField::new_with_options(array.data_type().clone(), options)
             })
             .collect();
+
+        let converter = RowConverter::new(sort_fields)?;
 
         let rows = converter.convert_columns(&sort_arrays)?;
         let mut sort_indices: Vec<u32> = (0..batch.num_rows() as u32).collect();

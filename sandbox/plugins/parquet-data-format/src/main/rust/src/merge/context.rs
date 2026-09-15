@@ -14,7 +14,6 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema};
 use parquet::arrow::arrow_writer::{compute_leaves, ArrowRowGroupWriterFactory};
 use parquet::file::writer::SerializedFileWriter;
-use parquet::schema::types::SchemaDescriptor;
 use rayon::prelude::*;
 use tokio::sync::{mpsc as tokio_mpsc, oneshot};
 
@@ -57,7 +56,6 @@ impl MergeContext {
     /// writer, and spawns the background IO task.
     pub fn new(
         arrow_schemas: Vec<ArrowSchema>,
-        parquet_descriptors: &[SchemaDescriptor],
         output_path: &str,
         index_name: &str,
         output_flush_rows: usize,
@@ -95,8 +93,6 @@ impl MergeContext {
         ));
         let output_schema = Arc::new(ArrowSchema::new(output_fields));
 
-        let parquet_root = build_parquet_root_schema(parquet_descriptors)?;
-
         let output_file = File::create(output_path)?;
         let throttled_writer =
             RateLimitedWriter::new(output_file, RATE_LIMIT_MB_PER_SEC).map_err(MergeError::Io)?;
@@ -117,6 +113,8 @@ impl MergeContext {
                 MergeError::Logic(format!("Invalid encoding/compression config: {}", e))
             })?,
         );
+
+        let parquet_root = build_parquet_root_schema(&output_schema, writer_props.coerce_types())?;
 
         let writer = SerializedFileWriter::new(crc_writer, parquet_root, writer_props)?;
         let rg_writer_factory = ArrowRowGroupWriterFactory::new(&writer, output_schema.clone());

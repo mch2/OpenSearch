@@ -68,6 +68,8 @@ pub use cache::statistics_cache;
 
 #[cfg(test)]
 mod spill_e2e_test;
+#[cfg(test)]
+mod struct_projection_e2e_test;
 
 // End-to-end TieredObjectStore + TieredBlockCache integration tests. Located here
 // (not in the lower-level `opensearch-tiered-storage` crate) because they drive a

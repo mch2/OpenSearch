@@ -1407,6 +1407,7 @@ async unsafe fn execute_indexed_with_context_inner(
         pushdown_predicate,
         query_config: Arc::clone(&query_config),
         predicate_columns,
+        predicate_exprs: leaf_exprs.clone(),
         emit_row_ids,
         prune_tree_config,
         sort_fields: sort_fields.clone(),

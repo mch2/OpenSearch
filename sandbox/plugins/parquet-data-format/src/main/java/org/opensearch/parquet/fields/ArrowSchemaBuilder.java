@@ -8,7 +8,9 @@
 
 package org.opensearch.parquet.fields;
 
+import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
+import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -19,17 +21,29 @@ import org.opensearch.index.mapper.IndexFieldMapper;
 import org.opensearch.index.mapper.KeywordFieldMapper;
 import org.opensearch.index.mapper.Mapper;
 import org.opensearch.index.mapper.MapperService;
+import org.opensearch.index.mapper.MappingLookup;
 import org.opensearch.index.mapper.NestedPathFieldMapper;
+import org.opensearch.index.mapper.ObjectMapper;
 import org.opensearch.index.mapper.SeqNoFieldMapper;
 import org.opensearch.index.mapper.SourceFieldMapper;
 import org.opensearch.parquet.fields.core.data.number.LongParquetField;
 
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.TreeMap;
 
 /**
  * Builds Apache Arrow schemas from OpenSearch MapperService field mappings.
+ *
+ * <p>An {@code object} field becomes a nullable Arrow {@code Struct}, so the Parquet writer stores
+ * it as a group node rather than as unrelated dotted columns. The leaf column chunks are the same
+ * either way — a struct's leaves get the same dotted paths ({@code city.name}), the same encodings,
+ * and the same statistics — but the reader hands the object back assembled, and a document that
+ * omitted the object reads as one null instead of as a row of coincidentally-null leaves.
  */
 public final class ArrowSchemaBuilder {
 
@@ -47,7 +61,14 @@ public final class ArrowSchemaBuilder {
         List<Field> fields = new ArrayList<>();
         DocumentMapper documentMapper = mapperService.documentMapperWithAutoCreate().getDocumentMapper();
         if (documentMapper != null) {
-            for (Mapper mapper : documentMapper.mappers()) {
+            MappingLookup mappers = documentMapper.mappers();
+            Map<String, ObjectMapper> objects = mappers.objectMappers();
+            // Leaves that belong to an object, keyed by the path of the object that owns them.
+            // Sorted so a struct's children keep a stable order across shards and mapping updates:
+            // Arrow struct equality is order-sensitive, and the merge compares types to decide
+            // whether a batch can be passed through untouched.
+            Map<String, Map<String, Field>> objectChildren = new HashMap<>();
+            for (Mapper mapper : mappers) {
                 if (isUnsupportedMetadataField(mapper)) {
                     logger.debug("Skipping unsupported metadata field: [{}] of type [{}]", mapper.name(), mapper.typeName());
                     continue;
@@ -55,12 +76,23 @@ public final class ArrowSchemaBuilder {
 
                 ParquetField parquetField = ArrowFieldRegistry.getParquetField(mapper.typeName());
                 if (parquetField != null) {
-                    fields.add(new Field(mapper.name(), parquetField.getFieldType(), null));
-                    handleNormalizedField(mapper, documentMapper, fields, parquetField);
+                    // A multi-field is not part of the object's shape — it hangs off a leaf, under
+                    // `fields` rather than `properties` — so it stays a top-level column under its
+                    // full dotted name. Putting it in the struct would give the struct a child the
+                    // query layer never declares, and the analytics engine rejects a scan whose
+                    // struct carries fields its schema does not.
+                    boolean isMultiField = mappers.isMultiField(mapper.name());
+                    if (isMultiField) {
+                        fields.add(new Field(mapper.name(), parquetField.getFieldType(), null));
+                    } else {
+                        place(mapper.name(), parquetField.getFieldType(), objects, objectChildren, fields);
+                    }
+                    handleNormalizedField(mapper, documentMapper, objects, objectChildren, fields, parquetField);
                 } else {
                     logger.debug("No ParquetField registered for field: [{}] of type [{}]", mapper.name(), mapper.typeName());
                 }
             }
+            fields.addAll(buildObjectFields(objects, objectChildren));
         }
         // Add row ID field (long)
         LongParquetField longField = new LongParquetField(false);
@@ -69,11 +101,108 @@ public final class ArrowSchemaBuilder {
         return new Schema(fields);
     }
 
-    private static void handleNormalizedField(Mapper mapper, DocumentMapper documentMapper, List<Field> fields, ParquetField parquetField) {
+    /**
+     * Files a leaf either as a top-level column or as a child of the object that encloses it.
+     *
+     * <p>The child is named by the remainder of the path below that object, so its Parquet leaf path
+     * spells out the full dotted name either way. That is what keeps every consumer of the dotted
+     * convention working: per-field encoding settings, statistics lookups, and the analytics engine's
+     * field-storage resolution all address {@code city.name} and still find it.
+     */
+    private static void place(
+        String fullName,
+        FieldType fieldType,
+        Map<String, ObjectMapper> objects,
+        Map<String, Map<String, Field>> objectChildren,
+        List<Field> topLevel
+    ) {
+        String objectPath = enclosingObject(fullName, objects);
+        if (objectPath == null) {
+            topLevel.add(new Field(fullName, fieldType, null));
+            return;
+        }
+        String childName = fullName.substring(objectPath.length() + 1);
+        objectChildren.computeIfAbsent(objectPath, path -> new TreeMap<>()).put(childName, new Field(childName, fieldType, null));
+    }
+
+    /**
+     * Returns the path of the innermost {@code object} enclosing {@code fullName}, or null when the
+     * field sits at the top level.
+     *
+     * <p>Resolved against the declared object paths rather than by splitting on dots, because a dot
+     * in a field name does not imply an object: a multi-field ({@code city.name.keyword}) and the
+     * derived-source companion of a keyword ({@code _ignored_source.city.name}) are both dotted, and
+     * neither {@code city.name} nor {@code _ignored_source} is an object.
+     *
+     * <p>A {@code nested} object is not one either, as far as storage goes: it is an array of
+     * sub-documents, which wants {@code LIST<STRUCT<..>>} and not a struct. Mapping creation rejects
+     * {@code nested} on a pluggable-data-format index, so this is unreachable; treating it as absent
+     * keeps the fallback a flat column rather than a silently wrong shape.
+     */
+    private static String enclosingObject(String fullName, Map<String, ObjectMapper> objects) {
+        for (int dot = fullName.lastIndexOf('.'); dot > 0; dot = fullName.lastIndexOf('.', dot - 1)) {
+            ObjectMapper object = objects.get(fullName.substring(0, dot));
+            if (object != null && object.nested().isNested() == false) {
+                return fullName.substring(0, dot);
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Assembles one struct Field per object that owns at least one writable leaf.
+     *
+     * <p>Deepest object first, so a sub-object is already built by the time its parent is assembled
+     * and can be filed as one of the parent's children. An object all of whose leaves are of a type
+     * with no Parquet representation contributes no column at all — the same treatment such a leaf
+     * gets on its own.
+     */
+    private static List<Field> buildObjectFields(Map<String, ObjectMapper> objects, Map<String, Map<String, Field>> objectChildren) {
+        List<String> paths = new ArrayList<>(objects.keySet());
+        paths.sort(Comparator.comparingInt(ArrowSchemaBuilder::depth).reversed());
+
+        List<Field> topLevel = new ArrayList<>();
+        for (String path : paths) {
+            Map<String, Field> children = objectChildren.get(path);
+            if (children == null || children.isEmpty()) {
+                continue;
+            }
+            int lastDot = path.lastIndexOf('.');
+            String localName = lastDot < 0 ? path : path.substring(lastDot + 1);
+            Field struct = new Field(localName, FieldType.nullable(ArrowType.Struct.INSTANCE), List.copyOf(children.values()));
+
+            String parent = enclosingObject(path, objects);
+            if (parent == null) {
+                topLevel.add(struct);
+            } else {
+                objectChildren.computeIfAbsent(parent, key -> new TreeMap<>()).put(localName, struct);
+            }
+        }
+        return topLevel;
+    }
+
+    private static int depth(String path) {
+        int depth = 0;
+        for (int i = 0; i < path.length(); i++) {
+            if (path.charAt(i) == '.') {
+                depth++;
+            }
+        }
+        return depth;
+    }
+
+    private static void handleNormalizedField(
+        Mapper mapper,
+        DocumentMapper documentMapper,
+        Map<String, ObjectMapper> objects,
+        Map<String, Map<String, Field>> objectChildren,
+        List<Field> topLevel,
+        ParquetField parquetField
+    ) {
         if (mapper instanceof KeywordFieldMapper keywordFieldMapper) {
             if (!documentMapper.mappers().isMultiField(mapper.name()) && keywordFieldMapper.getRawValueFieldType() != null) {
                 KeywordFieldMapper.KeywordFieldType rawValueField = keywordFieldMapper.getRawValueFieldType();
-                fields.add(new Field(rawValueField.name(), parquetField.getFieldType(), null));
+                place(rawValueField.name(), parquetField.getFieldType(), objects, objectChildren, topLevel);
             }
         }
     }

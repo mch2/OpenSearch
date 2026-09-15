@@ -102,10 +102,9 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
     // ── Object-parent projection ───────────────────────────────────────────────
     //
     // Projecting an object parent (top-level "city" or intermediate "city.location")
-    // returns the nested object. No query-then-fetch / _source read is needed: the
-    // schema exposes the object as a struct (ROW) column and ObjectStructMaterializer
-    // re-assembles it with make_struct over the flat leaf columns the scan already
-    // produces, in a project directly above the scan.
+    // returns the nested object. No query-then-fetch / _source read is needed: the object is
+    // stored as a Parquet struct, so the scan reads it as one column and the value comes back
+    // assembled.
 
     public void testSelectIntermediateObjectField() throws IOException {
         assertRowsEqual(
@@ -141,8 +140,8 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
     // ── Aggregation involving object fields ───────────────────────────────────
     //
     // Leaf aggregations (min/max/sum on city.population, city.location.latitude, …) are covered
-    // above. These cover aggregating on the OBJECT VALUE itself — the group key is a struct
-    // materialized by ObjectStructMaterializer, so the aggregate receives an assembled object.
+    // above. These cover aggregating on the OBJECT VALUE itself — the group key is the struct
+    // column the scan reads.
 
     /** Group by an intermediate object ({@code city.location}) — 3 distinct locations. */
     public void testGroupByIntermediateObjectField() throws IOException {
@@ -333,12 +332,13 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
     }
 
     /**
-     * {@code isnull} / {@code isnotnull} on an object column. Both used to be no-ops —
-     * {@code named_struct} builds no validity buffer so the struct is never null, making isnotnull
-     * always true and isnull always false, while the same row rendered as null. Filtering on a leaf
-     * gave the right answer, so it was easy to miss.
-     * {@link org.opensearch.analytics.planner.ObjectNullPredicateExpander} expands the test to the
-     * object's leaves.
+     * {@code isnull} / {@code isnotnull} on an object column. Answered by the struct's own validity
+     * bit, which the writer sets only for a document that carried the object.
+     *
+     * <p>Both used to be no-ops: the object was assembled at query time by a struct constructor,
+     * which builds no validity buffer, so the struct was never null — isnotnull always true, isnull
+     * always false, while the same row rendered as null. Filtering on a leaf gave the right answer,
+     * so it was easy to miss.
      */
     public void testNullPredicatesOnObjectField() throws IOException {
         String index = "objrev_it";
@@ -442,9 +442,8 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
      * <ul>
      *   <li>rendering: {@code ArrowValues.structToMap} skips null children and returns null when the
      *       resulting map is empty, recursively for sub-objects;</li>
-     *   <li>{@code isnull} / {@code isnotnull}: {@code ObjectNullPredicateExpander} rewrites the test
-     *       to a conjunction / disjunction over the object's leaves, so it never consults the struct's
-     *       own validity — which {@code named_struct} does not set;</li>
+     *   <li>{@code isnull} / {@code isnotnull}: read from the struct column's validity, which the
+     *       writer sets per row for the documents that carried the object;</li>
      *   <li>{@code count(object)}: counts non-null values of the struct column.</li>
      * </ul>
      *
