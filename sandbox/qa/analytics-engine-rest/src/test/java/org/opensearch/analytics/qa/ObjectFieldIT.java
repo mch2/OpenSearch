@@ -598,4 +598,141 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
         // ...and on the top-level object that contains it.
         assertRowsEqual("source=" + DATASET.indexName + " | where isnotnull(city) | stats count()", row(3));
     }
+
+    /**
+     * An array of objects must keep each element's fields together.
+     *
+     * <p>The two documents differ only in <em>which</em> element carries {@code time}, so listing
+     * {@code events} must tell them apart. Storing an object's leaves as independent lists —
+     * {@code STRUCT<name LIST, time LIST>} — cannot: both collapse to
+     * {@code {name:[a,b], time:[2]}}, and "which event happened at time 2" stops having an answer.
+     *
+     * <p>Ragged elements are the normal case for OpenTelemetry {@code events} and {@code links},
+     * whose attribute keys vary per element, so this is not a corner case. The shape that
+     * distinguishes them is {@code LIST<STRUCT<name, time>>}, where an element that omitted a key
+     * carries a null for it inside that element.
+     */
+    public void testArrayOfObjectsKeepsElementsTogether() throws IOException {
+        String index = "object_array_it";
+        try {
+            client().performRequest(new Request("DELETE", "/" + index));
+        } catch (Exception ignored) {}
+        Request create = new Request("PUT", "/" + index);
+        create.setJsonEntity(
+            "{\"settings\":{\"index.pluggable.dataformat.enabled\":true,"
+                + "\"index.pluggable.dataformat\":\"composite\","
+                + "\"index.composite.primary_data_format\":\"parquet\","
+                + "\"index.composite.secondary_data_formats\":[\"lucene\"],"
+                + "\"number_of_shards\":1,\"number_of_replicas\":0},"
+                // `events` is left to dynamic mapping, which is how an OTel template arrives: the
+                // array shape is discovered from the first document, not declared.
+                + "\"mappings\":{\"properties\":{\"id\":{\"type\":\"keyword\"}}}}"
+        );
+        client().performRequest(create);
+        Request bulk = new Request("POST", "/" + index + "/_bulk?refresh=true");
+        bulk.setJsonEntity(
+            // Element 0 has only `name`; element 1 has both.
+            "{\"index\":{}}\n{\"id\":\"1\",\"events\":[{\"name\":\"a\"},{\"name\":\"b\",\"time\":2}]}\n"
+                // The mirror image: `time` sits on element 0 instead.
+                + "{\"index\":{}}\n{\"id\":\"2\",\"events\":[{\"name\":\"a\",\"time\":2},{\"name\":\"b\"}]}\n"
+        );
+        bulk.setOptions(bulk.getOptions().toBuilder().addHeader("Content-Type", "application/x-ndjson"));
+        client().performRequest(bulk);
+
+        assertRowsEqual(
+            "source=" + index + " | sort id | fields id, events",
+            row("1", List.of(Map.of("name", "a"), Map.of("name", "b", "time", 2))),
+            row("2", List.of(Map.of("name", "a", "time", 2), Map.of("name", "b")))
+        );
+    }
+
+
+    /**
+     * The OpenTelemetry span shape: {@code events} is an array of objects, each with its own
+     * {@code attributes} object whose keys vary per element. Nothing is declared — the array shape
+     * and every attribute key arrive by dynamic mapping, as they do from a real collector.
+     */
+    public void testOtelSpanEventsWithPerElementAttributes() throws IOException {
+        String index = "otel_span_it";
+        try {
+            client().performRequest(new Request("DELETE", "/" + index));
+        } catch (Exception ignored) {}
+        Request create = new Request("PUT", "/" + index);
+        create.setJsonEntity(
+            "{\"settings\":{\"index.pluggable.dataformat.enabled\":true,"
+                + "\"index.pluggable.dataformat\":\"composite\","
+                + "\"index.composite.primary_data_format\":\"parquet\","
+                + "\"index.composite.secondary_data_formats\":[\"lucene\"],"
+                + "\"number_of_shards\":1,\"number_of_replicas\":0},"
+                + "\"mappings\":{\"properties\":{\"traceId\":{\"type\":\"keyword\"}}}}"
+        );
+        client().performRequest(create);
+        Request bulk = new Request("POST", "/" + index + "/_bulk?refresh=true");
+        bulk.setJsonEntity(
+            "{\"index\":{}}\n"
+                + "{\"traceId\":\"t1\",\"events\":["
+                + "{\"name\":\"exception\",\"attributes\":{\"http_method\":\"GET\"}},"
+                + "{\"name\":\"retry\",\"attributes\":{\"db_statement\":\"select 1\"}}]}\n"
+                + "{\"index\":{}}\n"
+                + "{\"traceId\":\"t2\",\"events\":[{\"name\":\"exception\",\"attributes\":{\"http_method\":\"POST\"}}]}\n"
+        );
+        bulk.setOptions(bulk.getOptions().toBuilder().addHeader("Content-Type", "application/x-ndjson"));
+        client().performRequest(bulk);
+
+        // Each event keeps its own attributes: `exception` has the http_method, `retry` has the
+        // db_statement. A key an element did not carry is absent from that element, exactly as a key
+        // a document did not carry is absent from a plain object in _source — not rendered as "".
+        assertRowsEqual(
+            "source=" + index + " | sort traceId | fields traceId, events",
+            row(
+                "t1",
+                List.of(
+                    Map.of("name", "exception", "attributes", Map.of("http_method", "GET")),
+                    Map.of("name", "retry", "attributes", Map.of("db_statement", "select 1"))
+                )
+            ),
+            row("t2", List.of(Map.of("name", "exception", "attributes", Map.of("http_method", "POST"))))
+        );
+    }
+
+
+    /**
+     * An absent array, an empty array, and an array of one stay three different things.
+     *
+     * <p>{@code null} and {@code []} are distinguished by the list's own validity bit, the same
+     * distinction the struct validity bit draws for a plain object. Collapsing them would make
+     * "this span reported no events" indistinguishable from "this span had no events field".
+     */
+    public void testAbsentAndEmptyArraysOfObjectsStayDistinct() throws IOException {
+        String index = "object_array_empty_it";
+        try {
+            client().performRequest(new Request("DELETE", "/" + index));
+        } catch (Exception ignored) {}
+        Request create = new Request("PUT", "/" + index);
+        create.setJsonEntity(
+            "{\"settings\":{\"index.pluggable.dataformat.enabled\":true,"
+                + "\"index.pluggable.dataformat\":\"composite\","
+                + "\"index.composite.primary_data_format\":\"parquet\","
+                + "\"index.composite.secondary_data_formats\":[\"lucene\"],"
+                + "\"number_of_shards\":1,\"number_of_replicas\":0},"
+                + "\"mappings\":{\"properties\":{\"id\":{\"type\":\"keyword\"}}}}"
+        );
+        client().performRequest(create);
+        Request bulk = new Request("POST", "/" + index + "/_bulk?refresh=true");
+        bulk.setJsonEntity(
+            "{\"index\":{}}\n{\"id\":\"1\",\"events\":[{\"name\":\"a\"}]}\n"
+                + "{\"index\":{}}\n{\"id\":\"2\",\"events\":[]}\n"
+                + "{\"index\":{}}\n{\"id\":\"3\"}\n"
+        );
+        bulk.setOptions(bulk.getOptions().toBuilder().addHeader("Content-Type", "application/x-ndjson"));
+        client().performRequest(bulk);
+
+        assertRowsEqual(
+            "source=" + index + " | sort id | fields id, events",
+            row("1", List.of(Map.of("name", "a"))),
+            row("2", List.of()),
+            row("3", null)
+        );
+    }
+
 }

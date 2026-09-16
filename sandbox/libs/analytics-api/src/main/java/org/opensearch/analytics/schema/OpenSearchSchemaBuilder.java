@@ -377,6 +377,14 @@ public class OpenSearchSchemaBuilder {
                     // reads each one back out of the struct with get_field.
                     RelDataType structType = buildObjectType(typeFactory, nested, fieldName);
                     if (structType != null) {
+                        // An object documents present as an array is stored as LIST<STRUCT<..>>, so it
+                        // is declared ARRAY<ROW<..>>: one element per array entry, with each entry's
+                        // fields kept together. Its leaves stay addressable above for the dotted
+                        // convention, but reading one out of the array needs an element-wise
+                        // projection rather than a plain get_field.
+                        if (Boolean.TRUE.equals(fieldProps.get("multi_value"))) {
+                            structType = typeFactory.createTypeWithNullability(typeFactory.createArrayType(structType, -1), true);
+                        }
                         builder.add(fieldName, structType);
                     }
                 }
@@ -434,6 +442,10 @@ public class OpenSearchSchemaBuilder {
             if (fieldType == null || "object".equals(fieldType)) {
                 Map<String, Object> nested = (Map<String, Object>) fieldProps.get("properties");
                 childType = nested == null ? null : buildObjectType(typeFactory, nested, pathPrefix + "." + localName);
+                if (childType != null && Boolean.TRUE.equals(fieldProps.get("multi_value"))) {
+                    // A sub-object that arrives as an array, e.g. `events` inside a wrapper object.
+                    childType = typeFactory.createTypeWithNullability(typeFactory.createArrayType(childType, -1), true);
+                }
             } else if ("nested".equals(fieldType)) {
                 // Array-of-sub-docs needs LIST<STRUCT> + UNNEST; out of scope here.
                 childType = null;

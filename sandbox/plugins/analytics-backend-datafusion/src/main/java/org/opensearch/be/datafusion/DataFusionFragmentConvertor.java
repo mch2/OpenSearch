@@ -688,8 +688,11 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
         for (Map.Entry<Integer, String> rootField : rootFields) {
             flattened.add(rootField.getValue());
             int index = rootField.getKey();
-            if (index >= 0 && index < fields.size() && fields.get(index).getType().isStruct()) {
-                appendNestedNames(flattened, fields.get(index).getType());
+            if (index >= 0 && index < fields.size()) {
+                RelDataType nested = namedStructOf(fields.get(index).getType());
+                if (nested != null) {
+                    appendNestedNames(flattened, nested);
+                }
             }
         }
         return flattened;
@@ -700,8 +703,9 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
         List<String> flattened = new ArrayList<>(rowType.getFieldCount());
         for (RelDataTypeField field : rowType.getFieldList()) {
             flattened.add(field.getName());
-            if (field.getType().isStruct()) {
-                appendNestedNames(flattened, field.getType());
+            RelDataType nested = namedStructOf(field.getType());
+            if (nested != null) {
+                appendNestedNames(flattened, nested);
             }
         }
         return flattened;
@@ -711,10 +715,33 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
     private static void appendNestedNames(List<String> out, RelDataType structType) {
         for (RelDataTypeField child : structType.getFieldList()) {
             out.add(child.getName());
-            if (child.getType().isStruct()) {
-                appendNestedNames(out, child.getType());
+            RelDataType nested = namedStructOf(child.getType());
+            if (nested != null) {
+                appendNestedNames(out, nested);
             }
         }
+    }
+
+    /**
+     * Returns the struct whose field names a Substrait named schema needs for {@code type}, or null
+     * when {@code type} contributes no names of its own.
+     *
+     * <p>A ROW contributes its own fields. An {@code ARRAY<ROW>} — how an object that documents present as an
+     * array is declared — contributes its element's fields: the list level is unnamed in Substrait,
+     * but every leaf beneath it still has to appear, or the plan is rejected with "Named schema must
+     * contain names for all fields".
+     */
+    private static RelDataType namedStructOf(RelDataType type) {
+        if (type.isStruct()) {
+            return type;
+        }
+        if (type.getSqlTypeName() == SqlTypeName.ARRAY) {
+            RelDataType component = type.getComponentType();
+            if (component != null && component.isStruct()) {
+                return component;
+            }
+        }
+        return null;
     }
 
     private static Rel replaceInput(Rel wrapper, Rel newInput) {

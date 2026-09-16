@@ -156,6 +156,24 @@ public final class ArrowValues {
             }
             return map;
         }
+        // An array of objects — how an `object` field that documents present as an array is stored —
+        // is rendered element by element through structToMap rather than through Arrow's getObject.
+        // getObject on a nested string child returns an empty value where the validity bit says null,
+        // so a key an element omitted would come back as "" instead of being absent. structToMap
+        // consults isNull directly, which also keeps an element's rendering identical to how the same
+        // object renders outside an array.
+        if (vector instanceof ListVector lv && vector instanceof MapVector == false && lv.getDataVector() instanceof StructVector elements) {
+            if (vector.isNull(index)) {
+                return null;
+            }
+            int start = lv.getOffsetBuffer().getInt((long) index * ListVector.OFFSET_WIDTH);
+            int end = lv.getOffsetBuffer().getInt((long) (index + 1) * ListVector.OFFSET_WIDTH);
+            List<Object> out = new ArrayList<>(end - start);
+            for (int i = start; i < end; i++) {
+                out.add(elements.isNull(i) ? null : structToMap(elements, i));
+            }
+            return out;
+        }
         Object value = vector.getObject(index);
         if (vector instanceof ListVector lv && value instanceof List<?> raw) {
             // child Arrow type drives temporal element formatting
