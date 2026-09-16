@@ -142,8 +142,11 @@ pub(crate) fn widen_schema_from_plan(
         .parquet
         .schema_force_view_types;
     let expected = crate::schema_coerce::physical_schema_for_declaration(&expected, force_view);
-    crate::schema_coerce::append_missing_nullable(inferred, &expected)
-        .unwrap_or_else(|| Arc::clone(inferred))
+    // The plan declares nested strings as Utf8 because Substrait has no view types, so compare and
+    // register the nested positions in non-view form too — DataFusion's (Utf8, Utf8View) binding arm
+    // does not recurse into a struct's children.
+    let registered = crate::schema_coerce::declare_nested_without_views(inferred);
+    crate::schema_coerce::append_missing_nullable(&registered, &expected).unwrap_or(registered)
 }
 
 /// Resolves the name to register the shard's table under so the Substrait plan's `NamedTable`
@@ -261,6 +264,14 @@ pub async unsafe fn create_session_context(
         .with_config(config)
         .with_runtime_env(Arc::from(runtime_env))
         .with_default_features()
+        // TODO(native-array_any_match): drop this analyzer rule once DataFusion consumes the Substrait lambda natively.
+        .with_analyzer_rule(Arc::new(
+            crate::nested_any_match_rewrite_analyzer::NestedAnyMatchRewriteRule,
+        ))
+        // TODO(native-array_transform): drop this analyzer rule once DataFusion consumes the Substrait lambda natively.
+        .with_analyzer_rule(Arc::new(
+            crate::nested_project_rewrite_analyzer::NestedProjectRewriteRule,
+        ))
         .with_physical_optimizer_rules(if has_partial_aggregate {
             crate::agg_mode::physical_optimizer_rules_without_combine()
         } else {
@@ -475,6 +486,14 @@ pub async unsafe fn create_worker_session_context(
         .with_config(config)
         .with_runtime_env(Arc::from(runtime_env))
         .with_default_features()
+        // TODO(native-array_any_match): drop this analyzer rule once DataFusion consumes the Substrait lambda natively.
+        .with_analyzer_rule(Arc::new(
+            crate::nested_any_match_rewrite_analyzer::NestedAnyMatchRewriteRule,
+        ))
+        // TODO(native-array_transform): drop this analyzer rule once DataFusion consumes the Substrait lambda natively.
+        .with_analyzer_rule(Arc::new(
+            crate::nested_project_rewrite_analyzer::NestedProjectRewriteRule,
+        ))
         .with_physical_optimizer_rules(crate::agg_mode::physical_optimizer_rules_without_combine())
         .build();
 

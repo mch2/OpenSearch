@@ -116,16 +116,10 @@ fn rewrite_data_type_to_view(data_type: &DataType) -> DataType {
         DataType::Binary | DataType::LargeBinary => DataType::BinaryView,
         DataType::List(child) => DataType::List(Arc::new(rewrite_field_to_view(child))),
         DataType::LargeList(child) => DataType::LargeList(Arc::new(rewrite_field_to_view(child))),
-        // An OpenSearch `object` is a struct column, so its string children are what parquet emits
-        // as views — and for a struct the child list is the type, so leaving a child as `Utf8` here
-        // makes the whole column mismatch. The inverse rewrite recurses structs, and these two have
-        // to agree or a nested string never compares equal.
-        DataType::Struct(children) => DataType::Struct(Fields::from(
-            children
-                .iter()
-                .map(|c| rewrite_field_to_view(c))
-                .collect::<Vec<Field>>(),
-        )),
+        // Deliberately NOT recursed into a struct. Substrait cannot express a view type, so a plan
+        // always declares a nested string as `Utf8`; the reconciliation happens on the registered
+        // side instead (`declare_nested_without_views`), and view-ifying here as well would just
+        // move the mismatch rather than remove it.
         other => other.clone(),
     }
 }
@@ -237,6 +231,68 @@ fn rewrite_data_type(dt: &DataType) -> DataType {
     }
 }
 
+/// Rewrites view types to their non-view equivalents in NESTED positions only, for a schema about
+/// to be compared against a Substrait plan's declaration.
+///
+/// Substrait has no view types, so a plan always declares a nested string as `Utf8` while parquet
+/// reports `Utf8View`. DataFusion hardcodes `(Utf8, Utf8View)` as binding-compatible, but that arm
+/// does not recurse: inside a struct the child list *is* the type, so one `Utf8View` child against a
+/// declared `Utf8` fails the whole column —
+///
+/// ```text
+/// table:     "path": Utf8View, "name": Utf8View
+/// substrait: "path": Utf8,     "name": Utf8
+/// ```
+///
+/// Top-level fields are left alone: they already bind through that hardcoded arm, and rewriting them
+/// is unnecessary risk.
+///
+/// Deliberately NOT part of [`coerce_inferred_schema`]. That helper also types aggregate `List` state
+/// — `list()`, `values()`, distinct-count bitmaps — and rewriting a view inside those corrupts them,
+/// which shows up as two dozen scalar multi-value failures. Only a schema being derived for
+/// declaration comparison may be rewritten this way.
+pub fn declare_nested_without_views(schema: &Schema) -> SchemaRef {
+    let fields: Vec<Field> = schema
+        .fields()
+        .iter()
+        .map(|f| match f.data_type() {
+            // Composite only — a top-level scalar keeps whatever parquet reported.
+            DataType::Struct(_) | DataType::List(_) | DataType::LargeList(_) | DataType::Map(_, _) => {
+                Field::new(f.name(), strip_views(f.data_type()), f.is_nullable())
+                    .with_metadata(f.metadata().clone())
+            }
+            _ => f.as_ref().clone(),
+        })
+        .collect();
+    Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()))
+}
+
+fn strip_views(data_type: &DataType) -> DataType {
+    match data_type {
+        DataType::Utf8View => DataType::Utf8,
+        DataType::BinaryView => DataType::Binary,
+        DataType::Struct(children) => DataType::Struct(Fields::from(
+            children
+                .iter()
+                .map(|c| strip_views_field(c))
+                .collect::<Vec<Field>>(),
+        )),
+        DataType::List(child) => DataType::List(Arc::new(strip_views_field(child))),
+        DataType::LargeList(child) => DataType::LargeList(Arc::new(strip_views_field(child))),
+        DataType::Map(child, sorted) => DataType::Map(Arc::new(strip_views_field(child)), *sorted),
+        other => other.clone(),
+    }
+}
+
+fn strip_views_field(field: &Field) -> Field {
+    Field::new(
+        field.name(),
+        strip_views(field.data_type()),
+        field.is_nullable(),
+    )
+    .with_metadata(field.metadata().clone())
+}
+
 /// Widens `registered` so it covers every field `expected` declares, as nullable.
 /// `Some(augmented)` if anything was added, `None` if `registered` already covers `expected`.
 ///
@@ -334,37 +390,42 @@ fn widen_to_cover(registered: &Field, expected: &Field) -> Option<Field> {
     }
 }
 
-/// Unions two child lists, keeping the registered children in place with their inferred types and
-/// appending the expected ones this shard never saw as nullable. `None` when nothing was added at
-/// any depth, so an unchanged column keeps its original `Field` and identity.
+/// Rebuilds `registered`'s child list to match `expected` — same members, same ORDER.
+///
+/// `DataType::Struct` equality compares the ordered field list, so identical children in a different
+/// order are different types. The two orders differ by construction and not by luck: the plan's comes
+/// from the cluster-state mapping, which OpenSearch stores sorted, while the file's is the order the
+/// writer first saw each attribute. For OpenTelemetry attributes that is immediate — two segments
+/// almost never see the same keys first.
+///
+/// So iterate `expected` and take the registered child where it exists (keeping its inferred, coerced
+/// type) or a nullable placeholder where it does not. Order then matches by construction rather than
+/// by coincidence. A child only the file has is appended after; it cannot be dropped without losing
+/// data, and in practice does not occur since the mapping is the union of every field ever seen.
+///
+/// `None` when the result is identical to `registered`, so an unchanged column keeps its original
+/// `Field` and identity.
 fn union_children(registered: &Fields, expected: &Fields) -> Option<Fields> {
-    let mut children: Vec<Field> = Vec::with_capacity(registered.len());
-    let mut changed = false;
-    for rc in registered {
-        match expected.find(rc.name()) {
-            Some((_, ec)) => match widen_to_cover(rc, ec) {
-                Some(widened) => {
-                    children.push(widened);
-                    changed = true;
-                }
-                None => children.push(rc.as_ref().clone()),
-            },
-            None => children.push(rc.as_ref().clone()),
-        }
-    }
+    let mut children: Vec<Field> = Vec::with_capacity(expected.len());
     for ec in expected {
-        if registered.find(ec.name()).is_none() {
-            children.push(
+        match registered.find(ec.name()) {
+            Some((_, rc)) => children.push(widen_to_cover(rc, ec).unwrap_or_else(|| rc.as_ref().clone())),
+            None => children.push(
                 Field::new(ec.name(), ec.data_type().clone(), true)
                     .with_metadata(ec.metadata().clone()),
-            );
-            changed = true;
+            ),
         }
     }
-    if changed == false {
+    for rc in registered {
+        if expected.find(rc.name()).is_none() {
+            children.push(rc.as_ref().clone());
+        }
+    }
+    let rebuilt = Fields::from(children);
+    if &rebuilt == registered {
         return None;
     }
-    Some(Fields::from(children))
+    Some(rebuilt)
 }
 
 #[cfg(test)]
@@ -473,6 +534,92 @@ mod tests {
     }
 
     #[test]
+    fn struct_children_are_reordered_to_the_expected_order() {
+        // Identical membership, different order. The plan's order is the mapping's (sorted); the
+        // file's is the order the writer first saw each key. `DataType::Struct` equality compares the
+        // ordered list, so this alone fails the whole column.
+        let registered = Schema::new(vec![struct_field(
+            "attributes",
+            vec![utf8("rpc"), utf8("app"), utf8("net")],
+        )]);
+        let expected = Schema::new(vec![struct_field(
+            "attributes",
+            vec![utf8("app"), utf8("net"), utf8("rpc")],
+        )]);
+
+        let merged = append_missing_nullable(&registered, &expected)
+            .expect("same children in a different order still needs rebuilding");
+        let DataType::Struct(children) = merged.field_with_name("attributes").unwrap().data_type()
+        else {
+            panic!("attributes must stay a struct");
+        };
+        assert_eq!(
+            children.iter().map(|c| c.name().as_str()).collect::<Vec<_>>(),
+            vec!["app", "net", "rpc"],
+            "children must come out in the expected schema's order"
+        );
+    }
+
+    #[test]
+    fn struct_children_are_reordered_inside_a_list_element() {
+        // Same one level deeper, which an array of objects hits as soon as two segments see event
+        // attributes in a different order.
+        let element = |children: Vec<Field>| {
+            Field::new("element", DataType::Struct(Fields::from(children)), true)
+        };
+        let list_of =
+            |children: Vec<Field>| Field::new("events", DataType::List(Arc::new(element(children))), true);
+        let registered = Schema::new(vec![list_of(vec![utf8("reason"), utf8("name")])]);
+        let expected = Schema::new(vec![list_of(vec![utf8("name"), utf8("reason")])]);
+
+        let merged = append_missing_nullable(&registered, &expected).expect("element order rebuilt");
+        let DataType::List(el) = merged.field_with_name("events").unwrap().data_type() else {
+            panic!()
+        };
+        let DataType::Struct(children) = el.data_type() else {
+            panic!()
+        };
+        assert_eq!(
+            children.iter().map(|c| c.name().as_str()).collect::<Vec<_>>(),
+            vec!["name", "reason"]
+        );
+    }
+
+    #[test]
+    fn reordering_keeps_the_registered_childs_inferred_type() {
+        // The point of taking the registered child rather than the expected one: its type is the
+        // coerced/physical one, which the plan's declaration may not match exactly.
+        let registered = Schema::new(vec![struct_field(
+            "attributes",
+            vec![
+                Field::new("count", DataType::Int64, true),
+                Field::new("name", DataType::Utf8, true),
+            ],
+        )]);
+        let expected = Schema::new(vec![struct_field(
+            "attributes",
+            vec![
+                Field::new("name", DataType::Utf8, true),
+                Field::new("count", DataType::Int64, false),
+            ],
+        )]);
+
+        let merged = append_missing_nullable(&registered, &expected).expect("reordered");
+        let DataType::Struct(children) = merged.field_with_name("attributes").unwrap().data_type()
+        else {
+            panic!()
+        };
+        assert_eq!(
+            children.iter().map(|c| c.name().as_str()).collect::<Vec<_>>(),
+            vec!["name", "count"]
+        );
+        assert!(
+            children.find("count").unwrap().1.is_nullable(),
+            "the registered child is kept as-is, not replaced by the declaration"
+        );
+    }
+
+    #[test]
     fn append_missing_returns_none_when_struct_children_already_match() {
         let registered = Schema::new(vec![struct_field(
             "attributes",
@@ -484,34 +631,99 @@ mod tests {
     }
 
     #[test]
-    fn view_rewrite_reaches_a_struct_child() {
-        // With force_view_types on, parquet emits Utf8View for a string — including one inside an
-        // object's struct. The declared schema has to be rewritten the same way at depth, or the
-        // struct's child list differs and the column never binds.
-        let declared = Schema::new(vec![struct_field(
-            "attributes",
-            vec![utf8("http"), struct_field("nested", vec![utf8("deep")])],
-        )]);
+    fn nested_views_are_declared_without_views() {
+        // The exact shape of the failure: the files report Utf8View children while the plan, which
+        // cannot express a view, declares Utf8. DataFusion's (Utf8, Utf8View) binding arm does not
+        // recurse, so one view child fails the whole column.
+        let registered = Schema::new(vec![
+            Field::new("traceId", DataType::Utf8View, true),
+            struct_field(
+                "attributes",
+                vec![
+                    Field::new("path", DataType::Utf8View, true),
+                    Field::new("name", DataType::Utf8View, true),
+                ],
+            ),
+        ]);
 
-        let physical = physical_schema_for_declaration(&declared, true);
-        let DataType::Struct(children) = physical.field_with_name("attributes").unwrap().data_type()
+        let declared = declare_nested_without_views(&registered);
+
+        let DataType::Struct(children) = declared.field_with_name("attributes").unwrap().data_type()
         else {
             panic!("attributes must stay a struct");
         };
+        assert_eq!(children.find("path").unwrap().1.data_type(), &DataType::Utf8);
+        assert_eq!(children.find("name").unwrap().1.data_type(), &DataType::Utf8);
         assert_eq!(
-            children.find("http").unwrap().1.data_type(),
+            declared.field_with_name("traceId").unwrap().data_type(),
             &DataType::Utf8View,
-            "a struct's string child becomes a view"
-        );
-        let DataType::Struct(deep) = children.find("nested").unwrap().1.data_type() else {
-            panic!("sub-object must stay a struct");
-        };
-        assert_eq!(
-            deep.find("deep").unwrap().1.data_type(),
-            &DataType::Utf8View,
-            "and so does a grandchild"
+            "a top-level scalar is left alone — it already binds through DataFusion's own arm"
         );
     }
+
+    #[test]
+    fn nested_views_are_stripped_inside_a_list_element_and_at_depth() {
+        let element = Field::new(
+            "element",
+            DataType::Struct(Fields::from(vec![
+                Field::new("name", DataType::Utf8View, true),
+                Field::new(
+                    "attributes",
+                    DataType::Struct(Fields::from(vec![Field::new(
+                        "reason",
+                        DataType::Utf8View,
+                        true,
+                    )])),
+                    true,
+                ),
+            ])),
+            true,
+        );
+        let registered = Schema::new(vec![Field::new(
+            "events",
+            DataType::List(Arc::new(element)),
+            true,
+        )]);
+
+        let declared = declare_nested_without_views(&registered);
+        let DataType::List(el) = declared.field_with_name("events").unwrap().data_type() else {
+            panic!()
+        };
+        let DataType::Struct(children) = el.data_type() else {
+            panic!()
+        };
+        assert_eq!(children.find("name").unwrap().1.data_type(), &DataType::Utf8);
+        let DataType::Struct(attrs) = children.find("attributes").unwrap().1.data_type() else {
+            panic!()
+        };
+        assert_eq!(
+            attrs.find("reason").unwrap().1.data_type(),
+            &DataType::Utf8,
+            "stripping reaches a grandchild"
+        );
+    }
+
+    #[test]
+    fn aggregate_list_state_is_untouched_by_the_shared_coercion() {
+        // coerce_inferred_schema also types aggregate List state — list(), values(), distinct-count
+        // bitmaps. Rewriting a view inside those corrupts them, which is why the view stripping lives
+        // in its own declaration-only helper and NOT here.
+        let state = Schema::new(vec![Field::new(
+            "list_state",
+            DataType::List(Arc::new(Field::new("item", DataType::Utf8View, true))),
+            true,
+        )]);
+        let coerced = coerce_inferred_schema(Arc::new(state));
+        let DataType::List(item) = coerced.field_with_name("list_state").unwrap().data_type() else {
+            panic!()
+        };
+        assert_eq!(
+            item.data_type(),
+            &DataType::Utf8View,
+            "the shared helper must not rewrite a view in aggregate state"
+        );
+    }
+
 
     fn utf8(name: &str) -> Field {
         Field::new(name, DataType::Utf8, true)
