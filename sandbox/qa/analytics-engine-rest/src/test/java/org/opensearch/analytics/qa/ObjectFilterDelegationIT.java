@@ -155,6 +155,21 @@ public class ObjectFilterDelegationIT extends AnalyticsRestTestCase {
     }
 
     /**
+     * Clears the driver preference after every test, pass or fail.
+     *
+     * <p>It is a persistent cluster setting, so leaving it set leaks into every other test class
+     * sharing the cluster — a query that expects the DataFusion driver then gets pushed at Lucene and
+     * fails with "Unexpected RexNode in Lucene-driver filter condition". Resetting at the end of the
+     * happy path is not enough: a failing assertion skips it.
+     */
+    @org.junit.After
+    public void clearDriverPreference() throws IOException {
+        Request req = new Request("PUT", "/_cluster/settings");
+        req.setJsonEntity("{\"persistent\":{\"analytics.planner.prefer_metadata_driver\": null}}");
+        client().performRequest(req);
+    }
+
+    /**
      * The discriminating case for element scoping: a conjunction over two leaves of an array of
      * objects.
      *
