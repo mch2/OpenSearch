@@ -1349,6 +1349,10 @@ scalar_functions:
             value: any1
         return: i64
 
+  # Appended at the END deliberately: a Substrait extension file assigns each declared function an
+  # anchor, and inserting a signature mid-file shifts the anchors of everything after it, so a shard
+  # resolves a different function than the coordinator sent. Adding only at the tail keeps existing
+  # anchors stable.
   # TODO(native-array_any_match): remove this signature once we add get_field + array_any_match HOF signatures.
   - name: "nested_any_match"
     description: >-
@@ -1377,7 +1381,4 @@ scalar_functions:
             name: "array"
           - value: "string"
             name: "path_json"
-        # substrait-java's type parser rejects a nullable `?` on a compound `list<…>` type
-        # (a simple `boolean?` is fine); the analyzer recomputes the real ARRAY<leaf> type at
-        # rewrite time, so a non-nullable list here is only a placeholder signature.
         return: "list<any1>"
