@@ -470,7 +470,11 @@ public class CompositeDynamicMappingIT extends OpenSearchIntegTestCase {
         // Each element carries every declared field, with a null where that element had none — the
         // distinction a per-leaf list cannot draw. (This reader renders nulls explicitly; the query
         // layer omits them, matching how _source renders an object.)
-        assertEquals("bar belongs to element 0 and baz to element 1", List.of(element("bar", 1, "baz", null), element("bar", null, "baz", 2)), rows.get(0).get("events"));
+        assertEquals(
+            "bar belongs to element 0 and baz to element 1",
+            List.of(element("bar", 1, "baz", null), element("bar", null, "baz", 2)),
+            rows.get(0).get("events")
+        );
     }
 
     /**
@@ -494,11 +498,7 @@ public class CompositeDynamicMappingIT extends OpenSearchIntegTestCase {
 
         List<Map<String, Object>> rows = refreshFlushAndReadParquetRows(indexName);
         assertEquals(1, rows.size());
-        assertEquals(
-            "two elements, each with its own name",
-            List.of(Map.of("name", 1), Map.of("name", 2)),
-            rows.get(0).get("events")
-        );
+        assertEquals("two elements, each with its own name", List.of(Map.of("name", 1), Map.of("name", 2)), rows.get(0).get("events"));
     }
 
     /** Shape A: the leaf itself is the array. Detected at creation, since the value is literally one. */
@@ -1275,9 +1275,6 @@ public class CompositeDynamicMappingIT extends OpenSearchIntegTestCase {
         return ((Map<String, Object>) object).get(leafName);
     }
 
-
-
-
     /**
      * The cluster-state mapping block for an object field itself, as opposed to
      * {@link #nestedFieldMapping} which returns its {@code properties}.
@@ -1286,7 +1283,6 @@ public class CompositeDynamicMappingIT extends OpenSearchIntegTestCase {
     private Map<String, Object> objectFieldMapping(String indexName, String objectFieldName) {
         return (Map<String, Object>) clusterStateProperties(indexName).get(objectFieldName);
     }
-
 
     /** One rendered element of an array of objects; a field the element omitted is present and null. */
     private Map<String, Object> element(String firstKey, Object firstValue, String secondKey, Object secondValue) {

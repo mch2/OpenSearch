@@ -242,13 +242,7 @@ public final class ArrowSchemaBuilder {
                 KeywordFieldMapper.KeywordFieldType rawValueField = keywordFieldMapper.getRawValueFieldType();
                 // The raw-value companion holds the pre-normalization source for derived source, so
                 // it must mirror the parent's cardinality or source reconstruction would lose values.
-                place(
-                    rawValueField.name(),
-                    parquetField.toArrowField(rawValueField.name(), multiValue),
-                    objects,
-                    objectChildren,
-                    topLevel
-                );
+                place(rawValueField.name(), parquetField.toArrowField(rawValueField.name(), multiValue), objects, objectChildren, topLevel);
             }
         }
     }

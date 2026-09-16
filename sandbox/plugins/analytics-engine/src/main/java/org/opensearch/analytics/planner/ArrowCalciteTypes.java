@@ -20,8 +20,6 @@ import org.apache.calcite.sql.type.SqlTypeName;
 import java.util.ArrayList;
 import java.util.List;
 
-import java.util.List;
-
 /**
  * Bidirectional Arrow ↔ Calcite type converter for single types.
  *

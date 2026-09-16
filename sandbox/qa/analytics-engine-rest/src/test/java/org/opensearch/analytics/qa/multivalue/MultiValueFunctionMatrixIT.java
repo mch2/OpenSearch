@@ -17,7 +17,6 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.LinkedHashMap;
@@ -407,7 +406,7 @@ public class MultiValueFunctionMatrixIT extends AnalyticsRestTestCase {
     private static void write(String fileName, String content) {
         try {
             String buildDir = System.getProperty("tests.gradle.buildDir", "build");
-            Path path = Paths.get(buildDir).resolve(fileName);
+            Path path = org.opensearch.common.io.PathUtils.get(buildDir).resolve(fileName);
             Files.createDirectories(path.getParent());
             Files.writeString(path, content);
             logger.info("wrote {}", path.toAbsolutePath());

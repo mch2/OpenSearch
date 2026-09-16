@@ -162,7 +162,9 @@ public final class ArrowValues {
         // so a key an element omitted would come back as "" instead of being absent. structToMap
         // consults isNull directly, which also keeps an element's rendering identical to how the same
         // object renders outside an array.
-        if (vector instanceof ListVector lv && vector instanceof MapVector == false && lv.getDataVector() instanceof StructVector elements) {
+        if (vector instanceof ListVector lv
+            && vector instanceof MapVector == false
+            && lv.getDataVector() instanceof StructVector elements) {
             if (vector.isNull(index)) {
                 return null;
             }

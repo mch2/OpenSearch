@@ -148,10 +148,7 @@ public final class MultiValueGroupKeyExpander {
             // Right arm: Uncollect over a one-row Values projecting the correlated LIST column —
             // byte-for-byte the shape the frontend builds for `mvexpand <field>`.
             LogicalValues singleRow = (LogicalValues) relBuilder.values(new String[] { "ZERO" }, 0).build();
-            RexNode correlatedList = rexBuilder.makeFieldAccess(
-                rexBuilder.makeCorrel(inputRowType, correlationId),
-                fieldIndex
-            );
+            RexNode correlatedList = rexBuilder.makeFieldAccess(rexBuilder.makeCorrel(inputRowType, correlationId), fieldIndex);
             RelNode listProject = LogicalProject.create(
                 singleRow,
                 List.of(),
@@ -174,13 +171,7 @@ public final class MultiValueGroupKeyExpander {
                 RelDataType type = correlate.getRowType().getFieldList().get(i == fieldIndex ? uncollectedIndex : i).getType();
                 projects.add(rexBuilder.makeInputRef(type, i == fieldIndex ? uncollectedIndex : i));
             }
-            RelNode restored = LogicalProject.create(
-                correlate,
-                List.of(),
-                projects,
-                inputRowType.getFieldNames(),
-                java.util.Set.of()
-            );
+            RelNode restored = LogicalProject.create(correlate, List.of(), projects, inputRowType.getFieldNames(), java.util.Set.of());
             if (LOGGER.isDebugEnabled()) {
                 LOGGER.debug("Expanded multi-value group key [{}]:\n{}", listField.getName(), RelOptUtil.toString(restored));
             }
