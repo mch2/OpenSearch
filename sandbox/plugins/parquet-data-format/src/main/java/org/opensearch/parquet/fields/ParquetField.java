@@ -122,6 +122,48 @@ public abstract class ParquetField {
     }
 
     /**
+     * Writes one leaf of an array of objects: the value each element supplied, positioned by element.
+     *
+     * <p>The leaf lives inside the list's element struct, so it is written at {@code start + ordinal}
+     * rather than at the row index. An element that omitted this leaf holds a null there — the list's
+     * own offsets say the element exists, so the null means "this element had no such field" and not
+     * "there is no such element".
+     *
+     * @param fieldType the mapped field type
+     * @param managedVSR the managed vector schema root
+     * @param elementValues one entry per element, null where the element omitted the leaf
+     * @param start offset of element 0, from {@link ManagedVSR#startObjectArray}
+     */
+    public final void createElementField(
+        MappedFieldType fieldType,
+        ManagedVSR managedVSR,
+        java.util.List<Object> elementValues,
+        int start,
+        int elementCount
+    ) {
+        FieldVector vector = managedVSR.getVector(fieldType.name());
+        if (vector == null) {
+            throw new IllegalStateException("No vector for array-of-objects leaf [" + fieldType.name() + "]");
+        }
+        // Every slot in the run is written, not just the ones a value landed in. A leaf only the
+        // first element carried still has to be explicitly null for the rest: a variable-width vector
+        // reads a skipped slot off the previous offset and yields an empty value rather than a null.
+        for (int i = 0; i < elementCount; i++) {
+            Object value = i < elementValues.size() ? elementValues.get(i) : null;
+            // A leaf declared multi_value inside an array of objects is a list per element, so each
+            // element gets its own list cell — a scalar the document supplied becomes a singleton,
+            // exactly as it does for a multi_value leaf outside an array.
+            if (vector instanceof ListVector elementList) {
+                writeListAt(elementList, start + i, value);
+            } else if (value == null) {
+                vector.setNull(start + i);
+            } else {
+                addToVector(vector, start + i, value);
+            }
+        }
+    }
+
+    /**
      * Writes all values collected for one document into a list column at the current row.
      * <p>
      * A null {@code parseValue} is written as a null list, which is how an absent field is
@@ -129,13 +171,22 @@ public abstract class ParquetField {
      * distinction between {@code "tags": []} and no {@code tags} at all.
      */
     private void writeList(MappedFieldType fieldType, ManagedVSR managedVSR, ListVector listVector, Object parseValue) {
-        int row = managedVSR.getRowCount();
+        writeListAt(listVector, managedVSR.getRowCount(), parseValue);
+    }
+
+    /**
+     * Writes one list cell at {@code index}.
+     *
+     * <p>Split out from {@link #writeList} because a multi-valued leaf inside an array of objects is
+     * a list per element, so the cell index is the element's offset rather than the row.
+     */
+    private void writeListAt(ListVector listVector, int index, Object parseValue) {
         if (parseValue == null) {
-            listVector.setNull(row);
+            listVector.setNull(index);
             return;
         }
         List<?> values = parseValue instanceof List<?> list ? list : List.of(parseValue);
-        int start = listVector.startNewValue(row);
+        int start = listVector.startNewValue(index);
         FieldVector dataVector = listVector.getDataVector();
         for (int i = 0; i < values.size(); i++) {
             Object value = values.get(i);
@@ -145,7 +196,7 @@ public abstract class ParquetField {
                 addToVector(dataVector, start + i, value);
             }
         }
-        listVector.endValue(row, values.size());
+        listVector.endValue(index, values.size());
     }
 
     /**

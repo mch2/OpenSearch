@@ -14,6 +14,7 @@ import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.complex.ListVector;
 import org.apache.arrow.vector.complex.StructVector;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.Schema;
@@ -25,6 +26,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -53,6 +55,9 @@ public class ManagedVSR implements AutoCloseable {
     private final BufferAllocator allocator;
     private final AtomicReference<VSRState> state = new AtomicReference<>(VSRState.ACTIVE);
     private final Map<String, Leaf> fields = new HashMap<>();
+
+    /** Array-valued objects by dotted path, each stored as a {@code LIST<STRUCT>}. */
+    private final Map<String, ListVector> objectArrays = new HashMap<>();
 
     /**
      * A writable column, addressed by its full dotted name.
@@ -85,12 +90,25 @@ public class ManagedVSR implements AutoCloseable {
     /** Rebuilds the dotted-name index over the current vectors. */
     private void indexAll() {
         fields.clear();
+        objectArrays.clear();
         for (Field field : vsr.getSchema().getFields()) {
             index(field.getName(), vsr.getVector(field), List.of());
         }
     }
 
-    /** Indexes {@code vector} under {@code path}, descending into a struct's children. */
+    /**
+     * Indexes {@code vector} under {@code path}, descending into a struct's children and through a
+     * {@code LIST<STRUCT>}.
+     *
+     * <p>An array of objects is a list whose element is a struct, so its leaves live two levels down
+     * ({@code events.list.element.name} on disk) but are still addressed by the dotted mapping name
+     * ({@code events.name}) — the list and element levels are storage detail, not part of the name.
+     * The list itself is recorded so a write can start and end one element run per row, and it is
+     * <em>not</em> added to {@code enclosing}: presence of an element is carried by the list's
+     * offsets, not by a struct validity bit.
+     *
+     * <p>A list of scalars stays a leaf: the whole list is one value of one field.
+     */
     private void index(String path, FieldVector vector, List<StructVector> enclosing) {
         if (vector instanceof StructVector struct) {
             List<StructVector> childEnclosing = new ArrayList<>(enclosing);
@@ -100,7 +118,106 @@ public class ManagedVSR implements AutoCloseable {
             }
             return;
         }
+        if (vector instanceof ListVector list && list.getDataVector() instanceof StructVector element) {
+            objectArrays.put(path, list);
+            for (FieldVector child : element.getChildrenFromFields()) {
+                index(path + "." + child.getName(), child, enclosing);
+            }
+            return;
+        }
         fields.put(path, new Leaf(vector, enclosing));
+    }
+
+    /**
+     * Returns the {@code LIST<STRUCT>} vector an array-valued object is stored in, or null when
+     * {@code objectPath} is not one.
+     */
+    public ListVector getObjectArray(String objectPath) {
+        return objectArrays.get(objectPath);
+    }
+
+    /**
+     * Opens one element run for an array-valued object at {@code rowIndex} and returns the offset its
+     * elements start at.
+     *
+     * <p>Every element is marked present up front: an element exists because the document supplied
+     * it, independent of whether any particular leaf inside it did. A leaf the element omitted stays
+     * null within a present element, which is exactly the distinction a per-leaf list cannot make.
+     *
+     * @param objectPath dotted path of the array-valued object
+     * @param rowIndex the row being written
+     * @param elementCount number of elements the document supplied
+     * @return the offset of element 0 in the element struct
+     */
+    public int startObjectArray(String objectPath, int rowIndex, int elementCount) {
+        ListVector list = objectArrays.get(objectPath);
+        if (list == null) {
+            throw new IllegalStateException("No array-valued object vector for [" + objectPath + "]");
+        }
+        int start = list.startNewValue(rowIndex);
+        StructVector element = (StructVector) list.getDataVector();
+        for (int i = 0; i < elementCount; i++) {
+            element.setIndexDefined(start + i);
+        }
+        return start;
+    }
+
+    /**
+     * Nulls every leaf of an element run that this document wrote nothing into.
+     *
+     * <p>A leaf no element carried gets no write at all, and an untouched slot in a variable-width
+     * vector reads off the previous offset as a valid empty value rather than a null — so
+     * {@code {"name":"x"}} would come back with every other attribute as {@code ""}. Called after the
+     * document's own leaves are written, so each of these vectors is untouched for the run and the
+     * nulls go in ascending index order.
+     *
+     * @param objectPath dotted path of the array-valued object
+     * @param start offset of element 0
+     * @param elementCount number of elements in the run
+     * @param written dotted paths this document already wrote
+     */
+    public void nullUnwrittenElementLeaves(String objectPath, int start, int elementCount, Set<String> written) {
+        String prefix = objectPath + ".";
+        for (Map.Entry<String, Leaf> entry : fields.entrySet()) {
+            if (entry.getKey().startsWith(prefix) == false || written.contains(entry.getKey())) {
+                continue;
+            }
+            FieldVector vector = entry.getValue().vector();
+            for (int i = 0; i < elementCount; i++) {
+                vector.setNull(start + i);
+            }
+        }
+    }
+
+    /** Closes the element run opened by {@link #startObjectArray}. */
+    public void endObjectArray(String objectPath, int rowIndex, int elementCount) {
+        ListVector list = objectArrays.get(objectPath);
+        if (list == null) {
+            throw new IllegalStateException("No array-valued object vector for [" + objectPath + "]");
+        }
+        list.endValue(rowIndex, elementCount);
+    }
+
+    /** Writes a null list for an array-valued object the document did not carry. */
+    public void setObjectArrayNull(String objectPath, int rowIndex) {
+        ListVector list = objectArrays.get(objectPath);
+        if (list != null) {
+            list.setNull(rowIndex);
+        }
+    }
+
+    /**
+     * Returns the path of the innermost array-valued object enclosing {@code leafPath}, or null when
+     * the leaf does not sit inside one.
+     */
+    public String enclosingObjectArray(String leafPath) {
+        for (int dot = leafPath.lastIndexOf('.'); dot > 0; dot = leafPath.lastIndexOf('.', dot - 1)) {
+            String candidate = leafPath.substring(0, dot);
+            if (objectArrays.containsKey(candidate)) {
+                return candidate;
+            }
+        }
+        return null;
     }
 
     /** Returns the current row count. */

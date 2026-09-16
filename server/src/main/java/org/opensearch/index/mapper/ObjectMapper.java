@@ -82,6 +82,7 @@ public class ObjectMapper extends Mapper implements Cloneable {
         public static final Nested NESTED = Nested.NO;
         public static final Dynamic DYNAMIC = null; // not set, inherited from root
         public static final Explicit<Boolean> DISABLE_OBJECTS = new Explicit<>(false, false);
+        public static final Explicit<Boolean> MULTI_VALUE = new Explicit<>(false, false);
     }
 
     /**
@@ -205,6 +206,8 @@ public class ObjectMapper extends Mapper implements Cloneable {
 
         protected Explicit<Boolean> disableObjects = Defaults.DISABLE_OBJECTS;
 
+        protected Explicit<Boolean> multiValue = Defaults.MULTI_VALUE;
+
         protected final List<Mapper.Builder> mappersBuilders = new ArrayList<>();
 
         public Builder(String name) {
@@ -229,6 +232,18 @@ public class ObjectMapper extends Mapper implements Cloneable {
 
         public T disableObjects(boolean disableObjects) {
             this.disableObjects = new Explicit<>(disableObjects, true);
+            return builder;
+        }
+
+        /**
+         * Declares that documents carry an array of this object rather than a single one.
+         *
+         * <p>Lucene does not care — it flattens either shape — but a columnar format has to fix the
+         * column's type when the field is created, and an array of objects is a different type from
+         * one object: {@code LIST<STRUCT<..>>} rather than {@code STRUCT<..>}.
+         */
+        public T multiValue(boolean multiValue) {
+            this.multiValue = new Explicit<>(multiValue, true);
             return builder;
         }
 
@@ -262,6 +277,9 @@ public class ObjectMapper extends Mapper implements Cloneable {
                 mappers,
                 context.indexSettings()
             );
+            // Assigned after construction rather than threaded through createMapper, which has a
+            // deprecated overload and a fixed parameter order that subclasses build on.
+            objectMapper.multiValue = multiValue;
 
             // Validate flat field compatibility during build
             if (Boolean.TRUE.equals(disableObjects.value())) {
@@ -383,6 +401,9 @@ public class ObjectMapper extends Mapper implements Cloneable {
                         e
                     );
                 }
+                return true;
+            } else if (fieldName.equals("multi_value")) {
+                builder.multiValue(XContentMapValues.nodeBooleanValue(fieldNode, fieldName + ".multi_value"));
                 return true;
             } else if (fieldName.equals("derived")) {
                 if (fieldNode instanceof Collection && ((Collection) fieldNode).isEmpty()) {
@@ -698,6 +719,13 @@ public class ObjectMapper extends Mapper implements Cloneable {
 
     private Explicit<Boolean> disableObjects;
 
+    /**
+     * Whether documents carry an array of this object rather than a single one. Set after
+     * construction by {@link Builder#build}, and defaulted here so every other construction path
+     * (clone, the deprecated createMapper overload) starts out single-valued.
+     */
+    private Explicit<Boolean> multiValue = Defaults.MULTI_VALUE;
+
     private volatile CopyOnWriteHashMap<String, Mapper> mappers;
 
     ObjectMapper(
@@ -811,6 +839,26 @@ public class ObjectMapper extends Mapper implements Cloneable {
         return disableObjects;
     }
 
+    /** Whether documents carry an array of this object rather than a single one. */
+    public boolean multiValue() {
+        return multiValue.value();
+    }
+
+    public Explicit<Boolean> multiValueExplicit() {
+        return multiValue;
+    }
+
+    /**
+     * Declares this object array-valued.
+     *
+     * <p>Called from the document parser when a document presents an array of objects for a field
+     * mapped as a plain {@code object}: a columnar format fixes the column's type when the field is
+     * created, so the shape has to be recorded on the mapper rather than discovered per document.
+     */
+    public void setMultiValue() {
+        this.multiValue = new Explicit<>(true, true);
+    }
+
     /**
      * Returns the parent {@link ObjectMapper} instance of the specified object mapper or <code>null</code> if there
      * isn't any.
@@ -878,6 +926,9 @@ public class ObjectMapper extends Mapper implements Cloneable {
             if (mergeWith.disableObjectsExplicit().explicit()) {
                 this.disableObjects = mergeWith.disableObjectsExplicit();
             }
+            if (mergeWith.multiValueExplicit().explicit()) {
+                this.multiValue = mergeWith.multiValueExplicit();
+            }
         } else {
             if (isEnabled() != mergeWith.isEnabled()) {
                 throw new MapperException("the [enabled] parameter can't be updated for the object mapping [" + name() + "]");
@@ -885,6 +936,19 @@ public class ObjectMapper extends Mapper implements Cloneable {
             // Validate disable_objects immutability (except for MAPPING_RECOVERY)
             if (reason != MergeReason.MAPPING_RECOVERY) {
                 validateDisableObjectsImmutability(mergeWith, reason);
+            }
+            // A single-valued object promotes to array-valued when a document first presents an
+            // array, which is how detection reaches the cluster state. The reverse is refused: the
+            // column's type is already fixed in every segment written so far.
+            if (mergeWith.multiValueExplicit().explicit()) {
+                if (this.multiValue() && mergeWith.multiValue() == false) {
+                    throw new MapperException(
+                        "Cannot update parameter [multi_value] from [true] to [false] for object mapping ["
+                            + name()
+                            + "]; the stored column is already an array of objects"
+                    );
+                }
+                this.multiValue = mergeWith.multiValueExplicit();
             }
         }
 
@@ -1016,6 +1080,9 @@ public class ObjectMapper extends Mapper implements Cloneable {
         }
         if (disableObjectsExplicit().explicit()) {
             builder.field("disable_objects", disableObjects.value());
+        }
+        if (multiValueExplicit().explicit()) {
+            builder.field("multi_value", multiValue.value());
         }
 
         if (custom != null) {

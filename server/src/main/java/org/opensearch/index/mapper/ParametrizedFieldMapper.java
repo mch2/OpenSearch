@@ -196,6 +196,12 @@ public abstract class ParametrizedFieldMapper extends FieldMapper {
      */
     protected final void addFieldForPluggableFormat(ParseContext context, Object value) {
         MappedFieldType fieldType = fieldType();
+        // Inside an array of objects the same leaf legitimately appears once per element, and the
+        // ordinal is what keeps those occurrences apart, so the single-value guard does not apply.
+        if (context.isWithinObjectArrayElement()) {
+            context.documentInput().addField(fieldType, value, context.currentFieldArrayElement());
+            return;
+        }
         if (fieldType.isMultiValued() == false && context.documentInput().getFieldCount(fieldType.name()) > 0) {
             throw new MapperParsingException(
                 "Field ["

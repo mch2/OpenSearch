@@ -288,7 +288,7 @@ public class CompositeDynamicMappingIT extends OpenSearchIntegTestCase {
 
         List<Map<String, Object>> rows = refreshFlushAndReadParquetRows(indexName);
         assertEquals(2, rows.size());
-        assertTrue(rows.stream().allMatch(row -> isListColumnPlaceholder(row.get("tags"))));
+        assertTrue(rows.stream().allMatch(row -> isListColumn(row.get("tags"))));
     }
 
     // ══════════════════════════════════════════════════════════════════════
@@ -315,7 +315,7 @@ public class CompositeDynamicMappingIT extends OpenSearchIntegTestCase {
 
         List<Map<String, Object>> rows = refreshFlushAndReadParquetRows(indexName);
         assertEquals(1, rows.size());
-        assertTrue("physical Parquet column must be a LIST", isListColumnPlaceholder(rows.get(0).get("codes")));
+        assertTrue("physical Parquet column must be a LIST", isListColumn(rows.get(0).get("codes")));
     }
 
     /** A scalar on an unmapped field leaves it single-valued, so the column stays primitive. */
@@ -328,7 +328,7 @@ public class CompositeDynamicMappingIT extends OpenSearchIntegTestCase {
         assertFalse(clusterStateFieldMapping(indexName, "code").containsKey("multi_value"));
         List<Map<String, Object>> rows = refreshFlushAndReadParquetRows(indexName);
         assertEquals(1, rows.size());
-        assertFalse(isListColumnPlaceholder(rows.get(0).get("code")));
+        assertFalse(isListColumn(rows.get(0).get("code")));
     }
 
     /**
@@ -361,7 +361,7 @@ public class CompositeDynamicMappingIT extends OpenSearchIntegTestCase {
 
         List<Map<String, Object>> rows = refreshFlushAndReadParquetRows(indexName);
         assertEquals(2, rows.size());
-        assertTrue(rows.stream().allMatch(row -> isListColumnPlaceholder(row.get("codes"))));
+        assertTrue(rows.stream().allMatch(row -> isListColumn(row.get("codes"))));
     }
 
     /**
@@ -401,7 +401,7 @@ public class CompositeDynamicMappingIT extends OpenSearchIntegTestCase {
 
         List<Map<String, Object>> rows = refreshFlushAndReadParquetRows(indexName);
         assertEquals(1, rows.size());
-        assertTrue(isListColumnPlaceholder(objectLeaf(rows.get(0), "attributes", "tags")));
+        assertTrue(isListColumn(objectLeaf(rows.get(0), "attributes", "tags")));
         assertEquals("node-1", objectLeaf(rows.get(0), "attributes", "host"));
     }
 
@@ -425,7 +425,7 @@ public class CompositeDynamicMappingIT extends OpenSearchIntegTestCase {
         List<Map<String, Object>> rows = refreshFlushAndReadParquetRows(indexName);
         assertEquals(1, rows.size());
         for (String field : List.of("counts", "ratios", "flags")) {
-            assertTrue(field + " should be a LIST column", isListColumnPlaceholder(rows.get(0).get(field)));
+            assertTrue(field + " should be a LIST column", isListColumn(rows.get(0).get(field)));
         }
     }
 
@@ -455,9 +455,22 @@ public class CompositeDynamicMappingIT extends OpenSearchIntegTestCase {
             client().prepareIndex(indexName).setSource("events", List.of(Map.of("bar", 1), Map.of("baz", 2))).get().status()
         );
 
+        // The array-ness belongs to the object, not to its leaves: `events` is one LIST<STRUCT<..>>
+        // whose elements keep their own fields together. Marking each leaf instead would store two
+        // unrelated lists and lose which element `bar` and `baz` came from.
+        Map<String, Object> eventsField = objectFieldMapping(indexName, "events");
+        assertEquals("the object is array-valued", Boolean.TRUE, eventsField.get("multi_value"));
+
         Map<String, Object> events = nestedFieldMapping(indexName, "events");
-        assertEquals(Boolean.TRUE, fieldOf(events, "bar").get("multi_value"));
-        assertEquals(Boolean.TRUE, fieldOf(events, "baz").get("multi_value"));
+        assertFalse("a leaf inside an element is a scalar", fieldOf(events, "bar").containsKey("multi_value"));
+        assertFalse(fieldOf(events, "baz").containsKey("multi_value"));
+
+        List<Map<String, Object>> rows = refreshFlushAndReadParquetRows(indexName);
+        assertEquals(1, rows.size());
+        // Each element carries every declared field, with a null where that element had none — the
+        // distinction a per-leaf list cannot draw. (This reader renders nulls explicitly; the query
+        // layer omits them, matching how _source renders an object.)
+        assertEquals("bar belongs to element 0 and baz to element 1", List.of(element("bar", 1, "baz", null), element("bar", null, "baz", 2)), rows.get(0).get("events"));
     }
 
     /**
@@ -476,16 +489,16 @@ public class CompositeDynamicMappingIT extends OpenSearchIntegTestCase {
             client().prepareIndex(indexName).setSource("events", List.of(Map.of("name", 1), Map.of("name", 2))).get().status()
         );
 
-        Map<String, Object> events = nestedFieldMapping(indexName, "events");
-        assertEquals(
-            "the two objects' name values belong to one multi-valued field",
-            Boolean.TRUE,
-            fieldOf(events, "name").get("multi_value")
-        );
+        Map<String, Object> eventsField = objectFieldMapping(indexName, "events");
+        assertEquals("the object is array-valued", Boolean.TRUE, eventsField.get("multi_value"));
 
         List<Map<String, Object>> rows = refreshFlushAndReadParquetRows(indexName);
         assertEquals(1, rows.size());
-        assertTrue(isListColumnPlaceholder(objectLeaf(rows.get(0), "events", "name")));
+        assertEquals(
+            "two elements, each with its own name",
+            List.of(Map.of("name", 1), Map.of("name", 2)),
+            rows.get(0).get("events")
+        );
     }
 
     /** Shape A: the leaf itself is the array. Detected at creation, since the value is literally one. */
@@ -501,9 +514,10 @@ public class CompositeDynamicMappingIT extends OpenSearchIntegTestCase {
         Map<String, Object> events = nestedFieldMapping(indexName, "events");
         assertEquals(Boolean.TRUE, fieldOf(events, "name").get("multi_value"));
 
+        // A single object whose leaf carried an array: `events` stays one struct, `name` is the list.
         List<Map<String, Object>> rows = refreshFlushAndReadParquetRows(indexName);
         assertEquals(1, rows.size());
-        assertTrue(isListColumnPlaceholder(objectLeaf(rows.get(0), "events", "name")));
+        assertEquals(Map.of("name", List.of(1, 2)), rows.get(0).get("events"));
     }
 
     /** Declaring the shape up front works too, and is what a template would do. */
@@ -527,7 +541,10 @@ public class CompositeDynamicMappingIT extends OpenSearchIntegTestCase {
 
         List<Map<String, Object>> rows = refreshFlushAndReadParquetRows(indexName);
         assertEquals(1, rows.size());
-        assertTrue(isListColumnPlaceholder(objectLeaf(rows.get(0), "events", "name")));
+        // `name` is declared multi_value, so it is a list *within each element*: the array-ness of
+        // `events` and of `name` are independent, and the scalar each element supplied becomes a
+        // singleton list just as it would outside an array.
+        assertEquals(List.of(Map.of("name", List.of(1)), Map.of("name", List.of(2))), rows.get(0).get("events"));
     }
 
     /** A single object is not an array, so its leaves stay single-valued. */
@@ -595,7 +612,7 @@ public class CompositeDynamicMappingIT extends OpenSearchIntegTestCase {
                 }
                 continue;
             }
-            if (isListColumnPlaceholder(column) == false) {
+            if (isListColumn(column) == false) {
                 unwired.add(type + " (column is not a LIST: " + column + ")");
             }
         }
@@ -701,8 +718,8 @@ public class CompositeDynamicMappingIT extends OpenSearchIntegTestCase {
         List<Map<String, Object>> rows = refreshFlushAndReadParquetRows(indexName);
         assertEquals(1, rows.size());
         Map<String, Object> row = rows.get(0);
-        assertTrue(isListColumnPlaceholder(objectLeaf(row, "attributes", "http@request@header@accept")));
-        assertTrue(isListColumnPlaceholder(objectLeaf(row, "attributes", "process@command_args")));
+        assertTrue(isListColumn(objectLeaf(row, "attributes", "http@request@header@accept")));
+        assertTrue(isListColumn(objectLeaf(row, "attributes", "process@command_args")));
         assertEquals(200L, ((Number) objectLeaf(row, "attributes", "http@response@status_code")).longValue());
         assertEquals("/cart", objectLeaf(row, "attributes", "http@route"));
         assertEquals("0af7651916cd43dd8448eb211c80319c", row.get("traceId"));
@@ -772,8 +789,14 @@ public class CompositeDynamicMappingIT extends OpenSearchIntegTestCase {
      * nested columns. Matching it verifies that the physical Parquet column is LIST; element-value
      * preservation is covered by the lower-level VSR and ParquetDocumentInput tests.
      */
-    private boolean isListColumnPlaceholder(Object value) {
-        return value instanceof String text && text.startsWith("<unsupported:List(");
+    /**
+     * True when the column read back as a Parquet LIST.
+     *
+     * <p>A list renders as a JSON array now that the reader descends into one, so this is a shape
+     * check only — a test that cares about the values should assert on them directly.
+     */
+    private boolean isListColumn(Object value) {
+        return value instanceof List<?>;
     }
 
     @SuppressWarnings("unchecked")
@@ -1250,6 +1273,27 @@ public class CompositeDynamicMappingIT extends OpenSearchIntegTestCase {
         Object object = row.get(objectName);
         assertTrue(objectName + " should read back as a nested object, was: " + object, object instanceof Map);
         return ((Map<String, Object>) object).get(leafName);
+    }
+
+
+
+
+    /**
+     * The cluster-state mapping block for an object field itself, as opposed to
+     * {@link #nestedFieldMapping} which returns its {@code properties}.
+     */
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> objectFieldMapping(String indexName, String objectFieldName) {
+        return (Map<String, Object>) clusterStateProperties(indexName).get(objectFieldName);
+    }
+
+
+    /** One rendered element of an array of objects; a field the element omitted is present and null. */
+    private Map<String, Object> element(String firstKey, Object firstValue, String secondKey, Object secondValue) {
+        Map<String, Object> element = new HashMap<>();
+        element.put(firstKey, firstValue);
+        element.put(secondKey, secondValue);
+        return element;
     }
 
 }

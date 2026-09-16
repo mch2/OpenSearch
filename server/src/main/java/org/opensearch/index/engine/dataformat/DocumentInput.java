@@ -40,6 +40,38 @@ public interface DocumentInput<T> extends AutoCloseable {
     void addField(MappedFieldType fieldType, Object value);
 
     /**
+     * Adds a field that belongs to one element of an array of objects.
+     *
+     * <p>Row-oriented formats do not care which element a value came from — Lucene flattens the
+     * array either way — but a columnar format that stores the array as {@code LIST<STRUCT<..>>}
+     * does: two sibling leaves are the same element only if they share an ordinal, and an element
+     * that omitted a leaf has to become a null inside that element rather than a shortened list.
+     * Without the ordinal, {@code [{"name":"a"},{"name":"b","time":2}]} and
+     * {@code [{"name":"a","time":2},{"name":"b"}]} are indistinguishable.
+     *
+     * <p>Defaults to dropping the ordinal, so a format that flattens is unaffected.
+     *
+     * @param fieldType the mapped field type
+     * @param value the field value
+     * @param elementOrdinal zero-based index of the enclosing array element
+     */
+    default void addField(MappedFieldType fieldType, Object value, int elementOrdinal) {
+        addField(fieldType, value);
+    }
+
+    /**
+     * Records that an object arrived as an explicitly empty array ({@code "events": []}).
+     *
+     * <p>No leaf is written for such a field, so without this the column would be left null and
+     * "reported no events" would be indistinguishable from "carried no events field". A columnar
+     * format that stores the object as {@code LIST<STRUCT<..>>} writes a zero-length, non-null list
+     * instead. Formats that flatten arrays ignore it.
+     *
+     * @param objectPath dotted path of the object that arrived empty
+     */
+    default void addEmptyObjectArray(String objectPath) {}
+
+    /**
      * Adds a row ID field to the document.
      *
      * @param rowIdFieldName the name of the row ID field

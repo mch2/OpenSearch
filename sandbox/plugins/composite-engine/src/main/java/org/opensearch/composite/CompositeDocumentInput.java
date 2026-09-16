@@ -76,6 +76,43 @@ public class CompositeDocumentInput implements DocumentInput<List<? extends Docu
         }
     }
 
+    /**
+     * Forwards the element ordinal to every format.
+     *
+     * <p>Without this override the interface default would drop it here, and a format that stores an
+     * array of objects as {@code LIST<STRUCT<..>>} would see each element's leaves as unrelated
+     * repeats of the same field. Formats that flatten arrays ignore the ordinal via the same default.
+     */
+    @Override
+    public void addField(MappedFieldType fieldType, Object value, int elementOrdinal) {
+        try {
+            primaryDocumentInput.addField(fieldType, value, elementOrdinal);
+        } catch (Exception e) {
+            throw new IllegalStateException(
+                "Failed to add field [" + fieldType.name() + "] in primary format [" + primaryFormat.name() + "]",
+                e
+            );
+        }
+        for (Map.Entry<DataFormat, DocumentInput<?>> entry : secondaryDocumentInputs.entrySet()) {
+            try {
+                entry.getValue().addField(fieldType, value, elementOrdinal);
+            } catch (Exception e) {
+                throw new IllegalStateException(
+                    "Failed to add field [" + fieldType.name() + "] in secondary format [" + entry.getKey().name() + "]",
+                    e
+                );
+            }
+        }
+    }
+
+    @Override
+    public void addEmptyObjectArray(String objectPath) {
+        primaryDocumentInput.addEmptyObjectArray(objectPath);
+        for (DocumentInput<?> input : secondaryDocumentInputs.values()) {
+            input.addEmptyObjectArray(objectPath);
+        }
+    }
+
     @Override
     public void setRowId(String rowIdFieldName, long rowId) {
         primaryDocumentInput.setRowId(rowIdFieldName, rowId);

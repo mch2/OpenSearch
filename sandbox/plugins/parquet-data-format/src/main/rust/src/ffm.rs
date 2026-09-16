@@ -810,7 +810,7 @@ pub unsafe extern "C" fn parquet_free_merge_result(
 // Parquet reader (for test verification)
 // ---------------------------------------------------------------------------
 
-/// Renders one value of `array` as JSON, descending into a struct.
+/// Renders one value of `array` as JSON, descending into a struct or a list.
 ///
 /// An OpenSearch `object` is stored as a struct, so it renders as a nested JSON object and a
 /// document that did not carry the object renders as `null` — the distinction the struct's validity
@@ -869,6 +869,18 @@ fn value_to_json(array: &dyn arrow::array::Array, row_idx: usize) -> serde_json:
                 );
             }
             serde_json::Value::Object(obj)
+        }
+        arrow::datatypes::DataType::List(_) => {
+            let arr = array
+                .as_any()
+                .downcast_ref::<arrow::array::ListArray>()
+                .unwrap();
+            let element = arr.value(row_idx);
+            serde_json::Value::Array(
+                (0..element.len())
+                    .map(|i| value_to_json(element.as_ref(), i))
+                    .collect(),
+            )
         }
         other => serde_json::Value::String(format!("<unsupported:{}>", other)),
     }

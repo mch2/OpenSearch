@@ -1526,7 +1526,12 @@ final class DocumentParser {
         boolean sawElement = false;
         while ((token = parser.nextToken()) != XContentParser.Token.END_ARRAY) {
             sawElement = true;
+            context.nextFieldArrayElement();
             if (token == XContentParser.Token.START_OBJECT) {
+                // An array whose elements are objects is a different storage shape from a single
+                // object — LIST<STRUCT<..>> rather than STRUCT<..> — and only the mapper can carry
+                // that, because a columnar format fixes the column's type when the field is created.
+                declareObjectArray(context, mapper, lastFieldName, paths);
                 parseObject(context, mapper, lastFieldName, paths);
             } else if (token == XContentParser.Token.START_ARRAY) {
                 parseArray(context, mapper, lastFieldName, paths);
@@ -1567,6 +1572,30 @@ final class DocumentParser {
      * {@code multi_value} type currently is; if that ever changes, that route needs equivalent
      * empty-array handling or {@code []} would collapse to an absent field there.
      */
+    /**
+     * Records that the object at {@code lastFieldName} arrives as an array of objects.
+     *
+     * <p>Marks the {@link ObjectMapper} itself rather than its leaves. Marking the leaves — which is
+     * what falls out of treating the array as a multi-valued scalar — stores the object as
+     * {@code STRUCT<a LIST, b LIST>}, one independent list per leaf, and that cannot express which
+     * element a value came from: {@code [{"a":1},{"b":2}]} and {@code [{"a":1,"b":2}]} both collapse
+     * to {@code a=[1], b=[2]}.
+     *
+     * <p>Gated on the pluggable data format, since Lucene flattens either shape and gains nothing
+     * from the parameter. Idempotent: only the first element of an already-marked object does work.
+     */
+    private static void declareObjectArray(ParseContext context, ObjectMapper mapper, String lastFieldName, String[] paths) {
+        if (context.indexSettings().isPluggableDataFormatEnabled() == false) {
+            return;
+        }
+        context.markFieldArrayHoldsObjects();
+        Mapper resolved = getMapper(context, mapper, lastFieldName, paths);
+        if (resolved instanceof ObjectMapper objectMapper && objectMapper.multiValue() == false) {
+            objectMapper.setMultiValue();
+            context.addDynamicMapper(objectMapper);
+        }
+    }
+
     private static void registerEmptyMultiValueArray(ParseContext context, ObjectMapper mapper, String lastFieldName, String[] paths) {
         if (context.indexSettings().isPluggableDataFormatEnabled() == false) {
             return;
@@ -1574,6 +1603,13 @@ final class DocumentParser {
         Mapper leaf = getMapper(context, mapper, lastFieldName, paths);
         if (leaf instanceof FieldMapper fieldMapper && fieldMapper.fieldType().isMultiValued()) {
             context.documentInput().addField(fieldMapper.fieldType(), List.of());
+            return;
+        }
+        // The same distinction one level up: an object already known to arrive as an array reports an
+        // empty array as empty, not absent. A field seen empty before it was ever seen populated has
+        // no mapper at all, so there is nothing to record and it stays absent — as it does in vanilla.
+        if (leaf instanceof ObjectMapper objectMapper && objectMapper.multiValue()) {
+            context.documentInput().addEmptyObjectArray(objectMapper.fullPath());
         }
     }
 
@@ -1807,7 +1843,10 @@ final class DocumentParser {
             }
             return;
         }
-        if (holdsMultipleValues(context)) {
+        // Inside an array of objects the array-ness belongs to the object, not to its leaves: the
+        // column is LIST<STRUCT<..>> and each leaf is a scalar within one element. Marking the leaf
+        // as well would nest a list inside the element that the document never had.
+        if (holdsMultipleValues(context) && context.isWithinObjectArrayElement() == false) {
             declareMultiValue(builder);
         }
         final Mapper.BuilderContext builderContext = new Mapper.BuilderContext(context.indexSettings().getSettings(), context.path());

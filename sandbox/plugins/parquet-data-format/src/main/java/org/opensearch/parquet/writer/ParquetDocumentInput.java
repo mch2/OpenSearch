@@ -46,6 +46,7 @@ public class ParquetDocumentInput implements DocumentInput<List<FieldValuePair>>
     // element — degrading a multi_value field to last-value-wins or bypassing the scalar duplicate
     // guard. Name keying makes accumulation robust to that.
     private final Map<String, FieldValuePair> seen = new HashMap<>();
+    private final Set<String> emptyObjectArrays = new java.util.HashSet<>();
     private long rowId = -1;
     private boolean isClosed = false;
 
@@ -87,6 +88,52 @@ public class ParquetDocumentInput implements DocumentInput<List<FieldValuePair>>
             );
         }
         existing.addValue(value);
+    }
+
+    /**
+     * Records a leaf of one element of an array of objects, keeping its element ordinal so the
+     * writer can lay the object out as {@code LIST<STRUCT<..>>}. Repeated calls for the same field
+     * fill in successive elements; an element that omitted the leaf leaves a null at its ordinal.
+     */
+    @Override
+    public void addField(MappedFieldType fieldType, Object value, int elementOrdinal) {
+        ensureOpen();
+        if (elementOrdinal < 0) {
+            addField(fieldType, value);
+            return;
+        }
+        Set<FieldTypeCapabilities.Capability> capabilities = fieldType.getCapabilityMap()
+            .getOrDefault(ParquetDataFormatPlugin.PARQUET_DATA_FORMAT, Set.of());
+        if (capabilities.isEmpty() && fieldType != PrimaryTermFieldType.INSTANCE) {
+            logger.trace("Ignored to add field: {} {}", fieldType.name(), fieldType.getCapabilityMap());
+            return;
+        }
+        FieldValuePair existing = seen.get(fieldType.name());
+        if (existing == null) {
+            FieldValuePair pair = FieldValuePair.elementIndexed(fieldType, value, elementOrdinal);
+            seen.put(fieldType.name(), pair);
+            collectedFields.add(pair);
+            return;
+        }
+        if (existing.isElementIndexed() == false) {
+            throw new MapperParsingException(
+                "Field ["
+                    + fieldType.name()
+                    + "] was written as a plain value and then as an element of an array of objects; the two shapes cannot be mixed"
+            );
+        }
+        existing.setElementValue(value, elementOrdinal);
+    }
+
+    @Override
+    public void addEmptyObjectArray(String objectPath) {
+        ensureOpen();
+        emptyObjectArrays.add(objectPath);
+    }
+
+    /** Objects this document carried as an explicitly empty array. */
+    public Set<String> getEmptyObjectArrays() {
+        return emptyObjectArrays;
     }
 
     @Override

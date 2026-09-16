@@ -41,7 +41,11 @@ import org.opensearch.parquet.writer.ParquetDocumentInput;
 import org.opensearch.threadpool.ThreadPool;
 
 import java.io.IOException;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -225,6 +229,30 @@ public class VSRManager implements AutoCloseable {
         int writtenFields = 0;
         boolean rowIdWritten = false;
         try {
+            // An array of objects is one LIST<STRUCT> shared by every leaf beneath it, so the element
+            // run has to be opened once per object before any of its leaves are written. The element
+            // count is the widest leaf: an element that omitted the last leaf still exists.
+            Map<String, Integer> elementCounts = new HashMap<>();
+            for (FieldValuePair pair : doc.getFinalInput()) {
+                if (pair.isElementIndexed() == false) {
+                    continue;
+                }
+                String objectPath = activeVSR.enclosingObjectArray(pair.getFieldType().name());
+                if (objectPath != null) {
+                    elementCounts.merge(objectPath, pair.valueCount(), Math::max);
+                }
+            }
+            // An explicitly empty array contributes no leaf, so it needs a zero-length run of its own
+            // to come back as [] rather than null.
+            for (String emptyObject : doc.getEmptyObjectArrays()) {
+                elementCounts.putIfAbsent(emptyObject, 0);
+            }
+            Map<String, Set<String>> writtenElementLeaves = new HashMap<>();
+            Map<String, Integer> elementStarts = new HashMap<>();
+            for (Map.Entry<String, Integer> entry : elementCounts.entrySet()) {
+                elementStarts.put(entry.getKey(), activeVSR.startObjectArray(entry.getKey(), rowIndex, entry.getValue()));
+            }
+
             for (FieldValuePair pair : doc.getFinalInput()) {
                 MappedFieldType fieldType = pair.getFieldType();
                 ParquetField parquetField = ArrowFieldRegistry.getParquetField(fieldType.typeName());
@@ -251,13 +279,43 @@ public class VSRManager implements AutoCloseable {
                             + "] — schema reconciliation must run via updateMappingVersion before addDocument"
                     );
                 }
-                parquetField.createField(fieldType, activeVSR, pair.getValue());
+                String objectArray = pair.isElementIndexed() ? activeVSR.enclosingObjectArray(fieldType.name()) : null;
+                if (objectArray != null) {
+                    @SuppressWarnings("unchecked")
+                    List<Object> elementValues = (List<Object>) pair.getValue();
+                    int start = elementStarts.get(objectArray);
+                    int count = elementCounts.get(objectArray);
+                    parquetField.createElementField(fieldType, activeVSR, elementValues, start, count);
+                    // Structs below the element carry their own validity, and it is indexed by
+                    // element — not by row. Marking at the row index would mark whichever element
+                    // happens to sit there, so a later document's element loses its object.
+                    for (int i = 0; i < elementValues.size(); i++) {
+                        if (elementValues.get(i) != null) {
+                            activeVSR.markObjectsPresent(fieldType.name(), start + i);
+                        }
+                    }
+                    writtenElementLeaves.computeIfAbsent(objectArray, key -> new HashSet<>()).add(fieldType.name());
+                    writtenFields++;
+                    continue;
+                } else {
+                    parquetField.createField(fieldType, activeVSR, pair.getValue());
+                }
                 // A value inside an object only survives export if the enclosing structs are marked
                 // present for this row; an unmarked struct is a null object and its children are
                 // dropped. Done here rather than in each ParquetField because this is where the row
                 // index lives, and it is the one place every field write passes through.
                 activeVSR.markObjectsPresent(fieldType.name(), rowIndex);
                 writtenFields++;
+            }
+            for (Map.Entry<String, Integer> entry : elementCounts.entrySet()) {
+                String objectPath = entry.getKey();
+                activeVSR.nullUnwrittenElementLeaves(
+                    objectPath,
+                    elementStarts.get(objectPath),
+                    entry.getValue(),
+                    writtenElementLeaves.getOrDefault(objectPath, Set.of())
+                );
+                activeVSR.endObjectArray(objectPath, rowIndex, entry.getValue());
             }
             BigIntVector rowIdVector = (BigIntVector) activeVSR.getVector(DocumentInput.ROW_ID_FIELD);
             if (rowIdVector != null) {

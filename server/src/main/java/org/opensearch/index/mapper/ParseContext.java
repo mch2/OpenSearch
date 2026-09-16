@@ -42,9 +42,11 @@ import org.opensearch.core.xcontent.XContentParser;
 import org.opensearch.index.IndexSettings;
 import org.opensearch.index.engine.dataformat.DocumentInput;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -386,6 +388,26 @@ public abstract class ParseContext implements Iterable<ParseContext.Document> {
         }
 
         @Override
+        public void nextFieldArrayElement() {
+            in.nextFieldArrayElement();
+        }
+
+        @Override
+        public int currentFieldArrayElement() {
+            return in.currentFieldArrayElement();
+        }
+
+        @Override
+        public void markFieldArrayHoldsObjects() {
+            in.markFieldArrayHoldsObjects();
+        }
+
+        @Override
+        public boolean isWithinObjectArrayElement() {
+            return in.isWithinObjectArrayElement();
+        }
+
+        @Override
         public void checkFieldArrayDepthLimit() {
             in.checkFieldArrayDepthLimit();
         }
@@ -427,6 +449,12 @@ public abstract class ParseContext implements Iterable<ParseContext.Document> {
         private final long maxAllowedFieldDepth;
 
         private long currentArrayDepth;
+
+        /** One ordinal per open array, innermost last; see {@link #currentFieldArrayElement()}. */
+        private final Deque<Integer> arrayElementOrdinals = new ArrayDeque<>();
+
+        /** Whether each open array's elements are objects, innermost last. */
+        private final Deque<Boolean> arrayHoldsObjects = new ArrayDeque<>();
 
         private final long maxAllowedArrayDepth;
 
@@ -679,6 +707,10 @@ public abstract class ParseContext implements Iterable<ParseContext.Document> {
         @Override
         public void incrementFieldArrayDepth() {
             this.currentArrayDepth++;
+            // -1 until the first element is entered, so a leaf parsed between `[` and the first
+            // element (there is none in well-formed JSON) cannot be mistaken for element 0.
+            this.arrayElementOrdinals.push(-1);
+            this.arrayHoldsObjects.push(Boolean.FALSE);
         }
 
         @Override
@@ -686,6 +718,37 @@ public abstract class ParseContext implements Iterable<ParseContext.Document> {
             if (this.currentArrayDepth > 0) {
                 this.currentArrayDepth--;
             }
+            if (this.arrayElementOrdinals.isEmpty() == false) {
+                this.arrayElementOrdinals.pop();
+            }
+            if (this.arrayHoldsObjects.isEmpty() == false) {
+                this.arrayHoldsObjects.pop();
+            }
+        }
+
+        @Override
+        public void nextFieldArrayElement() {
+            if (this.arrayElementOrdinals.isEmpty() == false) {
+                this.arrayElementOrdinals.push(this.arrayElementOrdinals.pop() + 1);
+            }
+        }
+
+        @Override
+        public int currentFieldArrayElement() {
+            return this.arrayElementOrdinals.isEmpty() ? -1 : this.arrayElementOrdinals.peek();
+        }
+
+        @Override
+        public void markFieldArrayHoldsObjects() {
+            if (this.arrayHoldsObjects.isEmpty() == false) {
+                this.arrayHoldsObjects.pop();
+                this.arrayHoldsObjects.push(Boolean.TRUE);
+            }
+        }
+
+        @Override
+        public boolean isWithinObjectArrayElement() {
+            return this.arrayHoldsObjects.isEmpty() == false && this.arrayHoldsObjects.peek();
         }
 
         @Override
@@ -904,6 +967,31 @@ public abstract class ParseContext implements Iterable<ParseContext.Document> {
     public abstract void incrementFieldArrayDepth();
 
     public abstract void decrementFieldArrayDepth();
+
+    /**
+     * Advances to the next element of the innermost array being parsed.
+     *
+     * <p>Called once per element so that a columnar format storing an array of objects as
+     * {@code LIST<STRUCT<..>>} can tell which element a leaf value belongs to; see
+     * {@link org.opensearch.index.engine.dataformat.DocumentInput#addField(MappedFieldType, Object, int)}.
+     */
+    public abstract void nextFieldArrayElement();
+
+    /**
+     * Zero-based index of the array element being parsed, or {@code -1} when not inside an array
+     * element. Reports the innermost array's ordinal.
+     */
+    public abstract int currentFieldArrayElement();
+
+    /** Records that the innermost array being parsed has objects for elements. */
+    public abstract void markFieldArrayHoldsObjects();
+
+    /**
+     * True when the innermost enclosing array holds objects, so a leaf being parsed sits inside one
+     * of its elements. A deeper scalar array within an element reports false, since that array's
+     * own elements are values and the leaf really is multi-valued.
+     */
+    public abstract boolean isWithinObjectArrayElement();
 
     public abstract void checkFieldArrayDepthLimit();
 

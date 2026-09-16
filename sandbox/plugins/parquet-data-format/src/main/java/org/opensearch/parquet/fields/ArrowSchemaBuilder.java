@@ -191,7 +191,22 @@ public final class ArrowSchemaBuilder {
             }
             int lastDot = path.lastIndexOf('.');
             String localName = lastDot < 0 ? path : path.substring(lastDot + 1);
-            Field struct = new Field(localName, FieldType.nullable(ArrowType.Struct.INSTANCE), List.copyOf(children.values()));
+            Field struct = objects.get(path).multiValue()
+                // An array of objects is one repeated group, so every leaf beneath it shares that
+                // repetition level and stays tied to its element. Storing the leaves as independent
+                // lists instead would lose which element each value came from.
+                ? new Field(
+                    localName,
+                    FieldType.nullable(ArrowType.List.INSTANCE),
+                    List.of(
+                        new Field(
+                            ParquetField.LIST_ELEMENT_NAME,
+                            FieldType.nullable(ArrowType.Struct.INSTANCE),
+                            List.copyOf(children.values())
+                        )
+                    )
+                )
+                : new Field(localName, FieldType.nullable(ArrowType.Struct.INSTANCE), List.copyOf(children.values()));
 
             String parent = enclosingObject(path, objects);
             if (parent == null) {

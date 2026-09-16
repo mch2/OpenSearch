@@ -41,6 +41,7 @@ public class FieldValuePair {
     private final MappedFieldType fieldType;
     private Object value;
     private List<Object> values;
+    private boolean elementIndexed;
 
     /**
      * Creates a single-valued FieldValuePair.
@@ -102,6 +103,48 @@ public class FieldValuePair {
             throw new IllegalStateException("Cannot add a value to a single-valued FieldValuePair for [" + fieldType.name() + "]");
         }
         values.add(nextValue);
+    }
+
+    /**
+     * Creates a pair whose values are positioned by the array element they came from.
+     *
+     * <p>Used for a leaf inside an array of objects, where the object is stored as
+     * {@code LIST<STRUCT<..>>}. Position matters and gaps are meaningful: an element that omitted
+     * this leaf leaves a null at its ordinal, which is what keeps
+     * {@code [{"a":1},{"b":2}]} distinct from {@code [{"a":1,"b":2}]}.
+     *
+     * @param fieldType the mapped field type
+     * @param value the value seen for element {@code elementOrdinal}
+     * @param elementOrdinal zero-based index of the element that carried it
+     * @return an element-indexed pair
+     */
+    public static FieldValuePair elementIndexed(MappedFieldType fieldType, Object value, int elementOrdinal) {
+        FieldValuePair pair = new FieldValuePair(fieldType, new ArrayList<>(elementOrdinal + 1));
+        pair.elementIndexed = true;
+        pair.setElementValue(value, elementOrdinal);
+        return pair;
+    }
+
+    /**
+     * Records {@code value} as belonging to element {@code elementOrdinal}, padding any elements in
+     * between with nulls so a leaf's position always matches its element.
+     *
+     * @param value the value
+     * @param elementOrdinal zero-based index of the element that carried it
+     */
+    public void setElementValue(Object value, int elementOrdinal) {
+        if (elementIndexed == false) {
+            throw new IllegalStateException("Cannot set an element value on a non element-indexed pair for [" + fieldType.name() + "]");
+        }
+        while (values.size() <= elementOrdinal) {
+            values.add(null);
+        }
+        values.set(elementOrdinal, value);
+    }
+
+    /** Returns whether this pair's values are positioned by array element. */
+    public boolean isElementIndexed() {
+        return elementIndexed;
     }
 
     /** Returns whether this pair accumulates multiple values into a list column. */
