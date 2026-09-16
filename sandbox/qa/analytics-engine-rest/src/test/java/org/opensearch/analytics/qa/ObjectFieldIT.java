@@ -877,4 +877,96 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
         assertThat("bulk reported item errors: " + body, body, org.hamcrest.Matchers.containsString("\"errors\":false"));
     }
 
+
+
+
+    /**
+     * Reading a leaf of an array of objects, element-wise.
+     *
+     * <p>An array-valued object is declared only as {@code ARRAY<ROW<..>>}, so {@code events.name} has
+     * no scalar column to resolve against and Calcite produces {@code ITEM($events,'name')}, which
+     * {@code OpenSearchNestedFieldRewriter} turns into an element-wise projection (one array per row)
+     * or an existential filter (element-scoped). Declaring the leaf as a flat dotted column instead
+     * would let it resolve to a column that no longer exists physically, and read null.
+     */
+    public void testArrayOfObjectsLeafIsReadElementWise() throws IOException {
+        String index = "object_array_leaf_it";
+        try {
+            client().performRequest(new Request("DELETE", "/" + index));
+        } catch (Exception ignored) {}
+        Request create = new Request("PUT", "/" + index);
+        create.setJsonEntity(
+            "{\"settings\":{\"index.pluggable.dataformat.enabled\":true,"
+                + "\"index.pluggable.dataformat\":\"composite\","
+                + "\"index.composite.primary_data_format\":\"parquet\","
+                + "\"index.composite.secondary_data_formats\":[\"lucene\"],"
+                + "\"number_of_shards\":1,\"number_of_replicas\":0},"
+                + "\"mappings\":{\"properties\":{\"id\":{\"type\":\"keyword\"}}}}"
+        );
+        client().performRequest(create);
+        bulkIndex(
+            index,
+            "{\"index\":{}}\n{\"id\":\"1\",\"events\":[{\"name\":\"a\"},{\"name\":\"b\"}]}\n"
+                + "{\"index\":{}}\n{\"id\":\"2\",\"events\":[{\"name\":\"c\"}]}\n"
+        );
+
+        // One array per row, in element order — not a scalar, and not null.
+        assertRowsEqual(
+            "source=" + index + " | sort id | fields id, events.name",
+            row("1", List.of("a", "b")),
+            row("2", List.of("c"))
+        );
+        // Existential over the elements: doc 1 has an event named `a`, doc 2 does not.
+        assertRowsEqual("source=" + index + " | where events.name='a' | stats count()", row(1));
+        assertRowsEqual("source=" + index + " | where events.name='c' | stats count()", row(1));
+        assertRowsEqual("source=" + index + " | where events.name='zzz' | stats count()", row(0));
+    }
+
+
+    /**
+     * Two files whose object children were first seen in a different order.
+     *
+     * <p>{@code DataType::Struct} equality compares the ordered child list, so identical children in
+     * a different order are a different type. The plan's order comes from the cluster-state mapping,
+     * which is sorted; a file's is the order its writer first saw each key. Flushing between two
+     * documents that introduce the keys in opposite orders is what makes the two disagree — for
+     * OpenTelemetry attributes it is the normal case, not a corner.
+     */
+    public void testObjectChildrenFirstSeenInDifferentOrders() throws IOException {
+        String index = "object_order_it";
+        try {
+            client().performRequest(new Request("DELETE", "/" + index));
+        } catch (Exception ignored) {}
+        Request create = new Request("PUT", "/" + index);
+        create.setJsonEntity(
+            "{\"settings\":{\"index.pluggable.dataformat.enabled\":true,"
+                + "\"index.pluggable.dataformat\":\"composite\","
+                + "\"index.composite.primary_data_format\":\"parquet\","
+                + "\"index.composite.secondary_data_formats\":[\"lucene\"],"
+                + "\"number_of_shards\":1,\"number_of_replicas\":0},"
+                + "\"mappings\":{\"properties\":{\"id\":{\"type\":\"keyword\"}}}}"
+        );
+        client().performRequest(create);
+
+        // File 1 sees zeta first, then alpha.
+        bulkIndex(index, "{\"index\":{}}\n{\"id\":\"1\",\"attrs\":{\"zeta\":\"z1\",\"alpha\":\"a1\"}}\n");
+        client().performRequest(new Request("POST", "/" + index + "/_flush"));
+        // File 2 introduces a third key, so its child order differs again.
+        bulkIndex(index, "{\"index\":{}}\n{\"id\":\"2\",\"attrs\":{\"mid\":\"m2\",\"alpha\":\"a2\",\"zeta\":\"z2\"}}\n");
+        client().performRequest(new Request("POST", "/" + index + "/_flush"));
+
+        assertRowsEqual(
+            "source=" + index + " | sort id | fields id, attrs",
+            row("1", Map.of("zeta", "z1", "alpha", "a1")),
+            row("2", Map.of("mid", "m2", "alpha", "a2", "zeta", "z2"))
+        );
+        // Values must land on the right leaf, not be permuted with a sibling.
+        assertRowsEqual(
+            "source=" + index + " | sort id | fields id, attrs.alpha, attrs.zeta",
+            row("1", "a1", "z1"),
+            row("2", "a2", "z2")
+        );
+        assertRowsEqual("source=" + index + " | stats count(attrs.mid)", row(1));
+    }
+
 }

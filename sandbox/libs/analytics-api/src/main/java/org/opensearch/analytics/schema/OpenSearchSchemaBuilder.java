@@ -369,6 +369,22 @@ public class OpenSearchSchemaBuilder {
                     continue;
                 }
                 {
+                    // An object that arrives as an array is declared ONLY as ARRAY<ROW<..>>. Declaring
+                    // its leaves as flat dotted columns too would let `events.name` resolve to a
+                    // scalar column that no longer exists physically — the leaf lives inside the
+                    // list's element — so the query would read null. Left undeclared, Calcite resolves
+                    // it as ITEM($events,'name') over the array, which OpenSearchNestedFieldRewriter
+                    // turns into an element-wise projection or existential filter.
+                    if (Boolean.TRUE.equals(fieldProps.get("multi_value"))) {
+                        RelDataType elementType = buildObjectType(typeFactory, nested, fieldName);
+                        if (elementType != null) {
+                            builder.add(
+                                fieldName,
+                                typeFactory.createTypeWithNullability(typeFactory.createArrayType(elementType, -1), true)
+                            );
+                        }
+                        continue;
+                    }
                     addLeafFields(builder, typeFactory, nested, fieldName);
                     // Also expose the object itself as a struct (ROW) column, so a query can
                     // address the whole object (`fields nested_metadata`, `stats … by obj`) and

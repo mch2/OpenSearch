@@ -48,6 +48,7 @@ import org.apache.calcite.util.ImmutableBitSet;
 import org.apache.calcite.util.Optionality;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.opensearch.analytics.planner.rules.OpenSearchNestedFieldRewriter;
 import org.opensearch.analytics.planner.rel.OpenSearchBroadcastScan;
 import org.opensearch.analytics.planner.rel.OpenSearchStageInputScan;
 import org.opensearch.analytics.spi.AggregateFunction;
@@ -225,7 +226,11 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
         FunctionMappings.s(WidthBucketAdapter.LOCAL_WIDTH_BUCKET_OP, "width_bucket"),
         FunctionMappings.s(MinspanBucketAdapter.LOCAL_MINSPAN_BUCKET_OP, "minspan_bucket"),
         FunctionMappings.s(RangeBucketAdapter.LOCAL_RANGE_BUCKET_OP, "range_bucket"),
-        FunctionMappings.s(ConvAdapter.LOCAL_CONV_OP, "conv")
+        FunctionMappings.s(ConvAdapter.LOCAL_CONV_OP, "conv"),
+        // TODO(native-array_any_match): drop this mapping once we emit array_any_match as a Substrait HOF+lambda.
+        FunctionMappings.s(OpenSearchNestedFieldRewriter.NESTED_ANY_MATCH_OP, "nested_any_match"),
+        // TODO(native-array_transform): drop this mapping once we emit array_transform as a Substrait HOF+lambda.
+        FunctionMappings.s(OpenSearchNestedFieldRewriter.NESTED_PROJECT_OP, "nested_project")
     );
 
     // TODO: extract these LOCAL_*_OP aggregate stubs (+ LocalAggOp and ADDITIONAL_AGGREGATE_SIGS)

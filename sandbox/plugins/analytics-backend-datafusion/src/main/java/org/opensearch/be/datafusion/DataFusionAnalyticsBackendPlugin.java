@@ -101,6 +101,7 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
         SUPPORTED_FIELD_TYPES.add(FieldType.BINARY);
         SUPPORTED_FIELD_TYPES.add(FieldType.IP);
         SUPPORTED_FIELD_TYPES.add(FieldType.MATCH_ONLY_TEXT);
+        SUPPORTED_FIELD_TYPES.add(FieldType.NESTED);
     }
 
     // Filter-side scalar functions DataFusion can evaluate natively. Comparisons, arithmetic
@@ -639,6 +640,22 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
                 for (ScalarFunction op : STANDARD_FILTER_OPS) {
                     caps.add(new FilterCapability.Standard(op, Set.of(FieldType.OBJECT), formats));
                 }
+                // Nested existential filter — DataFusion-only (parquet path), no Lucene. Registered
+                // explicitly for ARRAY/NESTED instead of via the STANDARD loop to keep its field-type
+                // scope narrow.
+                caps.add(
+                    new FilterCapability.Standard(
+                        // TODO(native-array_any_match): remove this capability once we drop the placeholder op.
+                        ScalarFunction.NESTED_ANY_MATCH,
+                        // OBJECT as well: an `object` field that documents present as an array is
+                        // stored as LIST<STRUCT<..>> and reported as OBJECT by field-storage
+                        // resolution, so an existential predicate over its elements arrives with the
+                        // object's own field type rather than ARRAY.
+                        Set.of(FieldType.ARRAY, FieldType.NESTED, FieldType.OBJECT),
+                        formats
+                    )
+                );
+
                 return Set.copyOf(caps);
             }
 
@@ -667,6 +684,13 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
                         caps.add(new ProjectCapability.Scalar(op, Set.of(ft), formats, true));
                     }
                 }
+                // Nested sub-path projection (`fields events.name`) — DataFusion-only (parquet path).
+                // Returns ARRAY<leaf>, so it's keyed on ARRAY/NESTED (project scalars are looked up
+                // by return type). The Rust NestedProjectRewriteRule lowers it to array_transform.
+                caps.add(
+                    // TODO(native-array_transform): remove this capability once we drop the placeholder op.
+                    new ProjectCapability.Scalar(ScalarFunction.NESTED_PROJECT, Set.of(FieldType.ARRAY, FieldType.NESTED), formats, true)
+                );
                 return Set.copyOf(caps);
             }
 
