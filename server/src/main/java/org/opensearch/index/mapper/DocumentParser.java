@@ -1553,6 +1553,28 @@ final class DocumentParser {
         if (sawElement == false) {
             registerEmptyMultiValueArray(context, mapper, lastFieldName, paths);
         }
+        // The element count is only knowable here: an element carries no value of its own, so
+        // `[{"a":1},{}]` writes one value and `[{},{}]` writes none at all. Reported for every array
+        // of objects, empty included, so the writer lays out a run of exactly this length.
+        reportObjectArrayLength(context, mapper, lastFieldName, paths);
+    }
+
+    /**
+     * Tells the document input how many elements an object array held, when the resolved mapper is an
+     * array-valued {@link ObjectMapper}. No-op otherwise, and inert unless the pluggable data format
+     * is enabled.
+     */
+    private static void reportObjectArrayLength(ParseContext context, ObjectMapper mapper, String lastFieldName, String[] paths) {
+        if (context.indexSettings().isPluggableDataFormatEnabled() == false) {
+            return;
+        }
+        if (context.isWithinObjectArrayElement() == false) {
+            return;
+        }
+        Mapper resolved = getMapper(context, mapper, lastFieldName, paths);
+        if (resolved instanceof ObjectMapper objectMapper && objectMapper.multiValue()) {
+            context.documentInput().addObjectArray(objectMapper.fullPath(), context.currentFieldArrayElement() + 1);
+        }
     }
 
     /**
@@ -1609,7 +1631,7 @@ final class DocumentParser {
         // empty array as empty, not absent. A field seen empty before it was ever seen populated has
         // no mapper at all, so there is nothing to record and it stays absent — as it does in vanilla.
         if (leaf instanceof ObjectMapper objectMapper && objectMapper.multiValue()) {
-            context.documentInput().addEmptyObjectArray(objectMapper.fullPath());
+            context.documentInput().addObjectArray(objectMapper.fullPath(), 0);
         }
     }
 

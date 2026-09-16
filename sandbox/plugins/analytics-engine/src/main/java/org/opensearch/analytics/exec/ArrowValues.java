@@ -170,7 +170,15 @@ public final class ArrowValues {
             int end = lv.getOffsetBuffer().getInt((long) (index + 1) * ListVector.OFFSET_WIDTH);
             List<Object> out = new ArrayList<>(end - start);
             for (int i = start; i < end; i++) {
-                out.add(elements.isNull(i) ? null : structToMap(elements, i));
+                if (elements.isNull(i)) {
+                    out.add(null);
+                    continue;
+                }
+                // An element the document supplied but which carried no field reads as {} — it is a
+                // present element with nothing in it. structToMap answers null for an empty struct,
+                // which is right for an absent object but would drop an element from its own array.
+                Map<String, Object> element = structToMap(elements, i);
+                out.add(element == null ? Map.of() : element);
             }
             return out;
         }

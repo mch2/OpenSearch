@@ -106,10 +106,10 @@ public class CompositeDocumentInput implements DocumentInput<List<? extends Docu
     }
 
     @Override
-    public void addEmptyObjectArray(String objectPath) {
-        primaryDocumentInput.addEmptyObjectArray(objectPath);
+    public void addObjectArray(String objectPath, int elementCount) {
+        primaryDocumentInput.addObjectArray(objectPath, elementCount);
         for (DocumentInput<?> input : secondaryDocumentInputs.values()) {
-            input.addEmptyObjectArray(objectPath);
+            input.addObjectArray(objectPath, elementCount);
         }
     }
 

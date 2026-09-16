@@ -969,4 +969,44 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
         assertRowsEqual("source=" + index + " | stats count(attrs.mid)", row(1));
     }
 
+
+    /**
+     * An element that carried no field still occupies a slot.
+     *
+     * <p>An element has no value of its own, so nothing written to the leaves distinguishes
+     * {@code [{"name":"a"},{}]} from {@code [{"name":"a"}]}, nor {@code [{},{}]} from an absent array.
+     * The element count therefore comes from the parser rather than from the values, and a present
+     * element with nothing in it reads as {@code {}} — dropping it would silently renumber the array,
+     * which for OpenTelemetry means the wrong event.
+     */
+    public void testElementsThatCarryNoFieldsStillOccupyTheirSlot() throws IOException {
+        String index = "object_empty_elem_it";
+        try {
+            client().performRequest(new Request("DELETE", "/" + index));
+        } catch (Exception ignored) {}
+        Request create = new Request("PUT", "/" + index);
+        create.setJsonEntity(
+            "{\"settings\":{\"index.pluggable.dataformat.enabled\":true,"
+                + "\"index.pluggable.dataformat\":\"composite\","
+                + "\"index.composite.primary_data_format\":\"parquet\","
+                + "\"index.composite.secondary_data_formats\":[\"lucene\"],"
+                + "\"number_of_shards\":1,\"number_of_replicas\":0},"
+                + "\"mappings\":{\"properties\":{\"id\":{\"type\":\"keyword\"}}}}"
+        );
+        client().performRequest(create);
+        bulkIndex(
+            index,
+            "{\"index\":{}}\n{\"id\":\"1\",\"events\":[{\"name\":\"a\"},{}]}\n"
+                + "{\"index\":{}}\n{\"id\":\"2\",\"events\":[{\"name\":\"a\"},{},{\"name\":\"b\"}]}\n"
+                + "{\"index\":{}}\n{\"id\":\"3\",\"events\":[{},{}]}\n"
+        );
+
+        assertRowsEqual(
+            "source=" + index + " | sort id | fields id, events",
+            row("1", List.of(Map.of("name", "a"), Map.of())),
+            row("2", List.of(Map.of("name", "a"), Map.of(), Map.of("name", "b"))),
+            row("3", List.of(Map.of(), Map.of()))
+        );
+    }
+
 }

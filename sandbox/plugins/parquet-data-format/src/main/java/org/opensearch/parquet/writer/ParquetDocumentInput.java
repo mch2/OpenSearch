@@ -46,7 +46,7 @@ public class ParquetDocumentInput implements DocumentInput<List<FieldValuePair>>
     // element — degrading a multi_value field to last-value-wins or bypassing the scalar duplicate
     // guard. Name keying makes accumulation robust to that.
     private final Map<String, FieldValuePair> seen = new HashMap<>();
-    private final Set<String> emptyObjectArrays = new java.util.HashSet<>();
+    private final Map<String, Integer> objectArrayCounts = new HashMap<>();
     private long rowId = -1;
     private boolean isClosed = false;
 
@@ -126,14 +126,19 @@ public class ParquetDocumentInput implements DocumentInput<List<FieldValuePair>>
     }
 
     @Override
-    public void addEmptyObjectArray(String objectPath) {
+    public void addObjectArray(String objectPath, int elementCount) {
         ensureOpen();
-        emptyObjectArrays.add(objectPath);
+        objectArrayCounts.merge(objectPath, elementCount, Math::max);
     }
 
-    /** Objects this document carried as an explicitly empty array. */
-    public Set<String> getEmptyObjectArrays() {
-        return emptyObjectArrays;
+    /**
+     * Element counts for the objects this document carried as arrays, by dotted path.
+     *
+     * <p>Authoritative over anything the written values imply: an element that carried no field at all
+     * still occupies a slot, and a zero count is an explicitly empty array rather than an absent one.
+     */
+    public Map<String, Integer> getObjectArrayCounts() {
+        return objectArrayCounts;
     }
 
     @Override

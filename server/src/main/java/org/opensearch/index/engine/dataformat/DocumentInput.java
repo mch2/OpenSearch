@@ -60,16 +60,18 @@ public interface DocumentInput<T> extends AutoCloseable {
     }
 
     /**
-     * Records that an object arrived as an explicitly empty array ({@code "events": []}).
+     * Records how many elements an object arrived with as an array.
      *
-     * <p>No leaf is written for such a field, so without this the column would be left null and
-     * "reported no events" would be indistinguishable from "carried no events field". A columnar
-     * format that stores the object as {@code LIST<STRUCT<..>>} writes a zero-length, non-null list
-     * instead. Formats that flatten arrays ignore it.
+     * <p>The count cannot be inferred from the values written, because an element carries no value of
+     * its own: {@code [{"name":"a"},{}]} writes one {@code name} and would look like a one-element
+     * array, and {@code []} and {@code [{},{}]} would both look like no array at all. Only the parser
+     * knows, so it says so — a columnar format storing the object as {@code LIST<STRUCT<..>>} then
+     * writes a run of exactly that length, and formats that flatten arrays ignore it.
      *
-     * @param objectPath dotted path of the object that arrived empty
+     * @param objectPath dotted path of the object
+     * @param elementCount number of elements the document supplied, possibly zero
      */
-    default void addEmptyObjectArray(String objectPath) {}
+    default void addObjectArray(String objectPath, int elementCount) {}
 
     /**
      * Adds a row ID field to the document.

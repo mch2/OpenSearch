@@ -242,10 +242,11 @@ public class VSRManager implements AutoCloseable {
                     elementCounts.merge(objectPath, pair.valueCount(), Math::max);
                 }
             }
-            // An explicitly empty array contributes no leaf, so it needs a zero-length run of its own
-            // to come back as [] rather than null.
-            for (String emptyObject : doc.getEmptyObjectArrays()) {
-                elementCounts.putIfAbsent(emptyObject, 0);
+            // The parser's count wins over anything the values imply: an element that carried no field
+            // still occupies a slot, so `[{"a":1},{}]` is a run of two and `[{},{}]` of two rather than
+            // none. Merged with max so a malformed report can never truncate written values.
+            for (Map.Entry<String, Integer> reported : doc.getObjectArrayCounts().entrySet()) {
+                elementCounts.merge(reported.getKey(), reported.getValue(), Math::max);
             }
             Map<String, Set<String>> writtenElementLeaves = new HashMap<>();
             Map<String, Integer> elementStarts = new HashMap<>();
