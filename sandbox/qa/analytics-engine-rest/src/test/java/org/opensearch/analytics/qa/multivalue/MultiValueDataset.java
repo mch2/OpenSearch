@@ -36,21 +36,16 @@ import static org.junit.Assert.assertEquals;
 public final class MultiValueDataset {
 
     /** One covered type: its OpenSearch mapping type plus the scalar/multi column name pair. */
-    public record TypeSpec(String osType, String scalarField, String multiField, boolean multiValueSupported) {
+    public record TypeSpec(String osType, String scalarField, String multiField) {
         public static TypeSpec of(String osType, String prefix) {
-            return new TypeSpec(osType, prefix + "_s", prefix + "_m", true);
-        }
-
-        /** A type whose parquet field has no LIST writer yet — only the scalar column is created. */
-        public static TypeSpec scalarOnly(String osType, String prefix) {
-            return new TypeSpec(osType, prefix + "_s", prefix + "_m", false);
+            return new TypeSpec(osType, prefix + "_s", prefix + "_m");
         }
     }
 
     /**
-     * The covered types. {@code text} is scalar-only: {@code TextParquetField} does not implement
-     * the list writer, so declaring {@code multi_value: true} on it is rejected at index creation —
-     * itself a result the matrix records.
+     * The covered types — every Parquet-backed type, each with a {@code LIST} writer. {@code text} is
+     * included: an array of strings is the shape dynamic mapping produces for a JSON string array, so
+     * it is the most common multi-value column there is, not an edge case.
      */
     public static final List<TypeSpec> TYPES = List.of(
         TypeSpec.of("keyword", "kw"),
@@ -60,7 +55,7 @@ public final class MultiValueDataset {
         TypeSpec.of("boolean", "bool"),
         TypeSpec.of("date", "dt"),
         TypeSpec.of("ip", "ip"),
-        TypeSpec.scalarOnly("text", "txt")
+        TypeSpec.of("text", "txt")
     );
 
     public static final String INDEX = "mv_matrix";
@@ -130,13 +125,11 @@ public final class MultiValueDataset {
         StringBuilder props = new StringBuilder("\"id\":{\"type\":\"integer\"}");
         for (TypeSpec type : types) {
             props.append(",\"").append(type.scalarField()).append("\":{\"type\":\"").append(type.osType()).append("\"}");
-            if (type.multiValueSupported()) {
-                props.append(",\"")
-                    .append(type.multiField())
-                    .append("\":{\"type\":\"")
-                    .append(type.osType())
-                    .append("\",\"multi_value\":true}");
-            }
+            props.append(",\"")
+                .append(type.multiField())
+                .append("\":{\"type\":\"")
+                .append(type.osType())
+                .append("\",\"multi_value\":true}");
         }
         Request create = new Request("PUT", "/" + indexName);
         create.setJsonEntity("{\"settings\":{" + settings(1) + "},\"mappings\":{\"properties\":{" + props + "}}}");
@@ -178,9 +171,7 @@ public final class MultiValueDataset {
             if (values.isEmpty() == false) {
                 fields.add("\"" + type.scalarField() + "\":" + values.get(0));
             }
-            if (type.multiValueSupported()) {
-                fields.add("\"" + type.multiField() + "\":[" + String.join(",", values) + "]");
-            }
+            fields.add("\"" + type.multiField() + "\":[" + String.join(",", values) + "]");
         }
         return "{" + String.join(",", fields) + "}";
     }

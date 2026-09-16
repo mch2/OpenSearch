@@ -132,9 +132,7 @@ public class MultiValueFunctionMatrixIT extends AnalyticsRestTestCase {
                 }
                 Probe.Literals literals = Probe.Literals.forType(type.osType());
                 Outcome scalar = run(probe.render(MultiValueDataset.INDEX, type.scalarField(), literals));
-                Outcome multi = type.multiValueSupported()
-                    ? run(probe.render(MultiValueDataset.INDEX, type.multiField(), literals))
-                    : Outcome.failure(FailureStage.ENGINE, "type has no parquet LIST writer; multi_value column not created");
+                Outcome multi = run(probe.render(MultiValueDataset.INDEX, type.multiField(), literals));
                 results.add(new Result(probe, type.osType(), scalar, multi));
             }
         }
