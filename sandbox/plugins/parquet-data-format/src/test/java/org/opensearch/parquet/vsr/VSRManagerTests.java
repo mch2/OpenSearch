@@ -629,15 +629,15 @@ public class VSRManagerTests extends ParquetBaseTests {
         }
     }
 
-    public void testMultiValueNumericFieldIsRejected() {
-        IllegalArgumentException error = expectThrows(
-            IllegalArgumentException.class,
-            () -> new IntegerParquetField().toArrowField("numbers", true)
-        );
-        assertEquals(
-            "Field [numbers] cannot be stored as multi-valued: type [IntegerParquetField] does not support list storage",
-            error.getMessage()
-        );
+    /**
+     * Every Parquet-backed scalar type can be stored multi-valued, numerics included, so declaring
+     * {@code multi_value} on one yields a {@code LIST<element>} rather than an error.
+     */
+    public void testMultiValueNumericFieldBecomesAList() {
+        Field field = new IntegerParquetField().toArrowField("numbers", true);
+        assertEquals(ArrowType.List.INSTANCE, field.getType());
+        assertEquals(1, field.getChildren().size());
+        assertEquals(new ArrowType.Int(32, true), field.getChildren().get(0).getType());
     }
 
     public void testMultiValueFieldWritesEmptyListDistinctFromAbsent() throws Exception {
