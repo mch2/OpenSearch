@@ -735,4 +735,146 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
         );
     }
 
+
+    /**
+     * A shard whose files predate a sub-field the mapping later gained still binds.
+     *
+     * <p>The plan's schema comes from the cluster-state mapping — the union of every field ever seen
+     * — while the shard's schema is inferred from its parquet files, which only contain what their
+     * own documents carried. For a struct the child list is the type, so an object whose child one
+     * file lacks is a type mismatch on a column present in both, not a missing column. Flushing
+     * between the two documents forces the first file to be written before {@code y} exists.
+     */
+    public void testObjectSubFieldAddedAfterAFileWasWritten() throws IOException {
+        String index = "object_grow_it";
+        try {
+            client().performRequest(new Request("DELETE", "/" + index));
+        } catch (Exception ignored) {}
+        Request create = new Request("PUT", "/" + index);
+        create.setJsonEntity(
+            "{\"settings\":{\"index.pluggable.dataformat.enabled\":true,"
+                + "\"index.pluggable.dataformat\":\"composite\","
+                + "\"index.composite.primary_data_format\":\"parquet\","
+                + "\"index.composite.secondary_data_formats\":[\"lucene\"],"
+                + "\"number_of_shards\":1,\"number_of_replicas\":0},"
+                + "\"mappings\":{\"properties\":{\"id\":{\"type\":\"keyword\"}}}}"
+        );
+        client().performRequest(create);
+
+        // A pluggable-format index is append-only, so documents cannot carry a custom _id.
+        bulkIndex(index, "{\"index\":{}}\n{\"id\":\"1\",\"a\":{\"x\":1}}\n");
+        // Close the file before `y` exists, so the shard has one file that never saw it.
+        client().performRequest(new Request("POST", "/" + index + "/_flush"));
+
+        bulkIndex(index, "{\"index\":{}}\n{\"id\":\"2\",\"a\":{\"x\":1,\"y\":2}}\n");
+        client().performRequest(new Request("POST", "/" + index + "/_flush"));
+
+        assertRowsEqual(
+            "source=" + index + " | sort id | fields id, a",
+            row("1", Map.of("x", 1)),
+            row("2", Map.of("x", 1, "y", 2))
+        );
+        // The leaf the older file never saw reads as null there rather than failing the scan.
+        assertRowsEqual("source=" + index + " | where isnull(a.y) | stats count()", row(1));
+        assertRowsEqual("source=" + index + " | stats count(a.y)", row(1));
+    }
+
+
+    /**
+     * The same divergence one level deeper: an array of objects whose elements gained an attribute
+     * after a file was written.
+     *
+     * <p>`events` is a {@code LIST<STRUCT<..>>}, so an attribute only later documents carry is a
+     * child of the element struct — a type mismatch on a column present in both schemas, exactly as
+     * for a plain object. This is what OpenTelemetry hits immediately, since an exception event
+     * carries keys an ordinary event does not.
+     */
+    public void testArrayElementAttributeAddedAfterAFileWasWritten() throws IOException {
+        String index = "object_array_grow_it";
+        try {
+            client().performRequest(new Request("DELETE", "/" + index));
+        } catch (Exception ignored) {}
+        Request create = new Request("PUT", "/" + index);
+        create.setJsonEntity(
+            "{\"settings\":{\"index.pluggable.dataformat.enabled\":true,"
+                + "\"index.pluggable.dataformat\":\"composite\","
+                + "\"index.composite.primary_data_format\":\"parquet\","
+                + "\"index.composite.secondary_data_formats\":[\"lucene\"],"
+                + "\"number_of_shards\":1,\"number_of_replicas\":0},"
+                + "\"mappings\":{\"properties\":{\"traceId\":{\"type\":\"keyword\"}}}}"
+        );
+        client().performRequest(create);
+
+        bulkIndex(index, "{\"index\":{}}\n{\"traceId\":\"t1\",\"events\":[{\"name\":\"ok\"}]}\n");
+        client().performRequest(new Request("POST", "/" + index + "/_flush"));
+
+        // An exception event carries a key the first file never saw.
+        bulkIndex(
+            index,
+            "{\"index\":{}}\n{\"traceId\":\"t2\",\"events\":[{\"name\":\"exception\",\"reason\":\"boom\"}]}\n"
+        );
+        client().performRequest(new Request("POST", "/" + index + "/_flush"));
+
+        assertRowsEqual(
+            "source=" + index + " | sort traceId | fields traceId, events",
+            row("t1", List.of(Map.of("name", "ok"))),
+            row("t2", List.of(Map.of("name", "exception", "reason", "boom")))
+        );
+    }
+
+    /**
+     * The divergence across shards rather than across files: each shard binds its own inferred schema
+     * against the one plan, so a shard that never saw a sub-field must widen its own.
+     */
+    public void testObjectSubFieldMissingOnOneShard() throws IOException {
+        String index = "object_shard_grow_it";
+        try {
+            client().performRequest(new Request("DELETE", "/" + index));
+        } catch (Exception ignored) {}
+        Request create = new Request("PUT", "/" + index);
+        create.setJsonEntity(
+            "{\"settings\":{\"index.pluggable.dataformat.enabled\":true,"
+                + "\"index.pluggable.dataformat\":\"composite\","
+                + "\"index.composite.primary_data_format\":\"parquet\","
+                + "\"index.composite.secondary_data_formats\":[\"lucene\"],"
+                + "\"number_of_shards\":3,\"number_of_replicas\":0},"
+                + "\"mappings\":{\"properties\":{\"id\":{\"type\":\"keyword\"}}}}"
+        );
+        client().performRequest(create);
+        // Auto-generated ids spread these over the shards; only some documents carry `y`.
+        StringBuilder body = new StringBuilder();
+        for (int i = 1; i <= 6; i++) {
+            body.append("{\"index\":{}}\n");
+            body.append("{\"id\":\"").append(i).append("\",\"a\":{\"x\":").append(i);
+            if (i % 2 == 0) {
+                body.append(",\"y\":").append(i * 10);
+            }
+            body.append("}}\n");
+        }
+        bulkIndex(index, body.toString());
+        client().performRequest(new Request("POST", "/" + index + "/_flush"));
+
+        assertRowsEqual("source=" + index + " | stats count()", row(6));
+        assertRowsEqual("source=" + index + " | stats count(a.y)", row(3));
+        assertRowsEqual("source=" + index + " | where isnull(a.y) | stats count()", row(3));
+    }
+
+
+    /**
+     * Indexes an ndjson bulk body and fails on any item error.
+     *
+     * <p>A pluggable-format index sets {@code index.append_only.enabled}, which rejects a custom
+     * {@code _id}, so every action line must be a bare {@code {"index":{}}}. Asserting on the
+     * response matters because a bulk reports per-item failures with a 200 overall — a silently empty
+     * index otherwise shows up later as a a mystified count assertion.
+     */
+    private void bulkIndex(String index, String ndjson) throws IOException {
+        Request bulk = new Request("POST", "/" + index + "/_bulk?refresh=true");
+        bulk.setJsonEntity(ndjson);
+        bulk.setOptions(bulk.getOptions().toBuilder().addHeader("Content-Type", "application/x-ndjson"));
+        Response response = client().performRequest(bulk);
+        String body = new String(response.getEntity().getContent().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        assertThat("bulk reported item errors: " + body, body, org.hamcrest.Matchers.containsString("\"errors\":false"));
+    }
+
 }

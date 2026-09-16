@@ -115,6 +115,17 @@ fn rewrite_data_type_to_view(data_type: &DataType) -> DataType {
         DataType::Utf8 | DataType::LargeUtf8 => DataType::Utf8View,
         DataType::Binary | DataType::LargeBinary => DataType::BinaryView,
         DataType::List(child) => DataType::List(Arc::new(rewrite_field_to_view(child))),
+        DataType::LargeList(child) => DataType::LargeList(Arc::new(rewrite_field_to_view(child))),
+        // An OpenSearch `object` is a struct column, so its string children are what parquet emits
+        // as views — and for a struct the child list is the type, so leaving a child as `Utf8` here
+        // makes the whole column mismatch. The inverse rewrite recurses structs, and these two have
+        // to agree or a nested string never compares equal.
+        DataType::Struct(children) => DataType::Struct(Fields::from(
+            children
+                .iter()
+                .map(|c| rewrite_field_to_view(c))
+                .collect::<Vec<Field>>(),
+        )),
         other => other.clone(),
     }
 }
@@ -226,36 +237,134 @@ fn rewrite_data_type(dt: &DataType) -> DataType {
     }
 }
 
-/// Appends to `registered` any `expected` field whose name is absent, as a nullable column.
+/// Widens `registered` so it covers every field `expected` declares, as nullable.
 /// `Some(augmented)` if anything was added, `None` if `registered` already covers `expected`.
 ///
 /// The Substrait consumer binds `base_schema` to the provider BY NAME, so the registered schema
 /// only needs to *contain* every expected column — order is irrelevant and present columns keep
-/// their inferred (coerced) types. Appended columns are forced nullable; DataFusion's parquet
+/// their inferred (coerced) types. Added fields are forced nullable; DataFusion's parquet
 /// `SchemaAdapter` null-fills them at read time.
+///
+/// # Nested columns
+///
+/// The two schemas come from different places: `expected` from the cluster-state mapping, which is
+/// the union of every field ever seen, and `registered` from the parquet files on this shard, which
+/// only contain what their own documents carried. A field the mapping has and the files do not used
+/// to be a missing top-level column, which appending covered.
+///
+/// An OpenSearch `object` is one struct column, and for a struct the child list *is* the type — so a
+/// child this shard never saw is not a missing column but a type mismatch on a column present in
+/// both, which the plan rejects with "Field 'attributes' … different type". Appending alone would
+/// leave it, so a field present in both is rebuilt by unioning its children, recursing all the way
+/// down. An array of objects needs the same one level deeper: `LIST<STRUCT<..>>` unions the element's
+/// children, which is what an OpenTelemetry `events` array hits as soon as one segment's events
+/// carry an attribute another's do not.
 pub fn append_missing_nullable(registered: &Schema, expected: &Schema) -> Option<SchemaRef> {
-    let mut added: Vec<Field> = Vec::new();
+    let mut fields: Vec<Field> = Vec::with_capacity(registered.fields().len());
+    let mut changed = false;
+    for rf in registered.fields() {
+        match expected.field_with_name(rf.name()) {
+            Ok(ef) => match widen_to_cover(rf, ef) {
+                Some(widened) => {
+                    fields.push(widened);
+                    changed = true;
+                }
+                None => fields.push(rf.as_ref().clone()),
+            },
+            Err(_) => fields.push(rf.as_ref().clone()),
+        }
+    }
     for ef in expected.fields() {
         if registered.field_with_name(ef.name()).is_err() {
-            added.push(
+            fields.push(
                 Field::new(ef.name(), ef.data_type().clone(), true)
                     .with_metadata(ef.metadata().clone()),
             );
+            changed = true;
         }
     }
-    if added.is_empty() {
+    if changed == false {
         return None;
     }
-    let mut fields: Vec<Field> = registered
-        .fields()
-        .iter()
-        .map(|f| f.as_ref().clone())
-        .collect();
-    fields.extend(added);
     Some(Arc::new(Schema::new_with_metadata(
         fields,
         registered.metadata().clone(),
     )))
+}
+
+/// Rebuilds `registered` to also cover the children `expected` declares, or `None` when it already
+/// does. Only composite types can differ this way — a scalar is covered or it is a different type,
+/// which is not this function's problem.
+fn widen_to_cover(registered: &Field, expected: &Field) -> Option<Field> {
+    match (registered.data_type(), expected.data_type()) {
+        (DataType::Struct(rc), DataType::Struct(ec)) => {
+            let children = union_children(rc, ec)?;
+            Some(
+                Field::new(
+                    registered.name(),
+                    DataType::Struct(children),
+                    registered.is_nullable(),
+                )
+                .with_metadata(registered.metadata().clone()),
+            )
+        }
+        (DataType::List(re), DataType::List(ee)) => {
+            let element = widen_to_cover(re, ee)?;
+            Some(
+                Field::new(
+                    registered.name(),
+                    DataType::List(Arc::new(element)),
+                    registered.is_nullable(),
+                )
+                .with_metadata(registered.metadata().clone()),
+            )
+        }
+        (DataType::LargeList(re), DataType::LargeList(ee)) => {
+            let element = widen_to_cover(re, ee)?;
+            Some(
+                Field::new(
+                    registered.name(),
+                    DataType::LargeList(Arc::new(element)),
+                    registered.is_nullable(),
+                )
+                .with_metadata(registered.metadata().clone()),
+            )
+        }
+        _ => None,
+    }
+}
+
+/// Unions two child lists, keeping the registered children in place with their inferred types and
+/// appending the expected ones this shard never saw as nullable. `None` when nothing was added at
+/// any depth, so an unchanged column keeps its original `Field` and identity.
+fn union_children(registered: &Fields, expected: &Fields) -> Option<Fields> {
+    let mut children: Vec<Field> = Vec::with_capacity(registered.len());
+    let mut changed = false;
+    for rc in registered {
+        match expected.find(rc.name()) {
+            Some((_, ec)) => match widen_to_cover(rc, ec) {
+                Some(widened) => {
+                    children.push(widened);
+                    changed = true;
+                }
+                None => children.push(rc.as_ref().clone()),
+            },
+            None => children.push(rc.as_ref().clone()),
+        }
+    }
+    for ec in expected {
+        if registered.find(ec.name()).is_none() {
+            children.push(
+                Field::new(ec.name(), ec.data_type().clone(), true)
+                    .with_metadata(ec.metadata().clone()),
+            );
+            changed = true;
+        }
+    }
+    if changed == false {
+        return None;
+    }
+    Some(Fields::from(children))
 }
 
 #[cfg(test)]
@@ -284,6 +393,132 @@ mod tests {
         assert!(alias.is_nullable(), "appended column must be nullable");
         assert!(merged.field_with_name("name").is_ok());
         assert!(merged.field_with_name("age").is_ok());
+    }
+
+    #[test]
+    fn append_missing_unions_struct_children() {
+        // The mapping is the union of every field ever seen; a shard's parquet files only carry what
+        // their own documents had. For a struct the child list IS the type, so a child the file never
+        // saw makes the whole column a type mismatch at plan binding — not a missing column that the
+        // top-level pass could append.
+        let registered = Schema::new(vec![struct_field("attributes", vec![utf8("http")])]);
+        let expected = Schema::new(vec![struct_field(
+            "attributes",
+            vec![utf8("http"), utf8("cart")],
+        )]);
+
+        let merged = append_missing_nullable(&registered, &expected)
+            .expect("a struct child the shard never saw must widen the column");
+        let DataType::Struct(children) = merged.field_with_name("attributes").unwrap().data_type()
+        else {
+            panic!("attributes must stay a struct");
+        };
+        assert_eq!(children.len(), 2, "children are unioned, not replaced");
+        let cart = children.find("cart").expect("absent child is added").1;
+        assert!(cart.is_nullable(), "an added child must be nullable");
+        assert!(children.find("http").is_some(), "existing child is kept");
+    }
+
+    #[test]
+    fn append_missing_unions_struct_children_inside_a_list() {
+        // An array of objects has the same problem one level deeper: `events` is a LIST<STRUCT<..>>,
+        // and one segment's events carrying an attribute another's did not is a child mismatch.
+        let element = |children: Vec<Field>| {
+            Field::new("element", DataType::Struct(Fields::from(children)), true)
+        };
+        let registered = Schema::new(vec![Field::new(
+            "events",
+            DataType::List(Arc::new(element(vec![utf8("name")]))),
+            true,
+        )]);
+        let expected = Schema::new(vec![Field::new(
+            "events",
+            DataType::List(Arc::new(element(vec![utf8("name"), utf8("reason")]))),
+            true,
+        )]);
+
+        let merged = append_missing_nullable(&registered, &expected)
+            .expect("an element child the shard never saw must widen the list");
+        let DataType::List(el) = merged.field_with_name("events").unwrap().data_type() else {
+            panic!("events must stay a list");
+        };
+        let DataType::Struct(children) = el.data_type() else {
+            panic!("elements must stay structs");
+        };
+        assert_eq!(children.len(), 2);
+        assert!(children.find("reason").expect("absent child is added").1.is_nullable());
+    }
+
+    #[test]
+    fn append_missing_recurses_into_a_sub_object() {
+        // `city.geo.zone` — the absent child is a grandchild, so the union has to recurse.
+        let registered = Schema::new(vec![struct_field(
+            "city",
+            vec![struct_field("geo", vec![utf8("country")])],
+        )]);
+        let expected = Schema::new(vec![struct_field(
+            "city",
+            vec![struct_field("geo", vec![utf8("country"), utf8("zone")])],
+        )]);
+
+        let merged = append_missing_nullable(&registered, &expected).expect("grandchild widens");
+        let DataType::Struct(city) = merged.field_with_name("city").unwrap().data_type() else {
+            panic!()
+        };
+        let DataType::Struct(geo) = city.find("geo").unwrap().1.data_type() else {
+            panic!()
+        };
+        assert_eq!(geo.len(), 2);
+        assert!(geo.find("zone").unwrap().1.is_nullable());
+    }
+
+    #[test]
+    fn append_missing_returns_none_when_struct_children_already_match() {
+        let registered = Schema::new(vec![struct_field(
+            "attributes",
+            vec![utf8("http"), utf8("cart")],
+        )]);
+        // Registered may carry a child the plan does not reference — still nothing to add.
+        let expected = Schema::new(vec![struct_field("attributes", vec![utf8("http")])]);
+        assert!(append_missing_nullable(&registered, &expected).is_none());
+    }
+
+    #[test]
+    fn view_rewrite_reaches_a_struct_child() {
+        // With force_view_types on, parquet emits Utf8View for a string — including one inside an
+        // object's struct. The declared schema has to be rewritten the same way at depth, or the
+        // struct's child list differs and the column never binds.
+        let declared = Schema::new(vec![struct_field(
+            "attributes",
+            vec![utf8("http"), struct_field("nested", vec![utf8("deep")])],
+        )]);
+
+        let physical = physical_schema_for_declaration(&declared, true);
+        let DataType::Struct(children) = physical.field_with_name("attributes").unwrap().data_type()
+        else {
+            panic!("attributes must stay a struct");
+        };
+        assert_eq!(
+            children.find("http").unwrap().1.data_type(),
+            &DataType::Utf8View,
+            "a struct's string child becomes a view"
+        );
+        let DataType::Struct(deep) = children.find("nested").unwrap().1.data_type() else {
+            panic!("sub-object must stay a struct");
+        };
+        assert_eq!(
+            deep.find("deep").unwrap().1.data_type(),
+            &DataType::Utf8View,
+            "and so does a grandchild"
+        );
+    }
+
+    fn utf8(name: &str) -> Field {
+        Field::new(name, DataType::Utf8, true)
+    }
+
+    fn struct_field(name: &str, children: Vec<Field>) -> Field {
+        Field::new(name, DataType::Struct(Fields::from(children)), true)
     }
 
     #[test]
