@@ -147,6 +147,9 @@ integTest {
     exclude '**/CoordinatorReduceMemtableIT.class'
     exclude '**/StreamingCoordinatorReduceIT.class'
     exclude '**/QueryCacheIT.class'
+    // Asserts process-global cache counters are zero, so any query another test class runs
+    // concurrently inflates them. Runs alone in integTestScopedPageIndexCache instead.
+    exclude '**/ScopedPageIndexCacheIT.class'
     exclude '**/SpillStatsEnabledIT.class'
     exclude '**/SpillCleanupOnBootIT.class'
     exclude '**/YmlOversamplingIT.class'
@@ -201,6 +204,17 @@ testClusters.integTestMemtable {
 }
 
 // ── Query cache variant: all_segments=true for cache testing ─────────────────
+task integTestScopedPageIndexCache(type: RestIntegTestTask) {
+    description = 'Runs the scoped page-index cache tests alone: they assert process-global cache counters are zero'
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    filter {
+        includeTestsMatching 'org.opensearch.analytics.qa.ScopedPageIndexCacheIT'
+    }
+    systemProperty 'tests.security.manager', 'false'
+}
+check.dependsOn(integTestScopedPageIndexCache)
+
 task integTestQueryCache(type: RestIntegTestTask) {
     description = 'Runs query cache tests with all_segments=true to bypass segment size threshold'
     testClassesDirs = sourceSets.test.output.classesDirs
@@ -211,6 +225,11 @@ task integTestQueryCache(type: RestIntegTestTask) {
     systemProperty 'tests.security.manager', 'false'
 }
 check.dependsOn(integTestQueryCache)
+
+testClusters.integTestScopedPageIndexCache {
+    numberOfNodes = 2
+    configureAnalyticsCluster(delegate)
+}
 
 testClusters.integTestQueryCache {
     numberOfNodes = 2
