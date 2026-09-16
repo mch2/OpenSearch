@@ -22,7 +22,6 @@ import org.apache.calcite.rel.core.Filter;
 import org.apache.calcite.rel.core.Join;
 import org.apache.calcite.rel.core.Project;
 import org.apache.calcite.rel.core.Sort;
-import org.apache.calcite.rel.core.Uncollect;
 import org.apache.calcite.rel.rules.CoreRules;
 import org.apache.calcite.rel.rules.FilterProjectTransposeRule;
 import org.apache.calcite.rel.rules.ReduceExpressionsRule;
@@ -46,6 +45,7 @@ import org.opensearch.analytics.planner.rules.OpenSearchAggregateSplitRule;
 import org.opensearch.analytics.planner.rules.OpenSearchBroadcastJoinSplitRule;
 import org.opensearch.analytics.planner.rules.OpenSearchCheckedLongSumRule;
 import org.opensearch.analytics.planner.rules.OpenSearchCheckedLongSumWindowRule;
+import org.opensearch.analytics.planner.rules.OpenSearchCorrelateRule;
 import org.opensearch.analytics.planner.rules.OpenSearchDistinctCountRule;
 import org.opensearch.analytics.planner.rules.OpenSearchDistributionDeriveRule;
 import org.opensearch.analytics.planner.rules.OpenSearchFilterRule;
@@ -60,11 +60,10 @@ import org.opensearch.analytics.planner.rules.OpenSearchSortRule;
 import org.opensearch.analytics.planner.rules.OpenSearchSortSplitRule;
 import org.opensearch.analytics.planner.rules.OpenSearchTableScanRule;
 import org.opensearch.analytics.planner.rules.OpenSearchTopKRewriter;
+import org.opensearch.analytics.planner.rules.OpenSearchUncollectRule;
 import org.opensearch.analytics.planner.rules.OpenSearchUnionRule;
 import org.opensearch.analytics.planner.rules.OpenSearchUnionSplitRule;
 import org.opensearch.analytics.planner.rules.OpenSearchValuesCharNormalizeRule;
-import org.opensearch.analytics.planner.rules.OpenSearchUncollectRule;
-import org.opensearch.analytics.planner.rules.OpenSearchCorrelateRule;
 import org.opensearch.analytics.planner.rules.OpenSearchValuesRule;
 
 import java.util.List;
@@ -335,11 +334,7 @@ public class PlannerImpl {
      */
     private static boolean needsDecorrelation(RelNode node) {
         for (Correlate correlate : RelNodeUtils.findNodes(node, Correlate.class)) {
-            RelNode right = RelNodeUtils.unwrapHep(correlate.getRight());
-            if (right instanceof Sort sort) {
-                right = RelNodeUtils.unwrapHep(sort.getInput());
-            }
-            if (right instanceof Uncollect == false) {
+            if (RelNodeUtils.expansionUncollect(correlate.getRight()) == null) {
                 return true;
             }
         }

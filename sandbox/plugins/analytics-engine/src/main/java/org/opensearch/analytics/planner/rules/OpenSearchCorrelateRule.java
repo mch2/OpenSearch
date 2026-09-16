@@ -12,8 +12,6 @@ import org.apache.calcite.plan.RelOptRule;
 import org.apache.calcite.plan.RelOptRuleCall;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.Correlate;
-import org.apache.calcite.rel.core.Sort;
-import org.apache.calcite.rel.core.Uncollect;
 import org.opensearch.analytics.planner.PlannerContext;
 import org.opensearch.analytics.planner.RelNodeUtils;
 import org.opensearch.analytics.planner.rel.OpenSearchCorrelate;
@@ -38,11 +36,7 @@ public class OpenSearchCorrelateRule extends RelOptRule {
         if (correlate instanceof OpenSearchCorrelate) {
             return false;
         }
-        RelNode right = RelNodeUtils.unwrapHep(correlate.getRight());
-        if (right instanceof Sort sort) {
-            right = RelNodeUtils.unwrapHep(sort.getInput());
-        }
-        return right instanceof Uncollect;
+        return RelNodeUtils.expansionUncollect(correlate.getRight()) != null;
     }
 
     @Override

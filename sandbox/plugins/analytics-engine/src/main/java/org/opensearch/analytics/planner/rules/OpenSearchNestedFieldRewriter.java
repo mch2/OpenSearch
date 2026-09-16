@@ -3,7 +3,7 @@
  *
  * The OpenSearch Contributors require contributions made to
  * this file be licensed under the Apache-2.0 license or a
- * compatible open source source license.
+ * compatible open source license.
  */
 
 package org.opensearch.analytics.planner.rules;
@@ -11,6 +11,7 @@ package org.opensearch.analytics.planner.rules;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 
 import org.apache.calcite.plan.RelOptCluster;
+import org.apache.calcite.rel.RelHomogeneousShuttle;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.RelShuttleImpl;
 import org.apache.calcite.rel.logical.LogicalFilter;
@@ -131,7 +132,7 @@ public final class OpenSearchNestedFieldRewriter {
 
     /** Rewrites every {@code ITEM}-on-array filter condition in the tree to use {@link #NESTED_ANY_MATCH_OP}. */
     public static RelNode rewrite(RelNode root) {
-        RelNode result = root.accept(new NestedShuttle());
+        RelNode result = root.accept(new StructItemShuttle(root.getCluster().getRexBuilder())).accept(new NestedShuttle());
         if (result != root) {
             LOGGER.debug("OpenSearchNestedFieldRewriter: rewrote nested filter predicate");
         }
@@ -149,6 +150,73 @@ public final class OpenSearchNestedFieldRewriter {
         public RelNode visit(LogicalProject project) {
             LogicalProject visited = (LogicalProject) super.visitChildren(project);
             return rewriteProject(visited);
+        }
+    }
+
+    /**
+     * Turns {@code ITEM($structCol, <key>)} into a plain struct field reference, everywhere in the
+     * tree.
+     *
+     * <p>The frontend resolves a dotted path over any container as {@code ITEM}. A path over one of
+     * our declared object columns never reaches here — those leaves are declared as flat dotted
+     * columns and {@link org.opensearch.analytics.planner.ObjectLeafProjector} reads them out of the
+     * struct — but a struct produced <em>mid-plan</em> has no flat leaf to resolve against. That
+     * happens after {@code mvexpand} over an {@code ARRAY<ROW<..>>}: each row then carries one
+     * element struct, and {@code events.name} arrives as {@code ITEM($events,'name')}. Substrait
+     * represents field selection structurally, so left as a call it would be emitted as an
+     * {@code array_element} over a struct and fail to convert.
+     *
+     * <p>Arrays and maps keep their {@code ITEM} — those are handled by {@link NestedShuttle} and the
+     * backend's map accessors respectively.
+     */
+    private static final class StructItemShuttle extends RelHomogeneousShuttle {
+
+        private final RexBuilder rexBuilder;
+        private final RexShuttle rex;
+
+        StructItemShuttle(RexBuilder rexBuilder) {
+            this.rexBuilder = rexBuilder;
+            this.rex = new RexShuttle() {
+                @Override
+                public RexNode visitCall(RexCall call) {
+                    RexCall visited = (RexCall) super.visitCall(call);
+                    RexNode access = structFieldAccess(visited);
+                    return access == null ? visited : access;
+                }
+            };
+        }
+
+        @Override
+        public RelNode visit(RelNode other) {
+            return super.visit(other).accept(rex);
+        }
+
+        /** The field reference {@code call} selects, or {@code null} if it is not struct selection. */
+        private RexNode structFieldAccess(RexCall call) {
+            if (!"ITEM".equals(call.getOperator().getName()) || call.getOperands().size() != 2) {
+                return null;
+            }
+            RexNode source = call.getOperands().getFirst();
+            if (!source.getType().isStruct() || !(call.getOperands().get(1) instanceof RexLiteral key)) {
+                return null;
+            }
+            RelDataTypeField field;
+            if (SqlTypeName.CHAR_TYPES.contains(key.getType().getSqlTypeName())) {
+                field = source.getType().getField(key.getValueAs(String.class), true, false);
+            } else if (SqlTypeName.INT_TYPES.contains(key.getType().getSqlTypeName())) {
+                // ITEM over a ROW is 1-based, matching Calcite's array indexing.
+                Integer ordinal = key.getValueAs(Integer.class);
+                List<RelDataTypeField> fields = source.getType().getFieldList();
+                field = ordinal != null && ordinal >= 1 && ordinal <= fields.size() ? fields.get(ordinal - 1) : null;
+            } else {
+                return null;
+            }
+            if (field == null) {
+                return null;
+            }
+            // ensureType keeps the call's declared nullability, so the enclosing rel's row type
+            // still matches after the substitution.
+            return rexBuilder.ensureType(call.getType(), rexBuilder.makeFieldAccess(source, field.getIndex()), true);
         }
     }
 

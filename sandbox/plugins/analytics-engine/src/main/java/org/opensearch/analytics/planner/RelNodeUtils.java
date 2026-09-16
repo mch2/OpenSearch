@@ -13,7 +13,11 @@ import org.apache.calcite.plan.RelOptUtil;
 import org.apache.calcite.plan.RelTraitSet;
 import org.apache.calcite.plan.hep.HepRelVertex;
 import org.apache.calcite.rel.RelNode;
+import org.apache.calcite.rel.core.Correlate;
+import org.apache.calcite.rel.core.Project;
+import org.apache.calcite.rel.core.Sort;
 import org.apache.calcite.rel.core.TableScan;
+import org.apache.calcite.rel.core.Uncollect;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rel.type.RelDataTypeField;
@@ -23,6 +27,7 @@ import org.apache.calcite.rex.RexInputRef;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.rex.RexShuttle;
 import org.apache.calcite.rex.RexUtil;
+import org.apache.calcite.sql.SqlKind;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.planner.rel.OpenSearchAggregate;
 import org.opensearch.analytics.planner.rel.OpenSearchConvention;
@@ -70,6 +75,45 @@ public class RelNodeUtils {
             return vertex.getCurrentRel();
         }
         return node;
+    }
+
+    /**
+     * The {@link Uncollect} driving a multi-value expansion on the right side of a {@link Correlate},
+     * or {@code null} when that side is not an expansion at all.
+     *
+     * <p>Unwraps, outermost first: the Hep vertex, the {@code Sort} carrying {@code mvexpand limit=},
+     * and the element-rewrap {@link Project} described in {@link #isExpansionElementRewrap}.
+     */
+    public static Uncollect expansionUncollect(RelNode right) {
+        RelNode node = unwrapHep(right);
+        if (node instanceof Sort sort) {
+            node = unwrapHep(sort.getInput());
+        }
+        if (isExpansionElementRewrap(node)) {
+            node = unwrapHep(((Project) node).getInput());
+        }
+        return node instanceof Uncollect uncollect ? uncollect : null;
+    }
+
+    /**
+     * True when {@code node} is the element-rewrap {@link Project}: a lone {@code ROW(..)} call
+     * directly over an {@link Uncollect}.
+     *
+     * <p>Expanding an {@code ARRAY<ROW<..>>} needs it because Calcite's {@code Uncollect} explodes a
+     * record element into one column per record field, which loses the expanded column's name — so
+     * the frontend rebuilds the element into a single {@code ROW} column named after the array. It is
+     * a type-level fixup only: execution unnests the list and already yields the element struct as
+     * one column, so the rewrap carries no work and is absorbed into the expansion spec rather than
+     * emitted.
+     */
+    public static boolean isExpansionElementRewrap(RelNode node) {
+        if (!(node instanceof Project project) || project.getProjects().size() != 1) {
+            return false;
+        }
+        if (!(project.getProjects().getFirst() instanceof RexCall call) || call.getKind() != SqlKind.ROW) {
+            return false;
+        }
+        return unwrapHep(project.getInput()) instanceof Uncollect;
     }
 
     public static RelNode copyToCluster(RelNode node, RelOptCluster newCluster, OpenSearchDistributionTraitDef distTraitDef) {

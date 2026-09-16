@@ -134,10 +134,17 @@ public class MvExpandIT extends AnalyticsRestTestCase {
         );
     }
 
-    /** A leaf under an object, which is where OTel span events land. */
-    public void testExpandLeafUnderAnObject() throws IOException {
+    /**
+     * An array of objects, which is where OTel span events land. The array column itself is
+     * expanded and the leaf is projected off the expanded element — the same shape vanilla uses
+     * for a {@code nested} field (see {@code CalciteMvExpandCommandIT}, and {@code mvexpand.md}
+     * "Expanding nested fields"). Expanding the leaf directly ({@code mvexpand events.name}) is
+     * not a form PPL supports: the leaf resolves to the element's scalar type, and mvexpand
+     * returns a non-array input unchanged.
+     */
+    public void testExpandArrayOfObjects() throws IOException {
         assertRowsEqualUnordered(
-            "source=" + INDEX + " | fields id, events.name | mvexpand events.name",
+            "source=" + INDEX + " | mvexpand events | fields id, events.name",
             row("s1", "start"),
             row("s1", "validate"),
             row("s1", "commit"),
@@ -158,7 +165,7 @@ public class MvExpandIT extends AnalyticsRestTestCase {
      * default here would silently collapse {@code s4}'s two {@code retry} events into one.
      */
     public void testDuplicateElementsArePreserved() throws IOException {
-        assertRowsEqualUnordered("source=" + INDEX + " | fields id, events.name | mvexpand events.name | where id = 's4' | stats count()", row(4));
+        assertRowsEqualUnordered("source=" + INDEX + " | mvexpand events | where id = 's4' | stats count()", row(4));
     }
 
     /** {@code limit} caps elements per document — s3 keeps 2 of its 3 tags, others are unaffected. */

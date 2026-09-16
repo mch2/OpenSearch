@@ -14,6 +14,7 @@
 use std::sync::Arc;
 
 use datafusion::{
+    common::tree_node::Transformed,
     common::DataFusionError,
     datasource::file_format::parquet::ParquetFormat,
     datasource::listing::{ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl},
@@ -23,6 +24,8 @@ use datafusion::{
     execution::memory_pool::MemoryPool,
     execution::runtime_env::RuntimeEnvBuilder,
     execution::SessionStateBuilder,
+    logical_expr::LogicalPlan,
+    optimizer::{ApplyOrder, Optimizer, OptimizerConfig, OptimizerRule},
     physical_plan::ExecutionPlan,
     prelude::*,
 };
@@ -35,6 +38,69 @@ use crate::cache::page_index;
 use crate::datafusion_query_config::DatafusionQueryConfig;
 use crate::query_tracker::QueryTrackingContext;
 use crate::scoped_index_optimizer::ScopedPageIndexOptimizer;
+
+/// Wraps DataFusion's `push_down_leaf_projections` so it leaves any subtree containing an
+/// [`LogicalPlan::Unnest`] alone.
+///
+/// That rule extracts a `get_field` into its own projection and pushes it towards the scan, routing
+/// it to whichever input owns the referenced column — a check made on the column's *name*. `Unnest`
+/// keeps the name and changes the type: the expanded column is `List<Struct<..>>` below it and
+/// `Struct<..>` above. So the routing check passes, the field access lands on the list, and planning
+/// fails with `type List(Struct(..)) is not Struct, Map, or Null`. That is what `mvexpand` over an
+/// array of objects produces (`mvexpand events | fields events.name`).
+///
+/// The rule applies top-down per node, so skipping only the subtrees that contain an unnest leaves
+/// the pushdown — and the nested-column pruning it buys — in place for every other plan and for the
+/// parts of this plan below the expansion.
+#[derive(Debug)]
+struct UnnestSafeLeafPushdown {
+    inner: Arc<dyn OptimizerRule + Send + Sync>,
+}
+
+impl OptimizerRule for UnnestSafeLeafPushdown {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn apply_order(&self) -> Option<ApplyOrder> {
+        self.inner.apply_order()
+    }
+
+    fn rewrite(
+        &self,
+        plan: LogicalPlan,
+        config: &dyn OptimizerConfig,
+    ) -> datafusion::common::Result<Transformed<LogicalPlan>> {
+        if contains_unnest(&plan) {
+            return Ok(Transformed::no(plan));
+        }
+        self.inner.rewrite(plan, config)
+    }
+}
+
+fn contains_unnest(plan: &LogicalPlan) -> bool {
+    if matches!(plan, LogicalPlan::Unnest(_)) {
+        return true;
+    }
+    plan.inputs().iter().any(|input| contains_unnest(input))
+}
+
+/// DataFusion's default optimizer rules with `push_down_leaf_projections` wrapped by
+/// [`UnnestSafeLeafPushdown`].
+fn unnest_safe_optimizer_rules() -> Vec<Arc<dyn OptimizerRule + Send + Sync>> {
+    Optimizer::new()
+        .rules
+        .into_iter()
+        .map(|rule| {
+            if rule.name() == "push_down_leaf_projections" {
+                Arc::new(UnnestSafeLeafPushdown { inner: rule })
+                    as Arc<dyn OptimizerRule + Send + Sync>
+            } else {
+                rule
+            }
+        })
+        .collect()
+}
 
 /// Opaque handle holding a configured SessionContext between FFM calls.
 pub struct SessionContextHandle {
@@ -272,6 +338,8 @@ pub async unsafe fn create_session_context(
         .with_analyzer_rule(Arc::new(
             crate::nested_project_rewrite_analyzer::NestedProjectRewriteRule,
         ))
+        // See UnnestSafeLeafPushdown.
+        .with_optimizer_rules(unnest_safe_optimizer_rules())
         .with_physical_optimizer_rules(if has_partial_aggregate {
             crate::agg_mode::physical_optimizer_rules_without_combine()
         } else {
@@ -494,6 +562,8 @@ pub async unsafe fn create_worker_session_context(
         .with_analyzer_rule(Arc::new(
             crate::nested_project_rewrite_analyzer::NestedProjectRewriteRule,
         ))
+        // See UnnestSafeLeafPushdown.
+        .with_optimizer_rules(unnest_safe_optimizer_rules())
         .with_physical_optimizer_rules(crate::agg_mode::physical_optimizer_rules_without_combine())
         .build();
 

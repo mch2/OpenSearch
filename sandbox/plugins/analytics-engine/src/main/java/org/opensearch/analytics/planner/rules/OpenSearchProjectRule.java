@@ -67,6 +67,24 @@ public class OpenSearchProjectRule extends RelOptRule {
 
         List<String> childViableBackends = openSearchChild.getViableBackends();
 
+        // The element rewrap above a multi-value expansion's Uncollect is a type-level fixup, not
+        // work: the expansion absorbs it and nothing emits its ROW call. Mark it (so the tree stays
+        // fully marked and copyable) but skip expression validation, which would otherwise reject
+        // ROW as an unsupported scalar function.
+        if (RelNodeUtils.isExpansionElementRewrap(project)) {
+            call.transformTo(
+                new OpenSearchProject(
+                    project.getCluster(),
+                    child.getTraitSet(),
+                    child,
+                    project.getProjects(),
+                    project.getRowType(),
+                    childViableBackends
+                )
+            );
+            return;
+        }
+
         // Note: if JMH benchmarks show this as a hotspot, consider (a) precomputing a
         // SqlKind → viable backends map once per onMatch() call, and (b) returning
         // childViableBackends directly when all candidates pass to avoid allocation.

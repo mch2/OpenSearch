@@ -56,7 +56,13 @@ dependencies {
     // opensearch-sql pulled from OpenSearch Snapshots (no local build), same as
     // jobSchedulerPlugin above. The EngineContextProvider/QueryRequestContext wiring is
     // merged upstream, so the published CI snapshot matches our QueryPlanExecutor signature.
-    sqlPlugin "org.opensearch.plugin:opensearch-sql-plugin:${externalPluginVersion}@zip"
+    // -PsqlPluginZip=<path> swaps in a locally built opensearch-sql zip, for verifying a
+    // frontend change end to end before it is merged and published as a snapshot.
+    if (project.hasProperty('sqlPluginZip')) {
+        sqlPlugin files(project.property('sqlPluginZip'))
+    } else {
+        sqlPlugin "org.opensearch.plugin:opensearch-sql-plugin:${externalPluginVersion}@zip"
+    }
 }
 
 // ── Shared cluster configuration closure ─────────────────────────────────────

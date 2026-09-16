@@ -48,9 +48,10 @@ import org.apache.calcite.util.ImmutableBitSet;
 import org.apache.calcite.util.Optionality;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.opensearch.analytics.planner.rules.OpenSearchNestedFieldRewriter;
+import org.opensearch.analytics.planner.RelNodeUtils;
 import org.opensearch.analytics.planner.rel.OpenSearchBroadcastScan;
 import org.opensearch.analytics.planner.rel.OpenSearchStageInputScan;
+import org.opensearch.analytics.planner.rules.OpenSearchNestedFieldRewriter;
 import org.opensearch.analytics.spi.AggregateFunction;
 import org.opensearch.analytics.spi.DelegatedPredicateFunction;
 import org.opensearch.analytics.spi.DelegationPossibleFunction;
@@ -985,6 +986,12 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
             }
             limit = literal.getValueAs(Integer.class);
             right = sort.getInput();
+        }
+        // An ARRAY<ROW<..>> expansion carries an element-rewrap Project between the Sort and the
+        // Uncollect. It is absorbed here rather than emitted: unnesting the list already yields the
+        // element struct as one column, which is exactly what the rewrap declares.
+        if (RelNodeUtils.isExpansionElementRewrap(right)) {
+            right = ((org.apache.calcite.rel.core.Project) right).getInput();
         }
         if (!(right instanceof Uncollect)) {
             return null;
