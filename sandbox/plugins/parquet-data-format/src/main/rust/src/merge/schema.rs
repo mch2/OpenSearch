@@ -157,6 +157,26 @@ fn widen_to(array: &ArrayRef, target: &ArrowField) -> MergeResult<ArrayRef> {
     if array.data_type() == target.data_type() {
         return Ok(array.clone());
     }
+    // An array-valued object is a list whose element is the struct, so widening happens one level
+    // down: the offsets and the list's own validity are reused untouched and only the element struct
+    // gains the columns this segment never saw. Without this, two segments whose events carried
+    // different attribute keys cannot merge — the common case as keys accumulate over time.
+    if let (DataType::List(target_element), DataType::List(_)) =
+        (target.data_type(), array.data_type())
+    {
+        let source = array
+            .as_any()
+            .downcast_ref::<arrow::array::ListArray>()
+            .expect("data type reports List");
+        let widened_values = widen_to(source.values(), target_element)?;
+        let widened = arrow::array::ListArray::try_new(
+            target_element.clone(),
+            source.offsets().clone(),
+            widened_values,
+            source.nulls().cloned(),
+        )?;
+        return Ok(Arc::new(widened));
+    }
     let (DataType::Struct(target_children), DataType::Struct(_)) =
         (target.data_type(), array.data_type())
     else {
@@ -399,4 +419,73 @@ mod tests {
             "unchanged struct column should not be rebuilt"
         );
     }
+
+    #[test]
+    fn widening_unions_the_element_struct_of_an_array_of_objects() {
+        // Two segments whose `events` elements carried different keys — the normal case as
+        // OpenTelemetry attribute keys accumulate. Widening happens inside the list: offsets and the
+        // list's validity are untouched, and only the element struct gains the missing column.
+        let element = |children: Vec<ArrowField>| {
+            ArrowField::new("element", DataType::Struct(Fields::from(children)), true)
+        };
+        let list_of = |children: Vec<ArrowField>| {
+            ArrowField::new("events", DataType::List(Arc::new(element(children))), true)
+        };
+
+        let narrow = ArrowSchema::new(vec![list_of(vec![int_child("code")])]);
+        let wide = Arc::new(ArrowSchema::new(vec![list_of(vec![
+            int_child("code"),
+            utf8_child("name"),
+        ])]));
+
+        // One row holding two elements, plus a row with no events at all.
+        let values = struct_array(
+            vec![int_child("code")],
+            vec![Arc::new(Int32Array::from(vec![Some(7), Some(8)]))],
+            vec![true, true],
+        );
+        let offsets = arrow::buffer::OffsetBuffer::new(vec![0, 2, 2].into());
+        let nulls = NullBuffer::from(vec![true, false]);
+        let events: ArrayRef = Arc::new(
+            arrow::array::ListArray::try_new(
+                Arc::new(element(vec![int_child("code")])),
+                offsets,
+                values,
+                Some(nulls),
+            )
+            .unwrap(),
+        );
+
+        let batch = RecordBatch::try_new(Arc::new(narrow.clone()), vec![events]).unwrap();
+        let padded = ColumnMapping::new(&narrow, &wide).pad_batch(&batch).unwrap();
+
+        let list = padded
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::ListArray>()
+            .expect("events stays a list");
+        assert!(!list.is_null(0), "row 0 carried events");
+        assert!(list.is_null(1), "row 1 carried none and stays null, not empty");
+        assert_eq!(list.value_length(0), 2, "both elements survive");
+
+        let elements = list
+            .value(0)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .expect("elements are structs")
+            .clone();
+        assert_eq!(elements.num_columns(), 2, "the element gained the new column");
+        let code = elements
+            .column_by_name("code")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        assert_eq!((code.value(0), code.value(1)), (7, 8), "written values keep their elements");
+        assert!(
+            elements.column_by_name("name").unwrap().is_null(0),
+            "the column this segment never saw is null per element"
+        );
+    }
+
 }
