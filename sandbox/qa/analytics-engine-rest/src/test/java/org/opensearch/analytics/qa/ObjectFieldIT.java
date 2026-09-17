@@ -734,6 +734,14 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
             row("2", null),
             row("3", null)
         );
+
+        // A null predicate on a leaf is a whole-array check — "no element has a non-null name" — which
+        // is what `must_not exists` answers in Lucene. So the three documents partition: only doc 1 has
+        // a name. Lowered as an element predicate instead (`some element's name is null`) the empty and
+        // absent documents answer neither side, because an existential over no elements is false.
+        assertRowsEqual("source=" + index + " | where isnull(events.name) | sort id | fields id", row("2"), row("3"));
+        assertRowsEqual("source=" + index + " | where isnotnull(events.name) | fields id", row("1"));
+        assertRowsEqual("source=" + index + " | where isnull(events) | sort id | fields id", row("2"), row("3"));
     }
 
 
@@ -921,6 +929,9 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
         assertRowsEqual("source=" + index + " | where events.name='a' | stats count()", row(1));
         assertRowsEqual("source=" + index + " | where events.name='c' | stats count()", row(1));
         assertRowsEqual("source=" + index + " | where events.name='zzz' | stats count()", row(0));
+        // Disjunction over one leaf: the folded Sarg is expanded before matching.
+        assertRowsEqual("source=" + index + " | where events.name='a' or events.name='c' | stats count()", row(2));
+        assertRowsEqual("source=" + index + " | where isnotnull(events.name) | stats count()", row(2));
     }
 
 

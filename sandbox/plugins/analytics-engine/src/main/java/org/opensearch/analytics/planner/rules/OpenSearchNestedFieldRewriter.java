@@ -460,6 +460,12 @@ public final class OpenSearchNestedFieldRewriter {
         LinkedHashMap<Integer, List<RexNode>> conjunctsByArray = new LinkedHashMap<>();
         List<RexNode> parentConjuncts = new ArrayList<>();
         for (RexNode conjunct : conjuncts) {
+            RexNode nullCheck = nestedIsNullAtRowLevel(conjunct, inputRowType, rexBuilder);
+            if (nullCheck != null) {
+                // Whole-array, so it cannot join the element-level fusion below.
+                parentConjuncts.add(nullCheck);
+                continue;
+            }
             int col = firstArrayColReferenced(List.of(conjunct), inputRowType);
             if (col < 0) {
                 parentConjuncts.add(conjunct);
@@ -467,8 +473,18 @@ public final class OpenSearchNestedFieldRewriter {
                 conjunctsByArray.computeIfAbsent(col, k -> new ArrayList<>()).add(conjunct);
             }
         }
-        if (conjunctsByArray.isEmpty()) {
+        if (conjunctsByArray.isEmpty() && parentConjuncts.isEmpty()) {
             return null;
+        }
+        if (conjunctsByArray.isEmpty()) {
+            // Only whole-array null checks (plus any scalar conjuncts) — nothing to fuse per element.
+            return parentConjuncts.size() == 1
+                ? parentConjuncts.get(0)
+                : rexBuilder.makeCall(
+                    rexBuilder.getTypeFactory().createSqlType(SqlTypeName.BOOLEAN),
+                    SqlStdOperatorTable.AND,
+                    parentConjuncts
+                );
         }
 
         List<RexNode> anyMatchCalls = new ArrayList<>(conjunctsByArray.size());
@@ -506,6 +522,56 @@ public final class OpenSearchNestedFieldRewriter {
             return allConjuncts.get(0);
         }
         return rexBuilder.makeCall(rexBuilder.getTypeFactory().createSqlType(SqlTypeName.BOOLEAN), SqlStdOperatorTable.AND, allConjuncts);
+    }
+
+    /**
+     * Rewrites {@code isnull(<array leaf>)} into a whole-array check, or returns null when the
+     * conjunct is not one.
+     *
+     * <p>{@code isnull} on a leaf of an array of objects means "no element has a non-null value" —
+     * that is what a {@code must_not exists} query answers in Lucene, and it is what makes
+     * {@code isnull} and {@code isnotnull} partition the documents. Lowering it as an element
+     * predicate ({@code ∃e: e.leaf IS NULL}) says something different and answers <em>nothing</em> for
+     * a document whose array is null or empty, because an existential over no elements is false: those
+     * documents fell out of both sides.
+     *
+     * <p>So it is emitted as the negation of the positive existential, at row level rather than inside
+     * the lambda: {@code NOT(nested_any_match(arr, EXISTS leaf)) OR arr IS NULL}. The {@code IS NULL}
+     * disjunct is needed because the call is null for a null array and {@code NOT(NULL)} is null, which
+     * would filter the row out again — the very documents this fixes. ({@code IS NOT TRUE} would say it
+     * in one operator, but no backend declares it as a filter predicate.)
+     *
+     * <p>Only a top-level {@code IS_NULL} is handled. A negated or arithmetic form keeps the existing
+     * element-level treatment; {@code isnotnull} already is the positive existential.
+     */
+    private static RexNode nestedIsNullAtRowLevel(RexNode conjunct, RelDataType inputRowType, RexBuilder rexBuilder) {
+        if (conjunct.getKind() != SqlKind.IS_NULL || !(conjunct instanceof RexCall call)) {
+            return null;
+        }
+        RexNode operand = call.getOperands().getFirst();
+        int col = firstArrayColReferenced(List.of(operand), inputRowType);
+        if (col < 0) {
+            return null;
+        }
+        Map<String, Object> fieldNode = new ExprTreeBuilder(col, inputRowType).build(operand);
+        if (fieldNode == null || fieldNode.containsKey("field") == false || fieldNode.containsKey("op")) {
+            return null;
+        }
+        RexNode existential = buildAnyMatchExprCall(opNode("EXISTS", List.of(fieldNode)), col, inputRowType, rexBuilder);
+        if (existential == null) {
+            return null;
+        }
+        RelDataType booleanType = rexBuilder.getTypeFactory().createSqlType(SqlTypeName.BOOLEAN);
+        RexNode arrayIsNull = rexBuilder.makeCall(
+            booleanType,
+            SqlStdOperatorTable.IS_NULL,
+            List.of(rexBuilder.makeInputRef(inputRowType.getFieldList().get(col).getType(), col))
+        );
+        return rexBuilder.makeCall(
+            booleanType,
+            SqlStdOperatorTable.OR,
+            List.of(rexBuilder.makeCall(booleanType, SqlStdOperatorTable.NOT, List.of(existential)), arrayIsNull)
+        );
     }
 
     private static RexNode tryOrSplitRewrite(
