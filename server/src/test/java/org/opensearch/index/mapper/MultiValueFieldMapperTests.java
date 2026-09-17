@@ -8,8 +8,10 @@
 
 package org.opensearch.index.mapper;
 
+import org.opensearch.common.CheckedConsumer;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.common.util.FeatureFlags;
+import org.opensearch.core.xcontent.XContentBuilder;
 
 import java.io.IOException;
 import java.util.List;
@@ -21,6 +23,31 @@ public class MultiValueFieldMapperTests extends MapperServiceTestCase {
 
     private Settings pluggableSettings() {
         return Settings.builder().put(getIndexSettings()).put("index.pluggable.dataformat.enabled", true).build();
+    }
+
+    /**
+     * Establishes {@code objectName} as an array-valued object, the way indexing does.
+     *
+     * <p>Two rounds, because the shape can only be recorded on a mapper that exists: the first parse
+     * creates the object and its leaf, and only once that update is applied can the array-ness be
+     * marked on it and published. Indexing gets the second round from the bulk retry that follows any
+     * mapping update.
+     */
+    private void declareObjectArray(MapperService service, String objectName, String leafName) throws IOException {
+        for (int round = 0; round < 2; round++) {
+            ParsedDocument parsed = service.documentMapper().parse(source(b -> {
+                b.startArray(objectName);
+                b.startObject().field(leafName, "a").endObject();
+                b.endArray();
+            }), new CapturingDocumentInput());
+            if (parsed.dynamicMappingsUpdate() != null) {
+                merge(service, dynamicMapping(parsed.dynamicMappingsUpdate()));
+            }
+        }
+        assertTrue(
+            "precondition: " + objectName + " must be declared array-valued",
+            service.documentMapper().objectMappers().get(objectName).multiValue()
+        );
     }
 
     private DocumentMapper keywordMapper() throws IOException {
@@ -122,24 +149,18 @@ public class MultiValueFieldMapperTests extends MapperServiceTestCase {
     }
 
     @LockFeatureFlag(FeatureFlags.PLUGGABLE_DATAFORMAT_EXPERIMENTAL_FLAG)
-    /**
-     * An empty array records nothing, so the column cell is written null — exactly what an absent
-     * field writes. That is Lucene's semantics (no term is indexed, so {@code isnull} matches) and
-     * vanilla OpenSearch's, so the two backends answer a null predicate the same way. It also keeps an
-     * empty {@code List} out of the composite broadcast to the secondary formats, where a Lucene field
-     * factory would stringify it and index the literal term {@code "[]"}.
-     *
-     * <p>This is the multi-value twin of {@link #testScalarFieldIgnoresEmptyArray}.
-     */
-    public void testExplicitTrueTreatsEmptyArrayAsAbsent() throws IOException {
+    public void testExplicitTruePreservesEmptyArray() throws IOException {
         DocumentMapper mapper = keywordMapper(true);
         CapturingDocumentInput input = new CapturingDocumentInput();
         ParsedDocument parsed = mapper.parse(source(b -> b.startArray("field").endArray()), input);
 
-        assertTrue(
-            "an empty array must record no field at all",
-            input.getCapturedFields().stream().noneMatch(entry -> entry.getKey().name().equals("field"))
-        );
+        Object emptyValue = input.getCapturedFields()
+            .stream()
+            .filter(entry -> entry.getKey().name().equals("field"))
+            .map(java.util.Map.Entry::getValue)
+            .findFirst()
+            .orElseThrow();
+        assertEquals(List.of(), emptyValue);
         assertNull(parsed.dynamicMappingsUpdate());
     }
 
@@ -243,34 +264,51 @@ public class MultiValueFieldMapperTests extends MapperServiceTestCase {
         }
     }
 
+    /**
+     * The array shape belongs to the object, not to its leaves: {@code events} becomes
+     * {@code LIST<STRUCT<start, stop>>}, so each leaf stays a scalar within its element. Marking the
+     * leaves instead would store {@code STRUCT<start LIST, stop LIST>}, which cannot say which element
+     * a value came from — see {@code DocumentParser#declareObjectArray}.
+     *
+     * <p>It takes two rounds, because the array-ness is recorded on the object's mapper and the first
+     * parse is what creates it. Indexing gets the second round from the bulk retry.
+     */
     @LockFeatureFlag(FeatureFlags.PLUGGABLE_DATAFORMAT_EXPERIMENTAL_FLAG)
-    public void testArrayOfObjectsDeclaresEveryLeafArrayShaped() throws IOException {
-        // Each object here contributes a different leaf, so neither actually repeats — both are still
-        // declared array-shaped. The enclosing array is taken as the declaration of intent; the exact
-        // alternative would mean buffering the array to count each leaf before creating any mapper.
+    public void testArrayOfObjectsDeclaresTheObjectArrayShaped() throws IOException {
         MapperService service = createMapperService(pluggableSettings(), mapping(b -> {}));
-        ParsedDocument parsed = service.documentMapper().parse(source(b -> {
+        CheckedConsumer<XContentBuilder, IOException> document = b -> {
             b.startArray("events");
             b.startObject().field("start", "a").endObject();
             b.startObject().field("stop", "b").endObject();
             b.endArray();
-        }), new CapturingDocumentInput());
-        merge(service, dynamicMapping(parsed.dynamicMappingsUpdate()));
+        };
 
-        assertTrue(((FieldMapper) service.documentMapper().mappers().getMapper("events.start")).fieldType().isMultiValued());
-        assertTrue(((FieldMapper) service.documentMapper().mappers().getMapper("events.stop")).fieldType().isMultiValued());
+        ParsedDocument first = service.documentMapper().parse(source(document), new CapturingDocumentInput());
+        merge(service, dynamicMapping(first.dynamicMappingsUpdate()));
+        assertFalse(
+            "the parse that creates the object cannot mark a mapper that does not exist yet",
+            service.documentMapper().objectMappers().get("events").multiValue()
+        );
+
+        ParsedDocument second = service.documentMapper().parse(source(document), new CapturingDocumentInput());
+        merge(service, dynamicMapping(second.dynamicMappingsUpdate()));
+
+        assertTrue("the object itself carries the array shape", service.documentMapper().objectMappers().get("events").multiValue());
+        assertFalse(((FieldMapper) service.documentMapper().mappers().getMapper("events.start")).fieldType().isMultiValued());
+        assertFalse(((FieldMapper) service.documentMapper().mappers().getMapper("events.stop")).fieldType().isMultiValued());
     }
 
     @LockFeatureFlag(FeatureFlags.PLUGGABLE_DATAFORMAT_EXPERIMENTAL_FLAG)
-    public void testArrayOfObjectsRepeatingALeafBecomesMultiValued() throws IOException {
-        // Under the default `object` mapping these two values belong to one multi-valued field —
-        // OpenSearch flattens the objects and discards which value came from which. Nothing about the
-        // first object reveals that `name` will appear again, so the shape is amended when the second
-        // value arrives. Safe because this same document created the field: the mapping update has not
-        // been applied and no file has been written.
+    public void testArrayOfObjectsRepeatingALeafStaysElementScoped() throws IOException {
+        // A leaf that appears in every element is still one value per element, not a multi-valued leaf.
+        // Both values reach the document input — that is what keeps `[{"name":"start"},{"name":"stop"}]`
+        // distinct from `[{"name":"start","other":"stop"}]` — but they are told apart by their element
+        // ordinal rather than by the leaf being a list.
         MapperService service = createMapperService(pluggableSettings(), mapping(b -> {}));
+        declareObjectArray(service, "events", "name");
+
         CapturingDocumentInput input = new CapturingDocumentInput();
-        ParsedDocument parsed = service.documentMapper().parse(source(b -> {
+        service.documentMapper().parse(source(b -> {
             b.startArray("events");
             b.startObject().field("name", "start").endObject();
             b.startObject().field("name", "stop").endObject();
@@ -278,21 +316,32 @@ public class MultiValueFieldMapperTests extends MapperServiceTestCase {
         }), input);
 
         assertEquals("both values belong to the one field", 2L, input.getFieldCount("events.name"));
-        merge(service, dynamicMapping(parsed.dynamicMappingsUpdate()));
+        assertEquals("and the run is two elements long", Integer.valueOf(2), input.getObjectArrayCounts().get("events"));
 
         FieldMapper name = (FieldMapper) service.documentMapper().mappers().getMapper("events.name");
-        assertTrue(name.fieldType().isMultiValued());
+        assertFalse("the leaf stays scalar within its element", name.fieldType().isMultiValued());
         assertThat(service.documentMapper().mappingSource().string(), containsString("\"multi_value\":true"));
     }
 
     @LockFeatureFlag(FeatureFlags.PLUGGABLE_DATAFORMAT_EXPERIMENTAL_FLAG)
-    public void testArrayOfObjectsRepeatingANumericLeafBecomesMultiValued() throws IOException {
+    public void testArrayOfObjectsRepeatingANumericLeafStaysElementScoped() throws IOException {
         // Same as the text case, on a numeric leaf, so a per-type serialization gap cannot hide.
         MapperService service = createMapperService(pluggableSettings(), mapping(b -> {}));
-        ParsedDocument parsed = service.documentMapper().parse(source(b -> {
+        service.documentMapper().parse(source(b -> {
             b.startArray("events");
             b.startObject().field("name", 1).endObject();
             b.startObject().field("name", 2).endObject();
+            b.endArray();
+        }), new CapturingDocumentInput());
+        merge(service, dynamicMapping(service.documentMapper().parse(source(b -> {
+            b.startArray("events");
+            b.startObject().field("name", 1).endObject();
+            b.endArray();
+        }), new CapturingDocumentInput()).dynamicMappingsUpdate()));
+
+        ParsedDocument parsed = service.documentMapper().parse(source(b -> {
+            b.startArray("events");
+            b.startObject().field("name", 3).endObject();
             b.endArray();
         }), new CapturingDocumentInput());
 
@@ -305,7 +354,25 @@ public class MultiValueFieldMapperTests extends MapperServiceTestCase {
             containsString("\"multi_value\":true")
         );
         merge(service, dynamicMapping(parsed.dynamicMappingsUpdate()));
-        assertTrue(((FieldMapper) service.documentMapper().mappers().getMapper("events.name")).fieldType().isMultiValued());
+        assertTrue(service.documentMapper().objectMappers().get("events").multiValue());
+        assertFalse(((FieldMapper) service.documentMapper().mappers().getMapper("events.name")).fieldType().isMultiValued());
+    }
+
+    /**
+     * An empty array of objects is a present, zero-length {@code LIST<STRUCT>}, so it stays distinct
+     * from an absent one. The element loop never runs for {@code []}, so the length is reported
+     * separately — see {@code DocumentParser#registerEmptyMultiValueArray}.
+     */
+    @LockFeatureFlag(FeatureFlags.PLUGGABLE_DATAFORMAT_EXPERIMENTAL_FLAG)
+    public void testEmptyArrayOfObjectsReportsAZeroLengthRun() throws IOException {
+        MapperService service = createMapperService(pluggableSettings(), mapping(b -> {}));
+        declareObjectArray(service, "events", "name");
+
+        CapturingDocumentInput input = new CapturingDocumentInput();
+        service.documentMapper().parse(source(b -> b.startArray("events").endArray()), input);
+
+        assertEquals("an empty array of objects reports a run of zero", Integer.valueOf(0), input.getObjectArrayCounts().get("events"));
+        assertTrue("and writes no leaf value", input.getCapturedFields().stream().noneMatch(e -> e.getKey().name().startsWith("events.")));
     }
 
     @LockFeatureFlag(FeatureFlags.PLUGGABLE_DATAFORMAT_EXPERIMENTAL_FLAG)

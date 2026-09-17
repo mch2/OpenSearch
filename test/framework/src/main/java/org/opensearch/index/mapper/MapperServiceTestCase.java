@@ -73,6 +73,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -378,6 +379,7 @@ public abstract class MapperServiceTestCase extends OpenSearchTestCase {
      */
     public static class CapturingDocumentInput implements DocumentInput<Object> {
         private final List<Map.Entry<MappedFieldType, Object>> capturedFields = new ArrayList<>();
+        private final Map<String, Integer> objectArrayCounts = new LinkedHashMap<>();
 
         @Override
         public Object getFinalInput() {
@@ -387,6 +389,12 @@ public abstract class MapperServiceTestCase extends OpenSearchTestCase {
         @Override
         public void addField(MappedFieldType fieldType, Object value) {
             capturedFields.add(Map.entry(fieldType, value));
+        }
+
+        /** Merged with max, as the writer does, so a later report cannot shorten an element run. */
+        @Override
+        public void addObjectArray(String objectPath, int elementCount) {
+            objectArrayCounts.merge(objectPath, elementCount, Math::max);
         }
 
         @Override
@@ -402,6 +410,11 @@ public abstract class MapperServiceTestCase extends OpenSearchTestCase {
 
         public List<Map.Entry<MappedFieldType, Object>> getCapturedFields() {
             return capturedFields;
+        }
+
+        /** Element counts reported per array-valued object, by dotted path. */
+        public Map<String, Integer> getObjectArrayCounts() {
+            return objectArrayCounts;
         }
     }
 }
