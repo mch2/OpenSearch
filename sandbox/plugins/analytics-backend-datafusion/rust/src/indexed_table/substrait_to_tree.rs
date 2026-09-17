@@ -157,6 +157,26 @@ pub fn expr_to_bool_tree(
     })
 }
 
+/// Residual-predicate counterpart to the plan-level `NestedAnyMatchRewriteRule`.
+///
+/// A nested predicate reaches the shard as a `nested_any_match` placeholder call, which that rule
+/// turns into a native `array_any_match` HOF. The rule matches `LogicalPlan::Filter`, but on the
+/// delegated path there is no Filter node to match — the residual arrives as a bare `Expr` and is
+/// lowered straight through `create_physical_expr`, which runs expression analysis but no
+/// plan-level rules. Left alone the placeholder survives into execution and errors with
+/// "placeholder invoked".
+///
+/// That happens whenever a nested predicate is ANDed with a delegated one
+/// (`where events.name='timeout' and id='s2'`): the delegated conjunct splits the filter and leaves
+/// the nested conjunct as the residual.
+///
+/// TODO(native-array_any_match): drop this alongside the analyzer rule once DataFusion consumes a
+/// Substrait HOF+lambda natively — an emitted `array_any_match` round-trips with no rewrite.
+fn rewrite_nested_any_match(expr: Expr, df_schema: &DFSchema) -> Result<Expr, String> {
+    crate::nested_any_match_rewrite_analyzer::rewrite_nested_any_match_in_expr(expr, df_schema)
+        .map_err(|e| format!("nested_any_match rewrite: {}", e))
+}
+
 fn convert_expr(
     expr: &Expr,
     schema: &Schema,
@@ -193,7 +213,7 @@ fn convert_expr(
         // `Utf8View` column compared against an `Utf8` literal — Arrow's
         // comparison kernel rejects mixed types).
         other => {
-            let unqualified = strip_column_qualifiers(other);
+            let unqualified = rewrite_nested_any_match(strip_column_qualifiers(other), df_schema)?;
             let phys = state
                 .create_physical_expr(unqualified.clone(), df_schema)
                 .map_err(|e| format!("create_physical_expr for {:?}: {}", unqualified, e))?;
@@ -240,7 +260,7 @@ fn convert_delegation_possible_function(
             args.len()
         ));
     }
-    let unqualified = strip_column_qualifiers(&args[0]);
+    let unqualified = rewrite_nested_any_match(strip_column_qualifiers(&args[0]), df_schema)?;
     let original_expr = state
         .create_physical_expr(unqualified, df_schema)
         .map_err(|e| {

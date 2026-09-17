@@ -221,4 +221,54 @@ public class ObjectFilterDelegationIT extends AnalyticsRestTestCase {
         setPreferMetadataDriver(false);
     }
 
+    /**
+     * An array-of-objects leaf ANDed with a scalar predicate that delegation takes.
+     *
+     * <p>The delegated conjunct splits the filter and leaves the nested one as the residual, which
+     * the indexed path lowers through {@code create_physical_expr} — no {@code Filter} node, so the
+     * plan-level rule that turns the {@code nested_any_match} placeholder into a native
+     * {@code array_any_match} never fires there. Left unlowered the placeholder reached execution and
+     * the query failed with "placeholder invoked". The nested predicate on its own, and the same
+     * conjunction with a numeric scalar, both took different paths and kept working — so only this
+     * shape pins it.
+     */
+    public void testArrayLeafWithDelegatedScalarPredicate() throws Exception {
+        String index = "object_array_delegated_scalar_it";
+        try {
+            client().performRequest(new Request("DELETE", "/" + index));
+        } catch (Exception ignored) {}
+        Request create = new Request("PUT", "/" + index);
+        create.setJsonEntity(
+            "{\"settings\":{"
+                + "\"number_of_shards\":1,\"number_of_replicas\":0,"
+                + "\"index.pluggable.dataformat.enabled\":true,"
+                + "\"index.pluggable.dataformat\":\"composite\","
+                + "\"index.composite.primary_data_format\":\"parquet\","
+                + "\"index.composite.secondary_data_formats\":\"lucene\"},"
+                + "\"mappings\":{\"properties\":{\"id\":{\"type\":\"keyword\"}}}}"
+        );
+        client().performRequest(create);
+        Request bulk = new Request("POST", "/" + index + "/_bulk");
+        bulk.setJsonEntity(
+            "{\"index\":{}}\n"
+                + "{\"id\":\"1\",\"events\":[{\"name\":\"exception\",\"time\":1},{\"name\":\"ok\",\"time\":2}]}\n"
+                + "{\"index\":{}}\n"
+                + "{\"id\":\"2\",\"events\":[{\"name\":\"exception\",\"time\":5}]}\n"
+        );
+        bulk.addParameter("refresh", "true");
+        client().performRequest(bulk);
+        client().performRequest(new Request("POST", "/" + index + "/_flush?force=true"));
+
+        // Both documents carry an `exception` event; the scalar conjunct is what narrows it to one.
+        assertCountUnderBothDrivers("source=" + index + " | where events.name='exception' | stats count()", 2L);
+        assertCountUnderBothDrivers("source=" + index + " | where events.name='exception' and id='1' | stats count()", 1L);
+        // Argument order must not matter — the residual is whichever conjunct delegation did not take.
+        assertCountUnderBothDrivers("source=" + index + " | where id='1' and events.name='exception' | stats count()", 1L);
+        // A projection alongside the delegated filter exercises the sibling nested_project placeholder.
+        assertCountUnderBothDrivers(
+            "source=" + index + " | where events.name='exception' and id='1' | fields events.name | stats count()",
+            1L
+        );
+    }
+
 }
