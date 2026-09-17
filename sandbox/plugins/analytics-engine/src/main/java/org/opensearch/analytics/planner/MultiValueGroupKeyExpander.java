@@ -13,6 +13,7 @@ import org.apache.calcite.plan.RelOptUtil;
 import org.apache.calcite.rel.RelHomogeneousShuttle;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.Aggregate;
+import org.apache.calcite.rel.core.AggregateCall;
 import org.apache.calcite.rel.core.CorrelationId;
 import org.apache.calcite.rel.core.JoinRelType;
 import org.apache.calcite.rel.core.Uncollect;
@@ -28,7 +29,9 @@ import org.apache.logging.log4j.Logger;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.NavigableSet;
 import java.util.Optional;
+import java.util.TreeSet;
 
 /**
  * Gives each element of a LIST-valued {@code GROUP BY} key its own bucket, by expanding the key
@@ -105,20 +108,32 @@ public final class MultiValueGroupKeyExpander {
 
     private static RelNode expand(Aggregate aggregate, RelBuilder relBuilder) {
         RelNode input = aggregate.getInput();
-        List<Integer> listKeys = new ArrayList<>();
+        // Group keys and aggregate arguments both need expanding, and both address the input by index,
+        // so one ordered, deduplicated set covers them. Deduplication is load-bearing, not hygiene:
+        // `stats dc(tags) by tags` names the same index twice, and expanding it twice would build a
+        // nested Correlate that cross-products a document's array with itself.
+        NavigableSet<Integer> listCols = new TreeSet<>();
+        List<RelDataTypeField> fields = input.getRowType().getFieldList();
         for (int fieldIndex : aggregate.getGroupSet()) {
-            if (input.getRowType().getFieldList().get(fieldIndex).getType().getComponentType() != null) {
-                listKeys.add(fieldIndex);
+            if (fields.get(fieldIndex).getType().getComponentType() != null) {
+                listCols.add(fieldIndex);
             }
         }
-        if (listKeys.isEmpty()) {
+        for (AggregateCall call : aggregate.getAggCallList()) {
+            for (int argIndex : call.getArgList()) {
+                if (argIndex < fields.size() && fields.get(argIndex).getType().getComponentType() != null) {
+                    listCols.add(argIndex);
+                }
+            }
+        }
+        if (listCols.isEmpty()) {
             return aggregate;
         }
         RelNode expandedInput = input;
-        for (int fieldIndex : listKeys) {
+        for (int fieldIndex : listCols) {
             expandedInput = expandOneColumn(expandedInput, fieldIndex, relBuilder);
             if (expandedInput == null) {
-                LOGGER.debug("Multi-value group key expansion skipped for field index {}", fieldIndex);
+                LOGGER.debug("Multi-value expansion skipped for field index {}", fieldIndex);
                 return aggregate;
             }
         }
@@ -127,8 +142,47 @@ public final class MultiValueGroupKeyExpander {
             expandedInput,
             aggregate.getGroupSet(),
             aggregate.getGroupSets(),
-            aggregate.getAggCallList()
+            reinferCalls(aggregate, expandedInput, listCols)
         );
+    }
+
+    /**
+     * Rebuilds every aggregate call that reads an expanded column so Calcite re-infers its return
+     * type against the narrowed input.
+     *
+     * <p>An aggregate's own return type can depend on its argument's: {@code MIN}/{@code MAX} are
+     * {@code ARG0}, so a call left holding {@code ARRAY<BIGINT>} over a now-{@code BIGINT} argument
+     * trips {@code Aggregate}'s per-call {@code typeMatchesInferred} assertion. Passing a null type
+     * asks Calcite to infer it, exactly as {@code OpenSearchDistinctCountRule} does. Calls whose type
+     * does not depend on the argument ({@code COUNT}, {@code APPROX_COUNT_DISTINCT} → BIGINT) come
+     * back identical.
+     */
+    private static List<AggregateCall> reinferCalls(Aggregate aggregate, RelNode expandedInput, NavigableSet<Integer> expandedCols) {
+        List<AggregateCall> calls = new ArrayList<>(aggregate.getAggCallList().size());
+        for (AggregateCall call : aggregate.getAggCallList()) {
+            if (call.getArgList().stream().noneMatch(expandedCols::contains)) {
+                calls.add(call);
+                continue;
+            }
+            calls.add(
+                AggregateCall.create(
+                    call.getAggregation(),
+                    call.isDistinct(),
+                    call.isApproximate(),
+                    call.ignoreNulls(),
+                    call.rexList,
+                    call.getArgList(),
+                    call.filterArg,
+                    call.distinctKeys,
+                    call.collation,
+                    aggregate.getGroupSet().cardinality(),
+                    expandedInput,
+                    null,
+                    call.getName()
+                )
+            );
+        }
+        return calls;
     }
 
     /**

@@ -228,6 +228,82 @@ public class MvExpandIT extends AnalyticsRestTestCase {
         assertRowsEqualUnordered("source=" + INDEX + " | mvexpand events | stats count() by events.name", expected);
     }
 
+    /**
+     * An aggregate's <em>argument</em> expands per element too, so {@code count}/{@code dc}/{@code max}
+     * over a multi-value column aggregate values rather than documents — Lucene's
+     * {@code value_count}/{@code cardinality} parity.
+     *
+     * <p>Not paired with an explicit {@code mvexpand} twin here: {@code stats <agg>(<col>)} after any
+     * explicit projection is broken independently of arrays — even the array-free
+     * {@code fields svc | stats count(svc)} returns a 500 — so a twin would assert around that bug
+     * rather than this behaviour.
+     */
+    public void testAggregateOverTextArrayAggregatesElements() throws IOException {
+        assertRowsEqualUnordered("source=" + INDEX + " | stats count(tags)", row(8));
+        assertRowsEqualUnordered("source=" + INDEX + " | stats dc(tags)", row(5));
+        assertRowsEqualUnordered("source=" + INDEX + " | stats max(tags)", row("us-west"));
+        assertRowsEqualUnordered("source=" + INDEX + " | stats min(tags)", row("canary"));
+    }
+
+    /** The same for a numeric array — MIN/MAX are ARG0-typed, so the call's type is re-inferred. */
+    public void testAggregateOverLongArrayAggregatesElements() throws IOException {
+        assertRowsEqualUnordered("source=" + INDEX + " | stats max(codes)", row(503));
+        assertRowsEqualUnordered("source=" + INDEX + " | stats min(codes)", row(200));
+        assertRowsEqualUnordered("source=" + INDEX + " | stats count(codes)", row(7));
+        assertRowsEqualUnordered("source=" + INDEX + " | stats dc(codes)", row(4));
+    }
+
+    /**
+     * A leaf of an array of objects. Ordering-sensitive for the same reason as
+     * {@link #testGroupByObjectArrayLeafExplodesImplicitly}: the leaf is only ARRAY-typed after the
+     * nested rewrite, so an expander running earlier would see a scalar and skip it.
+     */
+    public void testAggregateOverObjectArrayLeafAggregatesElements() throws IOException {
+        assertRowsEqualUnordered("source=" + INDEX + " | stats count(events.name)", row(10));
+        assertRowsEqualUnordered("source=" + INDEX + " | stats dc(events.name)", row(6));
+        assertRowsEqualUnordered("source=" + INDEX + " | stats max(events.name)", row("validate"));
+    }
+
+    /** Duplicates count once each for {@code count} and collapse for {@code dc} — s4 has retry twice. */
+    public void testDuplicateElementsCountButDoNotAffectDistinctCount() throws IOException {
+        assertRowsEqualUnordered("source=" + INDEX + " | where id = 's4' | stats count(events.name)", row(4));
+        assertRowsEqualUnordered("source=" + INDEX + " | where id = 's4' | stats dc(events.name)", row(3));
+    }
+
+    /**
+     * The same column as both group key and aggregate argument must expand exactly once. Expanding it
+     * twice cross-products a document's array with itself and squares every contribution, so {@code prod}
+     * would report 9 rather than 3.
+     */
+    public void testSameColumnAsGroupKeyAndAggArgExpandsOnce() throws IOException {
+        assertRowsEqualUnordered(
+            "source=" + INDEX + " | stats count(tags) by tags",
+            row(3, "prod"),
+            row(2, "us-west"),
+            row(1, "us-east"),
+            row(1, "staging"),
+            row(1, "canary"),
+            rowWithNull(0)           // the null key has no value to count
+        );
+    }
+
+    /**
+     * Two different arrays in one aggregate give the cartesian product of the two per document, which
+     * is what vanilla's terms-agg with a {@code value_count} sub-agg reports: bucket {@code prod} sums
+     * |codes| over s1, s2, s4 = 2 + 2 + 1.
+     */
+    public void testTwoArraysCrossProductMatchesLuceneValueCount() throws IOException {
+        assertRowsEqualUnordered(
+            "source=" + INDEX + " | stats count(codes) by tags",
+            row(5, "prod"),
+            row(3, "us-west"),
+            row(2, "us-east"),
+            row(1, "staging"),
+            row(1, "canary"),
+            rowWithNull(1)           // s5 [] and s6 absent share the null key; only s5 has a code
+        );
+    }
+
     /** {@link List#of} rejects nulls, so the null-key bucket needs Arrays.asList. */
     private static List<Object> rowWithNull(Object first) {
         return Arrays.asList(first, null);
