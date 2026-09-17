@@ -23,6 +23,7 @@ import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeField;
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.rex.RexNode;
+import org.apache.calcite.sql.fun.SqlLibraryOperators;
 import org.apache.calcite.tools.RelBuilder;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -39,7 +40,7 @@ import java.util.TreeSet;
  *
  * <p>A {@code multi_value} column groups per element rather than per document — Lucene terms-agg
  * parity — so {@code stats count() by tags} over {@code ["prod","us-east"]} contributes to two
- * buckets. This rewrites
+ * buckets, and over {@code ["blue","blue"]} to one (see {@link #distinctElements}). This rewrites
  *
  * <pre>
  * Aggregate(group=[{tags}])
@@ -113,10 +114,12 @@ public final class MultiValueGroupKeyExpander {
         // `stats dc(tags) by tags` names the same index twice, and expanding it twice would build a
         // nested Correlate that cross-products a document's array with itself.
         NavigableSet<Integer> listCols = new TreeSet<>();
+        NavigableSet<Integer> groupKeys = new TreeSet<>();
         List<RelDataTypeField> fields = input.getRowType().getFieldList();
         for (int fieldIndex : aggregate.getGroupSet()) {
             if (fields.get(fieldIndex).getType().getComponentType() != null) {
                 listCols.add(fieldIndex);
+                groupKeys.add(fieldIndex);
             }
         }
         for (AggregateCall call : aggregate.getAggCallList()) {
@@ -131,7 +134,7 @@ public final class MultiValueGroupKeyExpander {
         }
         RelNode expandedInput = input;
         for (int fieldIndex : listCols) {
-            expandedInput = expandOneColumn(expandedInput, fieldIndex, relBuilder);
+            expandedInput = expandOneColumn(expandedInput, fieldIndex, groupKeys.contains(fieldIndex), relBuilder);
             if (expandedInput == null) {
                 LOGGER.debug("Multi-value expansion skipped for field index {}", fieldIndex);
                 return aggregate;
@@ -144,6 +147,28 @@ public final class MultiValueGroupKeyExpander {
             aggregate.getGroupSets(),
             reinferCalls(aggregate, expandedInput, listCols)
         );
+    }
+
+    /**
+     * Collapses a document's repeated elements in column {@code fieldIndex} into one, so a group key
+     * buckets a document once per distinct value.
+     *
+     * <p>That is what a Lucene terms aggregation reports: it counts documents per term, so
+     * {@code ["blue","blue","red"]} contributes one to {@code blue}, not two. Only group keys are
+     * deduplicated — an aggregate argument keeps every element, because {@code count} and {@code sum}
+     * over a multi-valued field count values rather than documents, which is Lucene's answer too.
+     *
+     * <p>A null column stays null ({@code array_distinct} propagates it), so a document missing the
+     * field still forms the single null bucket it forms today.
+     */
+    private static RelNode distinctElements(RelNode input, int fieldIndex, RelBuilder relBuilder) {
+        RexBuilder rexBuilder = input.getCluster().getRexBuilder();
+        List<RexNode> projects = new ArrayList<>(input.getRowType().getFieldCount());
+        for (int i = 0; i < input.getRowType().getFieldCount(); i++) {
+            RexNode ref = rexBuilder.makeInputRef(input, i);
+            projects.add(i == fieldIndex ? rexBuilder.makeCall(SqlLibraryOperators.ARRAY_DISTINCT, ref) : ref);
+        }
+        return relBuilder.push(input).project(projects, input.getRowType().getFieldNames(), true).build();
     }
 
     /**
@@ -190,8 +215,13 @@ public final class MultiValueGroupKeyExpander {
      * the column order — untouched, so callers keep addressing fields by their original index.
      * Returns {@code null} when the shape can't be built, so the caller can leave the plan alone
      * rather than emit something the backend will reject.
+     *
+     * @param perDocumentDistinct collapse a document's repeated elements into one before exploding
      */
-    private static RelNode expandOneColumn(RelNode input, int fieldIndex, RelBuilder relBuilder) {
+    private static RelNode expandOneColumn(RelNode input, int fieldIndex, boolean perDocumentDistinct, RelBuilder relBuilder) {
+        if (perDocumentDistinct) {
+            input = distinctElements(input, fieldIndex, relBuilder);
+        }
         RelOptCluster cluster = input.getCluster();
         RexBuilder rexBuilder = cluster.getRexBuilder();
         RelDataType inputRowType = input.getRowType();

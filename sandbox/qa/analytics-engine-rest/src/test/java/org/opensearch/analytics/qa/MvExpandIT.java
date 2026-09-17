@@ -38,7 +38,7 @@ import java.util.Map;
  * s2  payment      450         [prod, us-west]               [500, 503]  [start, timeout]
  * s3  cart          30         [staging, us-west, canary]    [200]       [start]
  * s4  checkout     900         [prod]                        [500]       [start, retry, retry, fail]
- * s5  search        75         []  (empty array = absent)    [200]       (absent)
+ * s5  search        75         []            (empty array)   [200]       (absent)
  * s6  quote         60         (absent)                      (absent)    (absent)
  * </pre>
  */
@@ -115,7 +115,6 @@ public class MvExpandIT extends AnalyticsRestTestCase {
             row("s3", "us-west"),
             row("s3", "canary"),
             row("s4", "prod"),
-            row("s5", null),
             row("s6", null)
         );
     }
@@ -171,7 +170,7 @@ public class MvExpandIT extends AnalyticsRestTestCase {
 
     /** {@code limit} caps elements per document — s3 keeps 2 of its 3 tags, others are unaffected. */
     public void testExpandRespectsLimit() throws IOException {
-        assertRowsEqualUnordered("source=" + INDEX + " | fields id, tags | mvexpand tags limit=2 | stats count()", row(9));
+        assertRowsEqualUnordered("source=" + INDEX + " | fields id, tags | mvexpand tags limit=2 | stats count()", row(8));
         assertRowsEqualUnordered("source=" + INDEX + " | fields id, tags | mvexpand tags limit=2 | where id = 's3' | stats count()", row(2));
     }
 
@@ -184,7 +183,7 @@ public class MvExpandIT extends AnalyticsRestTestCase {
             row(240.0, "us-west"),   // (450 + 30) / 2
             row(30.0, "staging"),
             row(30.0, "canary"),
-            row(67.5, null)          // s5 (75, empty array) and s6 (60, absent) — both null keys
+            row(60.0, null)
         );
     }
 
@@ -199,7 +198,7 @@ public class MvExpandIT extends AnalyticsRestTestCase {
             row(1, "us-east"),
             row(1, "staging"),
             row(1, "canary"),
-            rowWithNull(2)           // s5's [] and s6's absent tags are the same thing
+            rowWithNull(1)
         );
         assertRowsEqualUnordered("source=" + INDEX + " | stats count() by tags", expected);
         assertRowsEqualUnordered("source=" + INDEX + " | fields tags | mvexpand tags | stats count() by tags", expected);
@@ -212,20 +211,34 @@ public class MvExpandIT extends AnalyticsRestTestCase {
      * <p>Ordering-sensitive: the leaf is {@code ITEM(events,'name')} — typed as the element's scalar —
      * until {@code OpenSearchNestedFieldRewriter} turns it into an ARRAY-typed {@code NESTED_PROJECT}.
      * An expander running before that rewrite sees a scalar key, skips it, and every document's whole
-     * array becomes one bucket. The explicit form below must agree bucket for bucket.
+     * array becomes one bucket.
+     *
+     * <p>The two forms agree on every bucket except {@code retry}, and that difference is the contract:
+     * an implicit group key counts documents per distinct value, as a Lucene terms aggregation does, so
+     * s4's two {@code retry} events count once. Writing {@code mvexpand} asks for the elements
+     * themselves, so both are kept.
      */
     public void testGroupByObjectArrayLeafExplodesImplicitly() throws IOException {
-        List<List<Object>> expected = List.of(
+        assertRowsEqualUnordered(
+            "source=" + INDEX + " | stats count() by events.name",
             row(4, "start"),   // s1, s2, s3, s4
             row(1, "validate"),
             row(1, "commit"),
             row(1, "timeout"),
-            row(2, "retry"),   // s4 carries two, and both count
+            row(1, "retry"),   // s4 carries two, and they are one document
             row(1, "fail"),
             rowWithNull(2)     // s5 and s6 have no events at all
         );
-        assertRowsEqualUnordered("source=" + INDEX + " | stats count() by events.name", expected);
-        assertRowsEqualUnordered("source=" + INDEX + " | mvexpand events | stats count() by events.name", expected);
+        assertRowsEqualUnordered(
+            "source=" + INDEX + " | mvexpand events | stats count() by events.name",
+            row(4, "start"),
+            row(1, "validate"),
+            row(1, "commit"),
+            row(1, "timeout"),
+            row(2, "retry"),   // expanded explicitly, so both elements are rows
+            row(1, "fail"),
+            rowWithNull(2)
+        );
     }
 
     /**
@@ -300,7 +313,7 @@ public class MvExpandIT extends AnalyticsRestTestCase {
             row(2, "us-east"),
             row(1, "staging"),
             row(1, "canary"),
-            rowWithNull(1)           // s5 [] and s6 absent share the null key; only s5 has a code
+            rowWithNull(0)           // s5's [] contributes no row, so the null key is s6, which has no codes
         );
     }
 
@@ -310,25 +323,29 @@ public class MvExpandIT extends AnalyticsRestTestCase {
     }
 
     /**
-     * An empty array is an absent field. s5 has {@code "tags": []} and s6 has no {@code tags} key;
-     * both expand to one row holding null and both answer {@code isnull}.
+     * Pins an asymmetry worth knowing about: an <em>empty</em> array contributes no row, while an
+     * <em>absent</em> field contributes one row holding null.
      *
-     * <p>This is Lucene's semantics — an empty array indexes no term, so {@code exists} is false for
-     * it — and vanilla OpenSearch's, so the two backends agree. Standard SQL {@code UNNEST} and
-     * Splunk's {@code mvexpand} drop both instead; the null row is the OpenSearch-parity divergence and
-     * is deliberate.
+     * <p>s5 has {@code "tags": []} and does not appear at all; s6 has no {@code tags} key and appears
+     * once as null. Standard SQL {@code UNNEST} drops both, and Splunk's {@code mvexpand} drops both,
+     * so the null row for s6 is a divergence — it comes from unnesting a null with nulls preserved.
+     * Recorded rather than endorsed; if it is ever made consistent, this is the test to change.
      */
-    public void testEmptyArrayBehavesLikeAnAbsentField() throws IOException {
-        assertRowsEqualUnordered("source=" + INDEX + " | fields id, tags | mvexpand tags | stats count()", row(10));
-        assertRowsEqualUnordered(
-            "source=" + INDEX + " | fields id, tags | mvexpand tags | where isnull(tags) | fields id",
-            row("s5"),
-            row("s6")
-        );
+    public void testEmptyArrayIsDroppedButAbsentFieldYieldsNull() throws IOException {
+        assertRowsEqualUnordered("source=" + INDEX + " | fields id, tags | mvexpand tags | stats count()", row(9));
+        assertRowsEqualUnordered("source=" + INDEX + " | fields id, tags | mvexpand tags | where isnull(tags) | fields id", row("s6"));
     }
 
-    /** Every document is on exactly one side of a null predicate: 2 + 4 = 6. */
-    public void testEmptyArrayCountsAsNull() throws IOException {
+    /**
+     * A null predicate partitions the documents, with an empty array on the null side.
+     *
+     * <p>{@code "tags": []} is stored as a present, zero-length list — that is what keeps it distinct
+     * from an absent field when it is read back — but it carries no value, and a null predicate asks
+     * about values. Lucene answers the same way, having no term to match for {@code []}. So s5 and s6
+     * answer {@code isnull} and the four documents with values answer {@code isnotnull}: 2 + 4 = 6,
+     * with nothing falling through both sides.
+     */
+    public void testNullPredicatesPartitionWithEmptyArrayCountedNull() throws IOException {
         assertRowsEqualUnordered("source=" + INDEX + " | where isnull(tags) | fields id", row("s5"), row("s6"));
         assertRowsEqualUnordered("source=" + INDEX + " | where isnotnull(tags) | stats count()", row(4));
         assertRowsEqualUnordered("source=" + INDEX + " | stats count()", row(6));
