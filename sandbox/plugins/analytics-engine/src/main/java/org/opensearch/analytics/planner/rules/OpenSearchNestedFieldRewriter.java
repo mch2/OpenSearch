@@ -27,6 +27,7 @@ import org.apache.calcite.rex.RexUtil;
 import org.apache.calcite.sql.SqlFunction;
 import org.apache.calcite.sql.SqlFunctionCategory;
 import org.apache.calcite.sql.SqlKind;
+import org.apache.calcite.sql.fun.SqlLibraryOperators;
 import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.calcite.sql.type.OperandTypes;
 import org.apache.calcite.sql.type.ReturnTypes;
@@ -35,6 +36,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.planner.UnsupportedFunctionException;
 
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -166,16 +168,18 @@ public final class OpenSearchNestedFieldRewriter {
 
     private static RelNode rewriteFilter(LogicalFilter filter) {
         RelNode input = filter.getInput();
-        int arrayCol = firstArrayColReferenced(List.of(filter.getCondition()), input.getRowType());
-        if (arrayCol < 0) {
-            return filter;
-        }
         RelOptCluster cluster = filter.getCluster();
         RexBuilder rexBuilder = cluster.getRexBuilder();
 
+        RexNode condition = emptyListCountsAsNull(filter.getCondition(), rexBuilder);
+        int arrayCol = firstArrayColReferenced(List.of(condition), input.getRowType());
+        if (arrayCol < 0) {
+            return condition == filter.getCondition() ? filter : LogicalFilter.create(input, condition);
+        }
+
         int[] offendingArrayCol = { -1 };
         RexNode rewrittenCondition = tryRewriteToNestedAnyMatch(
-            expandNestedSearch(filter.getCondition(), input.getRowType(), rexBuilder),
+            expandNestedSearch(condition, input.getRowType(), rexBuilder),
             arrayCol,
             input.getRowType(),
             rexBuilder,
@@ -197,6 +201,61 @@ public final class OpenSearchNestedFieldRewriter {
             "nested predicate on '" + field + "'",
             "in this form; supported on a nested leaf: comparisons, AND/OR/NOT, isnull/isnotnull"
         );
+    }
+
+    /**
+     * Makes a null predicate on a whole LIST column count an empty list as null.
+     *
+     * <p>{@code "tags": []} is stored as a present, zero-length list — that is how it stays distinct
+     * from an absent field in the column and in {@code _source} — but it holds no value, and a null
+     * predicate asks about values. Lucene answers the same way: an empty array indexes no term, so
+     * {@code exists} is false for it. Without this, {@code isnull(tags)} would miss the document and
+     * {@code isnotnull(tags)} would claim it, and the two backends would disagree on it.
+     *
+     * <pre>
+     * isnull(tags)    -> tags IS NULL     OR  array_length(tags) = 0
+     * isnotnull(tags) -> tags IS NOT NULL AND array_length(tags) &gt; 0
+     * </pre>
+     *
+     * <p>Applies to any LIST column, an array of objects included, so {@code isnull(events)} answers
+     * for an empty array of objects too. A predicate on a leaf <em>inside</em> an array is a different
+     * question, answered by {@link #nestedIsNullAtRowLevel}.
+     */
+    private static RexNode emptyListCountsAsNull(RexNode condition, RexBuilder rexBuilder) {
+        return condition.accept(new RexShuttle() {
+            @Override
+            public RexNode visitCall(RexCall call) {
+                SqlKind kind = call.getKind();
+                boolean isNull = kind == SqlKind.IS_NULL;
+                if ((isNull || kind == SqlKind.IS_NOT_NULL)
+                    && call.getOperands().getFirst() instanceof RexInputRef ref
+                    && ref.getType().getComponentType() != null) {
+                    RelDataType booleanType = rexBuilder.getTypeFactory().createSqlType(SqlTypeName.BOOLEAN);
+                    RexNode length = rexBuilder.makeCall(SqlLibraryOperators.ARRAY_LENGTH, ref);
+                    RexNode zero = rexBuilder.makeExactLiteral(BigDecimal.ZERO);
+                    // array_length is null for a null array, so the null check has to carry that case:
+                    // OR leaves it to IS NULL, and AND is already false by then.
+                    return isNull
+                        ? rexBuilder.makeCall(
+                            booleanType,
+                            SqlStdOperatorTable.OR,
+                            List.of(
+                                rexBuilder.makeCall(booleanType, SqlStdOperatorTable.IS_NULL, List.of(ref)),
+                                rexBuilder.makeCall(booleanType, SqlStdOperatorTable.EQUALS, List.of(length, zero))
+                            )
+                        )
+                        : rexBuilder.makeCall(
+                            booleanType,
+                            SqlStdOperatorTable.AND,
+                            List.of(
+                                rexBuilder.makeCall(booleanType, SqlStdOperatorTable.IS_NOT_NULL, List.of(ref)),
+                                rexBuilder.makeCall(booleanType, SqlStdOperatorTable.GREATER_THAN, List.of(length, zero))
+                            )
+                        );
+                }
+                return super.visitCall(call);
+            }
+        });
     }
 
     /**

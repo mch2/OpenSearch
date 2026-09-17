@@ -697,14 +697,13 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
 
 
     /**
-     * An empty array of objects reads back as an absent one.
+     * An absent array, an empty array, and an array of one stay three different things.
      *
-     * <p>{@code events: []} and no {@code events} key are the same thing: the list cell is written
-     * null for both. That is Lucene's semantics — neither indexes a term, so {@code exists} is false
-     * for both — and vanilla OpenSearch's, so the two backends answer a null predicate alike. An array
-     * of one is still distinct from both.
+     * <p>{@code null} and {@code []} are distinguished by the list's own validity bit, the same
+     * distinction the struct validity bit draws for a plain object. Collapsing them would make
+     * "this span reported no events" indistinguishable from "this span had no events field".
      */
-    public void testAnEmptyArrayOfObjectsReadsAsAbsent() throws IOException {
+    public void testAbsentAndEmptyArraysOfObjectsStayDistinct() throws IOException {
         String index = "object_array_empty_it";
         try {
             client().performRequest(new Request("DELETE", "/" + index));
@@ -731,7 +730,7 @@ public class ObjectFieldIT extends AnalyticsRestTestCase {
         assertRowsEqual(
             "source=" + index + " | sort id | fields id, events",
             row("1", List.of(Map.of("name", "a"))),
-            row("2", null),
+            row("2", List.of()),
             row("3", null)
         );
 

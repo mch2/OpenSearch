@@ -22,6 +22,7 @@ import org.opensearch.index.mapper.MappedFieldType;
 import org.opensearch.index.mapper.SeqNoFieldMapper;
 import org.opensearch.index.mapper.VersionFieldMapper;
 
+import java.util.List;
 import java.util.Set;
 
 /**
@@ -108,6 +109,13 @@ public class LuceneDocumentInput implements DocumentInput<Document> {
      */
     @Override
     public void addField(MappedFieldType fieldType, Object value) {
+        if (value instanceof List<?> list && list.isEmpty()) {
+            // An empty array (`"tags": []`) indexes no term, so there is nothing for Lucene to add.
+            // It arrives as an empty List because a columnar format needs to tell an empty array from
+            // an absent field; the factories take one value at a time and would otherwise stringify
+            // the list itself, indexing the literal term "[]" and matching `where tags = '[]'`.
+            return;
+        }
         if (metadataDocValuesEnabled == false && METADATA_DOC_VALUE_TYPES.contains(fieldType.typeName())) {
             // Skip all mirrored metadata fields when disabled.
             return;

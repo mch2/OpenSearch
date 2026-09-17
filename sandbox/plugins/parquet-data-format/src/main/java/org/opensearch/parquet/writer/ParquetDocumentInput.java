@@ -64,16 +64,16 @@ public class ParquetDocumentInput implements DocumentInput<List<FieldValuePair>>
         if (existing == null) {
             // Fields declared `multi_value: true` in the mapping start out as a list of one so the
             // value shape reaching the VSR is the same whether the document had one value or several.
-            // An empty List carries no value, so record nothing: the cell is then written null, which
-            // is what an absent field writes. The parser already declines to register `"field": []`;
-            // this is the second line of defence, so no caller can reintroduce a present-but-empty
-            // cell that would read back as [] while Lucene reads the same document as null.
-            if (fieldType.isMultiValued() && value instanceof List<?> list && list.isEmpty()) {
-                return;
+            // An explicit empty array (`"field": []`) is signalled by an empty List and seeds a
+            // zero-value pair, so its LIST cell is written empty-but-non-null rather than null.
+            final FieldValuePair pair;
+            if (fieldType.isMultiValued()) {
+                pair = value instanceof List<?> list && list.isEmpty()
+                    ? FieldValuePair.emptyMultiValued(fieldType)
+                    : FieldValuePair.multiValued(fieldType, value);
+            } else {
+                pair = new FieldValuePair(fieldType, value);
             }
-            final FieldValuePair pair = fieldType.isMultiValued()
-                ? FieldValuePair.multiValued(fieldType, value)
-                : new FieldValuePair(fieldType, value);
             seen.put(fieldType.name(), pair);
             collectedFields.add(pair);
             return;
@@ -128,11 +128,6 @@ public class ParquetDocumentInput implements DocumentInput<List<FieldValuePair>>
     @Override
     public void addObjectArray(String objectPath, int elementCount) {
         ensureOpen();
-        if (elementCount == 0) {
-            // An empty array of objects is an absent one: leaving the path unrecorded means the writer
-            // never opens a run, so the LIST cell is null. Matches the scalar case above.
-            return;
-        }
         objectArrayCounts.merge(objectPath, elementCount, Math::max);
     }
 
@@ -140,8 +135,7 @@ public class ParquetDocumentInput implements DocumentInput<List<FieldValuePair>>
      * Element counts for the objects this document carried as arrays, by dotted path.
      *
      * <p>Authoritative over anything the written values imply: an element that carried no field at all
-     * still occupies a slot, so {@code [{},{}]} is a run of two. An empty array is never recorded — it
-     * is written null, exactly as an absent field is.
+     * still occupies a slot, and a zero count is an explicitly empty array rather than an absent one.
      */
     public Map<String, Integer> getObjectArrayCounts() {
         return objectArrayCounts;

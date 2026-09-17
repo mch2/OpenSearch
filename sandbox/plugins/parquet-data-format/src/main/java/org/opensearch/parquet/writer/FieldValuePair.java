@@ -24,8 +24,8 @@ import java.util.List;
  * <p>Scalar pairs are immutable and hold exactly one value. Pairs created via
  * {@link #multiValued} back a Parquet LIST column and are <em>mutable</em>: {@link #addValue}
  * appends as the document parser reports each array element, so {@link #getValue()} returns a
- * {@code List} for those — including a single-element list when the document supplied one value. An
- * empty array creates no pair at all, so its cell is written null, exactly as an absent field is.
+ * {@code List} for those — including a single-element list when the document supplied one value, or
+ * an empty list for an explicit empty array via {@link #emptyMultiValued}.
  *
  * <p>Because multi-valued pairs grow during parsing, a reference must not be read until the
  * document is finalized. The sole consumer, {@code VSRManager#addDocument}, reads only through
@@ -79,6 +79,18 @@ public class FieldValuePair {
         List<Object> values = new ArrayList<>(1);
         values.add(firstValue);
         return new FieldValuePair(fieldType, values);
+    }
+
+    /**
+     * Creates a multi-valued FieldValuePair holding zero values, representing an explicit empty
+     * array ({@code "field": []}). It backs a zero-length, non-null LIST cell, which reads back as
+     * {@code []} and so stays distinct from an absent field (a null cell).
+     *
+     * @param fieldType the mapped field type
+     * @return an empty multi-valued pair
+     */
+    public static FieldValuePair emptyMultiValued(MappedFieldType fieldType) {
+        return new FieldValuePair(fieldType, new ArrayList<>(0));
     }
 
     /**

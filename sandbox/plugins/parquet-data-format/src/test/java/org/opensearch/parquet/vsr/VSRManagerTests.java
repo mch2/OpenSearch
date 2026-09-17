@@ -640,7 +640,7 @@ public class VSRManagerTests extends ParquetBaseTests {
         assertEquals(new ArrowType.Int(32, true), field.getChildren().get(0).getType());
     }
 
-    public void testMultiValueFieldWritesEmptyArrayAsNull() throws Exception {
+    public void testMultiValueFieldWritesEmptyListDistinctFromAbsent() throws Exception {
         String filePath = createTempDir().resolve("multi-value-empty.parquet").toString();
         VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 100, threadPool, 0L);
         try {
@@ -659,9 +659,38 @@ public class VSRManagerTests extends ParquetBaseTests {
             manager.addDocument(doc);
 
             ListVector listVector = (ListVector) manager.getActiveManagedVSR().getVector("tags");
-            // An empty array is written as a null LIST cell, exactly as an absent field is: Lucene has
-            // no term to match for [] either, so a null predicate answers the same on both backends.
-            assertTrue("an empty array must be written as a null LIST cell", listVector.isNull(0));
+            assertFalse("explicit empty array must be a present LIST cell", listVector.isNull(0));
+            assertEquals(List.of(), listElements(listVector, 0));
+            assertEquals(1, manager.flush().numRows());
+        } finally {
+            manager.close();
+        }
+    }
+
+    /**
+     * The same distinction one level up: {@code "events": []} is a present, zero-length
+     * {@code LIST<STRUCT>} rather than a null one, so an empty array of objects stays distinct from an
+     * absent one. The parser reports the length, and a length of zero still opens the run.
+     */
+    public void testEmptyObjectArrayWritesPresentEmptyList() throws Exception {
+        String filePath = createTempDir().resolve("object-array-empty.parquet").toString();
+        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 100, threadPool, 0L);
+        try {
+            manager.reconcileSchema(schemaWithObjectArray("events", "name"));
+            NumberFieldMapper.NumberFieldType valField = new NumberFieldMapper.NumberFieldType("val", NumberFieldMapper.NumberType.INTEGER);
+            assignTestCapabilities(valField, PARQUET_FORMAT);
+
+            ParquetDocumentInput doc = new ParquetDocumentInput();
+            populateMetadataFields(doc);
+            doc.setRowId(DocumentInput.ROW_ID_FIELD, 0);
+            doc.addField(valField, 1);
+            doc.addObjectArray("events", 0);
+            manager.addDocument(doc);
+
+            ListVector events = manager.getActiveManagedVSR().getObjectArray("events");
+            assertNotNull("the array-valued object must have a LIST vector", events);
+            assertFalse("an empty array of objects must be a present LIST cell", events.isNull(0));
+            assertEquals("and hold no elements", 0, events.getElementEndIndex(0) - events.getElementStartIndex(0));
             assertEquals(1, manager.flush().numRows());
         } finally {
             manager.close();
@@ -740,6 +769,16 @@ public class VSRManagerTests extends ParquetBaseTests {
         List<Field> fields = new ArrayList<>(schema.getFields());
         fields.addAll(metadataFields());
         fields.add(new KeywordParquetField().toArrowField(name, true));
+        return new Schema(fields);
+    }
+
+    /** Test schema plus metadata fields plus an array-valued object with one keyword leaf. */
+    private Schema schemaWithObjectArray(String objectName, String leafName) {
+        Field leaf = new KeywordParquetField().toArrowField(leafName, false);
+        Field element = new Field("element", FieldType.nullable(ArrowType.Struct.INSTANCE), List.of(leaf));
+        List<Field> fields = new ArrayList<>(schema.getFields());
+        fields.addAll(metadataFields());
+        fields.add(new Field(objectName, FieldType.nullable(ArrowType.List.INSTANCE), List.of(element)));
         return new Schema(fields);
     }
 
