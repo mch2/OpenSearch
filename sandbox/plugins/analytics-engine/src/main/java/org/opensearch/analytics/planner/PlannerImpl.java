@@ -132,8 +132,8 @@ public class PlannerImpl {
 
         RelNode modifiedRelNode = rawRelNode;
         modifiedRelNode = removeSubQueries(modifiedRelNode, listener);
-        // Must run before trimFields — see ObjectLeafProjector.
-        modifiedRelNode = ObjectLeafProjector.rewrite(modifiedRelNode).orElse(modifiedRelNode);
+        // Before trimFields, which would otherwise drop the shapeless column the project supplies.
+        modifiedRelNode = ShapelessObjectStripper.rewrite(modifiedRelNode).orElse(modifiedRelNode);
         modifiedRelNode = trimFields(modifiedRelNode);
         modifiedRelNode = extractLiteralAgg(modifiedRelNode, listener);
         modifiedRelNode = reduceExpressions(modifiedRelNode, listener);

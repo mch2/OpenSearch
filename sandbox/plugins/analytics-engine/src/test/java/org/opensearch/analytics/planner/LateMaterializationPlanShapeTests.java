@@ -515,7 +515,7 @@ public class LateMaterializationPlanShapeTests extends BasePlannerRulesTests {
     /** Selecting one of the object's leaves: the fetch list must carry the object it is read from. */
     public void testQtfFires_selectingAnObjectLeaf() {
         RelNode optimized = optimize(
-            "SELECT \"Client.Name\", EventDate FROM hits ORDER BY EventDate LIMIT 10",
+            "SELECT hits.\"Client\".\"Name\", EventDate FROM hits ORDER BY EventDate LIMIT 10",
             2,
             List.of(DATAFUSION, LUCENE),
             ClickBench.FIELDS_WITH_OBJECT

@@ -1036,7 +1036,7 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
         List<Aggregate.Measure> rewritten = null;
         for (int i = 0; i < measures.size(); i++) {
             Aggregate.Measure m = measures.get(i);
-            if (!(calls.get(i).getAggregation() instanceof LocalAggOp op) || !op.filtersNullArgs(calls.get(i))) {
+            if (!filtersNullArgs(calls.get(i))) {
                 continue;
             }
             if (m.getPreMeasureFilter().isPresent()
@@ -1054,6 +1054,23 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
             rewritten.set(i, Aggregate.Measure.builder().from(m).preMeasureFilter(filter).build());
         }
         return rewritten == null ? agg : Aggregate.builder().from(agg).measures(rewritten).build();
+    }
+
+    /**
+     * Whether the measure must ignore rows where its argument is null.
+     *
+     * <p>{@code COUNT(x)} counts non-null values, and the frontend normally guarantees that by injecting
+     * a row-level {@code IS NOT NULL} filter — but only when the argument is a plain column reference.
+     * A leaf of an object is field access on the struct, so no filter is injected and the count came back
+     * as a row count: {@code count(attrs.mid)} answered 2 where only one document has that child. A
+     * pre-measure filter here is the same guarantee, expressed where the argument's shape does not
+     * matter. Harmless when the frontend did inject one, and when the argument cannot be null.
+     */
+    private static boolean filtersNullArgs(AggregateCall call) {
+        if (call.getAggregation() instanceof LocalAggOp op) {
+            return op.filtersNullArgs(call);
+        }
+        return call.getAggregation().getKind() == SqlKind.COUNT && call.getArgList().size() == 1;
     }
 
     /** Builds {@code is_not_null(arg)} from the merged extension catalog, or null if the variant is absent. */

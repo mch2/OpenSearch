@@ -385,22 +385,14 @@ public class OpenSearchSchemaBuilder {
                         }
                         continue;
                     }
-                    addLeafFields(builder, typeFactory, nested, fieldName);
-                    // Also expose the object itself as a struct (ROW) column, so a query can
-                    // address the whole object (`fields nested_metadata`, `stats … by obj`) and
-                    // not just its leaves. This is the column that is physically stored; the flat
-                    // leaves above are not, so ObjectLeafProjector strips them from the scan and
-                    // reads each one back out of the struct with get_field.
+                    // The object itself is the only column: it is what is physically stored, as one
+                    // Parquet struct. A leaf is NOT declared under its dotted name — the frontend then
+                    // resolves `city.name` as field access on the struct, which is Calcite's own way to
+                    // reference a struct field and needs nothing lifted out of the scan. Declaring the
+                    // leaves instead means declaring columns that do not exist and rebuilding each one
+                    // above the scan, which is what this used to do.
                     RelDataType structType = buildObjectType(typeFactory, nested, fieldName);
                     if (structType != null) {
-                        // An object documents present as an array is stored as LIST<STRUCT<..>>, so it
-                        // is declared ARRAY<ROW<..>>: one element per array entry, with each entry's
-                        // fields kept together. Its leaves stay addressable above for the dotted
-                        // convention, but reading one out of the array needs an element-wise
-                        // projection rather than a plain get_field.
-                        if (Boolean.TRUE.equals(fieldProps.get("multi_value"))) {
-                            structType = typeFactory.createTypeWithNullability(typeFactory.createArrayType(structType, -1), true);
-                        }
                         builder.add(fieldName, structType);
                     }
                 }
@@ -441,7 +433,7 @@ public class OpenSearchSchemaBuilder {
      * sub-field, recursing for sub-objects. Field names are the <em>local</em> names (the struct
      * nesting already carries the path), while the flat leaf columns added by
      * {@link #addLeafFields} keep their dotted paths — that dotted convention is how
-     * {@code ObjectLeafProjector} pairs a flat leaf column back to its field in the struct.
+     * a dotted path resolves as field access on this struct.
      *
      * <p>Returns {@code null} when the object contributes no supported field, so callers omit the
      * column entirely rather than declaring an empty struct.
@@ -457,7 +449,17 @@ public class OpenSearchSchemaBuilder {
             RelDataType childType;
             if (fieldType == null || "object".equals(fieldType)) {
                 Map<String, Object> nested = (Map<String, Object>) fieldProps.get("properties");
-                childType = nested == null ? null : buildObjectType(typeFactory, nested, pathPrefix + "." + localName);
+                if (nested == null) {
+                    // A shapeless sub-object — `{"type": "object"}` before any document gave it a shape.
+                    // It goes into the struct as a field-less ROW so `outer.shapeless` is still reachable
+                    // by descending the parent, and resolves to null. Leaving it out made it addressable
+                    // only through a flat dotted column, which is no longer declared.
+                    childType = "object".equals(fieldType)
+                        ? typeFactory.createTypeWithNullability(typeFactory.createStructType(List.of(), List.of()), true)
+                        : null;
+                } else {
+                    childType = buildObjectType(typeFactory, nested, pathPrefix + "." + localName);
+                }
                 if (childType != null && Boolean.TRUE.equals(fieldProps.get("multi_value"))) {
                     // A sub-object that arrives as an array, e.g. `events` inside a wrapper object.
                     childType = typeFactory.createTypeWithNullability(typeFactory.createArrayType(childType, -1), true);

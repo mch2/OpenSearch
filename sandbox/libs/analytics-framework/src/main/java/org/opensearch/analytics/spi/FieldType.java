@@ -145,7 +145,7 @@ public enum FieldType {
             case ARRAY -> FieldType.ARRAY;
             case MAP -> FieldType.MAP;
             // A Calcite ROW is the struct shape an `object` mapping materializes into (see
-            // ObjectLeafProjector). Without this case, any struct-typed expression fails
+            // field access on the struct). Without this case, any struct-typed expression fails
             // capability resolution in OpenSearchProjectRule and surfaces as
             // UnsupportedFunctionException rather than dispatching to a backend.
             case ROW -> OBJECT;

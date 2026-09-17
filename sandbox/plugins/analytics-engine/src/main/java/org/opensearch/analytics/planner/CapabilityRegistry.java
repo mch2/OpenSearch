@@ -313,6 +313,15 @@ public class CapabilityRegistry {
         return allBackends(filterIndex.getOrDefault(new ScalarKey(function, fieldType), Map.of()));
     }
 
+    /**
+     * All backends declaring scan support for a (capability kind, fieldType) ignoring storage formats.
+     * Used to ask whether a backend can read a field type at all — a struct read has no format to match
+     * against once the value is an expression rather than a column.
+     */
+    public List<String> scanBackendsAnyFormat(Class<? extends ScanCapability> kind, FieldType fieldType) {
+        return allBackends(scanIndex.getOrDefault(new ScanKey(kind, fieldType), Map.of()));
+    }
+
     public List<String> scalarBackendsAnyFormat(ScalarFunction function, FieldType fieldType) {
         return allBackends(scalarIndex.getOrDefault(new ScalarKey(function, fieldType), Map.of()));
     }

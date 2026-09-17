@@ -27,7 +27,6 @@ import org.apache.calcite.rex.RexInputRef;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.rex.RexShuttle;
 import org.apache.calcite.rex.RexUtil;
-import org.apache.calcite.sql.SqlKind;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.planner.rel.OpenSearchAggregate;
 import org.opensearch.analytics.planner.rel.OpenSearchConvention;
@@ -96,21 +95,23 @@ public class RelNodeUtils {
     }
 
     /**
-     * True when {@code node} is the element-rewrap {@link Project}: a lone {@code ROW(..)} call
-     * directly over an {@link Uncollect}.
+     * True when {@code node} is a single-expression {@link Project} sitting directly on an
+     * {@link Uncollect} — the shape a multi-value expansion puts there.
      *
-     * <p>Expanding an {@code ARRAY<ROW<..>>} needs it because Calcite's {@code Uncollect} explodes a
-     * record element into one column per record field, which loses the expanded column's name — so
-     * the frontend rebuilds the element into a single {@code ROW} column named after the array. It is
-     * a type-level fixup only: execution unnests the list and already yields the element struct as
-     * one column, so the rewrap carries no work and is absorbed into the expansion spec rather than
-     * emitted.
+     * <p>Expanding an {@code ARRAY<ROW<..>>} needs one because Calcite's {@code Uncollect} explodes a
+     * record element into one column per record field, which loses the expanded column's name — so the
+     * frontend rebuilds the element into a single {@code ROW} column named after the array. It is a
+     * type-level fixup only: execution unnests the list and already yields the element struct as one
+     * column, so it carries no work and is absorbed into the expansion spec rather than emitted.
+     *
+     * <p>The expression is not required to still be a {@code ROW} call. When nothing downstream reads
+     * the expanded column — {@code mvexpand events | stats count()} — field trimming rewrites it, and
+     * requiring the original shape left the {@code Correlate} unmarked and the query failing with
+     * "Aggregate rule encountered unmarked child [LogicalCorrelate]". Any single-expression Project
+     * directly over an Uncollect belongs to the expansion either way.
      */
     public static boolean isExpansionElementRewrap(RelNode node) {
         if (!(node instanceof Project project) || project.getProjects().size() != 1) {
-            return false;
-        }
-        if (!(project.getProjects().getFirst() instanceof RexCall call) || call.getKind() != SqlKind.ROW) {
             return false;
         }
         return unwrapHep(project.getInput()) instanceof Uncollect;

@@ -171,7 +171,7 @@ public final class OpenSearchNestedFieldRewriter {
      *
      * <p>The frontend resolves a dotted path over any container as {@code ITEM}. A path over one of
      * our declared object columns never reaches here — those leaves are declared as flat dotted
-     * columns and {@link org.opensearch.analytics.planner.ObjectLeafProjector} reads them out of the
+     * columns and a pass above the scan reads them out of the
      * struct — but a struct produced <em>mid-plan</em> has no flat leaf to resolve against. That
      * happens after {@code mvexpand} over an {@code ARRAY<ROW<..>>}: each row then carries one
      * element struct, and {@code events.name} arrives as {@code ITEM($events,'name')}. Substrait

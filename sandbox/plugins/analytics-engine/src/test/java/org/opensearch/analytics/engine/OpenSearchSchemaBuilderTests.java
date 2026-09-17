@@ -280,12 +280,10 @@ public class OpenSearchSchemaBuilderTests extends OpenSearchTestCase {
         assertNotNull(table);
 
         RelDataType rowType = table.getRowType(new org.apache.calcite.jdbc.JavaTypeFactoryImpl());
-        // 2 supported leaves + the struct-typed `customer` parent column. Both are declared: the
-        // object is the stored column, and ObjectLeafProjector reads each leaf back out of it.
-        assertEquals("2 supported nested leaves plus the object parent", 3, rowType.getFieldCount());
-        assertFieldType(rowType, "customer.id", SqlTypeName.VARCHAR);
-        assertFieldType(rowType, "customer.age", SqlTypeName.INTEGER);
-        assertNull("nested geo_point leaf must be dropped", rowType.getField("customer.home", true, false));
+        // The object is the only column — it is what is stored. A leaf is reached by descending the
+        // struct, not by a flat dotted column, so none are declared.
+        assertEquals("only the object column", 1, rowType.getFieldCount());
+        assertNull("a leaf is not a column", rowType.getField("customer.id", true, false));
 
         // The unsupported sub-field is dropped from the struct too, for the same reason it is
         // dropped from the flat columns.
@@ -919,7 +917,7 @@ public class OpenSearchSchemaBuilderTests extends OpenSearchTestCase {
      * {@code fields outer} returns {@code {name: x}} and {@code fields outer.shapeless} returns
      * null, exactly as measured against vanilla.
      */
-    public void testNestedBareObjectIsAddressableButAbsentFromParentStruct() throws Exception {
+    public void testNestedBareObjectIsAddressableInsideTheParentStruct() throws Exception {
         String mapping = "{\"properties\":{"
             + "\"outer\":{\"properties\":{"
             + "\"name\":{\"type\":\"keyword\"},"
@@ -931,15 +929,15 @@ public class OpenSearchSchemaBuilderTests extends OpenSearchTestCase {
         SchemaPlus schema = OpenSearchSchemaBuilder.buildSchema(clusterState);
         RelDataType rowType = schema.getTable("bare_nested").getRowType(new org.apache.calcite.jdbc.JavaTypeFactoryImpl());
 
-        RelDataTypeField shapeless = rowType.getField("outer.shapeless", true, false);
-        assertNotNull("nested shapeless object must stay addressable", shapeless);
-        assertEquals(0, shapeless.getType().getFieldCount());
-        assertFieldType(rowType, "outer.name", SqlTypeName.VARCHAR);
-
+        // A shapeless child rides inside the parent's struct as a field-less ROW, which is how
+        // `outer.shapeless` stays reachable now that leaves are not declared as flat columns: the path
+        // descends the struct and lands on a ROW with nothing in it, which reads as null — as vanilla does.
         RelDataTypeField outer = rowType.getField("outer", true, false);
         assertNotNull(outer);
-        assertEquals("parent's struct carries only the resolvable leaf", 1, outer.getType().getFieldCount());
+        assertEquals("both children are in the parent's struct", 2, outer.getType().getFieldCount());
         assertNotNull(outer.getType().getField("name", true, false));
-        assertNull("shapeless child is not part of the parent struct", outer.getType().getField("shapeless", true, false));
+        RelDataTypeField shapeless = outer.getType().getField("shapeless", true, false);
+        assertNotNull("nested shapeless object must stay addressable", shapeless);
+        assertEquals("a shapeless object has no fields", 0, shapeless.getType().getFieldCount());
     }
 }
