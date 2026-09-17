@@ -608,11 +608,10 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
     private static RelNode preprocessForSubstrait(RelNode rel) {
         RelNode preprocessed = UntypedNullPreprocessor.rewrite(rel);
         preprocessed = PplAggregateCallRewriter.rewrite(preprocessed);
-        // The analytics engine expands LIST group keys and aggregate arguments
-        // before the aggregate split (MultiValueGroupKeyExpander), so doing it again here would
-        // insert a second explode over data the shard already expanded — and the per-fragment timing
-        // is what made multi-shard `stats … by <array>` fail in the first place. Left in the tree
-        // because the single-fragment path it was written for is still exercised by its unit tests.
+        // No expansion of LIST group keys or aggregate arguments here: the analytics engine does it
+        // before the aggregate split (MultiValueGroupKeyExpander), and repeating it per fragment
+        // explodes data the shard already expanded, which is what made multi-shard
+        // `stats … by <array>` produce a reduce-sink type mismatch.
 
         preprocessed = PplWindowCallRewriter.rewrite(preprocessed);
         preprocessed = ItemTypeRebuilder.rewrite(preprocessed);
@@ -995,7 +994,7 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
     }
 
     private static final class MultiValueExpandDetail implements Extension.SingleRelDetail {
-        static final String TYPE_URL = "opensearch://analytics/multi_value_expand/v1";
+        private static final String TYPE_URL = "opensearch://analytics/multi_value_expand/v1";
         private final MultiValueExpandSpec spec;
 
         private MultiValueExpandDetail(MultiValueExpandSpec spec) {

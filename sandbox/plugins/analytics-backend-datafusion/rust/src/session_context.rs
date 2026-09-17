@@ -120,6 +120,11 @@ pub struct SessionContextHandle {
     pub sort_orders: Vec<String>,
     pub query_context: QueryTrackingContext,
     pub table_name: String,
+    /// When true, the shard has deleted docs: the indexed executor ANDs a synthetic match-all
+    /// Collector leaf (reserved annotation id) into the decoded filter tree so deleted rows are
+    /// excluded via the ordinary Lucene collector machinery. Sourced from the Java per-shard
+    /// hasDeletions probe; false on shards without deletions (zero overhead).
+    pub deleted_doc_filtering_required: bool,
     /// When set, indicates this session uses the indexed execution path with filter delegation.
     pub indexed_config: Option<IndexedExecutionConfig>,
     /// Per-query tuning knobs (batch size, partitions, filter strategies, etc.)
@@ -240,6 +245,7 @@ pub async unsafe fn create_session_context(
     shard_view_ptr: i64,
     table_name: &str,
     context_id: i64,
+    deleted_doc_filtering_required: bool,
     has_partial_aggregate: bool,
     query_config: DatafusionQueryConfig,
     plan_bytes: &[u8],
@@ -495,6 +501,7 @@ pub async unsafe fn create_session_context(
         sort_orders: shard_view.sort_orders.clone(),
         query_context,
         table_name: table_name.to_string(),
+        deleted_doc_filtering_required,
         indexed_config: None,
         query_config,
         io_handle: tokio::runtime::Handle::current(),
@@ -592,6 +599,7 @@ pub async unsafe fn create_worker_session_context(
         sort_fields: Vec::new(),
         sort_orders: Vec::new(),
         table_name: String::new(),
+        deleted_doc_filtering_required: false,
         indexed_config: None,
         query_config,
         aggregate_mode: crate::agg_mode::Mode::Default,
@@ -626,6 +634,7 @@ pub async unsafe fn create_session_context_indexed(
     tree_shape: i32,
     delegated_predicate_count: i32,
     requests_row_ids: bool,
+    deleted_doc_filtering_required: bool,
     has_partial_aggregate: bool,
     query_config: DatafusionQueryConfig,
     plan_bytes: &[u8],
@@ -635,6 +644,7 @@ pub async unsafe fn create_session_context_indexed(
         shard_view_ptr,
         table_name,
         context_id,
+        deleted_doc_filtering_required,
         has_partial_aggregate,
         query_config,
         plan_bytes,
@@ -663,7 +673,6 @@ pub async fn prepare_partial_plan(
     handle: &mut SessionContextHandle,
     substrait_bytes: &[u8],
 ) -> Result<(), datafusion::common::DataFusionError> {
-    use crate::substrait_consumer::from_substrait_plan;
     use prost::Message;
     use substrait::proto::Plan;
 
@@ -990,6 +999,7 @@ mod tests {
             sort_orders: vec![],
             query_context,
             table_name: "t".to_string(),
+            deleted_doc_filtering_required: false,
             indexed_config: None,
             query_config: crate::datafusion_query_config::DatafusionQueryConfig::test_default(),
             io_handle: tokio::runtime::Handle::current(),

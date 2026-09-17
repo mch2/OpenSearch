@@ -288,7 +288,9 @@ public class CompositeDynamicMappingIT extends OpenSearchIntegTestCase {
 
         List<Map<String, Object>> rows = refreshFlushAndReadParquetRows(indexName);
         assertEquals(2, rows.size());
-        assertTrue(rows.stream().allMatch(row -> isListColumn(row.get("tags"))));
+        assertTrue("every document must persist as a LIST", rows.stream().allMatch(row -> isListColumn(row.get("tags"))));
+        assertTrue("scalar input persists as a singleton list", rows.stream().anyMatch(row -> List.of("solo").equals(row.get("tags"))));
+        assertTrue("array input persists in source order", rows.stream().anyMatch(row -> List.of("one", "two", "one").equals(row.get("tags"))));
     }
 
     // ══════════════════════════════════════════════════════════════════════
@@ -784,11 +786,6 @@ public class CompositeDynamicMappingIT extends OpenSearchIntegTestCase {
         return (Map<String, Object>) properties.get(fieldName);
     }
 
-    /**
-     * RustBridge's test-only JSON renderer decodes primitive columns and emits this marker for
-     * nested columns. Matching it verifies that the physical Parquet column is LIST; element-value
-     * preservation is covered by the lower-level VSR and ParquetDocumentInput tests.
-     */
     /**
      * True when the column read back as a Parquet LIST.
      *

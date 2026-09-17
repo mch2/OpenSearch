@@ -72,7 +72,6 @@ pub fn merge_unsorted_with_pool(
         let file = File::open(path)?;
         let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
         let schema = builder.schema().clone();
-        let parquet_descr = builder.parquet_schema().clone();
         let num_rows = builder.metadata().file_metadata().num_rows() as usize;
         let generation = crate::writer_properties_builder::read_writer_generation(
             builder.metadata().file_metadata(),
@@ -80,7 +79,8 @@ pub fn merge_unsorted_with_pool(
         );
 
         let projection_indices = projection_indices_excluding_row_id(&schema);
-        let projection = parquet::arrow::ProjectionMask::roots(&parquet_descr, projection_indices);
+        let projection =
+            parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), projection_indices);
         let reader = builder
             .with_batch_size(batch_size)
             .with_projection(projection)

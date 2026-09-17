@@ -22,7 +22,11 @@ use std::sync::{Arc, Mutex};
 
 use crate::crc_writer::CrcWriter;
 use crate::memory::write_pool;
-use crate::merge::{merge_sorted_with_pool, schema::ROW_ID_COLUMN_NAME};
+use crate::merge::{
+    heap::reduced_sort_array,
+    merge_sorted_with_pool,
+    schema::ROW_ID_COLUMN_NAME,
+};
 use crate::native_settings::NativeSettings;
 use crate::writer_properties_builder::WriterPropertiesBuilder;
 use crate::{log_debug, log_error, log_info};
@@ -78,6 +82,8 @@ struct SortingChunkedWriter {
     sort_columns: Vec<String>,
     reverse_sorts: Vec<bool>,
     nulls_first: Vec<bool>,
+    /// Parallel with `sort_columns`: `true` = MAX reduction, `false` = MIN.
+    max_sort_modes: Vec<bool>,
     /// Current IPC writer for staging incoming batches.
     current_ipc_writer: Option<IpcFileWriter<File>>,
     /// Tracked byte size of the current IPC staging file (approximated from
@@ -108,6 +114,7 @@ impl SortingChunkedWriter {
         sort_columns: Vec<String>,
         reverse_sorts: Vec<bool>,
         nulls_first: Vec<bool>,
+        max_sort_modes: Vec<bool>,
         writer_generation: i64,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut writer = Self {
@@ -118,6 +125,7 @@ impl SortingChunkedWriter {
             sort_columns,
             reverse_sorts,
             nulls_first,
+            max_sort_modes,
             current_ipc_writer: None,
             current_chunk_bytes: 0,
             current_rows: 0,
@@ -267,6 +275,7 @@ impl SortingChunkedWriter {
             &self.sort_columns,
             &self.reverse_sorts,
             &self.nulls_first,
+            &self.max_sort_modes,
         )?;
         drop(combined); // free unsorted data
 
@@ -452,11 +461,12 @@ impl NativeParquetWriter {
         sort_columns: Vec<String>,
         reverse_sorts: Vec<bool>,
         nulls_first: Vec<bool>,
+        max_sort_modes: Vec<bool>,
         writer_generation: i64,
     ) -> Result<(), Box<dyn std::error::Error>> {
         log_debug!(
-            "create_writer called for file: {}, index: {}, schema_address: {}, sort_columns: {:?}, reverse_sorts: {:?}, nulls_first: {:?}, writer_generation: {}",
-            filename, index_name, schema_address, sort_columns, reverse_sorts, nulls_first, writer_generation
+            "create_writer called for file: {}, index: {}, schema_address: {}, sort_columns: {:?}, reverse_sorts: {:?}, nulls_first: {:?}, max_sort_modes: {:?}, writer_generation: {}",
+            filename, index_name, schema_address, sort_columns, reverse_sorts, nulls_first, max_sort_modes, writer_generation
         );
 
         if (schema_address as *mut u8).is_null() {
@@ -494,6 +504,7 @@ impl NativeParquetWriter {
         settings.sort_columns = sort_columns;
         settings.reverse_sorts = reverse_sorts;
         settings.nulls_first = nulls_first;
+        settings.max_sort_modes = max_sort_modes;
 
         SETTINGS_STORE.insert(index_name.clone(), settings.clone());
 
@@ -511,6 +522,7 @@ impl NativeParquetWriter {
                 settings.sort_columns.clone(),
                 settings.reverse_sorts.clone(),
                 settings.nulls_first.clone(),
+                settings.max_sort_modes.clone(),
                 writer_generation,
             )?;
             (
@@ -666,6 +678,7 @@ impl NativeParquetWriter {
                                 &settings.sort_columns,
                                 &settings.reverse_sorts,
                                 &settings.nulls_first,
+                                &settings.max_sort_modes,
                                 writer_generation,
                                 schema.clone(),
                                 &mut reservation,
@@ -768,6 +781,7 @@ impl NativeParquetWriter {
         sort_columns: &[String],
         reverse_sorts: &[bool],
         nulls_first: &[bool],
+        max_sort_modes: &[bool],
         writer_generation: i64,
         schema: Arc<arrow::datatypes::Schema>,
         reservation: &mut MemoryReservation,
@@ -840,6 +854,7 @@ impl NativeParquetWriter {
             sort_columns,
             reverse_sorts,
             nulls_first,
+            max_sort_modes,
             writer_generation,
             &mut merge_reservation,
         )
@@ -902,17 +917,27 @@ impl NativeParquetWriter {
     ///
     /// `take` reorders a struct column as a whole, so an `object` needs no special handling here;
     /// only naming one of its leaves as a sort key does (see `resolve_sort_array`).
-    fn sort_batch(
+    pub(crate) fn sort_batch(
         batch: &RecordBatch,
         sort_columns: &[String],
         reverse_sorts: &[bool],
         nulls_first: &[bool],
+        max_sort_modes: &[bool],
     ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
+        // Resolve each key to its array first, which descends an `object` to the named leaf, then
+        // reduce it: a LIST sorts by its min (or max, descending), which is what Lucene does for a
+        // multi-valued field. Taking the SortField type from the reduced array rather than from the
+        // schema keeps the declared type and the values from disagreeing.
         let sort_arrays: Vec<Arc<dyn arrow::array::Array>> = sort_columns
             .iter()
-            .map(|col_name| {
-                resolve_sort_array(batch, col_name)
-                    .ok_or_else(|| format!("Sort column '{}' not found in schema", col_name).into())
+            .enumerate()
+            .map(|(i, col_name)| {
+                let array = resolve_sort_array(batch, col_name)
+                    .ok_or_else(|| -> Box<dyn std::error::Error> {
+                        format!("Sort column '{}' not found in schema", col_name).into()
+                    })?;
+                let max = max_sort_modes.get(i).copied().unwrap_or(false);
+                reduced_sort_array(&array, max).map_err(|e| -> Box<dyn std::error::Error> { e.into() })
             })
             .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
 
