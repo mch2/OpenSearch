@@ -61,7 +61,7 @@ import java.util.TreeSet;
  * </pre>
  *
  * <p><b>Why here and not in fragment conversion.</b> The equivalent backend rewriter
- * ({@code MultiValueRelRewriter}) runs per fragment, i.e. after the aggregate has been split into a
+ * (since deleted) ran per fragment, i.e. after the aggregate has been split into a
  * per-shard PARTIAL and a coordinator FINAL. The shard then emits the element type while the
  * coordinator's {@code OpenSearchStageInputScan} still declares the LIST, and the reduce sink fails:
  *

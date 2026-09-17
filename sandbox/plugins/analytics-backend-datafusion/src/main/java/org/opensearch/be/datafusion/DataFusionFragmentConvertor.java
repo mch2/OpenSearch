@@ -608,7 +608,7 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
     private static RelNode preprocessForSubstrait(RelNode rel) {
         RelNode preprocessed = UntypedNullPreprocessor.rewrite(rel);
         preprocessed = PplAggregateCallRewriter.rewrite(preprocessed);
-        // Deliberately NOT MultiValueRelRewriter: the analytics engine now expands LIST group keys
+        // The analytics engine expands LIST group keys and aggregate arguments
         // before the aggregate split (MultiValueGroupKeyExpander), so doing it again here would
         // insert a second explode over data the shard already expanded — and the per-fragment timing
         // is what made multi-shard `stats … by <array>` fail in the first place. Left in the tree
@@ -957,20 +957,6 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
                 return ExtensionSingle.from(new MultiValueExpandDetail(spec), apply(correlate.getLeft())).build();
             }
 
-            @Override
-            public Rel visitOther(RelNode other) {
-                if (other instanceof MultiValueExpandRel expand) {
-                    MultiValueExpandSpec spec = new MultiValueExpandSpec(
-                        expand.fieldIndex(),
-                        null,
-                        true,
-                        true,
-                        typeConverter.toNamedStruct(expand.getRowType()).struct()
-                    );
-                    return ExtensionSingle.from(new MultiValueExpandDetail(spec), apply(expand.getInput())).build();
-                }
-                return super.visitOther(other);
-            }
         };
     }
 

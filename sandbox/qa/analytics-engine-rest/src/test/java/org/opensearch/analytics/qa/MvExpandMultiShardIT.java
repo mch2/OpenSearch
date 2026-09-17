@@ -21,7 +21,7 @@ import java.util.Map;
  * PARTIAL/FINAL reduce — and the explode is pushed down to the shard, which makes the reduce the
  * interesting part.
  *
- * <p>The specific risk is double expansion. {@code MultiValueRelRewriter} inserts the explode beneath
+ * <p>The specific risk is double expansion. the group-key expander inserts the explode beneath
  * a group-by, and {@code OpenSearchAggregateSplitRule} splits the aggregate into a per-shard PARTIAL
  * and a coordinator FINAL. If the explode lands on both sides of that split, per-element counts
  * inflate — a failure that is invisible at one shard.
