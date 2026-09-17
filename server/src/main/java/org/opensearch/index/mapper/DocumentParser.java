@@ -1523,9 +1523,7 @@ final class DocumentParser {
             );
         }
         final String[] paths = resolvePathForParsing(mapper, lastFieldName);
-        boolean sawElement = false;
         while ((token = parser.nextToken()) != XContentParser.Token.END_ARRAY) {
-            sawElement = true;
             context.nextFieldArrayElement();
             if (token == XContentParser.Token.START_OBJECT) {
                 // An array whose elements are objects is a different storage shape from a single
@@ -1550,9 +1548,12 @@ final class DocumentParser {
                 parseValue(context, mapper, lastFieldName, token, paths);
             }
         }
-        if (sawElement == false) {
-            registerEmptyMultiValueArray(context, mapper, lastFieldName, paths);
-        }
+        // An empty array registers nothing, so `"tags": []` reaches the writer exactly as an absent
+        // field does and its column cell is written null. That is Lucene's semantics — its inverted
+        // index has no term to match, so `isnull(tags)` matches an empty array — and vanilla
+        // OpenSearch's, so the two backends agree. It also keeps the value out of
+        // CompositeDocumentInput's broadcast to the secondary formats, where an empty List reached a
+        // Lucene field factory and indexed the literal term "[]".
         // The element count is only knowable here: an element carries no value of its own, so
         // `[{"a":1},{}]` writes one value and `[{},{}]` writes none at all. Reported for every array
         // of objects, empty included, so the writer lays out a run of exactly this length.
@@ -1578,23 +1579,6 @@ final class DocumentParser {
     }
 
     /**
-     * Records an empty array ({@code "field": []}) for a pluggable-data-format field mapped with
-     * {@code multi_value: true}. The element loop above never fires for an empty array, so without
-     * this the field would be absent from the document input and its LIST column cell would be
-     * written null — collapsing the distinction between {@code []} and a missing field when
-     * {@code _source} is later reconstructed from the columns. Registering an empty list lets the
-     * writer emit a zero-length, non-null list instead.
-     *
-     * <p>Strictly gated: no-op unless the pluggable data format is enabled and the resolved leaf is
-     * a {@code multi_value} {@link FieldMapper}, so stock indexing is unaffected.
-     *
-     * <p>Reached from every scalar-leaf array route — top-level, nested, and disable_objects arrays
-     * all funnel through {@link #parseNonDynamicArray}. The only array route that bypasses it is a
-     * mapper with {@link FieldMapper#parsesArrayValue()} true (geo/completion), which no
-     * {@code multi_value} type currently is; if that ever changes, that route needs equivalent
-     * empty-array handling or {@code []} would collapse to an absent field there.
-     */
-    /**
      * Records that the object at {@code lastFieldName} arrives as an array of objects.
      *
      * <p>Marks the {@link ObjectMapper} itself rather than its leaves. Marking the leaves — which is
@@ -1615,23 +1599,6 @@ final class DocumentParser {
         if (resolved instanceof ObjectMapper objectMapper && objectMapper.multiValue() == false) {
             objectMapper.setMultiValue();
             context.addDynamicMapper(objectMapper);
-        }
-    }
-
-    private static void registerEmptyMultiValueArray(ParseContext context, ObjectMapper mapper, String lastFieldName, String[] paths) {
-        if (context.indexSettings().isPluggableDataFormatEnabled() == false) {
-            return;
-        }
-        Mapper leaf = getMapper(context, mapper, lastFieldName, paths);
-        if (leaf instanceof FieldMapper fieldMapper && fieldMapper.fieldType().isMultiValued()) {
-            context.documentInput().addField(fieldMapper.fieldType(), List.of());
-            return;
-        }
-        // The same distinction one level up: an object already known to arrive as an array reports an
-        // empty array as empty, not absent. A field seen empty before it was ever seen populated has
-        // no mapper at all, so there is nothing to record and it stays absent — as it does in vanilla.
-        if (leaf instanceof ObjectMapper objectMapper && objectMapper.multiValue()) {
-            context.documentInput().addObjectArray(objectMapper.fullPath(), 0);
         }
     }
 

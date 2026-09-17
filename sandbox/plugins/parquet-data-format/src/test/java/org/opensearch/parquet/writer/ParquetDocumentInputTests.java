@@ -126,25 +126,34 @@ public class ParquetDocumentInputTests extends ParquetBaseTests {
         assertEquals(List.of("solo"), pair.getValue());
     }
 
-    public void testDeclaredMultiValueFieldWithEmptyArrayIsPresentEmptyList() {
+    public void testDeclaredMultiValueFieldWithEmptyArrayRecordsNothing() {
         ParquetDocumentInput input = new ParquetDocumentInput();
         populateMetadataFields(input);
         MappedFieldType tags = new KeywordFieldMapper.KeywordFieldType("tags");
         tags.setMultiValued(true);
         assignTestCapabilities(tags, PARQUET_FORMAT);
 
-        // The parser signals an explicit empty array ("tags": []) with an empty List value. It must
-        // seed a present, zero-value list (written as an empty-but-non-null LIST cell) rather than
-        // being dropped, so an empty array stays distinct from an absent field in reconstructed
-        // _source.
+        // An empty List carries no value, so no pair is created and the LIST cell is written null —
+        // exactly what an absent field writes. The parser already declines to register `"tags": []`;
+        // this is the second line of defence against a present-but-empty cell, which would read back
+        // as [] while Lucene reads the same document as null.
         input.addField(tags, List.of());
         input.setRowId(DocumentInput.ROW_ID_FIELD, 0L);
 
-        FieldValuePair pair = findPair(input, "tags");
-        assertTrue(pair.isMultiValued());
-        assertEquals(List.of(), pair.getValue());
-        assertEquals(0, pair.valueCount());
+        assertNull("an empty array must create no pair", findPairOrNull(input, "tags"));
         assertEquals(0L, input.getFieldCount("tags"));
+    }
+
+    /** An empty array of objects is likewise absent: no count is recorded, so no run is opened. */
+    public void testEmptyObjectArrayRecordsNoElementCount() {
+        ParquetDocumentInput input = new ParquetDocumentInput();
+        populateMetadataFields(input);
+
+        input.addObjectArray("events", 0);
+        input.addObjectArray("links", 2);
+
+        assertFalse("an empty array of objects must record nothing", input.getObjectArrayCounts().containsKey("events"));
+        assertEquals(Integer.valueOf(2), input.getObjectArrayCounts().get("links"));
     }
 
     public void testMultiValueAccumulationKeyedByNameNotInstanceIdentity() {
@@ -232,6 +241,11 @@ public class ParquetDocumentInputTests extends ParquetBaseTests {
         FieldValuePair pair = findPair(input, "_ignored_source.tags");
         assertTrue(pair.isMultiValued());
         assertEquals(List.of("RAW-ONE", "RAW-TWO"), pair.getValue());
+    }
+
+    /** Like {@link #findPair} but returns null instead of failing, for asserting a field is absent. */
+    private static FieldValuePair findPairOrNull(ParquetDocumentInput input, String fieldName) {
+        return input.getFinalInput().stream().filter(p -> p.getFieldType().name().equals(fieldName)).findFirst().orElse(null);
     }
 
     private static FieldValuePair findPair(ParquetDocumentInput input, String fieldName) {

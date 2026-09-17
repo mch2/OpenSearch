@@ -122,18 +122,24 @@ public class MultiValueFieldMapperTests extends MapperServiceTestCase {
     }
 
     @LockFeatureFlag(FeatureFlags.PLUGGABLE_DATAFORMAT_EXPERIMENTAL_FLAG)
-    public void testExplicitTruePreservesEmptyArray() throws IOException {
+    /**
+     * An empty array records nothing, so the column cell is written null — exactly what an absent
+     * field writes. That is Lucene's semantics (no term is indexed, so {@code isnull} matches) and
+     * vanilla OpenSearch's, so the two backends answer a null predicate the same way. It also keeps an
+     * empty {@code List} out of the composite broadcast to the secondary formats, where a Lucene field
+     * factory would stringify it and index the literal term {@code "[]"}.
+     *
+     * <p>This is the multi-value twin of {@link #testScalarFieldIgnoresEmptyArray}.
+     */
+    public void testExplicitTrueTreatsEmptyArrayAsAbsent() throws IOException {
         DocumentMapper mapper = keywordMapper(true);
         CapturingDocumentInput input = new CapturingDocumentInput();
         ParsedDocument parsed = mapper.parse(source(b -> b.startArray("field").endArray()), input);
 
-        Object emptyValue = input.getCapturedFields()
-            .stream()
-            .filter(entry -> entry.getKey().name().equals("field"))
-            .map(java.util.Map.Entry::getValue)
-            .findFirst()
-            .orElseThrow();
-        assertEquals(List.of(), emptyValue);
+        assertTrue(
+            "an empty array must record no field at all",
+            input.getCapturedFields().stream().noneMatch(entry -> entry.getKey().name().equals("field"))
+        );
         assertNull(parsed.dynamicMappingsUpdate());
     }
 

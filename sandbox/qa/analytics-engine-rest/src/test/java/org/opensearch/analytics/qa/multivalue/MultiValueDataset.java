@@ -68,7 +68,7 @@ public final class MultiValueDataset {
         PAIR,
         /** Three values including a duplicate — separates dedup semantics from cardinality. */
         TRIPLE_WITH_DUPLICATE,
-        /** Explicit {@code []} — must stay distinct from an absent field. */
+        /** Explicit {@code []} — must read back identically to an absent field. */
         EMPTY_ARRAY,
         /** Field absent — the null-list case. */
         MISSING

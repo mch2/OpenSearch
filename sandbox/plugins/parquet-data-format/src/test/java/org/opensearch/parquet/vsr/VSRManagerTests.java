@@ -640,7 +640,7 @@ public class VSRManagerTests extends ParquetBaseTests {
         assertEquals(new ArrowType.Int(32, true), field.getChildren().get(0).getType());
     }
 
-    public void testMultiValueFieldWritesEmptyListDistinctFromAbsent() throws Exception {
+    public void testMultiValueFieldWritesEmptyArrayAsNull() throws Exception {
         String filePath = createTempDir().resolve("multi-value-empty.parquet").toString();
         VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 100, threadPool, 0L);
         try {
@@ -659,8 +659,9 @@ public class VSRManagerTests extends ParquetBaseTests {
             manager.addDocument(doc);
 
             ListVector listVector = (ListVector) manager.getActiveManagedVSR().getVector("tags");
-            assertFalse("explicit empty array must be a present LIST cell", listVector.isNull(0));
-            assertEquals(List.of(), listElements(listVector, 0));
+            // An empty array is written as a null LIST cell, exactly as an absent field is: Lucene has
+            // no term to match for [] either, so a null predicate answers the same on both backends.
+            assertTrue("an empty array must be written as a null LIST cell", listVector.isNull(0));
             assertEquals(1, manager.flush().numRows());
         } finally {
             manager.close();
