@@ -97,9 +97,6 @@ base64 = "0.22"
 
 [dev-dependencies]
 criterion = { workspace = true }
-# Spike-only: tests/mv_spikes.rs hand-builds the substrait ExtensionSingleRel detail, whose type is
-# pbjson_types::Any. Transitively present via the substrait crate; declared here so the test can name it.
-pbjson-types = "=0.8.0"
 tempfile = { workspace = true }
 rand = "=0.8.6"
 proptest = { workspace = true }

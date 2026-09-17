@@ -198,14 +198,6 @@ public class ManagedVSR implements AutoCloseable {
         list.endValue(rowIndex, elementCount);
     }
 
-    /** Writes a null list for an array-valued object the document did not carry. */
-    public void setObjectArrayNull(String objectPath, int rowIndex) {
-        ListVector list = objectArrays.get(objectPath);
-        if (list != null) {
-            list.setNull(rowIndex);
-        }
-    }
-
     /**
      * Returns the path of the innermost array-valued object enclosing {@code leafPath}, or null when
      * the leaf does not sit inside one.

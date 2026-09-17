@@ -2864,7 +2864,6 @@ dependencies = [
  "opensearch-tiered-storage",
  "parking_lot",
  "parquet",
- "pbjson-types",
  "proptest",
  "prost",
  "rand 0.8.6",
