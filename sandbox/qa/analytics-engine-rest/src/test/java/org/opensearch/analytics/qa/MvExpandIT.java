@@ -204,6 +204,29 @@ public class MvExpandIT extends AnalyticsRestTestCase {
         assertRowsEqualUnordered("source=" + INDEX + " | fields tags | mvexpand tags | stats count() by tags", expected);
     }
 
+    /**
+     * The same implicit expansion for a leaf of an array of objects, which is the OTel shape
+     * ({@code stats count() by events.name}).
+     *
+     * <p>Ordering-sensitive: the leaf is {@code ITEM(events,'name')} — typed as the element's scalar —
+     * until {@code OpenSearchNestedFieldRewriter} turns it into an ARRAY-typed {@code NESTED_PROJECT}.
+     * An expander running before that rewrite sees a scalar key, skips it, and every document's whole
+     * array becomes one bucket. The explicit form below must agree bucket for bucket.
+     */
+    public void testGroupByObjectArrayLeafExplodesImplicitly() throws IOException {
+        List<List<Object>> expected = List.of(
+            row(4, "start"),   // s1, s2, s3, s4
+            row(1, "validate"),
+            row(1, "commit"),
+            row(1, "timeout"),
+            row(2, "retry"),   // s4 carries two, and both count
+            row(1, "fail"),
+            rowWithNull(2)     // s5 and s6 have no events at all
+        );
+        assertRowsEqualUnordered("source=" + INDEX + " | stats count() by events.name", expected);
+        assertRowsEqualUnordered("source=" + INDEX + " | mvexpand events | stats count() by events.name", expected);
+    }
+
     /** {@link List#of} rejects nulls, so the null-key bucket needs Arrays.asList. */
     private static List<Object> rowWithNull(Object first) {
         return Arrays.asList(first, null);

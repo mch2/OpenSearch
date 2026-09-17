@@ -138,17 +138,20 @@ public class PlannerImpl {
         modifiedRelNode = extractLiteralAgg(modifiedRelNode, listener);
         modifiedRelNode = reduceExpressions(modifiedRelNode, listener);
         modifiedRelNode = pushdownRules(modifiedRelNode, listener);
-        // Before the aggregate split: expanding a LIST group key here lets Calcite's type derivation
-        // carry the element type into BOTH fragments. Done per-fragment (as the backend's
-        // MultiValueRelRewriter does) the shard emits elements while the coordinator still declares
-        // the LIST, and the reduce sink fails on the type mismatch.
+        modifiedRelNode = decomposeAggregates(modifiedRelNode, listener);
+        modifiedRelNode = reorderJoins(modifiedRelNode, context, listener);
+        modifiedRelNode = OpenSearchNestedFieldRewriter.rewrite(modifiedRelNode);
+        // After the nested rewrite and before the aggregate split. A leaf of an array of objects
+        // (`stats … by events.name`) is still ITEM(events,'name') — typed as the element's scalar —
+        // until OpenSearchNestedFieldRewriter turns it into an ARRAY-typed NESTED_PROJECT, so an
+        // expander running earlier sees a scalar key and skips it, leaving the whole per-row array as
+        // the bucket. Still before the split, so Calcite's type derivation carries the element type
+        // into BOTH fragments; done per-fragment the shard emits elements while the coordinator
+        // declares the LIST and the reduce sink fails on the mismatch.
         modifiedRelNode = MultiValueGroupKeyExpander.rewrite(
             modifiedRelNode,
             RelBuilder.proto(Contexts.empty()).create(modifiedRelNode.getCluster(), null)
         ).orElse(modifiedRelNode);
-        modifiedRelNode = decomposeAggregates(modifiedRelNode, listener);
-        modifiedRelNode = reorderJoins(modifiedRelNode, context, listener);
-        modifiedRelNode = OpenSearchNestedFieldRewriter.rewrite(modifiedRelNode);
         modifiedRelNode = mark(modifiedRelNode, context, listener);
         RelNodeUtils.logPlan(LOGGER, "After marking", modifiedRelNode);
         modifiedRelNode = splitAggLiteralArgProject(modifiedRelNode, listener);
