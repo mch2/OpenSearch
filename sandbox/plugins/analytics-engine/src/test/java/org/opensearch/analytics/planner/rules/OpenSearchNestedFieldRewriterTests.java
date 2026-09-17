@@ -10,6 +10,7 @@ package org.opensearch.analytics.planner.rules;
 
 import com.google.common.collect.ImmutableRangeSet;
 import com.google.common.collect.Range;
+import org.apache.calcite.plan.RelOptPredicateList;
 import org.apache.calcite.plan.RelOptTable;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.logical.LogicalFilter;
@@ -19,7 +20,9 @@ import org.apache.calcite.rex.RexCall;
 import org.apache.calcite.rex.RexInputRef;
 import org.apache.calcite.rex.RexLiteral;
 import org.apache.calcite.rex.RexNode;
+import org.apache.calcite.rex.RexSimplify;
 import org.apache.calcite.rex.RexUnknownAs;
+import org.apache.calcite.rex.RexUtil;
 import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.calcite.sql.type.SqlTypeName;
@@ -230,8 +233,12 @@ public class OpenSearchNestedFieldRewriterTests extends BasePlannerRulesTests {
         assertTrue(json, json.contains("\"op\":\"<=\""));
     }
 
-    public void testSearchSargOnLeafIsNotRewritten() {
-        // The other lowering: an IN / range kept as a SEARCH(Sarg) node is outside the allowlist → rejected with a 400.
+    /**
+     * The other lowering: Calcite folds a same-leaf {@code IN} / {@code OR} / range union into one
+     * {@code SEARCH(Sarg)} node, which is not in the element grammar. It is expanded before matching,
+     * so it is covered — this used to be a 400.
+     */
+    public void testSearchSargOnLeafIsExpandedAndRewritten() {
         RelNode scan = nestedScan();
         Sarg<BigDecimal> sarg = Sarg.of(
             RexUnknownAs.UNKNOWN,
@@ -244,7 +251,70 @@ public class OpenSearchNestedFieldRewriterTests extends BasePlannerRulesTests {
         RexNode search = rexBuilder.makeCall(SqlStdOperatorTable.SEARCH, ref, rexBuilder.makeSearchArgumentLiteral(sarg, ref.getType()));
         assertEquals(SqlKind.SEARCH, search.getKind());
 
-        assertRejected(scan, search);
+        String json = jsonOf(asNestedAnyMatch(rewrittenCondition(scan, search)));
+        assertTrue(json, json.contains("\"op\":\"OR\""));
+        assertTrue(json, json.contains("\"op\":\"=\""));
+    }
+
+    /**
+     * The reported failure, built the way production builds it: {@code events.name='retry' or
+     * events.name='timeout'} does not reach the rewriter as an {@code OR} — {@code RexSimplify} (run by
+     * the reduce-expressions phase, before this rewriter) Sarg-folds it, because Calcite's Sarg
+     * collector keys on the whole referenced expression and an {@code ITEM} call folds like a column.
+     */
+    public void testSameLeafOrFoldedToSargIsRewritten() {
+        RelNode scan = nestedScan();
+        RexNode or = rexBuilder.makeCall(SqlStdOperatorTable.OR, eq(eventsName(), str("retry")), eq(eventsName(), str("timeout")));
+
+        RexNode folded = new RexSimplify(rexBuilder, RelOptPredicateList.EMPTY, RexUtil.EXECUTOR).simplifyUnknownAsFalse(or);
+        assertEquals("precondition: Calcite folds a same-leaf OR into a Sarg", SqlKind.SEARCH, folded.getKind());
+
+        String json = jsonOf(asNestedAnyMatch(rewrittenCondition(scan, folded)));
+        assertTrue(json, json.contains("\"op\":\"OR\""));
+        assertTrue(json, json.contains("retry"));
+        assertTrue(json, json.contains("timeout"));
+    }
+
+    /**
+     * A Sarg on a parent column must stay folded: marking counts a {@code SEARCH} as one predicate and
+     * the backend expands it for Substrait later, so unfolding it here would change the delegated
+     * predicate count. Only the nested leaf's Sarg is expanded.
+     */
+    public void testParentSargStaysFoldedAlongsideNestedPredicate() {
+        RelNode scan = nestedScan();
+        // Folded the way production folds it, so the Sarg literal is well formed.
+        RexNode parentSearch = new RexSimplify(rexBuilder, RelOptPredicateList.EMPTY, RexUtil.EXECUTOR).simplifyUnknownAsFalse(
+            rexBuilder.makeCall(SqlStdOperatorTable.OR, eq(traceIdRef(), str("t1")), eq(traceIdRef(), str("t2")))
+        );
+        assertEquals("precondition: the parent OR folds to a Sarg", SqlKind.SEARCH, parentSearch.getKind());
+
+        RexNode rewritten = rewrittenCondition(scan, makeAnd(parentSearch, eq(eventsName(), str("x"))));
+        RexCall and = asCall(rewritten, SqlKind.AND);
+        assertTrue(
+            "the parent Sarg must survive unexpanded: " + and,
+            and.getOperands().stream().anyMatch(operand -> operand.getKind() == SqlKind.SEARCH)
+        );
+        assertTrue(
+            "the nested leaf must still become one nested_any_match: " + and,
+            and.getOperands()
+                .stream()
+                .anyMatch(operand -> operand instanceof RexCall call && "NESTED_ANY_MATCH".equals(call.getOperator().getName()))
+        );
+    }
+
+    /**
+     * Multi-field disjuncts fuse into ONE call, which is exact because the existential distributes over
+     * disjunction: one element must satisfy one whole disjunct.
+     */
+    public void testMultiLeafDisjunctsFuseIntoOneCall() {
+        RelNode scan = nestedScan();
+        RexNode left = makeAnd(eq(eventsName(), str("a")), eq(eventsCount(), intLit(1)));
+        RexNode right = makeAnd(eq(eventsName(), str("b")), eq(eventsCount(), intLit(2)));
+
+        RexNode rewritten = rewrittenCondition(scan, rexBuilder.makeCall(SqlStdOperatorTable.OR, left, right));
+        String json = jsonOf(asNestedAnyMatch(rewritten));
+        assertTrue(json, json.contains("\"op\":\"OR\""));
+        assertTrue(json, json.contains("\"op\":\"AND\""));
     }
 
     public void testLikeOnLeafIsNotRewritten() {

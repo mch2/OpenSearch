@@ -24,6 +24,7 @@ import org.apache.calcite.rex.RexInputRef;
 import org.apache.calcite.rex.RexLiteral;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.rex.RexShuttle;
+import org.apache.calcite.rex.RexUtil;
 import org.apache.calcite.sql.SqlFunction;
 import org.apache.calcite.sql.SqlFunctionCategory;
 import org.apache.calcite.sql.SqlKind;
@@ -59,7 +60,18 @@ import java.util.Map;
  *       them (matching vanilla OpenSearch's nested block-join semantics).</li>
  *   <li>Multiple arrays combined with {@code AND} — one call each (independent existentials).</li>
  *   <li>A nested predicate combined with parent/scalar conjuncts (row-level AND, or OR-split).</li>
+ *   <li>{@code IN} / {@code NOT IN} / same-leaf {@code OR} / a union of ranges, whether Calcite left
+ *       them as {@code OR}/{@code AND} or folded them into {@code SEARCH(Sarg)} — a Sarg on a nested
+ *       leaf is expanded before matching (see {@code expandNestedSearch}). Disjuncts fuse into one
+ *       call, which is exact: {@code ∃e:(P(e) ∨ Q(e))} ≡ {@code (∃e:P) ∨ (∃e:Q)}, unlike conjunction,
+ *       where fusing is the deliberate joint-element choice above.</li>
  * </ul>
+ *
+ * <p><b>Negation is element-scoped.</b> {@code NOT} and {@code !=} are pushed <em>into</em> the
+ * lambda, so {@code events.name != 'a'} means "some element is not 'a'" — not SQL's / a
+ * {@code must_not nested} query's "no element is 'a'". This predates the Sarg expansion, which only
+ * widens where it is reachable ({@code NOT IN} now expands to {@code ∃e:(≠a ∧ ≠b)}); rejecting the
+ * folded form while accepting the unfolded one would be arbitrary, so both are accepted.
  *
  * <p><b>Not covered</b> (rejected with a 400 {@link UnsupportedFunctionException}):
  * <ul>
@@ -69,9 +81,9 @@ import java.util.Map;
  *   <li>Multiple arrays combined with {@code OR} (e.g. {@code events.x = 1 OR links.y = 2}).</li>
  *   <li>Array-within-array (multi-level nested) descent (e.g. {@code spans.events.name}).</li>
  *   <li>Map-value paths (e.g. {@code events.attributes.foo}).</li>
- *   <li>Any other operator or function ({@code LIKE}, {@code CIDRMATCH}, string/date functions, …).
- *       {@code IN}/{@code BETWEEN} are covered only if Calcite pre-expanded them to the operators
- *       above; a {@code SEARCH}/{@code Sarg} form is not.</li>
+ *   <li>Any other operator or function ({@code LIKE}, {@code CIDRMATCH}, string/date functions, …),
+ *       including a {@code SEARCH} whose reference is not a plain nested leaf (e.g. a map-value
+ *       path).</li>
  * </ul>
  *
  * @opensearch.internal
@@ -231,7 +243,7 @@ public final class OpenSearchNestedFieldRewriter {
 
         int[] offendingArrayCol = { -1 };
         RexNode rewrittenCondition = tryRewriteToNestedAnyMatch(
-            filter.getCondition(),
+            expandNestedSearch(filter.getCondition(), input.getRowType(), rexBuilder),
             arrayCol,
             input.getRowType(),
             rexBuilder,
@@ -253,6 +265,39 @@ public final class OpenSearchNestedFieldRewriter {
             "nested predicate on '" + field + "'",
             "in this form; supported on a nested leaf: comparisons, AND/OR/NOT, isnull/isnotnull"
         );
+    }
+
+    /**
+     * Expands {@code SEARCH($ref, Sarg[..])} back into comparisons / AND / OR, but only where
+     * {@code $ref} is an {@code ITEM}-on-array leaf.
+     *
+     * <p>{@code FilterReduceExpressionsRule} runs {@code RexSimplify} before this rewriter, and
+     * Calcite's Sarg collector keys on the whole referenced expression — an {@code ITEM($events,'name')}
+     * call folds exactly like a plain column. So {@code events.name='a' OR events.name='b'} (likewise
+     * {@code IN}, {@code NOT IN}, a union of ranges) arrives as a single {@code SEARCH} node, which is
+     * not in the element-tree grammar and was rejected with a 400 — even though every operator the
+     * expansion produces is already supported on both sides of the wire.
+     *
+     * <p>Scoped to array refs deliberately: a Sarg on a parent column must stay folded. Marking counts
+     * a {@code SEARCH} as one predicate, and the backend's {@code SargAdapter} expands it for Substrait
+     * later; unfolding it here would change the delegated predicate count.
+     */
+    private static RexNode expandNestedSearch(RexNode condition, RelDataType inputRowType, RexBuilder rexBuilder) {
+        RexNode expanded = condition.accept(new RexShuttle() {
+            @Override
+            public RexNode visitCall(RexCall call) {
+                RexCall visited = (RexCall) super.visitCall(call);
+                if (visited.getKind() == SqlKind.SEARCH
+                    && firstArrayColReferenced(List.of(visited.getOperands().getFirst()), inputRowType) >= 0) {
+                    return RexUtil.expandSearch(rexBuilder, null, visited);
+                }
+                return visited;
+            }
+        });
+        // expandSearch builds right-leaning AND/OR chains; flatten so the expanded disjuncts become
+        // siblings of an enclosing OR, and so anything handed to LogicalFilter.create stays
+        // RexUtil.isFlat (Filter's constructor asserts it). Same pairing as SargAdapter.
+        return expanded == condition ? condition : RexUtil.flatten(rexBuilder, expanded);
     }
 
     // ── Projection: fields events.name / events.attributes / events.attributes.<key> ──

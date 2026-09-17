@@ -222,6 +222,58 @@ public class ObjectFilterDelegationIT extends AnalyticsRestTestCase {
     }
 
     /**
+     * Disjunctions over an array-of-objects leaf.
+     *
+     * <p>These do not reach the planner as an {@code OR}: the reduce-expressions phase runs
+     * {@code RexSimplify} first, and Calcite's Sarg collector keys on the whole referenced expression,
+     * so an {@code ITEM(events,'name')} call folds exactly like a plain column. Every form below
+     * arrives as one {@code SEARCH(Sarg)} and used to be rejected with a 400.
+     */
+    public void testArrayLeafDisjunction() throws Exception {
+        String index = "object_array_disjunction_it";
+        try {
+            client().performRequest(new Request("DELETE", "/" + index));
+        } catch (Exception ignored) {}
+        Request create = new Request("PUT", "/" + index);
+        create.setJsonEntity(
+            "{\"settings\":{"
+                + "\"number_of_shards\":1,\"number_of_replicas\":0,"
+                + "\"index.pluggable.dataformat.enabled\":true,"
+                + "\"index.pluggable.dataformat\":\"composite\","
+                + "\"index.composite.primary_data_format\":\"parquet\","
+                + "\"index.composite.secondary_data_formats\":\"lucene\"},"
+                + "\"mappings\":{\"properties\":{\"id\":{\"type\":\"keyword\"}}}}"
+        );
+        client().performRequest(create);
+        Request bulk = new Request("POST", "/" + index + "/_bulk");
+        bulk.setJsonEntity(
+            "{\"index\":{}}\n{\"id\":\"1\",\"events\":[{\"name\":\"exception\",\"time\":1},{\"name\":\"ok\",\"time\":2}]}\n"
+                + "{\"index\":{}}\n{\"id\":\"2\",\"events\":[{\"name\":\"retry\",\"time\":9}]}\n"
+                + "{\"index\":{}}\n{\"id\":\"3\",\"events\":[{\"name\":\"other\",\"time\":3}]}\n"
+        );
+        bulk.addParameter("refresh", "true");
+        client().performRequest(bulk);
+        client().performRequest(new Request("POST", "/" + index + "/_flush?force=true"));
+
+        String base = "source=" + index;
+        // The reported query.
+        assertCountUnderBothDrivers(base + " | where events.name='retry' or events.name='timeout' | stats count()", 1L);
+        assertCountUnderBothDrivers(base + " | where events.name='exception' or events.name='retry' | stats count()", 2L);
+        // Same Sarg, different surface syntax.
+        assertCountUnderBothDrivers(base + " | where events.name in ('retry','timeout') | stats count()", 1L);
+        // Element-scoped negation: "some element is neither" — documented on the rewriter, previously a 400.
+        assertCountUnderBothDrivers(base + " | where events.name not in ('exception','ok') | stats count()", 2L);
+        // Fusing disjuncts is exact — one element must satisfy one whole disjunct. Document 1 has an
+        // element named exception (time 1) and one at time 2, but neither satisfies a disjunct alone.
+        assertCountUnderBothDrivers(
+            base + " | where (events.name='exception' and events.time=2) or (events.name='zzz' and events.time=9) | stats count()",
+            0L
+        );
+        // The OR-split path: one array operand, one parent operand.
+        assertCountUnderBothDrivers(base + " | where events.name='retry' or id='1' | stats count()", 2L);
+    }
+
+    /**
      * An array-of-objects leaf ANDed with a scalar predicate that delegation takes.
      *
      * <p>The delegated conjunct splits the filter and leaves the nested one as the residual, which
