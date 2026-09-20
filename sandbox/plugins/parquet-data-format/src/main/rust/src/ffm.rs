@@ -14,7 +14,7 @@
 use std::slice;
 use std::str;
 
-use native_bridge_common::{ffm_safe, log_debug};
+use native_bridge_common::ffm_safe;
 
 use crate::field_config::FieldConfig;
 use crate::merge;
@@ -818,67 +818,79 @@ pub unsafe extern "C" fn parquet_free_merge_result(
 // Parquet reader (for test verification)
 // ---------------------------------------------------------------------------
 
-/// Serializes a single Arrow array cell to JSON, recursing into LIST children.
+/// Renders one value of `array` as JSON, descending into a struct or a list.
 ///
-/// This lets list-typed columns round-trip through `parquet_read_as_json` so tests
-/// can assert LIST values survive the write/merge path: a null list row stays JSON
-/// `null`, an empty list stays `[]`, and a null child element stays JSON `null`,
-/// preserving the null-vs-empty-vs-null-child distinctions the merge must not lose.
-fn array_value_to_json(col: &dyn arrow::array::Array, row_idx: usize) -> serde_json::Value {
-    use arrow::array::Array;
-
-    if col.is_null(row_idx) {
+/// An OpenSearch `object` is stored as a struct, so it renders as a nested JSON object and a
+/// document that did not carry the object renders as `null` — the distinction the struct's validity
+/// bit records. Types with no case here render as a `<unsupported:…>` marker naming the type, which
+/// is enough for a test to see what it got.
+fn value_to_json(array: &dyn arrow::array::Array, row_idx: usize) -> serde_json::Value {
+    if array.is_null(row_idx) {
         return serde_json::Value::Null;
     }
-    match col.data_type() {
+    match array.data_type() {
         arrow::datatypes::DataType::Int32 => {
-            let arr = col
+            let arr = array
                 .as_any()
                 .downcast_ref::<arrow::array::Int32Array>()
                 .unwrap();
             serde_json::Value::Number(arr.value(row_idx).into())
         }
         arrow::datatypes::DataType::Int64 => {
-            let arr = col
+            let arr = array
                 .as_any()
                 .downcast_ref::<arrow::array::Int64Array>()
                 .unwrap();
             serde_json::Value::Number(arr.value(row_idx).into())
         }
         arrow::datatypes::DataType::Utf8 => {
-            let arr = col
+            let arr = array
                 .as_any()
                 .downcast_ref::<arrow::array::StringArray>()
                 .unwrap();
             serde_json::Value::String(arr.value(row_idx).to_string())
         }
         arrow::datatypes::DataType::Boolean => {
-            let arr = col
+            let arr = array
                 .as_any()
                 .downcast_ref::<arrow::array::BooleanArray>()
                 .unwrap();
             serde_json::Value::Bool(arr.value(row_idx))
         }
         arrow::datatypes::DataType::Float64 => {
-            let arr = col
+            let arr = array
                 .as_any()
                 .downcast_ref::<arrow::array::Float64Array>()
                 .unwrap();
             serde_json::json!(arr.value(row_idx))
         }
+        arrow::datatypes::DataType::Struct(fields) => {
+            let arr = array
+                .as_any()
+                .downcast_ref::<arrow::array::StructArray>()
+                .unwrap();
+            let mut obj = serde_json::Map::new();
+            for (child_idx, child) in fields.iter().enumerate() {
+                obj.insert(
+                    child.name().clone(),
+                    value_to_json(arr.column(child_idx).as_ref(), row_idx),
+                );
+            }
+            serde_json::Value::Object(obj)
+        }
         arrow::datatypes::DataType::List(_) => {
-            let arr = col
+            let arr = array
                 .as_any()
                 .downcast_ref::<arrow::array::ListArray>()
                 .unwrap();
-            let elements = arr.value(row_idx);
-            let mut items = Vec::with_capacity(elements.len());
-            for i in 0..elements.len() {
-                items.push(array_value_to_json(elements.as_ref(), i));
-            }
-            serde_json::Value::Array(items)
+            let element = arr.value(row_idx);
+            serde_json::Value::Array(
+                (0..element.len())
+                    .map(|i| value_to_json(element.as_ref(), i))
+                    .collect(),
+            )
         }
-        _ => serde_json::Value::String(format!("<unsupported:{}>", col.data_type())),
+        other => serde_json::Value::String(format!("<unsupported:{}>", other)),
     }
 }
 
@@ -915,10 +927,9 @@ pub unsafe extern "C" fn parquet_read_as_json(
         for row_idx in 0..batch.num_rows() {
             let mut obj = serde_json::Map::new();
             for (col_idx, field) in schema.fields().iter().enumerate() {
-                let col = batch.column(col_idx);
                 obj.insert(
                     field.name().clone(),
-                    array_value_to_json(col.as_ref(), row_idx),
+                    value_to_json(batch.column(col_idx), row_idx),
                 );
             }
             rows.push(serde_json::Value::Object(obj));

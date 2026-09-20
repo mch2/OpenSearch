@@ -399,18 +399,6 @@ fn reduce_list_array<O: OffsetSizeTrait>(
     Ok(take(values.as_ref(), &UInt64Array::from(indices), None)?)
 }
 
-/// Returns the scalar type used as the physical sort key. LIST columns reduce
-/// to the winning (MIN or MAX, per the resolved sort mode) non-null element;
-/// scalar columns keep their own type.
-pub(crate) fn reduced_sort_type(dtype: &ArrowDataType) -> ArrowDataType {
-    match dtype {
-        ArrowDataType::List(field)
-        | ArrowDataType::LargeList(field)
-        | ArrowDataType::FixedSizeList(field, _) => field.data_type().clone(),
-        _ => dtype.clone(),
-    }
-}
-
 /// Materializes one temporary scalar reduced key per row for Arrow's
 /// RowConverter, using the resolved reduction mode (`max == true` selects the
 /// MAX element, otherwise MIN). Scalar fields ignore the reduction mode and are
