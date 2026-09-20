@@ -27,6 +27,7 @@ import org.opensearch.common.util.concurrent.ThreadContext;
 import org.opensearch.core.common.Strings;
 import org.opensearch.index.IndexNotFoundException;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -350,8 +351,34 @@ public class OpenSearchSchemaBuilder {
             // Recurse into sub-properties so dotted leaf paths ("city.location.latitude") appear as flat columns.
             if (fieldType == null || "object".equals(fieldType)) {
                 Map<String, Object> nested = (Map<String, Object>) fieldProps.get("properties");
-                if (nested != null) {
-                    addLeafFields(builder, typeFactory, nested, fieldName);
+                if (nested == null) {
+                    if ("object".equals(fieldType) == false) {
+                        // No "type" AND no "properties" — a malformed mapping entry, not an object.
+                        // Skip it, as before; only an explicit `"type": "object"` is shapeless.
+                        continue;
+                    }
+                    // Shapeless object — `{"type": "object"}` with no properties, which is what
+                    // dynamic mapping leaves before any document populates it. Nothing is known
+                    // about its shape, but the field must stay addressable and resolve to null, as
+                    // vanilla does. A field-less ROW gives that: ObjectLeafProjector has no column to
+                    // read it from and emits a typed NULL. Note the parent of a shapeless
+                    // child does NOT carry it in its own struct type (buildObjectType skips it), so
+                    // `fields outer` omits it while `fields outer.shapeless` returns null — again
+                    // matching vanilla.
+                    builder.add(fieldName, emptyStruct(typeFactory));
+                    continue;
+                }
+                {
+                    // The object itself is the only column: it is what is physically stored, as one
+                    // Parquet struct. A leaf is NOT declared under its dotted name — the frontend then
+                    // resolves `city.name` as field access on the struct, which is Calcite's own way to
+                    // reference a struct field and needs nothing lifted out of the scan. Declaring the
+                    // leaves instead means declaring columns that do not exist and rebuilding each one
+                    // above the scan, which is what this used to do.
+                    RelDataType structType = buildObjectType(typeFactory, nested, fieldName);
+                    if (structType != null) {
+                        builder.add(fieldName, structType);
+                    }
                 }
                 continue;
             }
@@ -378,6 +405,80 @@ public class OpenSearchSchemaBuilder {
             }
             builder.add(fieldName, columnType);
         }
+    }
+
+    /** Nullable ROW with no fields — an object whose shape is unknown; always resolves to null. */
+    private static RelDataType emptyStruct(RelDataTypeFactory typeFactory) {
+        return typeFactory.createTypeWithNullability(typeFactory.createStructType(List.of(), List.of()), true);
+    }
+
+    /**
+     * Builds the struct (ROW) type for an {@code object} mapping: one struct field per supported
+     * sub-field, recursing for sub-objects. Field names are the <em>local</em> names (the struct
+     * nesting already carries the path), while the flat leaf columns added by
+     * {@link #addLeafFields} keep their dotted paths — that dotted convention is how
+     * a dotted path resolves as field access on this struct.
+     *
+     * <p>Returns {@code null} when the object contributes no supported field, so callers omit the
+     * column entirely rather than declaring an empty struct.
+     */
+    @SuppressWarnings("unchecked")
+    private static RelDataType buildObjectType(RelDataTypeFactory typeFactory, Map<String, Object> properties, String pathPrefix) {
+        List<RelDataType> types = new ArrayList<>();
+        List<String> names = new ArrayList<>();
+        for (Map.Entry<String, Object> fieldEntry : properties.entrySet()) {
+            String localName = fieldEntry.getKey();
+            Map<String, Object> fieldProps = (Map<String, Object>) fieldEntry.getValue();
+            String fieldType = (String) fieldProps.get("type");
+            RelDataType childType;
+            if (fieldType == null || "object".equals(fieldType)) {
+                Map<String, Object> nested = (Map<String, Object>) fieldProps.get("properties");
+                if (nested == null) {
+                    // A shapeless sub-object — `{"type": "object"}` before any document gave it a shape.
+                    // It goes into the struct as a field-less ROW so `outer.shapeless` is still reachable
+                    // by descending the parent, and resolves to null. Leaving it out made it addressable
+                    // only through a flat dotted column, which is no longer declared.
+                    childType = "object".equals(fieldType)
+                        ? typeFactory.createTypeWithNullability(typeFactory.createStructType(List.of(), List.of()), true)
+                        : null;
+                } else {
+                    childType = buildObjectType(typeFactory, nested, pathPrefix + "." + localName);
+                }
+                if (childType != null && Boolean.TRUE.equals(fieldProps.get("multi_value"))) {
+                    // A sub-object that arrives as an array, e.g. `events` inside a wrapper object.
+                    childType = typeFactory.createTypeWithNullability(typeFactory.createArrayType(childType, -1), true);
+                }
+            } else if ("nested".equals(fieldType)) {
+                // Array-of-sub-docs needs LIST<STRUCT> + UNNEST; out of scope here.
+                childType = null;
+            } else {
+                // An ordinary scalar leaf (keyword, long, date_nanos, …). Typed exactly as
+                // addLeafFields types the equivalent flat column — including `scaling_factor`,
+                // the mapping parameter of `scaled_float` (a float persisted as a scaled long),
+                // which buildLeafType needs to type that field. parseScalingFactor yields NaN
+                // when absent, which buildLeafType treats as "not a scaled_float".
+                double scalingFactor = parseScalingFactor(fieldProps.get(SCALING_FACTOR_FIELD));
+                childType = buildLeafType(fieldType, (String) fieldProps.get("format"), scalingFactor, typeFactory);
+                // …including multi_value, which addLeafFields wraps in an ARRAY above. Storage does
+                // the same one level down — ArrowSchemaBuilder files the LIST leaf as a child of the
+                // object's struct — so the ROW field has to be an ARRAY or the declared type would
+                // disagree with the column. Only reachable for an object whose leaf is multi-valued.
+                if (childType != null && Boolean.TRUE.equals(fieldProps.get("multi_value"))) {
+                    childType = typeFactory.createTypeWithNullability(typeFactory.createArrayType(childType, -1), true);
+                }
+            }
+            if (childType == null) {
+                // Unsupported sub-field (geo_point, nested, …) — dropped from the struct for the
+                // same reason it is dropped from the flat columns.
+                continue;
+            }
+            names.add(localName);
+            types.add(childType);
+        }
+        if (names.isEmpty()) {
+            return null;
+        }
+        return typeFactory.createTypeWithNullability(typeFactory.createStructType(types, names), true);
     }
 
     /**
