@@ -80,6 +80,10 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
 
     private static final Logger LOGGER = LogManager.getLogger(DataFusionAnalyticsBackendPlugin.class);
 
+    // MULTI_VALUE_EXPAND: the explode crosses the wire as a Substrait ExtensionSingleRel and is
+    // reconstructed on the shard as DataFusion's LogicalPlan::Unnest (see substrait_consumer.rs).
+    // Substrait has no UnnestRel and datafusion-substrait implements neither direction, so the
+    // extension rel is the only route — and only this backend can consume it.
     private static final Set<EngineCapability> ENGINE_CAPS = Set.of(
         EngineCapability.SORT,
         EngineCapability.UNION,
@@ -97,6 +101,7 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
         SUPPORTED_FIELD_TYPES.add(FieldType.BINARY);
         SUPPORTED_FIELD_TYPES.add(FieldType.IP);
         SUPPORTED_FIELD_TYPES.add(FieldType.MATCH_ONLY_TEXT);
+        SUPPORTED_FIELD_TYPES.add(FieldType.NESTED);
     }
 
     // Filter-side scalar functions DataFusion can evaluate natively. Comparisons, arithmetic
@@ -595,7 +600,12 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
             @Override
             public Set<ScanCapability> scanCapabilities() {
                 Set<String> formats = Set.copyOf(plugin.getSupportedFormats());
-                return Set.of(new ScanCapability.DocValues(formats, Set.copyOf(SUPPORTED_FIELD_TYPES)));
+                // OBJECT is scannable but is deliberately not in SUPPORTED_FIELD_TYPES: an object
+                // is stored as a struct and read as one column, while most operations over a struct
+                // are meaningless (no ordering, no arithmetic) and would be wrongly claimed.
+                Set<FieldType> scannable = new HashSet<>(SUPPORTED_FIELD_TYPES);
+                scannable.add(FieldType.OBJECT);
+                return Set.of(new ScanCapability.DocValues(formats, Set.copyOf(scannable)));
             }
 
             @Override
@@ -617,6 +627,35 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
                     // emits a value-typed scalar before substrait emission.
                     caps.add(new FilterCapability.Standard(op, Set.of(FieldType.MAP), formats));
                 }
+                // OBJECT-typed fields enter the filter rule the same way MAP ones do. An object is
+                // stored as a struct, so `where city.population > 500000` is
+                // `get_field(city, 'population') > 500000` once the predicate moves through the
+                // projection that reads the leaf, and the filter rule's field-index collection sees
+                // the OBJECT column rather than the extracted scalar. Without this the WHERE rejects
+                // with "No backend can evaluate filter predicate [GREATER_THAN] on fields
+                // [city:object]". Sound for the same reason: every viable predicate against an
+                // object column is forced through a get_field that yields a value-typed scalar
+                // before substrait emission — except the null predicates, which read the struct's
+                // own validity and are meaningful on it directly.
+                for (ScalarFunction op : STANDARD_FILTER_OPS) {
+                    caps.add(new FilterCapability.Standard(op, Set.of(FieldType.OBJECT), formats));
+                }
+                // Nested existential filter — DataFusion-only (parquet path), no Lucene. Registered
+                // explicitly for ARRAY/NESTED instead of via the STANDARD loop to keep its field-type
+                // scope narrow.
+                caps.add(
+                    new FilterCapability.Standard(
+                        // TODO(native-array_any_match): remove this capability once we drop the placeholder op.
+                        ScalarFunction.NESTED_ANY_MATCH,
+                        // OBJECT as well: an `object` field that documents present as an array is
+                        // stored as LIST<STRUCT<..>> and reported as OBJECT by field-storage
+                        // resolution, so an existential predicate over its elements arrives with the
+                        // object's own field type rather than ARRAY.
+                        Set.of(FieldType.ARRAY, FieldType.NESTED, FieldType.OBJECT),
+                        formats
+                    )
+                );
+
                 return Set.copyOf(caps);
             }
 
@@ -645,6 +684,13 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
                         caps.add(new ProjectCapability.Scalar(op, Set.of(ft), formats, true));
                     }
                 }
+                // Nested sub-path projection (`fields events.name`) — DataFusion-only (parquet path).
+                // Returns ARRAY<leaf>, so it's keyed on ARRAY/NESTED (project scalars are looked up
+                // by return type). The Rust NestedProjectRewriteRule lowers it to array_transform.
+                caps.add(
+                    // TODO(native-array_transform): remove this capability once we drop the placeholder op.
+                    new ProjectCapability.Scalar(ScalarFunction.NESTED_PROJECT, Set.of(FieldType.ARRAY, FieldType.NESTED), formats, true)
+                );
                 return Set.copyOf(caps);
             }
 
@@ -652,6 +698,18 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
             public Set<AggregateCapability> aggregateCapabilities() {
                 Set<String> formats = Set.copyOf(plugin.getSupportedFormats());
                 Set<AggregateCapability> caps = new HashSet<>();
+                // Aggregates over a struct-typed (object) column. Registered separately because
+                // FieldType.OBJECT is deliberately NOT in SUPPORTED_FIELD_TYPES — most aggregates
+                // are meaningless on a struct (no ordering ⇒ MIN/MAX, no arithmetic ⇒ SUM/AVG),
+                // and adding OBJECT there would also wrongly claim filter/sort support.
+                //
+                // COUNT is the meaningful one (non-null count) and is what the SQL plugin's
+                // Lucene path supports today, i.e. `stats count(<object>)`. Without this the
+                // capability lookup for (COUNT, OBJECT) misses and the query fails at plan time
+                // with "Function [COUNT] is not currently supported as an aggregate function".
+                for (FieldType objectType : Set.of(FieldType.OBJECT)) {
+                    caps.add(new AggregateCapability(AggregateFunction.COUNT, Set.of(objectType), formats));
+                }
                 for (AggregateFunction func : AGG_FUNCTIONS) {
                     for (FieldType type : SUPPORTED_FIELD_TYPES) {
                         // 3-arg constructor leaves decomposition=null so the

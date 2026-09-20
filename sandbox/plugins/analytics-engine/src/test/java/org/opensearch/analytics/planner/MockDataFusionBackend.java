@@ -53,6 +53,9 @@ public class MockDataFusionBackend extends MockBackend implements SearchBackEndP
         SUPPORTED_TYPES.addAll(FieldType.keyword());
         SUPPORTED_TYPES.addAll(FieldType.date());
         SUPPORTED_TYPES.add(FieldType.BOOLEAN);
+        // Calcite ROW maps to FieldType.OBJECT — needed for the object column itself to resolve a
+        // capable backend when the scan reads it.
+        SUPPORTED_TYPES.add(FieldType.OBJECT);
     }
 
     private static final Set<ScalarFunction> STANDARD_OPS = Set.of(

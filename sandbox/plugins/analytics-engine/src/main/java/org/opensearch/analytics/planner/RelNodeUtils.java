@@ -13,7 +13,11 @@ import org.apache.calcite.plan.RelOptUtil;
 import org.apache.calcite.plan.RelTraitSet;
 import org.apache.calcite.plan.hep.HepRelVertex;
 import org.apache.calcite.rel.RelNode;
+import org.apache.calcite.rel.core.Correlate;
+import org.apache.calcite.rel.core.Project;
+import org.apache.calcite.rel.core.Sort;
 import org.apache.calcite.rel.core.TableScan;
+import org.apache.calcite.rel.core.Uncollect;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rel.type.RelDataTypeField;
@@ -72,6 +76,47 @@ public class RelNodeUtils {
         return node;
     }
 
+    /**
+     * The {@link Uncollect} driving a multi-value expansion on the right side of a {@link Correlate},
+     * or {@code null} when that side is not an expansion at all.
+     *
+     * <p>Unwraps, outermost first: the Hep vertex, the {@code Sort} carrying {@code mvexpand limit=},
+     * and the element-rewrap {@link Project} described in {@link #isExpansionElementRewrap}.
+     */
+    public static Uncollect expansionUncollect(RelNode right) {
+        RelNode node = unwrapHep(right);
+        if (node instanceof Sort sort) {
+            node = unwrapHep(sort.getInput());
+        }
+        if (isExpansionElementRewrap(node)) {
+            node = unwrapHep(((Project) node).getInput());
+        }
+        return node instanceof Uncollect uncollect ? uncollect : null;
+    }
+
+    /**
+     * True when {@code node} is a single-expression {@link Project} sitting directly on an
+     * {@link Uncollect} — the shape a multi-value expansion puts there.
+     *
+     * <p>Expanding an {@code ARRAY<ROW<..>>} needs one because Calcite's {@code Uncollect} explodes a
+     * record element into one column per record field, which loses the expanded column's name — so the
+     * frontend rebuilds the element into a single {@code ROW} column named after the array. It is a
+     * type-level fixup only: execution unnests the list and already yields the element struct as one
+     * column, so it carries no work and is absorbed into the expansion spec rather than emitted.
+     *
+     * <p>The expression is not required to still be a {@code ROW} call. When nothing downstream reads
+     * the expanded column — {@code mvexpand events | stats count()} — field trimming rewrites it, and
+     * requiring the original shape left the {@code Correlate} unmarked and the query failing with
+     * "Aggregate rule encountered unmarked child [LogicalCorrelate]". Any single-expression Project
+     * directly over an Uncollect belongs to the expansion either way.
+     */
+    public static boolean isExpansionElementRewrap(RelNode node) {
+        if (!(node instanceof Project project) || project.getProjects().size() != 1) {
+            return false;
+        }
+        return unwrapHep(project.getInput()) instanceof Uncollect;
+    }
+
     public static RelNode copyToCluster(RelNode node, RelOptCluster newCluster, OpenSearchDistributionTraitDef distTraitDef) {
         List<RelNode> newInputs = node.getInputs().stream().map(input -> copyToCluster(input, newCluster, distTraitDef)).toList();
 
@@ -124,10 +169,6 @@ public class RelNodeUtils {
                 join.getJoinType(),
                 join.getViableBackends()
             );
-        } else if (node instanceof OpenSearchUnion union) {
-            return new OpenSearchUnion(newCluster, newTraits, newInputs, union.all, union.getViableBackends());
-        } else if (node instanceof OpenSearchValues values) {
-            return new OpenSearchValues(newCluster, newTraits, values.getRowType(), values.getTuples(), values.getViableBackends());
         } else if (node instanceof OpenSearchCorrelate correlate) {
             return new OpenSearchCorrelate(
                 newCluster,
@@ -139,6 +180,10 @@ public class RelNodeUtils {
                 correlate.getJoinType(),
                 correlate.getViableBackends()
             );
+        } else if (node instanceof OpenSearchUnion union) {
+            return new OpenSearchUnion(newCluster, newTraits, newInputs, union.all, union.getViableBackends());
+        } else if (node instanceof OpenSearchValues values) {
+            return new OpenSearchValues(newCluster, newTraits, values.getRowType(), values.getTuples(), values.getViableBackends());
         } else if (node instanceof OpenSearchUncollect uncollect) {
             return new OpenSearchUncollect(
                 newCluster,

@@ -33,7 +33,14 @@ public class RuleProfilingListenerTests extends BasePlannerRulesTests {
 
     private static final Logger LOGGER = LogManager.getLogger(RuleProfilingListenerTests.class);
 
-    private static final List<String> EXPECTED_PHASES = List.of(
+    /**
+     * Every phase, in the order {@link PlannerImpl#runAllOptimizations} declares them. A phase only
+     * registers with the listener when it actually runs, and {@code subquery-remove} is conditional —
+     * it is skipped for a plan that has neither a {@code RexSubQuery} nor a {@code Correlate} needing
+     * decorrelation, which is every query here. So the assertion is that the phases that ran are an
+     * in-order subsequence of this list, with the unconditional ones all present.
+     */
+    private static final List<String> DECLARED_PHASES = List.of(
         "subquery-remove",
         "literal-agg-extract",
         "reduce-expressions",
@@ -43,6 +50,11 @@ public class RuleProfilingListenerTests extends BasePlannerRulesTests {
         "agg-literal-arg-split",
         "cbo"
     );
+
+    /** Phases that run for every query, regardless of its shape. */
+    private static final List<String> UNCONDITIONAL_PHASES = DECLARED_PHASES.stream()
+        .filter(phase -> "subquery-remove".equals(phase) == false)
+        .toList();
 
     public void testProfilePureScan() {
         runAndAssertRules(
@@ -157,6 +169,25 @@ public class RuleProfilingListenerTests extends BasePlannerRulesTests {
     // ---- Shared assertion helper ----
 
     /**
+     * Asserts the phases that ran are an in-order subsequence of {@link #DECLARED_PHASES} and include
+     * every {@link #UNCONDITIONAL_PHASES} entry. A conditional phase that legitimately did not run
+     * (see {@link #DECLARED_PHASES}) is allowed to be absent, but no phase may run out of order or
+     * under an unknown name — either would be a real regression in the phase wiring.
+     */
+    private static void assertPhasesInDeclaredOrder(List<String> actual) {
+        int next = 0;
+        for (String phase : actual) {
+            int at = DECLARED_PHASES.subList(next, DECLARED_PHASES.size()).indexOf(phase);
+            assertTrue(
+                "Phase '" + phase + "' is unknown or ran out of declared order; ran " + actual + ", declared " + DECLARED_PHASES,
+                at >= 0
+            );
+            next += at + 1;
+        }
+        assertTrue("Every unconditional phase must run; ran " + actual, actual.containsAll(UNCONDITIONAL_PHASES));
+    }
+
+    /**
      * Runs the SQL through {@link PlannerImpl#runAllOptimizations} with profiling enabled,
      * then asserts:
      * <ul>
@@ -177,9 +208,9 @@ public class RuleProfilingListenerTests extends BasePlannerRulesTests {
         RuleProfilingListener.PlannerProfile profile = context.getProfilingResults();
         assertNotNull("Profiling enabled — profile must be recorded", profile);
 
-        assertEquals("All optimization phases must run in declared order", EXPECTED_PHASES, profile.phases());
+        assertPhasesInDeclaredOrder(profile.phases());
 
-        for (String phase : EXPECTED_PHASES) {
+        for (String phase : profile.phases()) {
             Long durationNs = profile.phaseDurationsNs().get(phase);
             assertNotNull("Phase '" + phase + "' must have a duration recorded", durationNs);
             assertTrue("Phase '" + phase + "' duration must be non-negative", durationNs >= 0);

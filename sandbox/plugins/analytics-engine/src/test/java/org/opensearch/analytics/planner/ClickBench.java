@@ -30,6 +30,14 @@ public final class ClickBench {
 
     public static final Map<String, Map<String, Object>> BASIC_FIELDS;
 
+    /**
+     * {@link #BASIC_FIELDS} plus an {@code object} field. An object is stored as a struct, so the
+     * schema exposes it as a ROW column alongside a flat column per leaf, and the scan reads the
+     * object while a projection above it reads each leaf back out — a shape worth covering wherever
+     * a rule reasons about what sits between the scan and its consumer.
+     */
+    public static final Map<String, Map<String, Object>> FIELDS_WITH_OBJECT;
+
     static {
         LinkedHashMap<String, Map<String, Object>> fields = new LinkedHashMap<>();
         fields.put("CounterID", Map.of("type", "integer"));
@@ -40,6 +48,10 @@ public final class ClickBench {
         fields.put("AdvEngineID", Map.of("type", "short"));
         fields.put("ParamPrice", Map.of("type", "long"));
         BASIC_FIELDS = Collections.unmodifiableMap(fields);
+
+        LinkedHashMap<String, Map<String, Object>> withObject = new LinkedHashMap<>(fields);
+        withObject.put("Client", Map.of("type", "object", "properties", Map.of("Name", Map.of("type", "keyword"))));
+        FIELDS_WITH_OBJECT = Collections.unmodifiableMap(withObject);
     }
 
     private ClickBench() {}

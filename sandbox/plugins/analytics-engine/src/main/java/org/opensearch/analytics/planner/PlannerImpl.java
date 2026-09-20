@@ -17,6 +17,7 @@ import org.apache.calcite.plan.volcano.VolcanoPlanner;
 import org.apache.calcite.rel.RelHomogeneousShuttle;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.RelShuttle;
+import org.apache.calcite.rel.core.Correlate;
 import org.apache.calcite.rel.core.Filter;
 import org.apache.calcite.rel.core.Join;
 import org.apache.calcite.rel.core.Project;
@@ -130,6 +131,8 @@ public class PlannerImpl {
 
         RelNode modifiedRelNode = rawRelNode;
         modifiedRelNode = removeSubQueries(modifiedRelNode, listener);
+        // Before trimFields, which would otherwise drop the shapeless column the project supplies.
+        modifiedRelNode = ShapelessObjectStripper.rewrite(modifiedRelNode).orElse(modifiedRelNode);
         modifiedRelNode = trimFields(modifiedRelNode);
         modifiedRelNode = extractLiteralAgg(modifiedRelNode, listener);
         modifiedRelNode = reduceExpressions(modifiedRelNode, listener);
@@ -265,6 +268,19 @@ public class PlannerImpl {
         // LogicalCorrelate that the marking phase rejects with "unmarked child [LogicalCorrelate]".
         // Strip that limit while the subquery is still an identifiable EXISTS RexSubQuery so the
         // decorrelation below can fold it into a standard join.
+        // Nothing to remove — and running the phase anyway is actively harmful. The postProcess
+        // below decorrelates unconditionally, and mvexpand's Correlate+Uncollect is a *legitimate*
+        // correlate that RelDecorrelator cannot remove: it leaves the Correlate in place but
+        // relocates the Filter above it into the correlate's RIGHT input, giving
+        // Correlate(scan, Filter(Uncollect)). OpenSearchCorrelateRule only recognises a bare
+        // Uncollect there, so the Correlate is never marked and OpenSearchProjectRule fails with
+        // "Project rule encountered unmarked child [LogicalCorrelate]" — i.e. every
+        // `mvexpand <field> | where <field> …` query. The decorrelator exists solely to clean up
+        // correlates the three *_SUB_QUERY_TO_CORRELATE rules introduce, so gate the whole phase on
+        // there being a RexSubQuery for them to convert.
+        if (containsSubQuery(input) == false && needsDecorrelation(input) == false) {
+            return input;
+        }
         RelNode prepared = stripExistsSubqueryLimits(input);
         return HepPhase.named("subquery-remove")
             .addRuleCollection(
@@ -285,6 +301,53 @@ public class PlannerImpl {
                 )
             )
             .run(prepared, listener);
+    }
+
+    /**
+     * Whether any node carries a {@link RexSubQuery} for the {@code *_SUB_QUERY_TO_CORRELATE} rules
+     * to convert. Calcite only exposes per-node overloads, and only these three node types can hold
+     * one, so the walk checks each in turn.
+     */
+    /**
+     * True when the tree already carries a {@link Correlate} that decorrelation has to remove.
+     *
+     * <p>The subquery check above is not sufficient on its own. The PPL frontend builds a Correlate
+     * directly for {@code streamstats reset_before=…} — a correlated aggregate over a segment id, with
+     * no {@code RexSubQuery} anywhere — so gating decorrelation on "contains a subquery" skipped it
+     * and left a Correlate that nothing marks, failing with "Sort rule encountered unmarked child
+     * [LogicalCorrelate]".
+     *
+     * <p>{@code mvexpand}'s Correlate is deliberately excluded: its right side is an Uncollect, it is
+     * a legitimate correlate the engine executes natively, and RelDecorrelator cannot remove it —
+     * running the phase for it relocates the Filter into the correlate's right input and breaks
+     * marking, which is why the gate exists at all.
+     */
+    private static boolean needsDecorrelation(RelNode node) {
+        for (Correlate correlate : RelNodeUtils.findNodes(node, Correlate.class)) {
+            if (RelNodeUtils.expansionUncollect(correlate.getRight()) == null) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean containsSubQuery(RelNode node) {
+        for (Project project : RelNodeUtils.findNodes(node, Project.class)) {
+            if (RexUtil.SubQueryFinder.containsSubQuery(project)) {
+                return true;
+            }
+        }
+        for (Filter filter : RelNodeUtils.findNodes(node, Filter.class)) {
+            if (RexUtil.SubQueryFinder.containsSubQuery(filter)) {
+                return true;
+            }
+        }
+        for (Join join : RelNodeUtils.findNodes(node, Join.class)) {
+            if (RexUtil.SubQueryFinder.containsSubQuery(join)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

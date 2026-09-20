@@ -48,6 +48,7 @@ import org.apache.calcite.util.ImmutableBitSet;
 import org.apache.calcite.util.Optionality;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.opensearch.analytics.planner.RelNodeUtils;
 import org.opensearch.analytics.planner.rel.OpenSearchBroadcastScan;
 import org.opensearch.analytics.planner.rel.OpenSearchStageInputScan;
 import org.opensearch.analytics.spi.AggregateFunction;
@@ -62,6 +63,7 @@ import java.math.MathContext;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.function.Function;
 
@@ -71,6 +73,7 @@ import io.substrait.expression.FunctionArg;
 import io.substrait.expression.ImmutableAggregateFunctionInvocation;
 import io.substrait.extension.ExtensionCollector;
 import io.substrait.extension.SimpleExtension;
+import io.substrait.isthmus.CallConverter;
 import io.substrait.isthmus.ConverterProvider;
 import io.substrait.isthmus.SubstraitRelVisitor;
 import io.substrait.isthmus.TypeConverter;
@@ -562,7 +565,11 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
 
         io.substrait.proto.Rel inputRel = io.substrait.proto.Rel.newBuilder().setRead(readRel).build();
         PlanRel planRel = PlanRel.newBuilder()
-            .setRoot(io.substrait.proto.RelRoot.newBuilder().setInput(inputRel).addAllNames(rowType.getFieldNames()).build())
+            // Flattened, not rowType.getFieldNames(): a struct column contributes its own name plus
+            // one per field at every level, and emitting only the top level fails with "Named schema
+            // must contain names for all fields". Reachable as soon as an `object` column is in the
+            // row type.
+            .setRoot(io.substrait.proto.RelRoot.newBuilder().setInput(inputRel).addAllNames(flattenNamesForSubstrait(rowType)).build())
             .build();
 
         byte[] bytes = SubstraitPlanProtoRewriter.rewrite(io.substrait.proto.Plan.newBuilder().addRelations(planRel).build()).toByteArray();
@@ -597,6 +604,7 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
         RelNode preprocessed = UntypedNullPreprocessor.rewrite(rel);
         preprocessed = PplAggregateCallRewriter.rewrite(preprocessed);
         preprocessed = MultiValueRelRewriter.rewrite(preprocessed);
+
         preprocessed = PplWindowCallRewriter.rewrite(preprocessed);
         preprocessed = ItemTypeRebuilder.rewrite(preprocessed);
         preprocessed = CastToVarcharRewriter.rewrite(preprocessed);
@@ -617,7 +625,8 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
             throw new IllegalStateException("Substrait conversion rejected the plan: " + e.getMessage(), e);
         }
 
-        List<String> fieldNames = root.fields.stream().map(field -> field.getValue()).toList();
+        // Root output names; flattened so struct columns contribute their nested names too.
+        List<String> fieldNames = flattenNamesForSubstrait(root.fields, preprocessed.getRowType());
 
         Plan.Root substraitRoot = Plan.Root.builder().input(substraitRel).names(fieldNames).build();
         Plan plan = Plan.builder().addRoots(substraitRoot).build();
@@ -650,7 +659,86 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
 
     /** Wrapper's output column names from its Calcite row type. */
     private static List<String> fieldNames(RelNode fragment) {
-        return fragment.getRowType().getFieldList().stream().map(RelDataTypeField::getName).toList();
+        return flattenNamesForSubstrait(fragment.getRowType());
+    }
+
+    /**
+     * Flattens column names for a Substrait {@code Plan.Root} / {@code NamedStruct}: one flat
+     * depth-first list naming every field at every nesting level.
+     *
+     * <pre>
+     * row type:  id INTEGER, meta ROW(top VARCHAR, props ROW(name VARCHAR))
+     * Substrait: ["id", "meta", "top", "props", "name"]
+     * </pre>
+     *
+     * It must be complete because a Substrait struct expression is positional — values only, no
+     * names — so emitting just the top level fails with "Named schema must contain names for all
+     * fields".
+     *
+     * <p>This overload takes {@link RelRoot} fields, whose names may be aliases and whose index into
+     * {@code rowType} need not match list position, so types are looked up by that index. The
+     * {@link #flattenNamesForSubstrait(RelDataType)} overload pairs by position instead.
+     */
+    private static List<String> flattenNamesForSubstrait(List<? extends Map.Entry<Integer, String>> rootFields, RelDataType rowType) {
+        List<RelDataTypeField> fields = rowType.getFieldList();
+        List<String> flattened = new ArrayList<>(rootFields.size());
+        for (Map.Entry<Integer, String> rootField : rootFields) {
+            flattened.add(rootField.getValue());
+            int index = rootField.getKey();
+            if (index >= 0 && index < fields.size()) {
+                RelDataType nested = namedStructOf(fields.get(index).getType());
+                if (nested != null) {
+                    appendNestedNames(flattened, nested);
+                }
+            }
+        }
+        return flattened;
+    }
+
+    /** Row-type-driven overload: names come from the row type itself, so positions align by construction. */
+    private static List<String> flattenNamesForSubstrait(RelDataType rowType) {
+        List<String> flattened = new ArrayList<>(rowType.getFieldCount());
+        for (RelDataTypeField field : rowType.getFieldList()) {
+            flattened.add(field.getName());
+            RelDataType nested = namedStructOf(field.getType());
+            if (nested != null) {
+                appendNestedNames(flattened, nested);
+            }
+        }
+        return flattened;
+    }
+
+    /** Appends a struct's field names depth-first (children before the next sibling). */
+    private static void appendNestedNames(List<String> out, RelDataType structType) {
+        for (RelDataTypeField child : structType.getFieldList()) {
+            out.add(child.getName());
+            RelDataType nested = namedStructOf(child.getType());
+            if (nested != null) {
+                appendNestedNames(out, nested);
+            }
+        }
+    }
+
+    /**
+     * Returns the struct whose field names a Substrait named schema needs for {@code type}, or null
+     * when {@code type} contributes no names of its own.
+     *
+     * <p>A ROW contributes its own fields. An {@code ARRAY<ROW>} — how an object that documents present as an
+     * array is declared — contributes its element's fields: the list level is unnamed in Substrait,
+     * but every leaf beneath it still has to appear, or the plan is rejected with "Named schema must
+     * contain names for all fields".
+     */
+    private static RelDataType namedStructOf(RelDataType type) {
+        if (type.isStruct()) {
+            return type;
+        }
+        if (type.getSqlTypeName() == SqlTypeName.ARRAY) {
+            RelDataType component = type.getComponentType();
+            if (component != null && component.isStruct()) {
+                return component;
+            }
+        }
+        return null;
     }
 
     private static Rel replaceInput(Rel wrapper, Rel newInput) {
@@ -838,21 +926,17 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
             aggConverter,
             windowConverter,
             typeConverter
-        );
+        ) {
+            @Override
+            public List<CallConverter> getCallConverters() {
+                return super.getCallConverters();
+            }
+        };
         return new SubstraitRelVisitor(converterProvider) {
             @Override
             public Rel visit(org.apache.calcite.rel.core.Aggregate aggregate) {
                 Rel rel = super.visit(aggregate);
                 return rel instanceof Aggregate agg ? addNullArgFilters(aggregate, agg) : rel;
-            }
-
-            @Override
-            public Rel visit(Correlate correlate) {
-                MultiValueExpandSpec spec = explicitMultiValueExpand(correlate, typeConverter);
-                if (spec == null) {
-                    return super.visit(correlate);
-                }
-                return ExtensionSingle.from(new MultiValueExpandDetail(spec), apply(correlate.getLeft())).build();
             }
 
             @Override
@@ -869,6 +953,16 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
                 }
                 return super.visitOther(other);
             }
+
+            @Override
+            public Rel visit(Correlate correlate) {
+                MultiValueExpandSpec spec = explicitMultiValueExpand(correlate, typeConverter);
+                if (spec == null) {
+                    return super.visit(correlate);
+                }
+                return ExtensionSingle.from(new MultiValueExpandDetail(spec), apply(correlate.getLeft())).build();
+            }
+
         };
     }
 
@@ -884,6 +978,12 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
             }
             limit = literal.getValueAs(Integer.class);
             right = sort.getInput();
+        }
+        // An ARRAY<ROW<..>> expansion carries an element-rewrap Project between the Sort and the
+        // Uncollect. It is absorbed here rather than emitted: unnesting the list already yields the
+        // element struct as one column, which is exactly what the rewrap declares.
+        if (RelNodeUtils.isExpansionElementRewrap(right)) {
+            right = ((org.apache.calcite.rel.core.Project) right).getInput();
         }
         if (!(right instanceof Uncollect)) {
             return null;
@@ -942,7 +1042,7 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
         List<Aggregate.Measure> rewritten = null;
         for (int i = 0; i < measures.size(); i++) {
             Aggregate.Measure m = measures.get(i);
-            if (!(calls.get(i).getAggregation() instanceof LocalAggOp op) || !op.filtersNullArgs(calls.get(i))) {
+            if (!filtersNullArgs(calls.get(i))) {
                 continue;
             }
             if (m.getPreMeasureFilter().isPresent()
@@ -960,6 +1060,23 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
             rewritten.set(i, Aggregate.Measure.builder().from(m).preMeasureFilter(filter).build());
         }
         return rewritten == null ? agg : Aggregate.builder().from(agg).measures(rewritten).build();
+    }
+
+    /**
+     * Whether the measure must ignore rows where its argument is null.
+     *
+     * <p>{@code COUNT(x)} counts non-null values, and the frontend normally guarantees that by injecting
+     * a row-level {@code IS NOT NULL} filter — but only when the argument is a plain column reference.
+     * A leaf of an object is field access on the struct, so no filter is injected and the count came back
+     * as a row count: {@code count(attrs.mid)} answered 2 where only one document has that child. A
+     * pre-measure filter here is the same guarantee, expressed where the argument's shape does not
+     * matter. Harmless when the frontend did inject one, and when the argument cannot be null.
+     */
+    private static boolean filtersNullArgs(AggregateCall call) {
+        if (call.getAggregation() instanceof LocalAggOp op) {
+            return op.filtersNullArgs(call);
+        }
+        return call.getAggregation().getKind() == SqlKind.COUNT && call.getArgList().size() == 1;
     }
 
     /** Builds {@code is_not_null(arg)} from the merged extension catalog, or null if the variant is absent. */
@@ -1102,13 +1219,90 @@ public class DataFusionFragmentConvertor implements FragmentConvertor {
 
     // ── Plan serde helpers ──────────────────────────────────────────────────────
 
-    /** Decodes serialized Substrait bytes into a model-level {@link Plan}. */
+    /**
+     * Decodes serialized Substrait bytes into a model-level {@link Plan}.
+     *
+     * <p>Uses a converter that understands the multi-value expand {@code ExtensionSingleRel}.
+     * Isthmus's stock {@code newExtensionSingle} keeps the detail as an opaque {@code Any}, so the
+     * decoded rel reports an <em>empty</em> record type. Any rel stacked on top then fails to
+     * reference its columns — {@code attachFragmentOnTop} decoding an inner expand for a FINAL
+     * aggregate throws {@code Field reference offset (0) must be less than number of fields in
+     * struct (0)}. Reachable only with more than one shard, where a reduce fragment is attached.
+     */
     private Plan decodePlan(byte[] bytes) {
         try {
             io.substrait.proto.Plan proto = io.substrait.proto.Plan.parseFrom(bytes);
-            return new ProtoPlanConverter(extensions).from(proto);
+            return new MultiValueAwarePlanConverter(extensions).from(proto);
         } catch (InvalidProtocolBufferException e) {
             throw new IllegalArgumentException("Failed to decode Substrait plan bytes", e);
+        }
+    }
+
+    /** {@link ProtoPlanConverter} whose rel converter can rebuild a multi-value expand detail. */
+    private static final class MultiValueAwarePlanConverter extends ProtoPlanConverter {
+        MultiValueAwarePlanConverter(io.substrait.extension.SimpleExtension.ExtensionCollection extensions) {
+            super(extensions);
+        }
+
+        @Override
+        protected io.substrait.relation.ProtoRelConverter getProtoRelConverter(io.substrait.extension.ExtensionLookup lookup) {
+            return new io.substrait.relation.ProtoRelConverter(lookup, extensionCollection) {
+                @Override
+                protected ExtensionSingle newExtensionSingle(io.substrait.proto.ExtensionSingleRel rel) {
+                    if (MultiValueExpandDetail.TYPE_URL.equals(rel.getDetail().getTypeUrl()) == false) {
+                        return super.newExtensionSingle(rel);
+                    }
+                    return ExtensionSingle.from(new DecodedMultiValueExpandDetail(rel.getDetail()), from(rel.getInput())).build();
+                }
+            };
+        }
+    }
+
+    /**
+     * The decode-side counterpart of {@link MultiValueExpandDetail}. The 16-byte payload carries no
+     * output type, so the record type is derived from the input the same way the producer derives
+     * it: the expanded column's LIST type collapses to its element type, in place or appended.
+     */
+    private static final class DecodedMultiValueExpandDetail implements Extension.SingleRelDetail {
+        private final Any detail;
+        private final int fieldIndex;
+        private final boolean append;
+
+        DecodedMultiValueExpandDetail(Any detail) {
+            this.detail = detail;
+            ByteBuffer payload = detail.getValue().asReadOnlyByteBuffer();
+            if (payload.remaining() != 16) {
+                throw new IllegalArgumentException("multi-value expand payload must be 16 bytes, got " + payload.remaining());
+            }
+            this.fieldIndex = payload.getInt(0);
+            this.append = payload.getInt(8) == 1;
+        }
+
+        @Override
+        public Type.Struct deriveRecordType(Rel input) {
+            Type.Struct inputType = input.getRecordType();
+            List<Type> fields = new java.util.ArrayList<>(inputType.fields());
+            if (fieldIndex < 0 || fieldIndex >= fields.size()) {
+                throw new IllegalArgumentException(
+                    "multi-value expand field index " + fieldIndex + " is outside " + fields.size() + " columns"
+                );
+            }
+            Type expanded = fields.get(fieldIndex);
+            if (expanded instanceof Type.ListType list) {
+                expanded = list.elementType();
+            }
+            if (append) {
+                fields.add(expanded);
+            } else {
+                fields.set(fieldIndex, expanded);
+            }
+            return Type.Struct.builder().addAllFields(fields).nullable(inputType.nullable()).build();
+        }
+
+        /** Round-trips the payload unchanged — this rel is decoded only to be re-serialized. */
+        @Override
+        public Any toProto(io.substrait.relation.RelProtoConverter converter) {
+            return detail;
         }
     }
 

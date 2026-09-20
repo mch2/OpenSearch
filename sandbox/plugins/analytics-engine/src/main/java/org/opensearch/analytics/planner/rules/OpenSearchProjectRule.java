@@ -13,9 +13,11 @@ import org.apache.calcite.plan.RelOptRuleCall;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.Project;
 import org.apache.calcite.rex.RexCall;
+import org.apache.calcite.rex.RexFieldAccess;
 import org.apache.calcite.rex.RexInputRef;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.rex.RexOver;
+import org.apache.calcite.rex.RexShuttle;
 import org.apache.calcite.sql.SqlFunction;
 import org.opensearch.analytics.planner.CapabilityRegistry;
 import org.opensearch.analytics.planner.PlannerContext;
@@ -27,6 +29,7 @@ import org.opensearch.analytics.planner.rel.OpenSearchRelNode;
 import org.opensearch.analytics.spi.DelegationType;
 import org.opensearch.analytics.spi.FieldType;
 import org.opensearch.analytics.spi.ScalarFunction;
+import org.opensearch.analytics.spi.ScanCapability;
 import org.opensearch.analytics.spi.WindowCapability;
 import org.opensearch.analytics.spi.WindowFunction;
 
@@ -67,6 +70,24 @@ public class OpenSearchProjectRule extends RelOptRule {
 
         List<String> childViableBackends = openSearchChild.getViableBackends();
 
+        // The element rewrap above a multi-value expansion's Uncollect is a type-level fixup, not
+        // work: the expansion absorbs it and nothing emits its ROW call. Mark it (so the tree stays
+        // fully marked and copyable) but skip expression validation, which would otherwise reject
+        // ROW as an unsupported scalar function.
+        if (RelNodeUtils.isExpansionElementRewrap(project)) {
+            call.transformTo(
+                new OpenSearchProject(
+                    project.getCluster(),
+                    child.getTraitSet(),
+                    child,
+                    project.getProjects(),
+                    project.getRowType(),
+                    childViableBackends
+                )
+            );
+            return;
+        }
+
         // Note: if JMH benchmarks show this as a hotspot, consider (a) precomputing a
         // SqlKind → viable backends map once per onMatch() call, and (b) returning
         // childViableBackends directly when all candidates pass to avoid allocation.
@@ -84,6 +105,21 @@ public class OpenSearchProjectRule extends RelOptRule {
         List<String> viableBackends = requiresBackendCapabilityEvaluation
             ? computeProjectViableBackends(annotatedExprs, childViableBackends)
             : childViableBackends;
+
+        // A projection that reads a struct child can only run where a struct can be read at all. The
+        // access is not a RexCall, so the annotation walk above leaves it alone and it would inherit
+        // every backend the child has — including Lucene, which has no column for an object's child and
+        // answers `count(attrs.mid)` as a document count. Before the leaves stopped being declared as
+        // columns this was covered by the leaf's own field storage, which named no index format.
+        if (readsStructChild(project.getProjects())) {
+            viableBackends = new ArrayList<>(viableBackends);
+            viableBackends.retainAll(
+                context.getCapabilityRegistry().scanBackendsAnyFormat(ScanCapability.DocValues.class, FieldType.OBJECT)
+            );
+            if (viableBackends.isEmpty()) {
+                throw new UnsupportedFunctionException("struct field access", "on any available backend");
+            }
+        }
 
         // Narrow viable backends to those whose WindowCapability declares every RexOver function used.
         Set<WindowFunction> requiredWindowFns = collectWindowFunctions(project.getProjects());
@@ -109,6 +145,25 @@ public class OpenSearchProjectRule extends RelOptRule {
                 viableBackends
             )
         );
+    }
+
+    /** True when any projection reads a field out of a struct, at any depth. */
+    private static boolean readsStructChild(List<RexNode> exprs) {
+        boolean[] found = { false };
+        RexShuttle shuttle = new RexShuttle() {
+            @Override
+            public RexNode visitFieldAccess(RexFieldAccess fieldAccess) {
+                found[0] = true;
+                return super.visitFieldAccess(fieldAccess);
+            }
+        };
+        for (RexNode expr : exprs) {
+            expr.accept(shuttle);
+            if (found[0]) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private RexNode annotateExpr(RexNode expr, List<String> childViableBackends) {
