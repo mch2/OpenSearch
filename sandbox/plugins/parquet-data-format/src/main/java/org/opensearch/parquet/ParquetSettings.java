@@ -416,7 +416,15 @@ public final class ParquetSettings {
     /** Set of ArrowType classes that do NOT support dictionary encoding. */
     private static final Set<Class<? extends ArrowType>> DICTIONARY_INCOMPATIBLE_TYPES = Set.of(ArrowType.Bool.class);
 
-    /** Maps arrow type name strings to representative ArrowType instances for compatibility checks. */
+    /**
+     * Maps arrow type name strings to representative ArrowType instances for compatibility checks.
+     *
+     * <p>Deliberately holds only leaf types. These names key the per-type encoding and compression
+     * settings, and a struct is a group node in the Parquet schema: it owns no column chunk, so it
+     * has neither. An OpenSearch {@code object} stored as a native struct is configured through its
+     * leaves, at the same dotted names as before — {@code collect_leaf_columns} on the Rust side
+     * walks the struct to reach them.
+     */
     public static final Map<String, ArrowType> ARROW_TYPE_NAME_TO_INSTANCE = Map.ofEntries(
         Map.entry("int8", new ArrowType.Int(8, true)),
         Map.entry("int16", new ArrowType.Int(16, true)),
