@@ -68,6 +68,7 @@ pub mod row_id_injection;
 pub mod row_selection;
 pub mod segment_info;
 pub mod stream;
+pub(crate) mod struct_pruning;
 pub mod substrait_to_tree;
 pub mod table_provider;
 

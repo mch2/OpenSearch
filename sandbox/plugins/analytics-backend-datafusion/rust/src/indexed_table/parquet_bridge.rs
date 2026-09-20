@@ -169,6 +169,9 @@ pub struct RowGroupStreamConfig {
     pub full_schema: SchemaRef,
     pub metadata: Arc<ParquetMetaData>,
     pub projection: Option<Vec<usize>>,
+    /// When set, the read pulls only the sub-fields of an `object` that the plan named — which is
+    /// what lets parquet mask at leaf level instead of reading the whole group. See `struct_pruning`.
+    pub flat_struct_read: Option<Arc<super::struct_pruning::FlatStructRead>>,
     pub predicate: Option<Arc<dyn datafusion::physical_expr::PhysicalExpr>>,
     pub io_stats: Arc<ReadIoStats>,
 }
@@ -250,15 +253,31 @@ fn create_stream_with_access_plan(
         }
     }
 
-    let mut config_builder =
-        FileScanConfigBuilder::new(config.store_url.clone(), Arc::new(parquet_source))
-            .with_file(partitioned_file);
+    // The projection is applied to the file source before the scan config is built, because a
+    // leaf-level projection can only be expressed as expressions on the source —
+    // `FileScanConfigBuilder` takes column indices.
+    let mut source: Arc<dyn datafusion_datasource::file::FileSource> = Arc::new(parquet_source);
+    if let Some(ref flat) = config.flat_struct_read {
+        // Each referenced sub-field is named with `get_field`, which is what makes the parquet
+        // opener build a leaf mask rather than reading every column of the group.
+        let exprs = flat.projection_exprs(config.full_schema.as_ref())?;
+        source = source.try_pushdown_projection(&exprs)?.ok_or_else(|| {
+            datafusion::error::DataFusionError::Internal(
+                "parquet source does not support projection pushdown".to_string(),
+            )
+        })?;
+    }
 
-    if let Some(ref proj) = config.projection {
-        // Empty projection (e.g. COUNT(*)) is honoured as "read no
-        // columns". Parquet delivers correct row counts via the
-        // access plan but skips all column I/O.
-        config_builder = config_builder.with_projection_indices(Some(proj.clone()))?;
+    let mut config_builder =
+        FileScanConfigBuilder::new(config.store_url.clone(), source).with_file(partitioned_file);
+
+    if config.flat_struct_read.is_none() {
+        if let Some(ref proj) = config.projection {
+            // Empty projection (e.g. COUNT(*)) is honoured as "read no
+            // columns". Parquet delivers correct row counts via the
+            // access plan but skips all column I/O.
+            config_builder = config_builder.with_projection_indices(Some(proj.clone()))?;
+        }
     }
 
     let exec: Arc<dyn ExecutionPlan> = DataSourceExec::from_data_source(config_builder.build());

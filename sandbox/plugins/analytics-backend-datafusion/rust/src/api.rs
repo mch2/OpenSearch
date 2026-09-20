@@ -1016,6 +1016,67 @@ pub async unsafe fn execute_query(
 /// is no automatic retry on the vanilla path — a false positive is a hard
 /// query error. In practice this is unreachable because the needle is not a
 /// valid DataFusion identifier anywhere else a plan would naturally contain
+/// The SQL projection for one column the fetch phase was asked for.
+///
+/// A quoted identifier for the requested name, except when the name is a path into a struct. An
+/// OpenSearch `object` is stored as one, so `process.name` is a field of the `process` column and
+/// not a column called `process.name` — quoting it whole would look for a column that is not there.
+/// Emitted as field access aliased back to the requested name, so the result schema is what the
+/// caller asked for either way.
+///
+/// Resolved against the file's schema level by level rather than by splitting on dots, because a dot
+/// does not imply a struct: a keyword's derived-source companion is literally named
+/// `_ignored_source.city.name`, one column, dots and all.
+fn fetch_projection_expr(schema: &arrow::datatypes::Schema, name: &str) -> String {
+    if schema.index_of(name).is_ok() {
+        return format!("\"{}\"", name);
+    }
+    let Some(path) = struct_field_path(schema, name) else {
+        // Not a column and not a path into one. Left as-is so the failure surfaces as DataFusion's
+        // own "no field named" rather than something this function invented.
+        return format!("\"{}\"", name);
+    };
+    let mut expr = format!("\"{}\"", path.root);
+    for field in &path.fields {
+        expr.push_str(&format!("['{}']", field));
+    }
+    format!("{} AS \"{}\"", expr, name)
+}
+
+/// A requested name resolved as a path into a struct column: the column, then the fields below it.
+struct StructFieldPath {
+    root: String,
+    fields: Vec<String>,
+}
+
+fn struct_field_path(schema: &arrow::datatypes::Schema, name: &str) -> Option<StructFieldPath> {
+    // Longest matching column prefix first, so a column whose own name contains dots wins over a
+    // shorter one that happens to be a struct.
+    let mut split = name.len();
+    while let Some(dot) = name[..split].rfind('.') {
+        let (root, rest) = (&name[..dot], &name[dot + 1..]);
+        split = dot;
+        let Ok(index) = schema.index_of(root) else {
+            continue;
+        };
+        let mut current = schema.field(index).data_type();
+        let mut fields = Vec::new();
+        for part in rest.split('.') {
+            let arrow::datatypes::DataType::Struct(children) = current else {
+                return None;
+            };
+            let child = children.iter().find(|f| f.name() == part)?;
+            fields.push(part.to_string());
+            current = child.data_type();
+        }
+        return Some(StructFieldPath {
+            root: root.to_string(),
+            fields,
+        });
+    }
+    None
+}
+
 /// QTF fetch phase: read specific rows by global row ID.
 ///
 /// Uses shared helpers from query_executor for runtime setup, file info building,
@@ -1139,7 +1200,7 @@ pub async unsafe fn fetch_by_row_ids(
 
     let store_url = store_url_from_table_path(&shard_view.table_path)?;
     let provider = Arc::new(ShardTableProvider::new(ShardTableConfig {
-        file_schema: resolved_schema,
+        file_schema: Arc::clone(&resolved_schema),
         files,
         store_url,
     }));
@@ -1161,7 +1222,7 @@ pub async unsafe fn fetch_by_row_ids(
                     crate::ROW_ID_COLUMN_NAME
                 )
             } else {
-                format!("\"{}\"", c)
+                fetch_projection_expr(resolved_schema.as_ref(), c)
             }
         })
         .collect::<Vec<_>>()
@@ -1654,6 +1715,7 @@ pub unsafe fn sql_to_substrait(
 fn derive_schema_from_partial_plan(
     substrait_bytes: &[u8],
 ) -> Result<arrow::datatypes::SchemaRef, DataFusionError> {
+    use crate::substrait_consumer::from_substrait_plan;
     use datafusion::datasource::MemTable;
     use datafusion::prelude::SessionContext;
     use datafusion_substrait::extensions::Extensions;
@@ -1719,21 +1781,12 @@ fn derive_schema_from_partial_plan(
             .execution
             .parquet
             .schema_force_view_types;
-        let arrow_schema = if view_types {
-            // Use the recursive variant so nested types (e.g. List<Utf8> child fields)
-            // are also rewritten to view types. DataFusion's non-recursive
-            // `transform_schema_to_view` only touches top-level fields, which left
-            // `List<Utf8>` here while the data node (which uses
-            // `transform_schema_to_view_recursive`) produced `List<Utf8View>`. The
-            // reduce stage's Arrow C Data import then read the view child's buffers as
-            // Utf8 offsets: "Offset buffer for type Utf8 is malformed", surfacing as
-            // "RefCnt has gone negative".
-            crate::schema_coerce::transform_schema_to_view_recursive(&arrow_schema)
-        } else {
-            arrow_schema
-        };
+        // Timestamp precision first: it is specific to this path (parquet-declared precisions the
+        // engine cannot represent) and independent of the view widening below.
         let arrow_schema = coerce_unsupported_timestamp_precision(&arrow_schema);
-        let arrow_schema = crate::schema_coerce::coerce_inferred_schema(Arc::new(arrow_schema));
+        // Then the shared declaration → physical conversion. Doing this by hand here is what
+        // declared `List<Utf8>` against a producer emitting `List<Utf8View>`; see the helper's docs.
+        let arrow_schema = crate::schema_coerce::physical_schema_for_declaration(&arrow_schema, view_types);
         let table = MemTable::try_new(arrow_schema, vec![vec![]])?;
         // Plan may scan the same table twice; the second register is a no-op.
         let _ = ctx.register_table(&table_name, Arc::new(table));
@@ -1898,13 +1951,12 @@ fn collect_reads(rel: &substrait::proto::Rel, out: &mut Vec<substrait::proto::Re
                 collect_reads(input, out);
             }
         }
-        // Extension rels wrap a normal input. The multi-value expand
-        // (MULTI_VALUE_EXPAND_TYPE_URL) places its parquet ReadRel beneath an
-        // ExtensionSingleRel. Without these arms the ReadRel is invisible here,
-        // no synthetic MemTable is registered for it, and planning the producer
-        // plan on the coordinator fails with "No table named '<index>'" — only
-        // reachable with more than one shard since a single shard has no reduce
-        // stage to derive a producer schema for.
+        // Extension rels wrap a normal input, and the multi-value expand
+        // (MULTI_VALUE_EXPAND_TYPE_URL) puts the parquet ReadRel underneath one. Missing these
+        // arms means the read is invisible here, no synthetic MemTable is registered for it, and
+        // planning the producer plan on the coordinator fails with "No table named '<index>'" —
+        // reachable only with more than one shard, since a single shard has no reduce stage to
+        // derive a producer schema for.
         Some(RelType::ExtensionSingle(e)) => {
             if let Some(input) = e.input.as_ref() {
                 collect_reads(input, out);
