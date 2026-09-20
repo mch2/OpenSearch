@@ -57,7 +57,13 @@ dependencies {
     // opensearch-sql pulled from OpenSearch Snapshots (no local build), same as
     // jobSchedulerPlugin above. The EngineContextProvider/QueryRequestContext wiring is
     // merged upstream, so the published CI snapshot matches our QueryPlanExecutor signature.
-    sqlPlugin "org.opensearch.plugin:opensearch-sql-plugin:${externalPluginVersion}@zip"
+    // -PsqlPluginZip=<path> swaps in a locally built opensearch-sql zip, for verifying a
+    // frontend change end to end before it is merged and published as a snapshot.
+    if (project.hasProperty('sqlPluginZip')) {
+        sqlPlugin files(project.property('sqlPluginZip'))
+    } else {
+        sqlPlugin "org.opensearch.plugin:opensearch-sql-plugin:${externalPluginVersion}@zip"
+    }
 }
 
 // ── Shared cluster configuration closure ─────────────────────────────────────
@@ -148,6 +154,9 @@ integTest {
     exclude '**/CoordinatorReduceMemtableIT.class'
     exclude '**/StreamingCoordinatorReduceIT.class'
     exclude '**/QueryCacheIT.class'
+    // Asserts process-global cache counters are zero, so any query another test class runs
+    // concurrently inflates them. Runs alone in integTestScopedPageIndexCache instead.
+    exclude '**/ScopedPageIndexCacheIT.class'
     exclude '**/SpillStatsEnabledIT.class'
     exclude '**/SpillCleanupOnBootIT.class'
     exclude '**/YmlOversamplingIT.class'
@@ -202,6 +211,17 @@ testClusters.integTestMemtable {
 }
 
 // ── Query cache variant: all_segments=true for cache testing ─────────────────
+task integTestScopedPageIndexCache(type: RestIntegTestTask) {
+    description = 'Runs the scoped page-index cache tests alone: they assert process-global cache counters are zero'
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    filter {
+        includeTestsMatching 'org.opensearch.analytics.qa.ScopedPageIndexCacheIT'
+    }
+    systemProperty 'tests.security.manager', 'false'
+}
+check.dependsOn(integTestScopedPageIndexCache)
+
 task integTestQueryCache(type: RestIntegTestTask) {
     description = 'Runs query cache tests with all_segments=true to bypass segment size threshold'
     testClassesDirs = sourceSets.test.output.classesDirs
@@ -212,6 +232,11 @@ task integTestQueryCache(type: RestIntegTestTask) {
     systemProperty 'tests.security.manager', 'false'
 }
 check.dependsOn(integTestQueryCache)
+
+testClusters.integTestScopedPageIndexCache {
+    numberOfNodes = 2
+    configureAnalyticsCluster(delegate)
+}
 
 testClusters.integTestQueryCache {
     numberOfNodes = 2
@@ -383,4 +408,37 @@ tasks.register('restTest', Test) {
     systemProperty 'tests.rest.load_packaged', 'false'
     // Inherit OpenSearch test base properties
     systemProperty 'tests.artifact', 'analytics-engine-rest'
+}
+
+// ── Long-lived local dev cluster ─────────────────────────────────────────────
+// A single analytics node kept running outside any test lifecycle, so Data Prepper
+// (or curl) can ingest into it and PPL can be driven by hand:
+//
+//   ./gradlew -Dsandbox.enabled=true :sandbox:qa:analytics-engine-rest:runAnalytics
+//   ./gradlew -Dsandbox.enabled=true :sandbox:qa:analytics-engine-rest:runAnalytics --preserve-data
+//
+// Same plugin set and JVM flags as the IT clusters, so behaviour matches what the
+// suites assert. Binds 127.0.0.1:9200 only — containers reach it via
+// mustang-bridge-fwd.py (see MUSTANG-SETUP.md in the observability-stack repo).
+//
+// Without --preserve-data the data dir is wiped on every start, which is usually
+// what you want for a clean ingest but will drop any indices already there.
+testClusters {
+    runAnalytics {
+        testDistribution = 'archive'
+        // No numberOfNodes: the default is already 1, and setting it explicitly is
+        // rejected ("Cannot shrink cluster ... to have 1 nodes as it already has 1").
+        configureAnalyticsCluster(delegate)
+        // The IT clusters run for minutes on fixture-sized data and inherit 512m. This one is a
+        // long-lived ingest target — pointed at Data Prepper it died after ~15h in a GC death
+        // spiral (JvmGcMonitorService reporting ~900ms collecting per second, no OOM, gradle
+        // then failing the task with "OpenSearch cluster died"). Size it for real ingest.
+        jvmArgs '-Xms2g', '-Xmx2g'
+    }
+}
+
+tasks.register('runAnalytics', org.opensearch.gradle.testclusters.RunTask) {
+    description = 'Runs a single long-lived analytics node on 127.0.0.1:9200 for local ingest'
+    group = 'Verification'
+    useCluster testClusters.runAnalytics
 }
