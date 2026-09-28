@@ -9,6 +9,8 @@
 package org.opensearch.analytics;
 
 import org.apache.calcite.schema.SchemaPlus;
+import org.apache.calcite.sql.SqlOperatorTable;
+import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.opensearch.analytics.schema.OpenSearchSchemaBuilder;
 import org.opensearch.cluster.ClusterState;
 
@@ -43,6 +45,24 @@ public interface EngineContextProvider {
     }
 
     QueryRequestContext getContext();
+
+    /**
+     * The SQL function/operator table describing the functions Analytics Engine can execute.
+     *
+     * <p>A front-end that parses queries with Calcite directly (rather than reusing another
+     * plugin's planner) must hand this table to its {@code SqlValidator} so AE-defined functions
+     * resolve during validation. Front-ends that carry their own operator table (e.g. the PPL
+     * front-end, which reuses the SQL plugin's planner) can ignore it.
+     *
+     * <p>Default implementation returns the standard Calcite operator table only. Engine
+     * implementations override this to return AE's own operators chained ahead of the standard
+     * table. The returned table is safe to chain again with {@link SqlStdOperatorTable} by callers.
+     *
+     * @return AE's operator table; never {@code null}
+     */
+    default SqlOperatorTable operatorTable() {
+        return SqlStdOperatorTable.instance();
+    }
 
     /**
      * Converts a backend-specific exception into an appropriate OpenSearch exception type.

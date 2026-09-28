@@ -1,0 +1,117 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
+ */
+
+/*
+ * Analytics SQL front-end plugin. Provides a REST endpoint (POST /_analytics/sql)
+ * that parses regular SQL directly with Calcite's own parser/validator/sql2rel
+ * pipeline (NO org.opensearch.sql / unified-query dependency) against Analytics
+ * Engine's schema, types, functions, and hep rules, then executes the resulting
+ * logical RelNode through AE's QueryPlanExecutor — exactly as the PPL front-end does.
+ * Extends analytics-engine so that EngineContextProvider and QueryPlanExecutor are
+ * injected via Guice from the hub plugin.
+ */
+
+apply plugin: 'opensearch.opensearchplugin'
+
+java { sourceCompatibility = JavaVersion.toVersion(25); targetCompatibility = JavaVersion.toVersion(25) }
+
+opensearchplugin {
+  description = 'Analytics SQL front-end: REST endpoint that plans regular SQL directly via Calcite against Analytics Engine.'
+  classname = 'org.opensearch.analytics.sql.AnalyticsSqlPlugin'
+  extendedPlugins = ['analytics-engine;optional=true']
+}
+
+// Guava comes transitively from calcite-core — forbidden on main compile classpaths
+// by OpenSearch. The SQL pipeline code needs it (Calcite API exposes ImmutableList,
+// Predicate). Bypass via a custom config, exactly as the PPL front-end does.
+configurations {
+  calciteCompile
+  compileClasspath { exclude group: 'com.google.guava' }
+  testCompileClasspath { exclude group: 'com.google.guava' }
+}
+sourceSets.main.compileClasspath += configurations.calciteCompile
+sourceSets.test.compileClasspath += configurations.calciteCompile
+
+dependencies {
+  // Analytics framework + Calcite are provided at runtime by analytics-engine
+  // (parent classloader via extendedPlugins). analytics-api carries the front-end SPI.
+  compileOnly project(':sandbox:libs:analytics-api')
+  compileOnly project(':sandbox:libs:analytics-framework')
+
+  // Guava for compilation — Calcite API exposes guava types.
+  calciteCompile "com.google.guava:guava:${versions.guava}"
+
+  // Avatica (Calcite's JDBC layer) exposes ConnectionConfig types referenced by
+  // CalciteConnectionConfigImpl. Provided at runtime by the analytics-engine parent
+  // classloader (bundled in its ZIP, excluded below); needed only at compile time.
+  // Transitives (httpcore5, slf4j) conflict with OpenSearch's managed versions and are
+  // not needed for compilation, so pull the jar alone.
+  calciteCompile("org.apache.calcite.avatica:avatica-core:${versions.avatica}") {
+    transitive = false
+  }
+
+  // Calcite bytecode references @Immutable from immutables — resolve at compile time.
+  compileOnly 'org.immutables:value-annotations:2.8.8'
+
+  // --- Test-only runtime for the Calcite pipeline ---------------------------------------------
+  // In production, analytics-engine's parent classloader supplies calcite-core and its transitive
+  // runtime. For this plugin's own unit tests (which drive the real Calcite parser/validator/
+  // converter in SqlQueryServiceTests) those classes must be on the TEST classpath directly.
+  // analytics-framework carries calcite-core (+ linq4j, avatica) as api deps; pulling it as
+  // testImplementation puts them on the test classpath. commons-math3 (Calcite's TimeFrames
+  // static init) and janino (RelBuilder codegen) are transitive runtime deps not pulled onto a
+  // test classpath automatically, so add them explicitly.
+  testImplementation project(':sandbox:libs:analytics-framework')
+  testImplementation "com.google.guava:guava:${versions.guava}"
+  testRuntimeOnly "org.apache.commons:commons-math3:3.6.1"
+  testRuntimeOnly "com.google.guava:failureaccess:1.0.2"
+}
+
+// Exclude jars already provided by the analytics-engine parent plugin ZIP (shared via the
+// extendedPlugins classloader). Everything else must be bundled — plugins have isolated
+// classloaders. Mirrors the PPL front-end's exclude list.
+bundlePlugin {
+  exclude 'analytics-framework-*.jar'
+  exclude 'calcite-core-*.jar'
+  exclude 'calcite-linq4j-*.jar'
+  exclude 'avatica-core-*.jar'
+  exclude 'avatica-metrics-*.jar'
+  exclude 'guava-*.jar'
+  exclude 'failureaccess-*.jar'
+  exclude 'slf4j-api-*.jar'
+  exclude 'commons-codec-*.jar'
+  exclude 'janino-*.jar'
+  exclude 'commons-compiler-*.jar'
+  exclude 'joou-java-6-*.jar'
+  exclude 'jackson-core-*.jar'
+  exclude 'jackson-databind-*.jar'
+  exclude 'jackson-annotations-*.jar'
+  exclude 'commons-lang3-*.jar'
+  exclude 'commons-text-*.jar'
+  exclude 'commons-math3-*.jar'
+  exclude 'value-annotations-*.jar'
+  exclude 'checker-qual-*.jar'
+  exclude 'error_prone_annotations-*.jar'
+}
+
+// No third-party SNAPSHOT jars to license-check (unlike the PPL front-end, which bundles
+// internal unified-query artifacts). Package-level javadocs are not required for a sandbox
+// front-end.
+tasks.matching { it.name == 'missingJavadoc' }.configureEach {
+  enabled = false
+}
+
+configurations.all {
+  resolutionStrategy {
+    // Align transitive versions with OpenSearch's managed versions.
+    force "com.google.guava:guava:${versions.guava}"
+    force 'com.google.guava:failureaccess:1.0.2'
+    force 'com.google.errorprone:error_prone_annotations:2.36.0'
+    force 'org.checkerframework:checker-qual:3.43.0'
+  }
+}

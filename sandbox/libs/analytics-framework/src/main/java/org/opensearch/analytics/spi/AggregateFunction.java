@@ -8,7 +8,6 @@
 
 package org.opensearch.analytics.spi;
 
-import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.sql.SqlAggFunction;
@@ -29,7 +28,7 @@ public enum AggregateFunction {
     SUM0(Type.SIMPLE, SqlKind.SUM0),
     MIN(Type.SIMPLE, SqlKind.MIN),
     MAX(Type.SIMPLE, SqlKind.MAX),
-    COUNT(Type.SIMPLE, SqlKind.COUNT, fields(IF("count", new ArrowType.Int(64, true), SUM))),
+    COUNT(Type.SIMPLE, SqlKind.COUNT, fields(IF("count", FixedType.INT64, SUM))),
     AVG(Type.SIMPLE, SqlKind.AVG),
 
     STDDEV_POP(Type.STATISTICAL, SqlKind.STDDEV_POP),
@@ -43,7 +42,7 @@ public enum AggregateFunction {
     COLLECT(Type.STATE_EXPANDING, SqlKind.COLLECT),
     LISTAGG(Type.STATE_EXPANDING, SqlKind.LISTAGG),
 
-    APPROX_COUNT_DISTINCT(Type.APPROXIMATE, SqlKind.OTHER, fields(IF("hll_registers", new ArrowType.Binary(), null))),
+    APPROX_COUNT_DISTINCT(Type.APPROXIMATE, SqlKind.OTHER, fields(IF("hll_registers", FixedType.BINARY, null))),
     TAKE(Type.STATE_EXPANDING, SqlKind.OTHER, fields(IF("take_state", IntermediateTypeResolver.passThroughArg0(), null))),
     FIRST(Type.STATE_EXPANDING, SqlKind.OTHER, fields(IF("first_state", IntermediateTypeResolver.passThroughArg0(), null))),
     LAST(Type.STATE_EXPANDING, SqlKind.OTHER, fields(IF("last_state", IntermediateTypeResolver.passThroughArg0(), null))),
@@ -66,13 +65,28 @@ public enum AggregateFunction {
     public record IntermediateField(String name, IntermediateTypeResolver typeResolver, AggregateFunction reducer) {
     }
 
+    /**
+     * Arrow-free descriptor for a fixed intermediate-field type. Encodes the intent
+     * ("this field is a 64-bit integer" / "this field is opaque binary state") without
+     * referencing any {@code org.apache.arrow} class, so touching an aggregate enum
+     * constant never forces Arrow to load. The resolver maps each case straight to a
+     * Calcite {@link RelDataType}; the mapping is the same one lowering has always used.
+     */
+    public enum FixedType {
+        INT64,
+        BINARY
+    }
+
     /** Resolves the Calcite type of an intermediate field from a FINAL aggregate's arg types. */
     @FunctionalInterface
     public interface IntermediateTypeResolver {
         RelDataType resolve(List<RelDataType> argTypes, RelDataTypeFactory typeFactory);
 
-        static IntermediateTypeResolver fixed(ArrowType arrowType) {
-            return (argTypes, typeFactory) -> ArrowToCalciteTypeMapper.toCalcite(arrowType, typeFactory);
+        static IntermediateTypeResolver fixed(FixedType fixedType) {
+            return (argTypes, typeFactory) -> switch (fixedType) {
+                case INT64 -> typeFactory.createSqlType(SqlTypeName.BIGINT);
+                case BINARY -> typeFactory.createSqlType(SqlTypeName.VARBINARY, Integer.MAX_VALUE);
+            };
         }
 
         static IntermediateTypeResolver passThroughArg0() {
@@ -81,16 +95,6 @@ public enum AggregateFunction {
                     throw new IllegalStateException("passThroughArg0 resolver requires at least one arg type");
                 }
                 return argTypes.get(0);
-            };
-        }
-    }
-
-    private static final class ArrowToCalciteTypeMapper {
-        static RelDataType toCalcite(ArrowType t, RelDataTypeFactory f) {
-            return switch (t) {
-                case ArrowType.Int i when i.getBitWidth() == 64 -> f.createSqlType(SqlTypeName.BIGINT);
-                case ArrowType.Binary b -> f.createSqlType(SqlTypeName.VARBINARY, Integer.MAX_VALUE);
-                default -> throw new IllegalArgumentException("Unsupported fixed Arrow type for IntermediateField: " + t);
             };
         }
     }
@@ -209,8 +213,8 @@ public enum AggregateFunction {
         return List.of(fs);
     }
 
-    private static IntermediateField IF(String name, ArrowType arrowType, AggregateFunction reducer) {
-        return new IntermediateField(name, IntermediateTypeResolver.fixed(arrowType), reducer);
+    private static IntermediateField IF(String name, FixedType fixedType, AggregateFunction reducer) {
+        return new IntermediateField(name, IntermediateTypeResolver.fixed(fixedType), reducer);
     }
 
     private static IntermediateField IF(String name, IntermediateTypeResolver typeResolver, AggregateFunction reducer) {

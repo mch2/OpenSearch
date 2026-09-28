@@ -44,6 +44,8 @@ dependencies {
     // explain endpoint (returns plain Calcite plan text). All other QA tests use
     // /_plugins/_ppl on the real plugin.
     testImplementation project(':sandbox:plugins:test-ppl-frontend')
+    // analytics-sql-frontend: the Calcite SQL front-end under test. Hits POST /_analytics/sql.
+    testImplementation project(':sandbox:plugins:analytics-sql-frontend')
 
     // External plugins are versioned as <opensearch_version>.0-SNAPSHOT and pulled from
     // OpenSearch Snapshots (no local build). Derive the version from core's
@@ -76,6 +78,8 @@ def configureAnalyticsCluster = { cluster ->
     // Shim — keeps /_analytics/ppl/_explain available for ExplainApiIT, which asserts on
     // the shim's profile/stage-timing output that the real plugin doesn't emit.
     cluster.plugin ':sandbox:plugins:test-ppl-frontend'
+    // SQL front-end under test: exposes POST /_analytics/sql (Calcite SQL → AE).
+    cluster.plugin ':sandbox:plugins:analytics-sql-frontend'
     // External plugins from Maven. job-scheduler must be installed before
     // opensearch-sql (which declares it in extended.plugins).
     cluster.plugin project.layout.file(provider { configurations.jobSchedulerPlugin.singleFile })

@@ -502,6 +502,15 @@ public enum ScalarFunction {
     }
 
     /**
+     * The concrete Calcite operator this constant is pinned to, or {@code null} when it resolves
+     * by {@link SqlKind} or identifier-name instead. Package-private: consumed by
+     * {@link AnalyticsOperatorTables} to publish AE's resolvable operators.
+     */
+    SqlOperator referenceOperator() {
+        return referenceOperator;
+    }
+
+    /**
      * Maps a Calcite SqlKind to a ScalarFunction, or null if not recognized.
      * Skips OTHER_FUNCTION — multiple functions share this kind,
      * so they must be resolved by name via {@link #fromSqlFunction(SqlFunction)}.

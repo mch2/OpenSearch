@@ -11,6 +11,7 @@ package org.opensearch.analytics;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.schema.SchemaPlus;
 import org.apache.calcite.sql.SqlOperatorTable;
+import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.calcite.sql.util.SqlOperatorTables;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -37,6 +38,7 @@ import org.opensearch.analytics.rest.RestMppStrategyStatsAction;
 import org.opensearch.analytics.schema.OpenSearchSchemaBuilder;
 import org.opensearch.analytics.settings.AnalyticsApproximationSettings;
 import org.opensearch.analytics.settings.AnalyticsQuerySettings;
+import org.opensearch.analytics.spi.AnalyticsOperatorTables;
 import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
 import org.opensearch.analytics.stats.AnalyticsStats;
 import org.opensearch.analytics.stats.AnalyticsStatsCollector;
@@ -397,9 +399,12 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
         }
     }
 
-    private SqlOperatorTable aggregateOperatorTables() {
-        // TODO: re-wire once operatorTable() is added back to AnalyticsSearchBackendPlugin
-        return SqlOperatorTables.of();
+    private static SqlOperatorTable aggregateOperatorTables() {
+        // AE's published operator table, derived from the ScalarFunction / AggregateFunction /
+        // WindowFunction SPI enums (the single source of truth for what AE recognizes). Chained
+        // ahead of SqlStdOperatorTable by the caller so SqlKind-resolved std operators still
+        // resolve; this table adds the AE-recognized operators the std table does not publish.
+        return AnalyticsOperatorTables.build();
     }
 
     /**
@@ -421,6 +426,15 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
         @Override
         public QueryRequestContext getContext() {
             return getContext(clusterService.state());
+        }
+
+        @Override
+        public SqlOperatorTable operatorTable() {
+            // Expose AE's function/operator table (currently the aggregate of backend-contributed
+            // operators) chained ahead of the standard Calcite table, so a front-end that parses
+            // SQL directly with Calcite resolves AE functions during validation. Reuses the
+            // existing aggregateOperatorTables() logic — nothing removed (R7).
+            return SqlOperatorTables.chain(aggregateOperatorTables(), SqlStdOperatorTable.instance());
         }
 
         @Override
